@@ -1,0 +1,19 @@
+# Secrets - never commit the real environment file
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+
+# OS / editor noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local backups (produced on servers, not in the repo)
+*.tar.gz

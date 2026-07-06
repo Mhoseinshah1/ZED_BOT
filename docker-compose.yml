@@ -1,0 +1,109 @@
+# =============================================================================
+# ZED_BOT - Docker Compose foundation
+#
+# Configuration comes from .env in this directory (created by
+# scripts/install.sh; see .env.example for the expected keys).
+# Persistent state lives outside the containers in ${ZEDBOT_DATA_DIR}
+# (default /opt/zedbot/data) so images can be rebuilt freely.
+# =============================================================================
+
+name: zedbot
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zedbot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-zedbot}
+      POSTGRES_USER: ${POSTGRES_USER:-zedbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - ${ZEDBOT_DATA_DIR:-/opt/zedbot/data}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-zedbot} -d ${POSTGRES_DB:-zedbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - zedbot
+
+  redis:
+    image: redis:7-alpine
+    container_name: zedbot-redis
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}",
+        "--appendonly", "yes",
+      ]
+    environment:
+      # Lets healthchecks and `zedbot doctor` authenticate without putting the
+      # password on a command line.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - ${ZEDBOT_DATA_DIR:-/opt/zedbot/data}/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - zedbot
+
+  api:
+    build: ./apps/api
+    container_name: zedbot-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${API_PORT:-3000}:${API_PORT:-3000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:${API_PORT:-3000}/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - zedbot
+
+  bot:
+    build: ./apps/bot
+    container_name: zedbot-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - zedbot
+
+  worker:
+    build: ./apps/worker
+    container_name: zedbot-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - zedbot
+
+networks:
+  zedbot:
+    name: zedbot
