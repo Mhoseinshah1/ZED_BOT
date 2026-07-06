@@ -73,7 +73,8 @@ check_any_container_running() {
 }
 
 check_postgres_reachable() {
-  run_compose exec -T postgres pg_isready -U "${POSTGRES_USER:-zedbot}" -d "${POSTGRES_DB:-zedbot}"
+  # -h 127.0.0.1 probes TCP (what the apps use), not just the unix socket.
+  run_compose exec -T postgres pg_isready -h 127.0.0.1 -U "${POSTGRES_USER:-zedbot}" -d "${POSTGRES_DB:-zedbot}"
 }
 
 check_redis_reachable() {

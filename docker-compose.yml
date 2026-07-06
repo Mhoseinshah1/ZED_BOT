@@ -21,7 +21,10 @@ services:
     volumes:
       - ${ZEDBOT_DATA_DIR:-/opt/zedbot/data}/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-zedbot} -d ${POSTGRES_DB:-zedbot}"]
+      # Probe TCP, not the unix socket: the image's init-time temporary
+      # server (listen_addresses='') answers the socket, which would mark the
+      # container healthy before port 5432 actually accepts connections.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-zedbot} -d ${POSTGRES_DB:-zedbot}"]
       interval: 10s
       timeout: 5s
       retries: 10
