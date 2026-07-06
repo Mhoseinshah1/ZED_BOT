@@ -3,7 +3,7 @@
 # ZED_BOT installer for Ubuntu 22.04 / 24.04
 #
 # Usage (as root):
-#   bash <(curl -Ls https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)
 #
 # This script is intentionally self-contained (it does not source
 # scripts/lib/common.sh) because it runs before the repository is cloned.

@@ -27,7 +27,7 @@ Production-ready Telegram VPN sales bot.
 Run as root on a fresh Ubuntu 22.04 / 24.04 server:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)
 ```
 
 The installer:

@@ -13,7 +13,7 @@ COMMON_LIB="${SCRIPTS_DIR}/lib/common.sh"
 if [ ! -f "$COMMON_LIB" ]; then
   echo "[FAIL] ZED_BOT does not look installed (missing ${COMMON_LIB})." >&2
   echo "       Install it with:" >&2
-  echo "       bash <(curl -Ls https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)" >&2
+  echo "       bash <(curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)" >&2
   exit 1
 fi
 # shellcheck source=lib/common.sh

@@ -8,7 +8,7 @@
 #
 # NOTE: scripts/install.sh intentionally does NOT source this file, because
 # it must run standalone via:
-#   bash <(curl -Ls https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)
 # before the repository has been cloned. Keep the helpers here and the
 # bootstrap copies in install.sh behaviourally in sync.
 # =============================================================================
@@ -113,7 +113,7 @@ detect_compose_command() {
   fi
   if ! has_command docker; then
     log_error "Docker is not installed. Run the ZED_BOT installer first:"
-    log_error "  bash <(curl -Ls https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)"
+    log_error "  bash <(curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)"
     return 1
   fi
   if docker compose version >/dev/null 2>&1; then
@@ -130,7 +130,7 @@ app_cd() {
   if [ ! -d "$ZEDBOT_APP_DIR" ]; then
     log_error "Application directory not found: ${ZEDBOT_APP_DIR}"
     log_error "Install ZED_BOT first:"
-    log_error "  bash <(curl -Ls https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)"
+    log_error "  bash <(curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)"
     exit 1
   fi
   cd "$ZEDBOT_APP_DIR"
