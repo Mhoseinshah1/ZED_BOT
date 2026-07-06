@@ -64,7 +64,7 @@ check_ubuntu() {
 }
 
 check_compose_available() {
-  docker compose version >/dev/null 2>&1 || has_command docker-compose
+  docker compose version >/dev/null 2>&1 || docker_compose_binary_is_v2
 }
 
 check_any_container_running() {

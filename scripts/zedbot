@@ -60,7 +60,10 @@ main() {
       ;;
     restart)
       require_root
-      run_compose restart
+      # `compose restart` never re-reads .env; recreating the containers does,
+      # so configuration edits actually take effect (README documents
+      # `zedbot restart` as the way to apply .env changes).
+      run_compose up -d --force-recreate --remove-orphans
       log_success "All services restarted."
       ;;
     start)

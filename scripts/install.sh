@@ -90,7 +90,11 @@ require_ubuntu() {
       log_info "Detected supported OS: ${os_pretty}"
       ;;
     *)
-      log_warn "Detected ${os_pretty}. Officially supported: Ubuntu 22.04 / 24.04. Continuing anyway."
+      log_warn "Detected ${os_pretty}. ZED_BOT supports Ubuntu 22.04 and 24.04."
+      if ! confirm "Continue on this unsupported Ubuntu version anyway?" "n"; then
+        log_error "Installation cancelled: unsupported Ubuntu version."
+        exit 1
+      fi
       ;;
   esac
 }
@@ -104,11 +108,12 @@ generate_password() {
   fi
 }
 
-# Strips characters that would break .env parsing (quotes, CR/LF). The values
-# collected here (tokens, ids, hostnames, passwords) never legitimately
-# contain them.
+# Strips characters that would break .env parsing (quotes, backslashes,
+# CR/LF). The values collected here (tokens, ids, hostnames, passwords) never
+# legitimately contain them; a trailing backslash in particular would make
+# docker compose's dotenv parser swallow the following line into the value.
 sanitize_value() {
-  printf '%s' "$1" | tr -d "\r\n'\""
+  printf '%s' "$1" | tr -d "\r\n'\"\\\\"
 }
 
 # Percent-encodes a string for safe embedding in connection URLs.
@@ -179,10 +184,17 @@ confirm() {
 }
 
 # --- Installation steps ------------------------------------------------------
+# Waits for concurrent apt/dpkg users (apt-daily, unattended-upgrades) instead
+# of failing immediately - fresh servers routinely hold the lock right after
+# boot.
+apt_get() {
+  apt-get -o DPkg::Lock::Timeout=120 "$@"
+}
+
 install_base_packages() {
   log_info "Installing base packages (curl, git, ca-certificates, gnupg, lsb-release, openssl) ..."
-  apt-get update -y -q
-  apt-get install -y -q curl git ca-certificates gnupg lsb-release openssl
+  apt_get update -y -q
+  apt_get install -y -q curl git ca-certificates gnupg lsb-release openssl
   log_success "Base packages installed."
 }
 
@@ -192,9 +204,16 @@ install_docker() {
   else
     log_info "Installing Docker Engine from the official Docker repository ..."
     install -m 0755 -d /etc/apt/keyrings
-    if [ ! -f /etc/apt/keyrings/docker.asc ]; then
-      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    # Always download to a temp file first: a truncated key left behind by an
+    # interrupted run must not poison every later re-run.
+    if curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc.tmp; then
+      mv /etc/apt/keyrings/docker.asc.tmp /etc/apt/keyrings/docker.asc
       chmod a+r /etc/apt/keyrings/docker.asc
+    elif [ -s /etc/apt/keyrings/docker.asc ]; then
+      log_warn "Could not refresh the Docker GPG key - reusing the existing one."
+    else
+      log_error "Failed to download the Docker GPG key. Check the network connection and re-run."
+      exit 1
     fi
     local codename arch
     codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}")"
@@ -204,8 +223,8 @@ install_docker() {
     arch="$(dpkg --print-architecture)"
     printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
       "$arch" "$codename" > /etc/apt/sources.list.d/docker.list
-    apt-get update -y -q
-    apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    apt_get update -y -q
+    apt_get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     log_success "Docker Engine installed."
   fi
 
@@ -221,18 +240,29 @@ install_docker() {
   fi
 }
 
+# Standalone docker-compose binaries are only usable when they are v2+;
+# the legacy python docker-compose 1.x cannot parse this project's compose
+# file (versionless Compose spec with a top-level "name:").
+docker_compose_binary_is_v2() {
+  has_command docker-compose &&
+    docker-compose version --short 2>/dev/null | grep -qE '^v?2'
+}
+
 install_compose() {
   if docker compose version >/dev/null 2>&1; then
     log_info "Docker Compose plugin already installed: $(docker compose version --short 2>/dev/null || echo 'unknown version')"
     return 0
   fi
-  if has_command docker-compose; then
-    log_info "Found legacy docker-compose binary: $(docker-compose --version 2>/dev/null || echo 'unknown version')"
+  if docker_compose_binary_is_v2; then
+    log_info "Found standalone Docker Compose v2 binary: $(docker-compose version --short 2>/dev/null || echo 'unknown version')"
     return 0
   fi
+  if has_command docker-compose; then
+    log_warn "Found a legacy docker-compose v1 binary - it cannot run this project; installing the v2 plugin."
+  fi
   log_info "Installing the Docker Compose plugin ..."
-  if ! apt-get install -y -q docker-compose-plugin; then
-    apt-get install -y -q docker-compose-v2
+  if ! apt_get install -y -q docker-compose-plugin; then
+    apt_get install -y -q docker-compose-v2
   fi
   if ! docker compose version >/dev/null 2>&1; then
     log_error "Failed to install the Docker Compose plugin."
@@ -249,10 +279,10 @@ detect_compose_command() {
   fi
   if docker compose version >/dev/null 2>&1; then
     COMPOSE_CMD=(docker compose)
-  elif has_command docker-compose; then
+  elif docker_compose_binary_is_v2; then
     COMPOSE_CMD=(docker-compose)
   else
-    log_error "Docker Compose is not available."
+    log_error "Docker Compose v2 is not available."
     return 1
   fi
 }
@@ -265,11 +295,29 @@ create_directories() {
   log_success "Directories ready: ${APP_DIR}, ${DATA_DIR}, ${BACKUP_DIR}"
 }
 
+ensure_git_safe_directory() {
+  # --add appends duplicates on every run; only add when missing.
+  if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$APP_DIR"; then
+    git config --global --add safe.directory "$APP_DIR" >/dev/null 2>&1 || true
+  fi
+}
+
 clone_or_update_repo() {
   if [ -d "${APP_DIR}/.git" ]; then
     log_info "Repository already present in ${APP_DIR} - fetching updates ..."
-    git config --global --add safe.directory "$APP_DIR" >/dev/null 2>&1 || true
+    ensure_git_safe_directory
     git -C "$APP_DIR" fetch --all --prune
+    # Only switch branches when one was explicitly requested via ZEDBOT_BRANCH;
+    # otherwise respect whatever the server is already tracking.
+    if [ -n "${ZEDBOT_BRANCH:-}" ]; then
+      local current_branch
+      current_branch="$(git -C "$APP_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
+      if [ "$current_branch" != "$REPO_BRANCH" ]; then
+        log_info "Switching from branch '${current_branch}' to '${REPO_BRANCH}' ..."
+        git -C "$APP_DIR" checkout "$REPO_BRANCH" ||
+          log_warn "Could not switch to '${REPO_BRANCH}'; staying on '${current_branch}'."
+      fi
+    fi
     if ! git -C "$APP_DIR" pull --ff-only; then
       log_warn "Could not fast-forward the repository (local changes?). Continuing with the current code."
     fi
@@ -384,6 +432,38 @@ start_services() {
   log_success "Services started."
 }
 
+# PostgreSQL only reads POSTGRES_PASSWORD when the data directory is first
+# initialized. When the installer re-runs and the user recreates .env (new or
+# regenerated password), the persistent volume would keep the old password
+# while every script and app uses the new one - so re-align it here. On a
+# fresh install this is a no-op (same password). The password travels via
+# stdin, never on a command line.
+sync_postgres_password() {
+  local pg_user pg_pass pw_sql waited=0
+  pg_user="$( (. "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${POSTGRES_USER:-zedbot}") 2>/dev/null || echo zedbot)"
+  pg_pass="$( (. "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${POSTGRES_PASSWORD:-}") 2>/dev/null || echo '')"
+  if [ -z "$pg_pass" ]; then
+    return 0
+  fi
+  until ( cd "$APP_DIR" && "${COMPOSE_CMD[@]}" exec -T postgres pg_isready -U "$pg_user" >/dev/null 2>&1 ); do
+    waited=$((waited + 3))
+    if [ "$waited" -ge 120 ]; then
+      log_warn "postgres did not become ready in time - skipping the password synchronization."
+      return 0
+    fi
+    sleep 3
+  done
+  pw_sql="${pg_pass//"'"/"''"}"
+  if ( cd "$APP_DIR" && "${COMPOSE_CMD[@]}" exec -T postgres psql -q -U "$pg_user" -d postgres >/dev/null ) <<SQL
+ALTER USER "${pg_user}" WITH PASSWORD '${pw_sql}';
+SQL
+  then
+    log_info "PostgreSQL password verified against .env."
+  else
+    log_warn "Could not synchronize the PostgreSQL password with .env. Run 'zedbot doctor' to check the database."
+  fi
+}
+
 run_migrations_if_available() {
   if [ -x "${APP_DIR}/scripts/migrate.sh" ]; then
     log_info "Running database migrations ..."
@@ -438,6 +518,7 @@ main() {
   create_env_file
   install_cli
   start_services
+  sync_postgres_password
   run_migrations_if_available
   if [ -x "${APP_DIR}/scripts/doctor.sh" ]; then
     log_info "Running post-install health checks ..."

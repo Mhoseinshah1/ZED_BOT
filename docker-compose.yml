@@ -33,13 +33,19 @@ services:
     image: redis:7-alpine
     container_name: zedbot-redis
     restart: unless-stopped
+    # The password is written to a config file at startup (printf is a shell
+    # builtin) instead of being passed as --requirepass, so it never appears
+    # in a process argv or in the container's recorded command. Re-entering
+    # docker-entrypoint.sh keeps the image's drop-to-redis-user behaviour.
     command:
-      [
-        "redis-server",
-        "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}",
-        "--appendonly", "yes",
-      ]
+      - sh
+      - -c
+      - >-
+        printf 'requirepass %s\nappendonly yes\n' "$$REDIS_PASSWORD" > /run/redis.conf &&
+        chown redis:redis /run/redis.conf && chmod 600 /run/redis.conf &&
+        exec docker-entrypoint.sh redis-server /run/redis.conf
     environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
       # Lets healthchecks and `zedbot doctor` authenticate without putting the
       # password on a command line.
       REDISCLI_AUTH: ${REDIS_PASSWORD}

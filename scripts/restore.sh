@@ -43,6 +43,9 @@ main() {
     log_error "Backup file not found: $1"
     exit 1
   fi
+  # Resolve to an absolute path now - later steps change the working
+  # directory, which would break a caller-relative path.
+  backup_file="$(readlink -f "$backup_file" 2>/dev/null || printf '%s' "$backup_file")"
 
   app_cd
   detect_compose_command

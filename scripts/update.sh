@@ -23,7 +23,10 @@ main() {
   bash "${SCRIPT_DIR}/backup.sh"
 
   log_info "[2/6] Pulling the latest code ..."
-  git config --global --add safe.directory "$ZEDBOT_APP_DIR" >/dev/null 2>&1 || true
+  # --add appends duplicates on every run; only add when missing.
+  if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ZEDBOT_APP_DIR"; then
+    git config --global --add safe.directory "$ZEDBOT_APP_DIR" >/dev/null 2>&1 || true
+  fi
   git fetch --all --prune
   if ! git pull --ff-only; then
     log_warn "Could not fast-forward the repository (local modifications?). Continuing with the current code."

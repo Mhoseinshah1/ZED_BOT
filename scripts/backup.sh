@@ -12,11 +12,18 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 . "${SCRIPT_DIR}/lib/common.sh"
 
 TMP_BACKUP_DIR=""
+PARTIAL_ARCHIVE=""
 
 cleanup() {
   if [ -n "$TMP_BACKUP_DIR" ] && [ -d "$TMP_BACKUP_DIR" ]; then
     rm -rf "$TMP_BACKUP_DIR"
   fi
+  # Never leave a half-written archive behind - it would look like a valid
+  # backup.
+  if [ -n "$PARTIAL_ARCHIVE" ] && [ -f "$PARTIAL_ARCHIVE" ]; then
+    rm -f "$PARTIAL_ARCHIVE"
+  fi
+  return 0
 }
 trap cleanup EXIT
 
@@ -69,8 +76,13 @@ main() {
     printf 'hostname=%s\n' "$(hostname)"
   } > "${TMP_BACKUP_DIR}/backup-info.txt"
 
-  tar -czf "$archive" -C "$TMP_BACKUP_DIR" .
-  chmod 600 "$archive"
+  # Write to a temp name and move into place only when complete, so a failed
+  # tar can never leave a corrupt zedbot-backup-*.tar.gz at the final path.
+  PARTIAL_ARCHIVE="${archive}.partial"
+  tar -czf "$PARTIAL_ARCHIVE" -C "$TMP_BACKUP_DIR" .
+  chmod 600 "$PARTIAL_ARCHIVE"
+  mv "$PARTIAL_ARCHIVE" "$archive"
+  PARTIAL_ARCHIVE=""
 
   rm -rf "$TMP_BACKUP_DIR"
   TMP_BACKUP_DIR=""

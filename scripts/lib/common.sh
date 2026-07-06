@@ -99,6 +99,14 @@ generate_password() {
 # --- Docker Compose ----------------------------------------------------------
 COMPOSE_CMD=()
 
+# Standalone docker-compose binaries are only usable when they are v2+; the
+# legacy python docker-compose 1.x cannot parse this project's compose file
+# (versionless Compose spec with a top-level "name:").
+docker_compose_binary_is_v2() {
+  has_command docker-compose &&
+    docker-compose version --short 2>/dev/null | grep -qE '^v?2'
+}
+
 detect_compose_command() {
   if [ "${#COMPOSE_CMD[@]}" -gt 0 ]; then
     return 0
@@ -110,10 +118,10 @@ detect_compose_command() {
   fi
   if docker compose version >/dev/null 2>&1; then
     COMPOSE_CMD=(docker compose)
-  elif has_command docker-compose; then
+  elif docker_compose_binary_is_v2; then
     COMPOSE_CMD=(docker-compose)
   else
-    log_error "Docker Compose is not installed. Run the ZED_BOT installer first."
+    log_error "Docker Compose v2 is not installed. Run the ZED_BOT installer first."
     return 1
   fi
 }
