@@ -280,6 +280,30 @@ your bot in Telegram:
 
 Menus, purchases and admin commands arrive in the next steps.
 
+## CI
+
+Every push and pull request to `main` is checked by GitHub Actions
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)); the workflow can
+also be started manually for any branch from the Actions tab
+(`workflow_dispatch`). Since development happens through GitHub / Claude Code
+rather than on a local server, CI is the safety net that validates every
+change before it lands.
+
+The workflow runs on an Ubuntu runner with dummy credentials (no real tokens
+or passwords) and validates:
+
+- **TypeScript** — `pnpm typecheck` and `pnpm lint` across the workspace
+- **Build** — `pnpm build` for every app and package
+- **Prisma** — client generation, plus `migrate deploy` and the seed against
+  a real PostgreSQL 16 service container (asserts the OWNER admin and default
+  settings exist)
+- **Runtime smoke test** — boots the API against PostgreSQL and
+  password-protected Redis and asserts `GET /health` returns
+  `"ok":true` with `database`/`redis` both `"ok"`
+- **Docker Compose** — `docker compose config` against a CI-generated `.env`
+- **Shell scripts** — `bash -n` syntax checks and ShellCheck for all
+  installer/management scripts
+
 ## Security notes
 
 - `.env` is created with `chmod 600` and is never committed (see `.gitignore`).

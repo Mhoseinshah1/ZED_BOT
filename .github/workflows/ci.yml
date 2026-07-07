@@ -1,0 +1,208 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Safe dummy values only - never put real tokens or passwords here.
+env:
+  NODE_ENV: test
+  APP_NAME: ZED_BOT
+  APP_DOMAIN_OR_IP: localhost
+  API_PORT: "3000"
+  TELEGRAM_BOT_TOKEN: "123456:test-token"
+  ADMIN_TELEGRAM_IDS: "123456789"
+  POSTGRES_DB: zedbot
+  POSTGRES_USER: zedbot
+  POSTGRES_PASSWORD: zedbot_test_password
+  DATABASE_URL: "postgresql://zedbot:zedbot_test_password@localhost:5432/zedbot?schema=public"
+  REDIS_HOST: localhost
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: zedbot_test_redis_password
+  REDIS_URL: "redis://:zedbot_test_redis_password@localhost:6379"
+
+jobs:
+  ci:
+    name: Typecheck, lint, build and validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: zedbot
+          POSTGRES_USER: zedbot
+          POSTGRES_PASSWORD: zedbot_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zedbot -d zedbot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable Corepack and set up pnpm
+        run: |
+          # corepack@latest avoids the signature-verification failures of the
+          # corepack bundled with older Node releases. package.json pins the
+          # exact pnpm version via the packageManager field; the first pnpm
+          # invocation downloads and activates it.
+          npm install -g corepack@latest
+          corepack enable
+          pnpm --version
+
+      - name: Print tool versions
+        run: |
+          node --version
+          pnpm --version
+          docker --version
+          docker compose version
+
+      - name: Resolve pnpm store directory
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile
+          else
+            pnpm install --no-frozen-lockfile
+          fi
+
+      - name: Generate Prisma client
+        run: pnpm run db:generate
+
+      - name: Typecheck
+        run: pnpm run --if-present typecheck
+
+      - name: Lint
+        run: pnpm run --if-present lint
+
+      - name: Build
+        run: pnpm run --if-present build
+
+      - name: Apply migrations and seed against PostgreSQL
+        run: |
+          pnpm run db:deploy
+          pnpm run db:seed
+          admin_count="$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c 'SELECT COUNT(*) FROM "Admin";')"
+          setting_count="$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c 'SELECT COUNT(*) FROM "Setting";')"
+          echo "seeded admins: ${admin_count}, settings: ${setting_count}"
+          test "$admin_count" = "1"
+          test "$setting_count" = "4"
+
+      - name: Start Redis (password-protected)
+        run: |
+          # A plain service container cannot override the image command, and
+          # the official redis image only takes its password via arguments.
+          docker run -d --name ci-redis -p 6379:6379 redis:7-alpine \
+            redis-server --requirepass "$REDIS_PASSWORD"
+          for _ in $(seq 1 20); do
+            if docker exec ci-redis redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+              echo "Redis is ready."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Redis did not become ready in time." >&2
+          docker logs ci-redis >&2 || true
+          exit 1
+
+      - name: API health smoke test
+        run: |
+          node apps/api/dist/index.js &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 15); do
+            if curl -fsS "http://localhost:${API_PORT}/health" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          health="$(curl -fsS "http://localhost:${API_PORT}/health")"
+          echo "GET /health -> ${health}"
+          echo "$health" | grep -q '"ok":true'
+          echo "$health" | grep -q '"database":"ok"'
+          echo "$health" | grep -q '"redis":"ok"'
+          version="$(curl -fsS "http://localhost:${API_PORT}/version")"
+          echo "GET /version -> ${version}"
+          echo "$version" | grep -q '"app":"ZED_BOT"'
+
+      - name: Validate docker-compose.yml
+        run: |
+          # Compose needs a .env (env_file + interpolation); use the CI dummy
+          # values, then clean up so nothing lingers on the runner.
+          cat > .env <<EOF
+          NODE_ENV=${NODE_ENV}
+          APP_NAME=${APP_NAME}
+          APP_DOMAIN_OR_IP=${APP_DOMAIN_OR_IP}
+          API_PORT=${API_PORT}
+          TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+          ADMIN_TELEGRAM_IDS=${ADMIN_TELEGRAM_IDS}
+          POSTGRES_DB=${POSTGRES_DB}
+          POSTGRES_USER=${POSTGRES_USER}
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          DATABASE_URL=${DATABASE_URL}
+          REDIS_HOST=${REDIS_HOST}
+          REDIS_PORT=${REDIS_PORT}
+          REDIS_PASSWORD=${REDIS_PASSWORD}
+          REDIS_URL=${REDIS_URL}
+          EOF
+          docker compose config --quiet
+          rm -f .env
+          echo "docker-compose.yml is valid."
+
+      - name: Validate bash scripts (syntax)
+        run: |
+          bash -n scripts/install.sh
+          bash -n scripts/update.sh
+          bash -n scripts/backup.sh
+          bash -n scripts/restore.sh
+          bash -n scripts/uninstall.sh
+          bash -n scripts/doctor.sh
+          bash -n scripts/migrate.sh
+          bash -n scripts/zedbot
+          bash -n scripts/lib/common.sh
+          echo "All scripts parse cleanly."
+
+      - name: ShellCheck
+        run: |
+          shellcheck -x -S warning -e SC1090,SC1091 \
+            scripts/install.sh \
+            scripts/update.sh \
+            scripts/backup.sh \
+            scripts/restore.sh \
+            scripts/uninstall.sh \
+            scripts/doctor.sh \
+            scripts/migrate.sh \
+            scripts/zedbot \
+            scripts/lib/common.sh
