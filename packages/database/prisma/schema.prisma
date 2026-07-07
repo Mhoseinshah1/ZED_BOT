@@ -1,0 +1,75 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AdminRole {
+  OWNER
+  SUPER_ADMIN
+  SUPPORT
+  PAYMENT_MANAGER
+  PRODUCT_MANAGER
+  REPORT_VIEWER
+}
+
+enum SettingType {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+}
+
+enum ActorType {
+  SYSTEM
+  USER
+  ADMIN
+  WORKER
+}
+
+model User {
+  id           String    @id @default(uuid())
+  telegramId   BigInt    @unique
+  username     String?
+  firstName    String?
+  lastName     String?
+  languageCode String?
+  isBlocked    Boolean   @default(false)
+  isBanned     Boolean   @default(false)
+  lastSeenAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Admin {
+  id         String    @id @default(uuid())
+  telegramId BigInt    @unique
+  role       AdminRole
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
+model Setting {
+  id        String      @id @default(uuid())
+  key       String      @unique
+  value     String
+  type      SettingType
+  isPublic  Boolean     @default(false)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+}
+
+model AuditLog {
+  id              String    @id @default(uuid())
+  actorTelegramId BigInt?
+  actorType       ActorType
+  action          String
+  entityType      String?
+  entityId        String?
+  metadata        Json?
+  createdAt       DateTime  @default(now())
+}

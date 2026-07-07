@@ -2,12 +2,19 @@
   "name": "@zedbot/shared",
   "version": "0.1.0",
   "private": true,
-  "description": "ZED_BOT shared types, constants and utilities (placeholder)",
+  "description": "ZED_BOT shared constants, env validation and logging",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

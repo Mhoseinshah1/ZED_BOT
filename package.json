@@ -2,7 +2,7 @@
   "name": "zed_bot",
   "version": "0.1.0",
   "private": true,
-  "description": "ZED_BOT - production-ready Telegram VPN sales bot (infrastructure foundation)",
+  "description": "ZED_BOT - production-ready Telegram VPN sales bot",
   "repository": {
     "type": "git",
     "url": "https://github.com/Mhoseinshah1/ZED_BOT.git"
@@ -10,11 +10,31 @@
   "engines": {
     "node": ">=20"
   },
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
+  "packageManager": "pnpm@10.4.1",
   "scripts": {
-    "build": "npm run build --workspaces --if-present"
+    "build": "pnpm -r run build",
+    "lint": "eslint .",
+    "typecheck": "pnpm -r run typecheck",
+    "db:generate": "pnpm --filter @zedbot/database run db:generate",
+    "db:migrate": "pnpm --filter @zedbot/database run db:migrate",
+    "db:deploy": "pnpm --filter @zedbot/database run db:deploy",
+    "db:seed": "pnpm --filter @zedbot/database run db:seed",
+    "dev:api": "pnpm --filter @zedbot/api run dev",
+    "dev:bot": "pnpm --filter @zedbot/bot run dev",
+    "dev:worker": "pnpm --filter @zedbot/worker run dev"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "eslint": "^9.17.0",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.18.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "esbuild"
+    ]
   }
 }

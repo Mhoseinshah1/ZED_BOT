@@ -63,10 +63,17 @@ services:
     networks:
       - zedbot
 
+  # api, bot and worker share one image built from the root Dockerfile; only
+  # the command differs. Compose deduplicates the build via the shared image
+  # tag.
   api:
-    build: ./apps/api
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zedbot-app
     container_name: zedbot-api
     restart: unless-stopped
+    command: ["node", "apps/api/dist/index.js"]
     env_file:
       - .env
     ports:
@@ -81,14 +88,18 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 20s
     networks:
       - zedbot
 
   bot:
-    build: ./apps/bot
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zedbot-app
     container_name: zedbot-bot
     restart: unless-stopped
+    command: ["node", "apps/bot/dist/index.js"]
     env_file:
       - .env
     depends_on:
@@ -100,9 +111,13 @@ services:
       - zedbot
 
   worker:
-    build: ./apps/worker
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zedbot-app
     container_name: zedbot-worker
     restart: unless-stopped
+    command: ["node", "apps/worker/dist/index.js"]
     env_file:
       - .env
     depends_on:

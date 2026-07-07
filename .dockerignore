@@ -1,0 +1,12 @@
+# Secrets must never enter the build context
+.env
+.env.*
+!.env.example
+
+node_modules
+**/node_modules
+**/dist
+.git
+*.tar.gz
+scripts
+README.md

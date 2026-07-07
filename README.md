@@ -2,17 +2,21 @@
 
 Production-ready Telegram VPN sales bot.
 
-> **Current status:** this repository contains the **installation and
-> infrastructure foundation** — one-command install, updates, backups,
-> restore, health checks and a `zedbot` management CLI on top of Docker
-> Compose. The API, bot and worker services are minimal placeholders; the
-> actual bot features (products, payments, panel integrations, admin panel)
-> land in later iterations.
+> **Current status:** this repository contains the **installation
+> infrastructure and the core development foundation** — one-command
+> install/update/backup/restore with the `zedbot` CLI, plus a real TypeScript
+> monorepo: Fastify API with database/Redis health checks, grammY Telegram
+> bot (`/start`, `/ping`), BullMQ worker, and a Prisma database layer with
+> initial models, migrations and seeding. The actual bot features (products,
+> payments, panel integrations, menus, admin panel) land in later iterations.
 
 ## Stack
 
-- TypeScript / Node.js
-- PostgreSQL
+- TypeScript / Node.js (pnpm workspaces monorepo)
+- Fastify (HTTP API)
+- grammY (Telegram bot)
+- BullMQ (background jobs)
+- PostgreSQL + Prisma
 - Redis
 - Docker Compose
 
@@ -47,7 +51,9 @@ The installer:
 6. Interactively creates `/opt/zedbot/app/.env` (existing configurations are kept unless you choose otherwise). Empty database/Redis passwords are auto-generated. The file is written with `chmod 600` and secrets are never printed.
 7. Installs the `zedbot` CLI to `/usr/local/bin/zedbot`.
 8. Builds and starts all services with Docker Compose.
-9. Runs database migrations when a migration command exists (none yet).
+9. Applies database migrations (`prisma migrate deploy`) and seeds baseline
+   data: the Telegram IDs from `ADMIN_TELEGRAM_IDS` become `OWNER` admins and
+   the default settings are created.
 10. Runs the health checks and prints a summary.
 
 The installer is **idempotent** — re-running it on an installed server is safe:
@@ -137,19 +143,25 @@ code are **kept by default** and only deleted when you explicitly confirm.
 
 `docker-compose.yml` defines:
 
-| Service    | Description                                             |
-| ---------- | ------------------------------------------------------- |
-| `postgres` | PostgreSQL 16 (data in `/opt/zedbot/data/postgres`)     |
-| `redis`    | Redis 7, password-protected, AOF persistence            |
-| `api`      | HTTP API placeholder — exposes `GET /health`            |
-| `bot`      | Telegram bot placeholder (logs a startup message)       |
-| `worker`   | Background worker placeholder (logs a startup message)  |
+| Service    | Description                                                        |
+| ---------- | ------------------------------------------------------------------ |
+| `postgres` | PostgreSQL 16 (data in `/opt/zedbot/data/postgres`)                |
+| `redis`    | Redis 7, password-protected, AOF persistence                       |
+| `api`      | Fastify API — `GET /health` (db + redis checks) and `GET /version` |
+| `bot`      | grammY Telegram bot (long polling) — `/start`, `/ping`             |
+| `worker`   | BullMQ worker on the `default` queue                               |
 
-The API health endpoint returns:
+`api`, `bot` and `worker` share one image built from the root `Dockerfile`;
+only the start command differs per service.
+
+`GET /health` returns `200` when everything is reachable:
 
 ```json
-{ "ok": true, "service": "api" }
+{ "ok": true, "service": "api", "database": "ok", "redis": "ok" }
 ```
+
+and `503` with `"ok": false` plus error details when the database or Redis is
+down. `GET /version` returns the app name, package version and `NODE_ENV`.
 
 ## Configuration
 
@@ -173,31 +185,100 @@ All configuration lives in `/opt/zedbot/app/.env` (created by the installer,
 
 After editing `.env`, apply the changes with `zedbot restart`.
 
-## Project structure
+## Development foundation
+
+### Project structure
+
+pnpm workspaces monorepo:
 
 ```
 .
 ├── apps/
-│   ├── api/              # HTTP API service (placeholder, GET /health)
-│   ├── bot/              # Telegram bot service (placeholder)
-│   └── worker/           # Background worker service (placeholder)
+│   ├── api/              # Fastify API — GET /health, GET /version
+│   ├── bot/              # grammY Telegram bot — /start, /ping
+│   └── worker/           # BullMQ worker — "default" queue
 ├── packages/
-│   ├── shared/           # Shared types/constants (placeholder)
-│   ├── database/         # Database layer & migrations (placeholder)
-│   ├── panel-adapters/   # VPN panel integrations (placeholder)
-│   └── payments/         # Payment gateway integrations (placeholder)
+│   ├── shared/           # Env validation, logger, constants (APP_NAME)
+│   ├── database/         # Prisma schema, client singleton, migrations, seed
+│   ├── panel-adapters/   # VPN panel adapter interface (placeholder)
+│   └── payments/         # Payment gateway interface (placeholder)
 ├── scripts/
 │   ├── install.sh        # One-command installer (self-contained)
 │   ├── update.sh         # Updater (backup → pull → rebuild → doctor)
+│   ├── migrate.sh        # prisma migrate deploy + seed (run by install/update)
 │   ├── backup.sh         # Backup (.env + PostgreSQL dump)
 │   ├── restore.sh        # Restore from a backup archive
 │   ├── doctor.sh         # Health checks
 │   ├── uninstall.sh      # Uninstaller
 │   ├── zedbot            # Management CLI (installed to /usr/local/bin)
 │   └── lib/common.sh     # Shared shell helpers
+├── Dockerfile            # Shared image for api / bot / worker
 ├── docker-compose.yml
 └── .env.example
 ```
+
+### Running the services
+
+On a server, everything runs through Docker Compose (`zedbot start`,
+`zedbot status`, `zedbot logs api|bot|worker`). By hand:
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs api
+```
+
+For local development (Node >= 20, `npm i -g pnpm`):
+
+```bash
+pnpm install
+pnpm db:generate         # generate the Prisma client
+pnpm build               # build all workspace packages
+pnpm dev:api             # or dev:bot / dev:worker (tsx watch)
+```
+
+The dev processes read the same environment variables as the containers
+(`DATABASE_URL`, `REDIS_URL` or `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`,
+`TELEGRAM_BOT_TOKEN`, `API_PORT`).
+
+### Database migrations
+
+Migrations live in `packages/database/prisma/migrations` and are applied
+automatically by the installer and `zedbot update` (via `scripts/migrate.sh`).
+Manually:
+
+```bash
+bash /opt/zedbot/app/scripts/migrate.sh     # on a server (migrate + seed)
+pnpm db:deploy                              # local: prisma migrate deploy
+pnpm db:migrate                             # local dev: prisma migrate dev
+```
+
+### Seeding admins
+
+The seed reads `ADMIN_TELEGRAM_IDS` (comma-separated Telegram user IDs) from
+the environment, upserts each as an `OWNER` admin, and creates the default
+settings (`bot_name`, `maintenance_mode`, `support_username`,
+`force_join_enabled`) without overwriting values you have changed. It runs
+automatically with `scripts/migrate.sh`; manually: `pnpm db:seed`.
+
+### Checking health
+
+```bash
+curl http://localhost:3000/health    # {"ok":true,"service":"api","database":"ok","redis":"ok"}
+curl http://localhost:3000/version   # {"app":"ZED_BOT","version":"0.1.0","environment":"production"}
+zedbot doctor
+```
+
+### Trying the bot
+
+With a valid `TELEGRAM_BOT_TOKEN` in `.env` and the services running, open
+your bot in Telegram:
+
+- `/start` — registers/updates your user record (username, name, language,
+  last-seen) and replies with a placeholder welcome message.
+- `/ping` — replies `pong`.
+
+Menus, purchases and admin commands arrive in the next steps.
 
 ## Security notes
 

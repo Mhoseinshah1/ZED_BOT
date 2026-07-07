@@ -1,6 +1,6 @@
-// Database layer for ZED_BOT (PostgreSQL schema, client and migrations).
-// Placeholder - the real schema and migration tooling land in a later step.
-// When migrations exist they must be exposed through an executable
-// scripts/migrate.sh so the installer and updater pick them up automatically.
+export { prisma, connectDatabase, disconnectDatabase } from "./client.js";
 
-export const DATABASE_PACKAGE = "@zedbot/database";
+// Re-export the generated enums and model types so consumers never import
+// from @prisma/client directly.
+export { AdminRole, SettingType, ActorType, Prisma } from "@prisma/client";
+export type { User, Admin, Setting, AuditLog, PrismaClient } from "@prisma/client";

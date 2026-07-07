@@ -2,15 +2,24 @@
   "name": "@zedbot/api",
   "version": "0.1.0",
   "private": true,
-  "description": "ZED_BOT API service (placeholder - exposes GET /health)",
+  "description": "ZED_BOT HTTP API service (Fastify)",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@zedbot/database": "workspace:*",
+    "@zedbot/shared": "workspace:*",
+    "fastify": "^5.2.0",
+    "ioredis": "^5.4.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
     "typescript": "^5.6.3"
   }
 }
