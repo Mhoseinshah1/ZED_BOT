@@ -280,6 +280,29 @@ your bot in Telegram:
 
 Menus, purchases and admin commands arrive in the next steps.
 
+### Troubleshooting the monorepo
+
+`@zedbot/database`, `@zedbot/shared`, `@zedbot/panel-adapters` and
+`@zedbot/payments` are **pnpm workspace packages**: the apps resolve them
+through each package's `main`/`types`/`exports` fields, which point at the
+compiled `dist/` output. Nothing resolves from `src/` directly, so on a fresh
+checkout the packages must be built once before the apps can typecheck.
+
+The root scripts handle the ordering for you:
+
+```bash
+pnpm install
+pnpm db:generate     # Prisma client (needed by @zedbot/database types)
+pnpm typecheck       # builds packages/* first, then typechecks everything
+pnpm build           # builds all packages and apps in dependency order
+```
+
+CI runs exactly this sequence. If you see
+`error TS2307: Cannot find module '@zedbot/...'`, it means the workspace
+packages have not been built yet — run `pnpm db:generate && pnpm build` (or
+`pnpm typecheck`, which pre-builds `packages/*` itself). If types from
+`@prisma/client` are missing, run `pnpm db:generate`.
+
 ## CI
 
 Every push and pull request to `main` is checked by GitHub Actions
