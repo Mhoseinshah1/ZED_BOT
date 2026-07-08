@@ -22,14 +22,14 @@ Production-ready Telegram VPN sales bot.
 
 ## Requirements
 
-- Ubuntu **24.04** or **26.04** (22.04 also works)
+- Ubuntu **24.04** or **26.04** (primary supported versions; Ubuntu 22.04 may work on a best-effort basis)
 - Root access
 - A **domain name** pointing at the server (IP-only setups are not supported)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) (can be added later)
 
 ## Installation
 
-Run as root on a fresh Ubuntu 22.04 / 24.04 server:
+Run as root on a fresh Ubuntu 24.04 / 26.04 server:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)
@@ -37,7 +37,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/sc
 
 The installer:
 
-1. Verifies the OS (Ubuntu 24.04 / 26.04; 22.04 also accepted).
+1. Verifies the OS (primary: Ubuntu 24.04 / 26.04; Ubuntu 22.04 is accepted on a best-effort basis).
 2. Installs base dependencies (curl, git, ca-certificates, gnupg, lsb-release, jq, unzip, zip, openssl, ufw — ufw is only installed, never enabled or reconfigured).
 3. Installs Docker Engine and the Docker Compose plugin if missing.
 4. Creates the directory layout:
@@ -316,8 +316,11 @@ zedbot doctor
 With a valid `TELEGRAM_BOT_TOKEN` in `.env` and the services running, open
 your bot in Telegram:
 
-- `/start` — registers/updates your user record (username, name, language,
-  last-seen) and replies with a placeholder welcome message.
+- `/start` — replies with a placeholder message confirming the installation
+  works. As **temporary Phase 1 smoke-test behaviour** it also
+  registers/updates your user record (username, name, language, last-seen)
+  to prove the bot → database path; the real registration flow replaces this
+  in a later phase.
 - `/ping` — replies `pong`.
 
 Menus, purchases and admin commands arrive in the next steps.
