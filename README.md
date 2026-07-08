@@ -22,8 +22,9 @@ Production-ready Telegram VPN sales bot.
 
 ## Requirements
 
-- Ubuntu **22.04** or **24.04**
+- Ubuntu **24.04** or **26.04** (22.04 also works)
 - Root access
+- A **domain name** pointing at the server (IP-only setups are not supported)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) (can be added later)
 
 ## Installation
@@ -36,8 +37,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/sc
 
 The installer:
 
-1. Verifies the OS (Ubuntu 22.04 / 24.04).
-2. Installs base dependencies (curl, git, ca-certificates, gnupg, lsb-release, openssl).
+1. Verifies the OS (Ubuntu 24.04 / 26.04; 22.04 also accepted).
+2. Installs base dependencies (curl, git, ca-certificates, gnupg, lsb-release, jq, unzip, zip, openssl, ufw — ufw is only installed, never enabled or reconfigured).
 3. Installs Docker Engine and the Docker Compose plugin if missing.
 4. Creates the directory layout:
 
@@ -46,9 +47,10 @@ The installer:
    | `/opt/zedbot/app`     | Application code (this repository)     |
    | `/opt/zedbot/data`    | Persistent data (PostgreSQL, Redis)    |
    | `/opt/zedbot/backups` | Backup archives                        |
+   | `/opt/zedbot/logs`    | Log files (reserved for later phases)  |
 
 5. Clones this repository into `/opt/zedbot/app` (or updates it when already present).
-6. Interactively creates `/opt/zedbot/app/.env` (existing configurations are kept unless you choose otherwise). Empty database/Redis passwords are auto-generated. The file is written with `chmod 600` and secrets are never printed.
+6. Interactively creates `/opt/zedbot/app/.env` (existing configurations are kept unless you choose otherwise). It asks for the Telegram bot token, the main admin Telegram ID, the **domain name** and the SSL email (default `admin@<domain>`), and auto-generates `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `APP_SECRET`, `INTERNAL_API_TOKEN` and `BACKUP_ENCRYPTION_PASSWORD`. The file is written with `chmod 600` and secrets are never printed.
 7. Installs the `zedbot` CLI to `/usr/local/bin/zedbot`.
 8. Builds and starts all services with Docker Compose.
 9. Applies database migrations (`prisma migrate deploy`) and seeds baseline
@@ -114,13 +116,21 @@ zedbot logs worker
 
 ```bash
 zedbot backup
-zedbot restore /opt/zedbot/backups/zedbot-backup-20260101-120000.tar.gz
+zedbot restore                    # lists backups and asks which to restore
+zedbot restore /opt/zedbot/backups/zedbot_backup_2026-01-01_12-00-00.tar.gz.enc
 ```
 
 Backups are written to `/opt/zedbot/backups` as
-`zedbot-backup-YYYYMMDD-HHMMSS.tar.gz` and contain the `.env` configuration
-and a full PostgreSQL dump. Restore is destructive and asks for confirmation;
-the replaced `.env` is kept next to the restored one.
+`zedbot_backup_YYYY-MM-DD_HH-mm-ss.tar.gz` and contain the `.env`
+configuration and a full PostgreSQL dump. When `BACKUP_ENCRYPTION_PASSWORD`
+is set in `.env` (the installer generates one), the archive is encrypted with
+AES-256 and gets the `.enc` suffix — **keep a copy of that password off the
+server**, encrypted backups cannot be opened without it. Old backups are
+never deleted automatically.
+
+Restore is destructive and asks for confirmation; the replaced `.env` is kept
+next to the restored one, and encrypted archives are decrypted with the
+password from `.env` (or an interactive prompt).
 
 ### Start / stop / restart
 
@@ -172,8 +182,11 @@ All configuration lives in `/opt/zedbot/app/.env` (created by the installer,
 | ------------------------------------- | ---------------------- | -------------------------------------- |
 | `NODE_ENV`                             | `production`           | Node environment                       |
 | `APP_NAME`                             | `ZED_BOT`              | Application name                       |
-| `APP_DOMAIN_OR_IP`                     | —                      | Public domain or IP of the server      |
+| `APP_DOMAIN`                           | —                      | Domain name of the server (required)   |
+| `APP_BASE_URL`                         | `https://<APP_DOMAIN>` | Public base URL                        |
 | `API_PORT`                             | `3000`                 | Published API port                     |
+| `LOG_LEVEL`                            | `info`                 | `debug` / `info` / `warn` / `error`    |
+| `SSL_EMAIL`                            | `admin@<APP_DOMAIN>`   | Email for SSL certificates (later phase) |
 | `TELEGRAM_BOT_TOKEN`                   | —                      | Bot token from @BotFather              |
 | `ADMIN_TELEGRAM_IDS`                   | —                      | Comma-separated admin Telegram IDs     |
 | `POSTGRES_DB` / `POSTGRES_USER`        | `zedbot`               | Database name / user                   |
@@ -182,8 +195,37 @@ All configuration lives in `/opt/zedbot/app/.env` (created by the installer,
 | `REDIS_HOST` / `REDIS_PORT`            | `redis` / `6379`       | Redis host / port (inside Compose)     |
 | `REDIS_PASSWORD`                       | auto-generated         | Redis password                         |
 | `REDIS_URL`                            | auto-generated         | Redis connection URL                   |
+| `APP_SECRET`                           | auto-generated         | Application signing/crypto secret      |
+| `INTERNAL_API_TOKEN`                   | auto-generated         | Token for internal service-to-service calls |
+| `BACKUP_DIR`                           | `/opt/zedbot/backups`  | Where backup archives are written      |
+| `BACKUP_ENCRYPTION_PASSWORD`           | auto-generated         | Backup encryption password (empty = unencrypted) |
 
 After editing `.env`, apply the changes with `zedbot restart`.
+
+## Domain and SSL
+
+ZED_BOT requires a **domain name** — the installer asks for it and stores
+`APP_DOMAIN` and `APP_BASE_URL=https://<domain>` in `.env`, along with an
+`SSL_EMAIL` (default `admin@<domain>`) for future certificates. IP-only mode
+is intentionally not supported.
+
+**SSL/reverse-proxy is not wired up yet in this phase.** The API currently
+listens on plain HTTP at `http://<domain>:<API_PORT>`. A reverse proxy with
+automatic certificates (using the stored domain and email) lands in a later
+phase; all the configuration it needs is already collected.
+
+## Phase 1 limitations
+
+This phase delivers infrastructure and the application skeleton only. Not
+implemented yet, by design:
+
+- Telegram menus, purchase flows and any bot business logic (the bot only
+  answers `/start` with a placeholder message and `/ping` with `pong`)
+- Products, orders, services, users management, payments
+- Marzban / XUI (Sanaei) panel integrations — only placeholder
+  interfaces/classes exist in `packages/panel-adapters`
+- Admin panel, reseller system, mini app
+- Reverse proxy / SSL termination (see above)
 
 ## Development foundation
 

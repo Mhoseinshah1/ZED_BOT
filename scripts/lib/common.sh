@@ -19,7 +19,9 @@ set -Eeuo pipefail
 ZEDBOT_BASE_DIR="${ZEDBOT_BASE_DIR:-/opt/zedbot}"
 ZEDBOT_APP_DIR="${ZEDBOT_APP_DIR:-${ZEDBOT_BASE_DIR}/app}"
 ZEDBOT_DATA_DIR="${ZEDBOT_DATA_DIR:-${ZEDBOT_BASE_DIR}/data}"
-ZEDBOT_BACKUP_DIR="${ZEDBOT_BACKUP_DIR:-${ZEDBOT_BASE_DIR}/backups}"
+# BACKUP_DIR (from .env) takes precedence so operators can relocate backups.
+ZEDBOT_BACKUP_DIR="${BACKUP_DIR:-${ZEDBOT_BACKUP_DIR:-${ZEDBOT_BASE_DIR}/backups}}"
+ZEDBOT_LOGS_DIR="${ZEDBOT_LOGS_DIR:-${ZEDBOT_BASE_DIR}/logs}"
 ZEDBOT_ENV_FILE="${ZEDBOT_ENV_FILE:-${ZEDBOT_APP_DIR}/.env}"
 ZEDBOT_REPO_URL="${ZEDBOT_REPO_URL:-https://github.com/Mhoseinshah1/ZED_BOT.git}"
 ZEDBOT_CLI_PATH="${ZEDBOT_CLI_PATH:-/usr/local/bin/zedbot}"
@@ -70,11 +72,11 @@ require_ubuntu() {
     exit 1
   fi
   case "$os_version" in
-    22.04 | 24.04)
+    22.04 | 24.04 | 26.04)
       log_info "Detected supported OS: ${os_pretty}"
       ;;
     *)
-      log_warn "Detected ${os_pretty}. Officially supported: Ubuntu 22.04 / 24.04. Continuing anyway."
+      log_warn "Detected ${os_pretty}. Officially supported: Ubuntu 24.04 / 26.04 (22.04 also works). Continuing anyway."
       ;;
   esac
 }
@@ -204,6 +206,16 @@ load_env_if_exists() {
     set +a
   fi
   return 0
+}
+
+# Conventional alias for load_env_if_exists.
+load_env() {
+  load_env_if_exists "$@"
+}
+
+# True when the Docker CLI is present and the daemon answers.
+check_docker() {
+  has_command docker && docker info >/dev/null 2>&1
 }
 
 # --- Migrations --------------------------------------------------------------

@@ -20,9 +20,13 @@
     "db:migrate": "pnpm --filter @zedbot/database run db:migrate",
     "db:deploy": "pnpm --filter @zedbot/database run db:deploy",
     "db:seed": "pnpm --filter @zedbot/database run db:seed",
+    "prisma:generate": "pnpm run db:generate",
+    "prisma:migrate": "pnpm run db:deploy",
+    "dev": "pnpm run dev:api",
     "dev:api": "pnpm --filter @zedbot/api run dev",
     "dev:bot": "pnpm --filter @zedbot/bot run dev",
-    "dev:worker": "pnpm --filter @zedbot/worker run dev"
+    "dev:worker": "pnpm --filter @zedbot/worker run dev",
+    "start": "pnpm --filter @zedbot/api run start"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

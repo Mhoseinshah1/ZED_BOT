@@ -18,8 +18,10 @@ concurrency:
 env:
   NODE_ENV: test
   APP_NAME: ZED_BOT
-  APP_DOMAIN_OR_IP: localhost
+  APP_DOMAIN: ci.zedbot.local
+  APP_BASE_URL: "https://ci.zedbot.local"
   API_PORT: "3000"
+  LOG_LEVEL: info
   TELEGRAM_BOT_TOKEN: "123456:test-token"
   ADMIN_TELEGRAM_IDS: "123456789"
   POSTGRES_DB: zedbot
@@ -164,7 +166,8 @@ jobs:
           cat > .env <<EOF
           NODE_ENV=${NODE_ENV}
           APP_NAME=${APP_NAME}
-          APP_DOMAIN_OR_IP=${APP_DOMAIN_OR_IP}
+          APP_DOMAIN=${APP_DOMAIN}
+          APP_BASE_URL=${APP_BASE_URL}
           API_PORT=${API_PORT}
           TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
           ADMIN_TELEGRAM_IDS=${ADMIN_TELEGRAM_IDS}

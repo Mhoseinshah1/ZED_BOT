@@ -39,11 +39,11 @@ main() {
   local data_state="kept" backups_state="kept" app_state="kept"
 
   # 2. Application data (destructive, default: keep)
-  if [ -d "$ZEDBOT_DATA_DIR" ]; then
-    if confirm "Delete ALL application data in ${ZEDBOT_DATA_DIR} (PostgreSQL + Redis)? This cannot be undone." "n"; then
-      rm -rf "$ZEDBOT_DATA_DIR"
+  if [ -d "$ZEDBOT_DATA_DIR" ] || [ -d "$ZEDBOT_LOGS_DIR" ]; then
+    if confirm "Delete ALL application data in ${ZEDBOT_DATA_DIR} (PostgreSQL + Redis) and logs in ${ZEDBOT_LOGS_DIR}? This cannot be undone." "n"; then
+      rm -rf "$ZEDBOT_DATA_DIR" "$ZEDBOT_LOGS_DIR"
       data_state="deleted"
-      log_success "Data directory deleted."
+      log_success "Data and logs directories deleted."
     else
       log_info "Keeping the data directory: ${ZEDBOT_DATA_DIR}"
     fi

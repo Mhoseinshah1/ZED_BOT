@@ -92,6 +92,28 @@ check_api_health() {
   fi
 }
 
+# At least 2 GB free on the filesystem holding /opt/zedbot.
+check_disk_space() {
+  local avail_kb
+  avail_kb="$(df -Pk "$ZEDBOT_BASE_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [ -z "$avail_kb" ]; then
+    avail_kb="$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}')"
+  fi
+  [ -n "$avail_kb" ] && [ "$avail_kb" -ge 2097152 ]
+}
+
+# At least ~1 GB of RAM total and some headroom available.
+check_memory() {
+  local total_kb avail_kb
+  total_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  avail_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  [ "$total_kb" -ge 900000 ] && [ "$avail_kb" -ge 150000 ]
+}
+
+check_api_port_listening() {
+  ss -ltn 2>/dev/null | grep -q ":${API_PORT:-3000} "
+}
+
 main() {
   require_root
   load_env_if_exists
@@ -110,6 +132,10 @@ main() {
   core_check "App directory exists (${ZEDBOT_APP_DIR})" test -d "$ZEDBOT_APP_DIR"
   core_check "docker-compose.yml exists" test -f "${ZEDBOT_APP_DIR}/docker-compose.yml"
   optional_check ".env exists" "run the installer to create it" test -f "$ZEDBOT_ENV_FILE"
+
+  # System resources
+  optional_check "Disk space (>= 2 GB free on ${ZEDBOT_BASE_DIR})" "free up disk space" check_disk_space
+  optional_check "Memory (>= 1 GB total, headroom available)" "server may be too small or under memory pressure" check_memory
 
   # Runtime (only meaningful when the core is intact)
   if [ "$CORE_BROKEN" -eq 1 ]; then
@@ -132,8 +158,10 @@ main() {
     fi
 
     if compose_service_running api; then
+      optional_check "API port ${API_PORT:-3000} is listening" "zedbot logs api" check_api_port_listening
       optional_check "API health endpoint responds" "zedbot logs api" check_api_health
     else
+      skip_check "API port ${API_PORT:-3000} is listening" "api container not running"
       skip_check "API health endpoint responds" "api container not running"
     fi
   fi
