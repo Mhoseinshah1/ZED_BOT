@@ -17,7 +17,8 @@
 #   ZEDBOT_NONINTERACTIVE=1       never prompt; use defaults / the vars below
 #   ZEDBOT_TELEGRAM_BOT_TOKEN     preseed TELEGRAM_BOT_TOKEN
 #   ZEDBOT_ADMIN_TELEGRAM_IDS     preseed ADMIN_TELEGRAM_IDS
-#   ZEDBOT_APP_DOMAIN_OR_IP       preseed APP_DOMAIN_OR_IP
+#   ZEDBOT_APP_DOMAIN             preseed APP_DOMAIN (required in non-interactive mode)
+#   ZEDBOT_SSL_EMAIL              preseed SSL_EMAIL (default: admin@<domain>)
 #   ZEDBOT_POSTGRES_PASSWORD      preseed POSTGRES_PASSWORD
 #   ZEDBOT_REDIS_PASSWORD         preseed REDIS_PASSWORD
 # =============================================================================
@@ -29,6 +30,7 @@ ZEDBOT_BASE_DIR="${ZEDBOT_BASE_DIR:-/opt/zedbot}"
 APP_DIR="${ZEDBOT_APP_DIR:-${ZEDBOT_BASE_DIR}/app}"
 DATA_DIR="${ZEDBOT_DATA_DIR:-${ZEDBOT_BASE_DIR}/data}"
 BACKUP_DIR="${ZEDBOT_BACKUP_DIR:-${ZEDBOT_BASE_DIR}/backups}"
+LOGS_DIR="${ZEDBOT_LOGS_DIR:-${ZEDBOT_BASE_DIR}/logs}"
 ENV_FILE="${APP_DIR}/.env"
 REPO_URL="${ZEDBOT_REPO_URL:-https://github.com/Mhoseinshah1/ZED_BOT.git}"
 REPO_BRANCH="${ZEDBOT_BRANCH:-main}"
@@ -86,11 +88,11 @@ require_ubuntu() {
     exit 1
   fi
   case "$os_version" in
-    22.04 | 24.04)
+    22.04 | 24.04 | 26.04)
       log_info "Detected supported OS: ${os_pretty}"
       ;;
     *)
-      log_warn "Detected ${os_pretty}. ZED_BOT supports Ubuntu 22.04 and 24.04."
+      log_warn "Detected ${os_pretty}. ZED_BOT supports Ubuntu 24.04 and 26.04 (22.04 also works)."
       if ! confirm "Continue on this unsupported Ubuntu version anyway?" "n"; then
         log_error "Installation cancelled: unsupported Ubuntu version."
         exit 1
@@ -192,9 +194,11 @@ apt_get() {
 }
 
 install_base_packages() {
-  log_info "Installing base packages (curl, git, ca-certificates, gnupg, lsb-release, openssl) ..."
+  log_info "Installing base packages (curl, git, ca-certificates, gnupg, lsb-release, jq, unzip, zip, openssl, ufw) ..."
   apt_get update -y -q
-  apt_get install -y -q curl git ca-certificates gnupg lsb-release openssl
+  # ufw is installed for later hardening phases but is NOT enabled or
+  # reconfigured here - changing firewall rules unprompted could cut SSH.
+  apt_get install -y -q curl git ca-certificates gnupg lsb-release jq unzip zip openssl ufw
   log_success "Base packages installed."
 }
 
@@ -289,10 +293,10 @@ detect_compose_command() {
 
 create_directories() {
   log_info "Creating ZED_BOT directories under ${ZEDBOT_BASE_DIR} ..."
-  mkdir -p "$ZEDBOT_BASE_DIR" "$APP_DIR" "$DATA_DIR" "$BACKUP_DIR"
+  mkdir -p "$ZEDBOT_BASE_DIR" "$APP_DIR" "$DATA_DIR" "$BACKUP_DIR" "$LOGS_DIR"
   mkdir -p "${DATA_DIR}/postgres" "${DATA_DIR}/redis"
   chmod 700 "$DATA_DIR" "$BACKUP_DIR"
-  log_success "Directories ready: ${APP_DIR}, ${DATA_DIR}, ${BACKUP_DIR}"
+  log_success "Directories ready: ${APP_DIR}, ${DATA_DIR}, ${BACKUP_DIR}, ${LOGS_DIR}"
 }
 
 ensure_git_safe_directory() {
@@ -332,6 +336,34 @@ clone_or_update_repo() {
   fi
 }
 
+# Basic sanity check for a bare domain name (no scheme, at least one dot).
+is_valid_domain() {
+  printf '%s' "$1" | grep -Eq '^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$'
+}
+
+prompt_domain() {
+  local domain="${ZEDBOT_APP_DOMAIN:-}"
+  domain="$(sanitize_value "$domain")"
+  if ! can_prompt; then
+    if is_valid_domain "$domain"; then
+      printf '%s' "$domain"
+      return 0
+    fi
+    log_error "ZED_BOT requires a domain name. Set ZEDBOT_APP_DOMAIN when installing non-interactively."
+    exit 1
+  fi
+  while :; do
+    domain="$(prompt_value "Domain name for this server (e.g. bot.example.com - IP addresses are not supported)" "$domain")"
+    domain="$(sanitize_value "$domain")"
+    if is_valid_domain "$domain"; then
+      printf '%s' "$domain"
+      return 0
+    fi
+    log_warn "'${domain}' is not a valid domain name. Enter a bare domain such as bot.example.com."
+    domain=""
+  done
+}
+
 create_env_file() {
   if [ -f "$ENV_FILE" ]; then
     log_info "An existing .env configuration was found."
@@ -350,20 +382,27 @@ create_env_file() {
   log_info "Creating a new .env configuration."
   log_info "Press ENTER to accept a default. Secret input is hidden and never printed."
 
-  local telegram_token admin_ids app_domain postgres_password redis_password default_ip
+  local telegram_token admin_ids app_domain ssl_email
   telegram_token="$(prompt_secret "Telegram bot token from @BotFather (can be added later)" "${ZEDBOT_TELEGRAM_BOT_TOKEN:-}")"
-  admin_ids="$(prompt_value "Admin Telegram user IDs (comma separated)" "${ZEDBOT_ADMIN_TELEGRAM_IDS:-}")"
-  default_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  app_domain="$(prompt_value "Server domain or public IP" "${ZEDBOT_APP_DOMAIN_OR_IP:-${default_ip:-127.0.0.1}}")"
-  postgres_password="$(prompt_secret "PostgreSQL password (leave empty to auto-generate)" "${ZEDBOT_POSTGRES_PASSWORD:-}")"
-  redis_password="$(prompt_secret "Redis password (leave empty to auto-generate)" "${ZEDBOT_REDIS_PASSWORD:-}")"
+  admin_ids="$(prompt_value "Main admin Telegram numeric ID (more can be added comma-separated)" "${ZEDBOT_ADMIN_TELEGRAM_IDS:-}")"
+  app_domain="$(prompt_domain)"
+  ssl_email="$(prompt_value "Email for SSL certificates" "${ZEDBOT_SSL_EMAIL:-admin@${app_domain}}")"
 
   telegram_token="$(sanitize_value "$telegram_token")"
   admin_ids="$(sanitize_value "$admin_ids")"
-  app_domain="$(sanitize_value "$app_domain")"
-  postgres_password="$(sanitize_value "$postgres_password")"
-  redis_password="$(sanitize_value "$redis_password")"
+  ssl_email="$(sanitize_value "$ssl_email")"
+  if [ -z "$ssl_email" ]; then
+    ssl_email="admin@${app_domain}"
+  fi
+  if [ -z "$telegram_token" ]; then
+    log_warn "TELEGRAM_BOT_TOKEN is empty. Add it to ${ENV_FILE} before enabling real bot features."
+  fi
 
+  # All infrastructure secrets are generated - they never travel through a
+  # prompt unless preseeded via ZEDBOT_* variables for automation.
+  local postgres_password redis_password app_secret internal_api_token backup_encryption_password
+  postgres_password="$(sanitize_value "${ZEDBOT_POSTGRES_PASSWORD:-}")"
+  redis_password="$(sanitize_value "${ZEDBOT_REDIS_PASSWORD:-}")"
   if [ -z "$postgres_password" ]; then
     postgres_password="$(generate_password)"
     log_info "Generated a secure random PostgreSQL password."
@@ -372,9 +411,10 @@ create_env_file() {
     redis_password="$(generate_password)"
     log_info "Generated a secure random Redis password."
   fi
-  if [ -z "$telegram_token" ]; then
-    log_warn "TELEGRAM_BOT_TOKEN is empty. Add it to ${ENV_FILE} before enabling real bot features."
-  fi
+  app_secret="$(generate_password)"
+  internal_api_token="$(generate_password)"
+  backup_encryption_password="$(generate_password)"
+  log_info "Generated APP_SECRET, INTERNAL_API_TOKEN and BACKUP_ENCRYPTION_PASSWORD."
 
   local database_url redis_url
   database_url="postgresql://zedbot:$(urlencode "$postgres_password")@postgres:5432/zedbot"
@@ -391,8 +431,13 @@ create_env_file() {
 # --- Application ---
 NODE_ENV='production'
 APP_NAME='ZED_BOT'
-APP_DOMAIN_OR_IP='${app_domain}'
+APP_DOMAIN='${app_domain}'
+APP_BASE_URL='https://${app_domain}'
 API_PORT='3000'
+LOG_LEVEL='info'
+
+# --- SSL (reverse proxy / certificates land in a later phase) ---
+SSL_EMAIL='${ssl_email}'
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN='${telegram_token}'
@@ -410,12 +455,25 @@ REDIS_PORT='6379'
 REDIS_PASSWORD='${redis_password}'
 REDIS_URL='${redis_url}'
 
+# --- Application secrets ---
+APP_SECRET='${app_secret}'
+INTERNAL_API_TOKEN='${internal_api_token}'
+
+# --- Backups ---
+BACKUP_DIR='${BACKUP_DIR}'
+# When set, backups are encrypted (AES-256). Keep a copy of this password
+# somewhere safe OUTSIDE this server - encrypted backups are useless without
+# it. Empty value = unencrypted backups.
+BACKUP_ENCRYPTION_PASSWORD='${backup_encryption_password}'
+
 # --- Paths (used by docker-compose bind mounts) ---
 ZEDBOT_DATA_DIR='${DATA_DIR}'
 EOF
   umask "$old_umask"
   chmod 600 "$ENV_FILE"
   log_success ".env created at ${ENV_FILE} (permissions 600). Secrets were not printed."
+  log_warn "Backups will be ENCRYPTED. Store a copy of BACKUP_ENCRYPTION_PASSWORD somewhere safe:"
+  log_warn "  grep BACKUP_ENCRYPTION_PASSWORD ${ENV_FILE}"
 }
 
 install_cli() {
@@ -479,7 +537,7 @@ run_migrations_if_available() {
 
 print_summary() {
   local domain port
-  domain="$( (set -a && . "$ENV_FILE" >/dev/null 2>&1 && printf '%s' "${APP_DOMAIN_OR_IP:-127.0.0.1}") || echo 127.0.0.1)"
+  domain="$( (set -a && . "$ENV_FILE" >/dev/null 2>&1 && printf '%s' "${APP_DOMAIN:-localhost}") || echo localhost)"
   port="$( (set -a && . "$ENV_FILE" >/dev/null 2>&1 && printf '%s' "${API_PORT:-3000}") || echo 3000)"
 
   echo
@@ -490,9 +548,10 @@ print_summary() {
     Application : ${APP_DIR}
     Data        : ${DATA_DIR}
     Backups     : ${BACKUP_DIR}
+    Logs        : ${LOGS_DIR}
     Config      : ${ENV_FILE} (chmod 600)
 
-  API health check
+  API health check (HTTPS arrives with the reverse-proxy phase)
     http://${domain}:${port}/health
 
   Useful commands
@@ -500,7 +559,7 @@ print_summary() {
     zedbot doctor    - run health checks
     zedbot logs      - tail all logs (zedbot logs api|bot|worker)
     zedbot update    - update to the latest version
-    zedbot backup    - create a backup
+    zedbot backup    - create an encrypted backup
 
 EOF
 }

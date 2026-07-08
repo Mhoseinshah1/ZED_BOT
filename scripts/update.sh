@@ -10,7 +10,15 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # shellcheck source=lib/common.sh
 . "${SCRIPT_DIR}/lib/common.sh"
 
-trap 'log_error "ZED_BOT update FAILED. Your data was not deleted; a pre-update backup is in ${ZEDBOT_BACKUP_DIR}."' ERR
+on_update_error() {
+  log_error "ZED_BOT update FAILED. Your data and .env were NOT deleted."
+  log_error "Recovery steps:"
+  log_error "  1. Inspect what went wrong:   zedbot logs        (or: zedbot doctor)"
+  log_error "  2. Retry the update:          zedbot update"
+  log_error "  3. If the app is broken, restore the pre-update backup:"
+  log_error "       zedbot restore           (pick the newest backup from the list)"
+}
+trap on_update_error ERR
 
 main() {
   require_root

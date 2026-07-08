@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ZED_BOT backup: archives .env and a PostgreSQL dump into
-#   /opt/zedbot/backups/zedbot-backup-YYYYMMDD-HHMMSS.tar.gz
-# Never prints secret values.
+#   /opt/zedbot/backups/zedbot_backup_YYYY-MM-DD_HH-mm-ss.tar.gz
+#
+# When BACKUP_ENCRYPTION_PASSWORD is set in .env the archive is encrypted
+# with AES-256 (openssl, PBKDF2) and gets the .enc suffix. The password is
+# passed via the environment - it never appears on a command line or in logs.
 # =============================================================================
 
 set -Eeuo pipefail
@@ -30,14 +33,16 @@ trap cleanup EXIT
 main() {
   require_root
   app_cd
-  load_env_if_exists
+  load_env
 
-  ensure_directory "$ZEDBOT_BACKUP_DIR" 700
+  # .env may relocate the backup directory via BACKUP_DIR.
+  local backup_dir="${BACKUP_DIR:-$ZEDBOT_BACKUP_DIR}"
+  ensure_directory "$backup_dir" 700
 
   local ts archive
-  ts="$(timestamp)"
-  TMP_BACKUP_DIR="${ZEDBOT_BACKUP_DIR}/.tmp-${ts}-$$"
-  archive="${ZEDBOT_BACKUP_DIR}/zedbot-backup-${ts}.tar.gz"
+  ts="$(date +%Y-%m-%d_%H-%M-%S)"
+  TMP_BACKUP_DIR="${backup_dir}/.tmp-${ts}-$$"
+  archive="${backup_dir}/zedbot_backup_${ts}.tar.gz"
   mkdir -p "$TMP_BACKUP_DIR"
   chmod 700 "$TMP_BACKUP_DIR"
 
@@ -77,17 +82,39 @@ main() {
   } > "${TMP_BACKUP_DIR}/backup-info.txt"
 
   # Write to a temp name and move into place only when complete, so a failed
-  # tar can never leave a corrupt zedbot-backup-*.tar.gz at the final path.
+  # tar can never leave a corrupt archive at the final path.
   PARTIAL_ARCHIVE="${archive}.partial"
   tar -czf "$PARTIAL_ARCHIVE" -C "$TMP_BACKUP_DIR" .
   chmod 600 "$PARTIAL_ARCHIVE"
-  mv "$PARTIAL_ARCHIVE" "$archive"
-  PARTIAL_ARCHIVE=""
 
-  rm -rf "$TMP_BACKUP_DIR"
-  TMP_BACKUP_DIR=""
-
-  log_success "Backup created: ${archive}"
+  if [ -n "${BACKUP_ENCRYPTION_PASSWORD:-}" ]; then
+    log_info "Encrypting the backup (AES-256) ..."
+    local encrypted="${archive}.enc"
+    export BACKUP_ENCRYPTION_PASSWORD
+    if openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+      -in "$PARTIAL_ARCHIVE" -out "${encrypted}.partial" \
+      -pass env:BACKUP_ENCRYPTION_PASSWORD; then
+      chmod 600 "${encrypted}.partial"
+      mv "${encrypted}.partial" "$encrypted"
+      rm -f "$PARTIAL_ARCHIVE"
+      PARTIAL_ARCHIVE=""
+      rm -rf "$TMP_BACKUP_DIR"
+      TMP_BACKUP_DIR=""
+      log_success "Encrypted backup created: ${encrypted}"
+      log_info "Restoring requires BACKUP_ENCRYPTION_PASSWORD - keep a copy of it off this server."
+    else
+      rm -f "${encrypted}.partial"
+      log_error "Backup encryption failed - no backup was written."
+      exit 1
+    fi
+  else
+    mv "$PARTIAL_ARCHIVE" "$archive"
+    PARTIAL_ARCHIVE=""
+    rm -rf "$TMP_BACKUP_DIR"
+    TMP_BACKUP_DIR=""
+    log_success "Backup created: ${archive}"
+    log_info "Tip: set BACKUP_ENCRYPTION_PASSWORD in .env to encrypt future backups."
+  fi
 }
 
 main "$@"

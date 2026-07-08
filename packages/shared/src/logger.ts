@@ -7,7 +7,17 @@ export interface Logger {
   error(message: string, meta?: Record<string, unknown>): void;
 }
 
+const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
+
+function minLevel(): number {
+  const configured = (process.env.LOG_LEVEL ?? "info").toLowerCase() as LogLevel;
+  return LEVEL_ORDER[configured] ?? LEVEL_ORDER.info;
+}
+
 function write(service: string, level: LogLevel, message: string, meta?: Record<string, unknown>): void {
+  if (LEVEL_ORDER[level] < minLevel()) {
+    return;
+  }
   const line = JSON.stringify({
     time: new Date().toISOString(),
     level,

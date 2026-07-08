@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ZED_BOT restore: restores .env and the PostgreSQL database from a backup
-# archive created by backup.sh.
+# archive created by backup.sh (plain .tar.gz or encrypted .tar.gz.enc).
 #
-# Usage: zedbot restore <backup-file>
-#        (bare file names are resolved inside /opt/zedbot/backups)
+# Usage: zedbot restore [backup-file]
+#        - without an argument, lists the available backups and asks which
+#          one to restore
+#        - bare file names are resolved inside /opt/zedbot/backups
 #
 # Restore is DESTRUCTIVE and asks for confirmation first.
 # =============================================================================
@@ -21,26 +23,60 @@ cleanup() {
   if [ -n "$RESTORE_TMP_DIR" ] && [ -d "$RESTORE_TMP_DIR" ]; then
     rm -rf "$RESTORE_TMP_DIR"
   fi
+  return 0
 }
 trap cleanup EXIT
 
-main() {
-  require_root
+# Prints the available backup archives (new and legacy naming), newest first.
+list_backups() {
+  local backup_dir="$1"
+  find "$backup_dir" -maxdepth 1 -type f \
+    \( -name 'zedbot_backup_*.tar.gz' -o -name 'zedbot_backup_*.tar.gz.enc' \
+    -o -name 'zedbot-backup-*.tar.gz' -o -name 'zedbot-backup-*.tar.gz.enc' \) \
+    2>/dev/null | sort -r
+}
 
-  if [ "$#" -lt 1 ]; then
-    log_error "Usage: zedbot restore <backup-file>"
-    log_info "Available backups:"
-    ls -1 "${ZEDBOT_BACKUP_DIR}"/zedbot-backup-*.tar.gz 2>/dev/null || log_info "  (none found in ${ZEDBOT_BACKUP_DIR})"
+# Interactively picks a backup from the list; prints the chosen path.
+choose_backup() {
+  local backup_dir="$1" backups=() choice
+  mapfile -t backups < <(list_backups "$backup_dir")
+  if [ "${#backups[@]}" -eq 0 ]; then
+    log_error "No backups found in ${backup_dir}."
+    log_info "Create one first with: zedbot backup"
     exit 1
   fi
+  log_info "Available backups in ${backup_dir} (newest first):" >&2
+  local i
+  for i in "${!backups[@]}"; do
+    printf '  [%d] %s\n' "$((i + 1))" "${backups[$i]##*/}" >&2
+  done
+  if ! ( : </dev/tty ) 2>/dev/null; then
+    log_error "No terminal available to choose a backup. Pass the file explicitly: zedbot restore <backup-file>"
+    exit 1
+  fi
+  read -r -p "Number of the backup to restore [1-${#backups[@]}]: " choice </dev/tty || choice=""
+  if ! printf '%s' "$choice" | grep -Eq '^[0-9]+$' || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#backups[@]}" ]; then
+    log_error "Invalid selection: '${choice}'"
+    exit 1
+  fi
+  printf '%s' "${backups[$((choice - 1))]}"
+}
 
-  local backup_file="$1"
+main() {
+  require_root
+  load_env
+  local backup_dir="${BACKUP_DIR:-$ZEDBOT_BACKUP_DIR}"
+
+  local backup_file="${1:-}"
+  if [ -z "$backup_file" ]; then
+    backup_file="$(choose_backup "$backup_dir")"
+  fi
   # Allow bare file names relative to the backups directory.
-  if [ ! -f "$backup_file" ] && [ -f "${ZEDBOT_BACKUP_DIR}/${backup_file}" ]; then
-    backup_file="${ZEDBOT_BACKUP_DIR}/${backup_file}"
+  if [ ! -f "$backup_file" ] && [ -f "${backup_dir}/${backup_file}" ]; then
+    backup_file="${backup_dir}/${backup_file}"
   fi
   if [ ! -f "$backup_file" ]; then
-    log_error "Backup file not found: $1"
+    log_error "Backup file not found: ${1:-<none>}"
     exit 1
   fi
   # Resolve to an absolute path now - later steps change the working
@@ -58,12 +94,39 @@ main() {
     exit 0
   fi
 
-  ensure_directory "$ZEDBOT_BACKUP_DIR" 700
-  RESTORE_TMP_DIR="$(mktemp -d "${ZEDBOT_BACKUP_DIR}/.restore-XXXXXX")"
+  ensure_directory "$backup_dir" 700
+  RESTORE_TMP_DIR="$(mktemp -d "${backup_dir}/.restore-XXXXXX")"
   chmod 700 "$RESTORE_TMP_DIR"
 
+  # Decrypt when the archive is encrypted.
+  local tarball="$backup_file"
+  case "$backup_file" in
+    *.enc)
+      if [ -z "${BACKUP_ENCRYPTION_PASSWORD:-}" ]; then
+        log_warn "This backup is encrypted and BACKUP_ENCRYPTION_PASSWORD is not set in .env."
+        if ( : </dev/tty ) 2>/dev/null; then
+          read -r -s -p "Backup encryption password (input hidden): " BACKUP_ENCRYPTION_PASSWORD </dev/tty || BACKUP_ENCRYPTION_PASSWORD=""
+          printf '\n' >&2
+        fi
+        if [ -z "${BACKUP_ENCRYPTION_PASSWORD:-}" ]; then
+          log_error "No password available - cannot decrypt this backup."
+          exit 1
+        fi
+      fi
+      log_info "Decrypting the backup archive ..."
+      tarball="${RESTORE_TMP_DIR}/backup.tar.gz"
+      export BACKUP_ENCRYPTION_PASSWORD
+      if ! openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+        -in "$backup_file" -out "$tarball" \
+        -pass env:BACKUP_ENCRYPTION_PASSWORD; then
+        log_error "Decryption failed - wrong password or corrupted archive."
+        exit 1
+      fi
+      ;;
+  esac
+
   log_info "Extracting the backup archive ..."
-  tar -xzf "$backup_file" -C "$RESTORE_TMP_DIR"
+  tar -xzf "$tarball" -C "$RESTORE_TMP_DIR"
 
   if [ ! -f "${RESTORE_TMP_DIR}/.env" ] && [ ! -f "${RESTORE_TMP_DIR}/database.sql" ]; then
     log_error "This archive does not look like a ZED_BOT backup (no .env or database.sql inside)."
@@ -88,7 +151,7 @@ main() {
     log_warn "The backup contains no .env - keeping the current configuration."
   fi
 
-  load_env_if_exists
+  load_env
 
   log_info "Starting postgres and redis ..."
   run_compose up -d postgres redis
