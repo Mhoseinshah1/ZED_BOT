@@ -10,6 +10,7 @@ import { userAccessMiddleware } from "./middlewares/user-access.middleware.js";
 import { adminHandler } from "./handlers/admin.handler.js";
 import { adminPlaceholdersHandler } from "./handlers/admin-placeholders.handler.js";
 import { panelHandler, panelTextHandler } from "./handlers/panels/panel.handler.js";
+import { productHandler, productTextHandler } from "./handlers/products/product.handler.js";
 import { forceJoinHandler } from "./handlers/force-join.handler.js";
 import { menuHandler } from "./handlers/menu.handler.js";
 import { pingHandler } from "./handlers/ping.handler.js";
@@ -53,17 +54,21 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(adminAuthMiddleware());
   adminArea.use(adminHandler);
   adminArea.use(panelHandler);
+  adminArea.use(productHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
 
-  // Admin flow text input (panel add/edit steps). Only active admins currently
-  // in a panel:* flow are consumed; every other text falls through untouched.
+  // Admin flow text input (panel/product/category wizard steps). Only active
+  // admins currently in a flow are consumed; every other text falls through.
+  const adminFlowText = new Composer<BotContext>();
+  adminFlowText.use(panelTextHandler);
+  adminFlowText.use(productTextHandler);
   bot.on("message:text", async (ctx, next) => {
     if (ctx.admin === null || ctx.session.currentFlow === null) {
       return next();
     }
-    await panelTextHandler.middleware()(ctx, next);
+    await adminFlowText.middleware()(ctx, next);
   });
 
   // User area: /menu + user:* / common:* callbacks behind the access gates.
