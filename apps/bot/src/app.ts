@@ -11,6 +11,10 @@ import { adminHandler } from "./handlers/admin.handler.js";
 import { adminPlaceholdersHandler } from "./handlers/admin-placeholders.handler.js";
 import { panelHandler, panelTextHandler } from "./handlers/panels/panel.handler.js";
 import { productHandler, productTextHandler } from "./handlers/products/product.handler.js";
+import {
+  checkoutHandler,
+  checkoutTextHandler,
+} from "./handlers/user-checkout/checkout.handler.js";
 import { forceJoinHandler } from "./handlers/force-join.handler.js";
 import { menuHandler } from "./handlers/menu.handler.js";
 import { pingHandler } from "./handlers/ping.handler.js";
@@ -59,13 +63,22 @@ export function createBot(token: string): Bot<BotContext> {
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
 
-  // Admin flow text input (panel/product/category wizard steps). Only active
-  // admins currently in a flow are consumed; every other text falls through.
+  // Flow text input. Checkout discount entry is a user flow (any user who
+  // reached the gated pre-invoice); panel/product/category wizards require an
+  // active admin. Everything else falls through untouched.
   const adminFlowText = new Composer<BotContext>();
   adminFlowText.use(panelTextHandler);
   adminFlowText.use(productTextHandler);
   bot.on("message:text", async (ctx, next) => {
-    if (ctx.admin === null || ctx.session.currentFlow === null) {
+    const flow = ctx.session.currentFlow;
+    if (flow === null) {
+      return next();
+    }
+    if (flow === "checkout:discount") {
+      await checkoutTextHandler.middleware()(ctx, next);
+      return;
+    }
+    if (ctx.admin === null) {
       return next();
     }
     await adminFlowText.middleware()(ctx, next);
@@ -75,6 +88,7 @@ export function createBot(token: string): Bot<BotContext> {
   const userArea = new Composer<BotContext>();
   userArea.use(userAccessMiddleware());
   userArea.use(menuHandler);
+  userArea.use(checkoutHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());

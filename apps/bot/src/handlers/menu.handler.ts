@@ -17,6 +17,7 @@ export async function showUserMenu(ctx: BotContext): Promise<void> {
     await safeReply(ctx, text, keyboard);
   }
   ctx.session.currentFlow = null;
+  ctx.session.temp.checkoutDraft = undefined;
   ctx.session.lastMenu = "user_main";
 }
 

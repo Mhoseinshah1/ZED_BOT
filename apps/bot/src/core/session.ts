@@ -62,6 +62,19 @@ export interface ProductAddState {
   displayOrder?: number;
 }
 
+/** Pre-invoice draft (user checkout browsing). No DB rows until "continue". */
+export interface CheckoutDraft {
+  productId: string;
+  categoryId: string;
+  flowType: ProductType;
+  locationCode?: "M" | "D" | "T" | "A";
+  discountCode?: string;
+  discountCodeId?: string;
+  originalPriceToman: number;
+  discountAmountToman: number;
+  finalPriceToman: number;
+}
+
 /** Minimal per-user session state. Complex conversations arrive later. */
 export interface SessionData {
   currentFlow: string | null;
@@ -82,6 +95,8 @@ export interface SessionData {
     productAdd?: ProductAddState;
     editingProductId?: string;
     editingProductField?: string;
+    // User checkout draft (pre-invoice).
+    checkoutDraft?: CheckoutDraft;
     [key: string]: unknown;
   };
 }
