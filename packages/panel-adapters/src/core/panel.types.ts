@@ -1,6 +1,4 @@
-// Shared types for VPN panel integrations. Phase 1 placeholder - the real
-// shapes (users, inbounds, usage, subscription links, ...) are defined when
-// the adapters are implemented.
+// Shared types for VPN panel integrations.
 
 export type PanelType = "marzban" | "xui";
 
@@ -10,4 +8,24 @@ export interface PanelCredentials {
   baseUrl: string;
   username: string;
   password: string;
+}
+
+/** Marzban connects with username + password (token flow). */
+export interface MarzbanCredentials {
+  baseUrl: string;
+  username: string;
+  password: string;
+}
+
+/** XUI / Sanaei / 3X-UI connects with an API token. */
+export interface XuiCredentials {
+  baseUrl: string;
+  token: string;
+}
+
+/** Result of a panel connectivity/authentication test. */
+export interface PanelHealthResult {
+  ok: boolean;
+  message: string;
+  details?: Record<string, unknown>;
 }
