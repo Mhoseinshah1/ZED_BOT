@@ -4,6 +4,7 @@ import { CB } from "../core/callbacks.js";
 import type { BotContext } from "../core/context.js";
 import { buildAdminMainKeyboard } from "../keyboards/admin-main.keyboard.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../utils/safe-reply.js";
+import { clearCheckoutState } from "./user-checkout/checkout-state.js";
 
 const ADMIN_MENU_TEXT = "پنل مدیریت 🛠\n\nیک بخش را انتخاب کنید:";
 
@@ -16,6 +17,8 @@ export async function showAdminMenu(ctx: BotContext): Promise<void> {
   } else {
     await safeReply(ctx, ADMIN_MENU_TEXT, keyboard);
   }
+  // Entering admin mode abandons any user checkout draft (separate surface).
+  clearCheckoutState(ctx);
   ctx.session.currentFlow = null;
   ctx.session.lastMenu = "admin_main";
 }

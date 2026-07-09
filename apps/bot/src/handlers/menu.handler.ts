@@ -5,6 +5,7 @@ import type { BotContext } from "../core/context.js";
 import { buildUserMainKeyboard } from "../keyboards/user-main.keyboard.js";
 import { getMessageTemplate } from "../services/text.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../utils/safe-reply.js";
+import { clearCheckoutState } from "./user-checkout/checkout-state.js";
 
 /** Renders the main user menu (start_text + inline keyboard). */
 export async function showUserMenu(ctx: BotContext): Promise<void> {
@@ -16,8 +17,8 @@ export async function showUserMenu(ctx: BotContext): Promise<void> {
   } else {
     await safeReply(ctx, text, keyboard);
   }
+  clearCheckoutState(ctx);
   ctx.session.currentFlow = null;
-  ctx.session.temp.checkoutDraft = undefined;
   ctx.session.lastMenu = "user_main";
 }
 
