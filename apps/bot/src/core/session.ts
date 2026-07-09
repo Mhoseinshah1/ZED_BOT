@@ -65,8 +65,9 @@ export interface ProductAddState {
 export interface CheckoutDraft {
   productId: string;
   categoryId: string;
+  /** Selected panel (SERVICE_PRODUCT flow; Phase 11.1 panel-first purchase). */
+  panelId?: string;
   flowType: ProductType;
-  locationCode?: "M" | "D" | "T" | "A";
   discountCode?: string;
   discountCodeId?: string;
   originalPriceToman: number;

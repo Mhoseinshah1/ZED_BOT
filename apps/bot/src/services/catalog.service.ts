@@ -1,25 +1,20 @@
 import {
   PanelStatus,
   prisma,
+  type Panel,
   type ProductCategory,
-  type ServiceLocation,
   type UserGroup,
 } from "@zedbot/database";
 
 import type { ProductWithRelations } from "./product.service.js";
 
 // =============================================================================
-// User-facing catalog: which products a given user may see and buy.
-// Purchasable service products require an ACTIVE + visible panel.
+// User-facing catalog: which panels/products a given user may see and buy.
+//
+// Phase 11.1: purchases are PANEL-FIRST. There is no hardcoded "service
+// type" step - real panels configured by the admin drive the selection, and
+// categories/products are always filtered by the selected panel.
 // =============================================================================
-
-export type LocationCode = "M" | "D" | "T" | "A";
-
-export const LOCATION_BY_CODE: Record<Exclude<LocationCode, "A">, ServiceLocation> = {
-  M: "MULTI_LOCATION",
-  D: "DEDICATED_LOCATION",
-  T: "TEST",
-};
 
 /**
  * Group visibility: a product is visible when its displayGroups array
@@ -38,31 +33,48 @@ export function groupMatches(displayGroups: unknown, group: UserGroup): boolean 
   return group === "F";
 }
 
-function locationMatches(product: ProductWithRelations, code: LocationCode): boolean {
-  if (code === "A") {
-    return true;
-  }
-  return product.allLocations || product.serviceLocation === LOCATION_BY_CODE[code];
+/** Panels users may buy from: ACTIVE + visible, in display order. */
+export async function purchasablePanels(): Promise<Panel[]> {
+  return prisma.panel.findMany({
+    where: { status: PanelStatus.ACTIVE, isVisible: true },
+    orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }],
+  });
 }
 
-/** All service products the user may buy for the selected location. */
+/** Resolves a purchasable panel by uuid-prefix short id (unique or null). */
+export async function getPurchasablePanelByShortId(shortId: string): Promise<Panel | null> {
+  if (!/^[0-9a-f-]{4,32}$/i.test(shortId)) {
+    return null;
+  }
+  const matches = await prisma.panel.findMany({
+    where: { id: { startsWith: shortId }, status: PanelStatus.ACTIVE, isVisible: true },
+    take: 2,
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/** All service products of ONE panel the user may buy. */
 export async function visibleServiceProducts(
   group: UserGroup,
-  locationCode: LocationCode,
+  panelId: string,
 ): Promise<ProductWithRelations[]> {
   const products = await prisma.product.findMany({
     where: {
       type: "SERVICE_PRODUCT",
       isActive: true,
+      panelId,
       category: { isActive: true },
       panel: { status: PanelStatus.ACTIVE, isVisible: true },
     },
     include: { category: true, panel: true },
-    orderBy: [{ category: { displayOrder: "asc" } }, { displayOrder: "asc" }, { createdAt: "asc" }],
+    orderBy: [
+      { category: { displayOrder: "asc" } },
+      { displayOrder: "asc" },
+      { priceToman: "asc" },
+      { createdAt: "asc" },
+    ],
   });
-  return products.filter(
-    (p) => groupMatches(p.displayGroups, group) && locationMatches(p, locationCode),
-  );
+  return products.filter((p) => groupMatches(p.displayGroups, group));
 }
 
 /** All other-products the user may buy. */
@@ -90,11 +102,7 @@ export function categoriesOf(products: ProductWithRelations[]): ProductCategory[
  * Re-checks that one specific product is still visible/purchasable for the
  * user (used when resolving callbacks and before checkout creation).
  */
-export function isProductVisible(
-  product: ProductWithRelations,
-  group: UserGroup,
-  locationCode?: LocationCode,
-): boolean {
+export function isProductVisible(product: ProductWithRelations, group: UserGroup): boolean {
   if (!product.isActive || !product.category.isActive) {
     return false;
   }
@@ -107,9 +115,6 @@ export function isProductVisible(
       product.panel.status !== PanelStatus.ACTIVE ||
       !product.panel.isVisible
     ) {
-      return false;
-    }
-    if (locationCode !== undefined && !locationMatches(product, locationCode)) {
       return false;
     }
   }

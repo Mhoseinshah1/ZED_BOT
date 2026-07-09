@@ -1,7 +1,7 @@
 // Callback-data builders for the user checkout flow. Short ids (8-char UUID
-// prefixes) plus single-letter location codes keep everything far below
-// Telegram's 64-byte limit. Location travels inside the callback data so
-// browsing is stateless and survives bot restarts.
+// prefixes) keep everything far below Telegram's 64-byte limit. The selected
+// panel/category travel inside the callback data so browsing is stateless
+// and survives bot restarts.
 
 export const CO_CB = {
   BUY: "user:buy",
@@ -13,9 +13,13 @@ export const CO_CB = {
 } as const;
 
 export const ccb = {
-  buyLocation: (l: string): string => `user:buy:loc:${l}`,
-  buyCategory: (l: string, catSid: string): string => `user:buy:cat:${l}:${catSid}`,
-  buyProduct: (l: string, prodSid: string): string => `user:buy:p:${l}:${prodSid}`,
+  // Panel-first buy flow (Phase 11.1). The old "user:buy:loc:*" fake
+  // service-type step is gone; legacy callbacks get a compat redirect.
+  buyPanel: (panelSid: string): string => `user:buy:panel:${panelSid}`,
+  buyCategory: (panelSid: string, catSid: string): string =>
+    `user:buy:cat:${panelSid}:${catSid}`,
+  buyProduct: (panelSid: string, catSid: string, prodSid: string): string =>
+    `user:buy:prod:${panelSid}:${catSid}:${prodSid}`,
   otherCategory: (catSid: string): string => `user:op:cat:${catSid}`,
   otherProduct: (prodSid: string): string => `user:op:p:${prodSid}`,
   viewCheckout: (coSid: string): string => `user:co:view:${coSid}`,
