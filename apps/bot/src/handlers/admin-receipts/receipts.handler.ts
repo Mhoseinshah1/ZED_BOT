@@ -23,10 +23,10 @@ import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe
 
 // =============================================================================
 // Admin "رسیدهای تایید نشده" - Phase 8: list + detail + approve / reject.
-// Approval creates the PAID Order and finalizes discount usage (in the
-// service); rejection first asks the admin for a reason ("receipt:reject"
-// flow) and sends it verbatim to the user. No Service / provisioning here -
-// that is Phase 9.
+// Approval requires an explicit confirmation step (Phase 8.1) before the
+// service creates the PAID Order and finalizes discount usage; rejection
+// first asks the admin for a reason ("receipt:reject" flow) and sends it
+// verbatim to the user. No Service / provisioning here - that is Phase 9.
 // =============================================================================
 
 const HTML = { parseMode: "HTML" as const };
@@ -37,7 +37,8 @@ const REJECT_REASON_PROMPT =
 const rcb = {
   list: (page: number): string => `admin:rec:list:${page}`,
   view: (sid: string): string => `admin:rec:view:${sid}`,
-  approve: (sid: string): string => `admin:rec:ap:${sid}`,
+  approveAsk: (sid: string): string => `admin:rec:ap:${sid}`,
+  approveConfirm: (sid: string): string => `admin:rec:ap:${sid}:yes`,
   reject: (sid: string): string => `admin:rec:rj:${sid}`,
 } as const;
 
@@ -173,7 +174,7 @@ receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
 
   const kb = new InlineKeyboard();
   if (payment.status === PaymentStatus.PENDING_REVIEW) {
-    kb.text("تایید رسید ✅", rcb.approve(paymentShortId(payment)))
+    kb.text("تایید رسید ✅", rcb.approveAsk(paymentShortId(payment)))
       .text("رد رسید ❌", rcb.reject(paymentShortId(payment)))
       .row();
   }
@@ -181,9 +182,34 @@ receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
 });
 
-// --- approval ------------------------------------------------------------------
+// --- approval (confirmation first, Phase 8.1) -----------------------------------
 
+// Step 1: «تایید رسید ✅» only opens a confirmation screen - nothing changes yet.
 receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+)$/, async (ctx) => {
+  clearReceiptReviewFlow(ctx);
+  const payment = await getPaymentByShortId(ctx.match[1]);
+  if (payment === null) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+  if (payment.status !== PaymentStatus.PENDING_REVIEW) {
+    await safeAnswerCallback(ctx, "این رسید قبلاً بررسی شده است.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const sid = paymentShortId(payment);
+  await safeEditOrReply(
+    ctx,
+    "آیا از تایید این رسید مطمئن هستید؟",
+    new InlineKeyboard()
+      .text("تایید نهایی ✅", rcb.approveConfirm(sid))
+      .row()
+      .text("انصراف", rcb.view(sid)),
+  );
+});
+
+// Step 2: only «تایید نهایی ✅» actually approves.
+receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => {
   clearReceiptReviewFlow(ctx);
   const admin = ctx.admin;
   if (admin === null) {
