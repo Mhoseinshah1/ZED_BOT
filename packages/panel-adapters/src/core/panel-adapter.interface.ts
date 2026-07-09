@@ -1,6 +1,8 @@
 import type {
   CreateServiceAccountInput,
   CreateServiceAccountResult,
+  GetServiceAccountInput,
+  GetServiceAccountResult,
   PanelHealthResult,
   PanelType,
 } from "./panel.types.js";
@@ -28,4 +30,11 @@ export interface PanelAdapter {
    * with a safe internal errorMessage (no credentials).
    */
   createServiceAccount(input: CreateServiceAccountInput): Promise<CreateServiceAccountResult>;
+
+  /**
+   * Reads one service account from the panel (read-only - never mutates
+   * panel state). Same contract: never throws for expected panel/API
+   * failures, never fakes success, never includes credentials.
+   */
+  getServiceAccount(input: GetServiceAccountInput): Promise<GetServiceAccountResult>;
 }

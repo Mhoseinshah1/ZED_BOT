@@ -2,6 +2,7 @@ import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
+import { syncServiceFromPanel } from "../../services/service-sync.service.js";
 import { getButtonText } from "../../services/text.service.js";
 import {
   getOwnedServiceByShortId,
@@ -68,19 +69,30 @@ servicesHandler.callbackQuery(/^user:svc:view:([0-9a-f-]+)$/, async (ctx) => {
   await safeEditOrReply(ctx, serviceDetailText(service), serviceDetailKeyboard(service), HTML);
 });
 
-// Phase 10: refresh re-reads from the DATABASE only - panel sync is a later phase.
+// Phase 11: refresh now syncs from the PANEL (read-only). A failed sync
+// keeps the stored values on screen; adapter errors never reach the user.
 servicesHandler.callbackQuery(/^user:svc:refresh:([0-9a-f-]+)$/, async (ctx) => {
   const user = ctx.dbUser;
   if (user === null) {
     return;
   }
-  const service = await getOwnedServiceByShortId(ctx.match[1], user.id);
-  if (service === null) {
+  const owned = await getOwnedServiceByShortId(ctx.match[1], user.id);
+  if (owned === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
   }
-  await safeAnswerCallback(ctx, "اطلاعات از دیتابیس بروزرسانی شد.");
-  await safeEditOrReply(ctx, serviceDetailText(service), serviceDetailKeyboard(service), HTML);
+  const sync = await syncServiceFromPanel(owned.id, user.id);
+  if (sync.ok) {
+    await safeAnswerCallback(ctx, "اطلاعات از پنل بروزرسانی شد.");
+    await safeEditOrReply(ctx, serviceDetailText(sync.service), serviceDetailKeyboard(sync.service), HTML);
+    return;
+  }
+  if (sync.service === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  await safeAnswerCallback(ctx, sync.safeUserMessage);
+  await safeEditOrReply(ctx, serviceDetailText(sync.service), serviceDetailKeyboard(sync.service), HTML);
 });
 
 servicesHandler.callbackQuery(/^user:svc:link:([0-9a-f-]+)$/, async (ctx) => {

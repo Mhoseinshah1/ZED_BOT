@@ -2,6 +2,9 @@ import type { PanelAdapter } from "../core/panel-adapter.interface.js";
 import type {
   CreateServiceAccountInput,
   CreateServiceAccountResult,
+  GetServiceAccountInput,
+  GetServiceAccountResult,
+  NormalizedAccountStatus,
   PanelHealthResult,
 } from "../core/panel.types.js";
 import { MarzbanClient } from "./marzban.client.js";
@@ -33,6 +36,31 @@ function resolveSubscriptionUrl(url: string | undefined, base: string): string |
     return url;
   }
   return `${base.replace(/\/+$/, "")}${url.startsWith("/") ? "" : "/"}${url}`;
+}
+
+const STATUS_MAP: Record<string, NormalizedAccountStatus> = {
+  active: "active",
+  disabled: "disabled",
+  limited: "limited",
+  expired: "expired",
+};
+
+/** Marzban status string -> normalized status ("unknown" keeps caller state). */
+function normalizeStatus(status: string | undefined): NormalizedAccountStatus {
+  return STATUS_MAP[status?.toLowerCase() ?? ""] ?? "unknown";
+}
+
+/** Defensive timestamp parse; undefined when missing or unparseable. */
+function parseTimestamp(value: string | null | undefined): Date | undefined {
+  if (typeof value !== "string" || value === "") {
+    return undefined;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function nonNegativeBigInt(value: number): bigint {
+  return BigInt(Math.max(0, Math.trunc(value)));
 }
 
 function toResult(user: MarzbanUser, subscriptionBase: string): CreateServiceAccountResult {
@@ -132,5 +160,75 @@ export class MarzbanAdapter implements PanelAdapter {
     }
 
     return { ok: false, errorMessage: `Marzban create user failed: ${created.message}` };
+  }
+
+  /** Read-only sync via the documented GET /api/user/{username} endpoint. */
+  async getServiceAccount(input: GetServiceAccountInput): Promise<GetServiceAccountResult> {
+    const auth = await this.client.getToken();
+    if (!auth.ok || auth.token === undefined) {
+      return { ok: false, errorMessage: `Marzban authentication failed: ${auth.message}` };
+    }
+    const fetched = await this.client.getUser(auth.token, input.username);
+    if (!fetched.ok || fetched.user === undefined) {
+      if (fetched.status === 404) {
+        return { ok: false, errorMessage: "Panel account not found." };
+      }
+      return { ok: false, errorMessage: `Marzban read user failed: ${fetched.message}` };
+    }
+    const user = fetched.user;
+
+    const subscriptionBase =
+      input.subscriptionBaseUrl !== null &&
+      input.subscriptionBaseUrl !== undefined &&
+      input.subscriptionBaseUrl !== ""
+        ? input.subscriptionBaseUrl
+        : this.client.credentials.baseUrl;
+
+    // Every optional field is mapped defensively - missing panel fields are
+    // OMITTED, never coerced to zero.
+    const result: GetServiceAccountResult = {
+      ok: true,
+      username: user.username,
+      status: normalizeStatus(user.status),
+    };
+    if (typeof user.used_traffic === "number") {
+      result.usedBytes = nonNegativeBigInt(user.used_traffic);
+    }
+    if (user.data_limit !== undefined) {
+      // 0/null = unlimited (explicit), >0 = the limit in bytes.
+      result.totalBytes =
+        typeof user.data_limit === "number" && user.data_limit > 0
+          ? nonNegativeBigInt(user.data_limit)
+          : null;
+      if (result.totalBytes === null) {
+        result.remainingBytes = null;
+      } else {
+        const used = result.usedBytes ?? 0n;
+        result.remainingBytes = result.totalBytes > used ? result.totalBytes - used : 0n;
+      }
+    }
+    if (user.expire !== undefined) {
+      // 0/null = never expires (explicit).
+      result.expiresAt =
+        typeof user.expire === "number" && user.expire > 0 ? new Date(user.expire * 1000) : null;
+    }
+    const subscriptionUrl = resolveSubscriptionUrl(user.subscription_url, subscriptionBase);
+    if (subscriptionUrl !== undefined) {
+      result.subscriptionUrl = subscriptionUrl;
+    }
+    if (Array.isArray(user.links)) {
+      const links = user.links.filter((l): l is string => typeof l === "string" && l !== "");
+      if (links.length > 0) {
+        result.configLinks = links;
+      }
+    }
+    const lastConnected =
+      parseTimestamp(user.online_at) ??
+      parseTimestamp(user.last_online) ??
+      parseTimestamp(user.last_connected_at);
+    if (lastConnected !== undefined) {
+      result.lastConnectedAt = lastConnected;
+    }
+    return result;
   }
 }
