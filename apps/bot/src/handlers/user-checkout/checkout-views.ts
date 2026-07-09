@@ -163,11 +163,16 @@ export function preInvoiceKeyboard(draft: CheckoutDraft): InlineKeyboard {
 
 export function checkoutViewText(checkout: CheckoutSession): string {
   const snapshot = (checkout.productSnapshot ?? {}) as Record<string, unknown>;
+  const isWalletTopup = checkout.purpose === "WALLET_CHARGE";
   const lines = [
     "🧾 <b>پیش‌فاکتور ثبت‌شده</b>",
     "",
-    `محصول: ${escapeHtml(String(snapshot.productName ?? "-"))}`,
-    `دسته‌بندی: ${escapeHtml(String(snapshot.categoryName ?? "-"))}`,
+    ...(isWalletTopup
+      ? [`نوع: ${escapeHtml(String(snapshot.title ?? "شارژ کیف پول"))} 🏦`]
+      : [
+          `محصول: ${escapeHtml(String(snapshot.productName ?? "-"))}`,
+          `دسته‌بندی: ${escapeHtml(String(snapshot.categoryName ?? "-"))}`,
+        ]),
     `قیمت: ${formatToman(checkout.originalPriceToman)}`,
   ];
   if (checkout.discountAmountToman > 0) {

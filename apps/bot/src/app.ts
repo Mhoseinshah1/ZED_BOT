@@ -30,7 +30,10 @@ import {
   renewalTextHandler,
 } from "./handlers/user-renewal/renewal.handler.js";
 import { servicesHandler } from "./handlers/user-services/services.handler.js";
-import { walletHandler } from "./handlers/user-wallet/wallet.handler.js";
+import {
+  walletHandler,
+  walletTopupTextHandler,
+} from "./handlers/user-wallet/wallet.handler.js";
 import { pingHandler } from "./handlers/ping.handler.js";
 import { startHandler } from "./handlers/start.handler.js";
 import { termsHandler } from "./handlers/terms.handler.js";
@@ -109,6 +112,10 @@ export function createBot(token: string): Bot<BotContext> {
     }
     if (flow === "renew:discount") {
       await renewalTextHandler.middleware()(ctx, next);
+      return;
+    }
+    if (flow === "wallet:topup:amount") {
+      await walletTopupTextHandler.middleware()(ctx, next);
       return;
     }
     if (ctx.admin === null) {

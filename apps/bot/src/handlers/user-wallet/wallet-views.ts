@@ -22,11 +22,13 @@ export const WALLET_CB = {
   MAIN: CB.USER_WALLET,
   REFRESH: "user:wallet:refresh",
   TOPUP: "user:wallet:topup",
+  TOPUP_CONTINUE: "user:wallet:topup:continue",
+  TOPUP_CANCEL: "user:wallet:topup:cancel",
 } as const;
 
 export const walletTxCb = (page: number): string => `user:wallet:tx:${page}`;
 
-export const TOPUP_PLACEHOLDER_TEXT = "شارژ کیف پول در فاز بعدی فعال می‌شود.";
+export const TOPUP_AMOUNT_PROMPT = "مبلغ شارژ کیف پول را به تومان وارد کنید.";
 export const NO_TRANSACTIONS_TEXT = "تراکنشی ثبت نشده است.";
 
 export function formatToman(value: number): string {
@@ -180,9 +182,32 @@ export function transactionHistoryKeyboard(pageData: WalletTransactionPage): Inl
   return kb;
 }
 
-export function topupPlaceholderKeyboard(): InlineKeyboard {
+export function topupAmountKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("بازگشت به کیف پول", WALLET_CB.MAIN)
     .row()
     .text("بازگشت به منو", CB.USER_MENU);
+}
+
+/** Pre-invoice for a validated top-up amount (nothing written yet). */
+export function topupPreInvoiceText(amountToman: number, balanceToman: number): string {
+  return [
+    "پیش‌فاکتور شارژ کیف پول 🏦",
+    "",
+    `مبلغ شارژ: <b>${formatToman(amountToman)}</b>`,
+    `موجودی فعلی کیف پول: ${formatToman(balanceToman)}`,
+    `موجودی بعد از شارژ: ${formatToman(balanceToman + amountToman)}`,
+    "",
+    "توضیح: پس از تایید رسید توسط ادمین، موجودی کیف پول شما افزایش می‌یابد.",
+  ].join("\n");
+}
+
+export function topupPreInvoiceKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("ادامه و انتخاب روش پرداخت ✅", WALLET_CB.TOPUP_CONTINUE)
+    .row()
+    .text("تغییر مبلغ", WALLET_CB.TOPUP)
+    .text("لغو", WALLET_CB.TOPUP_CANCEL)
+    .row()
+    .text("بازگشت به کیف پول", WALLET_CB.MAIN);
 }

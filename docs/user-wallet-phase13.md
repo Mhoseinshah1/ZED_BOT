@@ -46,11 +46,13 @@ escaped raw), date, and «موجودی: …» from `balanceAfterToman`. Empty st
 «تراکنشی ثبت نشده است.» Phase 9/12 refunds are therefore fully visible to
 the user here.
 
-## Top-up placeholder
+## Top-up (placeholder replaced in Phase 14)
 
-«افزایش موجودی 💰» only shows «شارژ کیف پول در فاز بعدی فعال می‌شود.» with
-back-to-wallet/menu buttons. No amount is asked, no Payment/CheckoutSession/
-WalletTransaction is created. Wallet charging arrives in a later phase.
+«افزایش موجودی 💰» was a placeholder in Phase 13. **Phase 14** replaced it
+with the real card-to-card wallet charge — see
+`docs/wallet-topup-phase14.md`. The wallet page itself remains read-only;
+only the top-up flow creates a payment session, and the balance mutates
+exclusively when an admin approves the receipt.
 
 ## Security
 
