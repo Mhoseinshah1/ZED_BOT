@@ -20,6 +20,7 @@ import {
 import { validateDiscountCode } from "../../services/discount.service.js";
 import { getProductByShortId, type ProductWithRelations } from "../../services/product.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
+import { clearCheckoutState } from "./checkout-state.js";
 import { ccb, CO_CB } from "./checkout-cb.js";
 import {
   categoryListKeyboard,
@@ -40,13 +41,6 @@ export const checkoutHandler = new Composer<BotContext>();
 
 // --- helpers ---------------------------------------------------------------------
 
-function clearCheckoutFlow(ctx: BotContext): void {
-  if (ctx.session.currentFlow === "checkout:discount") {
-    ctx.session.currentFlow = null;
-  }
-  ctx.session.temp.checkoutDraft = undefined;
-}
-
 function backKeyboard(backCb: string): InlineKeyboard {
   return new InlineKeyboard().text("بازگشت", backCb);
 }
@@ -60,7 +54,7 @@ async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {
   }
   const product = await getProductByShortId(draft.productId.slice(0, 8));
   if (product === null || product.id !== draft.productId || !isProductVisible(product, user.group)) {
-    clearCheckoutFlow(ctx);
+    clearCheckoutState(ctx);
     await safeEditOrReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard(CB.USER_MENU));
     return;
   }
@@ -95,7 +89,7 @@ async function startPreInvoice(
 // --- Buy subscription flow -----------------------------------------------------------
 
 checkoutHandler.callbackQuery(CO_CB.BUY, async (ctx) => {
-  clearCheckoutFlow(ctx);
+  clearCheckoutState(ctx);
   await safeAnswerCallback(ctx);
   await safeEditOrReply(ctx, "نوع سرویس را انتخاب کنید:", locationMenuKeyboard());
 });
@@ -164,7 +158,7 @@ checkoutHandler.callbackQuery(CO_CB.OTHER, async (ctx) => {
   if (user === null) {
     return;
   }
-  clearCheckoutFlow(ctx);
+  clearCheckoutState(ctx);
   const products = await visibleOtherProducts(user.group);
   await safeAnswerCallback(ctx);
   if (products.length === 0) {
@@ -267,7 +261,7 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
     product.id !== draft.productId ||
     !isProductVisible(product, user.group, draft.locationCode)
   ) {
-    clearCheckoutFlow(ctx);
+    clearCheckoutState(ctx);
     await safeAnswerCallback(ctx);
     await safeEditOrReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard(CB.USER_MENU));
     return;
@@ -296,7 +290,7 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
 
   try {
     const checkout = await createCheckoutSession(user, product, draft);
-    clearCheckoutFlow(ctx);
+    clearCheckoutState(ctx);
     await safeAnswerCallback(ctx, "ثبت شد ✅");
     await safeEditOrReply(ctx, checkoutCreatedText(), checkoutCreatedKeyboard(checkout));
     logger.info("checkout session created", {
@@ -346,9 +340,9 @@ checkoutTextHandler.on("message:text", async (ctx, next) => {
     return next();
   }
   const text = ctx.message.text;
-  // Commands cancel the discount entry and continue normally.
+  // Commands cancel the discount entry (and the draft) and continue normally.
   if (text.startsWith("/")) {
-    ctx.session.currentFlow = null;
+    clearCheckoutState(ctx);
     return next();
   }
   const draft = ctx.session.temp.checkoutDraft;

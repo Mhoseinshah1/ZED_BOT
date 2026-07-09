@@ -10,6 +10,7 @@ import { registerOrUpdateUser } from "../services/user.service.js";
 import { getStartPayload } from "../utils/telegram.js";
 import { safeReply } from "../utils/safe-reply.js";
 import { showUserMenu } from "./menu.handler.js";
+import { clearCheckoutState } from "./user-checkout/checkout-state.js";
 
 /**
  * /start flow, in spec order:
@@ -25,6 +26,10 @@ startHandler.command("start", async (ctx) => {
   if (from === undefined || from.is_bot) {
     return;
   }
+
+  // /start always abandons an in-progress checkout draft, even when an
+  // access gate blocks the menu afterwards.
+  clearCheckoutState(ctx);
 
   try {
     ctx.dbUser = await registerOrUpdateUser(from);

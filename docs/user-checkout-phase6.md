@@ -100,6 +100,14 @@ Discount text entry uses `session.currentFlow = "checkout:discount"`; only
 that flow consumes user text, `/`-commands cancel it and run normally, and
 returning to the main menu clears the draft.
 
+**State cleanup (Phase 6.1)**: a single `clearCheckoutState` helper clears
+the checkout draft and the discount-entry flow whenever the user leaves the
+checkout surface — `/start` (even when an access gate blocks the menu),
+`/menu`, the main-menu callback (`user:menu` / `common:back`), `/admin`
+(admin mode is a separate surface), unregistered `/`-commands typed during
+discount entry, and re-entering the buy/other-products flows. The helper
+never touches admin panel/product wizard state.
+
 ## Intentionally NOT implemented
 
 Payment methods (card-to-card, gateways, Stars), wallet deduction, Order /
