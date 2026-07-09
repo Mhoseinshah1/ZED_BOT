@@ -1,4 +1,4 @@
-import type { CheckoutSession, ProductCategory, User } from "@zedbot/database";
+import type { CheckoutSession, Panel, ProductCategory, User } from "@zedbot/database";
 import { InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -9,6 +9,15 @@ import { escapeHtml } from "../../utils/html.js";
 import { ccb, CO_CB } from "./checkout-cb.js";
 
 export const EMPTY_CATALOG_TEXT = "فعلاً محصولی برای این بخش فعال نیست.";
+
+// Phase 11.1 panel-first purchase texts.
+export const NO_PANEL_TEXT = "در حال حاضر پنلی برای خرید فعال نیست.";
+export const PICK_PANEL_TEXT = "از کدام پنل می‌خواهید خرید کنید؟";
+export const PICK_CATEGORY_TEXT = "دسته‌بندی مورد نظر را انتخاب کنید.";
+export const PICK_PRODUCT_TEXT = "پلن مورد نظر را انتخاب کنید.";
+export const NO_CATEGORY_TEXT = "برای این پنل دسته‌بندی فعالی وجود ندارد.";
+export const NO_PRODUCT_TEXT = "پلنی برای این دسته‌بندی موجود نیست.";
+export const LEGACY_STEP_TEXT = "این مرحله حذف شده است. لطفاً دوباره خرید اشتراک را انتخاب کنید.";
 
 const LOCATION_LABEL: Record<string, string> = {
   MULTI_LOCATION: "مولتی لوکیشن 🚀",
@@ -39,19 +48,17 @@ function durationLabel(durationDays: number | null): string {
   return durationDays === 0 ? "نامحدود" : `${durationDays} روز`;
 }
 
-// --- Buy flow: location + category + product lists -----------------------------
+// --- Buy flow: panel + category + product lists -----------------------------
+// There is deliberately NO hardcoded "service type" step (Phase 11.1): real
+// ACTIVE + visible panels are the first (and skippable) choice.
 
-export function locationMenuKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("مولتی لوکیشن 🚀", ccb.buyLocation("M"))
-    .row()
-    .text("تک لوکیشن اختصاصی 🚀", ccb.buyLocation("D"))
-    .row()
-    .text("تست", ccb.buyLocation("T"))
-    .row()
-    .text("همه سرویس‌ها", ccb.buyLocation("A"))
-    .row()
-    .text("بازگشت", CB.USER_MENU);
+export function panelListKeyboard(panels: Panel[]): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  for (const panel of panels) {
+    kb.text(panel.name, ccb.buyPanel(panel.id.slice(0, 8))).row();
+  }
+  kb.text("بازگشت به منو", CB.USER_MENU);
+  return kb;
 }
 
 export function categoryListKeyboard(
@@ -142,7 +149,9 @@ export function preInvoiceKeyboard(draft: CheckoutDraft): InlineKeyboard {
   }
   const backCb =
     draft.flowType === "SERVICE_PRODUCT"
-      ? ccb.buyCategory(draft.locationCode ?? "A", draft.categoryId.slice(0, 8))
+      ? draft.panelId !== undefined
+        ? ccb.buyCategory(draft.panelId.slice(0, 8), draft.categoryId.slice(0, 8))
+        : CO_CB.BUY
       : ccb.otherCategory(draft.categoryId.slice(0, 8));
   kb.text("بازگشت به محصولات", backCb).text("منوی اصلی", CB.USER_MENU);
   return kb;

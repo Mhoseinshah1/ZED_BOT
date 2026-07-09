@@ -584,6 +584,9 @@ productHandler.callbackQuery(/^admin:prod:fe:([^:]+):([a-z]+)$/, async (ctx) => 
 
 // --- add-wizard entry + callback steps -------------------------------------------------
 
+// SERVICE_PRODUCT creation is PANEL-FIRST (Phase 11.1): a real panel, then a
+// real category, then the product details. There is no "service type" step
+// and nothing (panel/category/product) is ever created by default.
 productHandler.callbackQuery(PROD_CB.ADD_SERVICE, async (ctx) => {
   clearProductFlows(ctx);
   const panels = await prisma.panel.findMany({
@@ -593,8 +596,11 @@ productHandler.callbackQuery(PROD_CB.ADD_SERVICE, async (ctx) => {
   if (panels.length === 0) {
     await safeEditOrReply(
       ctx,
-      "ابتدا از مدیریت پنل‌ها یک پنل اضافه کنید.",
-      new InlineKeyboard().text("بازگشت", PROD_CB.MENU),
+      "ابتدا باید از بخش مدیریت پنل‌ها یک پنل اضافه کنید.",
+      new InlineKeyboard()
+        .text("رفتن به مدیریت پنل‌ها", CB.ADMIN_PANELS)
+        .row()
+        .text("بازگشت", PROD_CB.MENU),
     );
     return;
   }
@@ -664,13 +670,9 @@ productHandler.callbackQuery(/^admin:prod:f:pnl:(.+)$/, async (ctx) => {
   state.panelId = panel.id;
   state.panelType = panel.type;
   state.panelName = panel.name;
-  state.step = "name";
   await safeAnswerCallback(ctx, panel.status !== PanelStatus.ACTIVE ? "توجه: این پنل فعال نیست." : undefined);
-  await safeEditOrReply(
-    ctx,
-    "نام اشتراک را وارد کنید. بهتر است قیمت و زمان در نام قابل فهم باشد.",
-    cancelKeyboard(),
-  );
+  // Panel-first (Phase 11.1): category comes right after the panel.
+  await askCategoryStep(ctx, state);
 });
 
 productHandler.callbackQuery(/^admin:prod:f:grp:(F|N|N2|ALL)$/, async (ctx) => {
@@ -707,8 +709,10 @@ productHandler.callbackQuery(/^admin:prod:f:loc:(M|D|T|A)$/, async (ctx) => {
     state.allLocations = false;
     state.serviceLocation = LOCATION_CODE[code];
   }
+  // Category was already picked right after the panel (Phase 11.1).
+  state.step = "volume";
   await safeAnswerCallback(ctx);
-  await askCategoryStep(ctx, state);
+  await safeEditOrReply(ctx, "حجم را به گیگ وارد کنید. برای نامحدود عدد 0 را بفرستید.", cancelKeyboard());
 });
 
 productHandler.callbackQuery(/^admin:prod:f:cat:(.+)$/, async (ctx) => {
@@ -726,8 +730,13 @@ productHandler.callbackQuery(/^admin:prod:f:cat:(.+)$/, async (ctx) => {
   state.categoryName = category.name;
   await safeAnswerCallback(ctx);
   if (state.kind === "SERVICE_PRODUCT") {
-    state.step = "volume";
-    await safeEditOrReply(ctx, "حجم را به گیگ وارد کنید. برای نامحدود عدد 0 را بفرستید.", cancelKeyboard());
+    // Panel + category are chosen; the details start with the name.
+    state.step = "name";
+    await safeEditOrReply(
+      ctx,
+      "نام اشتراک را وارد کنید. بهتر است قیمت و زمان در نام قابل فهم باشد.",
+      cancelKeyboard(),
+    );
   } else {
     state.step = "duration";
     await safeEditOrReply(ctx, "مدت/اعتبار محصول را به روز وارد کنید. اگر ندارد 0 بفرستید.", cancelKeyboard());

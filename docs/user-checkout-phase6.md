@@ -15,10 +15,14 @@ Source: `apps/bot/src/handlers/user-checkout/`,
 
 ## User flows
 
-**خرید اشتراک 🔐 (`user:buy`)**: location choice (multi / dedicated / test /
-all) → category list → product list (`name | price تومان`) → pre-invoice →
-optional discount code → continue → «پیش‌فاکتور ثبت شد ✅ / مرحله انتخاب روش
-پرداخت در فاز بعدی فعال می‌شود.»
+**خرید اشتراک 🔐 (`user:buy`)** — *rewritten in Phase 11.1
+(`docs/panel-first-purchase-fix-phase11-1.md`)*: purchase starts with
+**panel detection**, not a fake "service type" step. No ACTIVE+visible
+panel → «در حال حاضر پنلی برای خرید فعال نیست.»; exactly one panel → skip
+straight to its categories; multiple panels → «از کدام پنل می‌خواهید خرید
+کنید؟» panel list first. Then: category list (only categories with buyable
+products **for the selected panel**) → plan list (`name | price تومان`) →
+pre-invoice → optional discount code → continue.
 
 **محصولات دیگر 🛍 (`user:other_products`)**: category list → product list →
 pre-invoice (shows delivery type and, when enabled, the "information
@@ -26,9 +30,10 @@ requested after payment" notice — the info itself is NOT collected yet) →
 discount → continue → same confirmation.
 
 The pre-invoice shows product details, invoice description, the user's
-wallet balance, applied discount and the final price. Location travels
-inside callback data (single letters M/D/T/A), so browsing is stateless and
-survives bot restarts; the draft (product + discount) lives in the session.
+wallet balance, applied discount and the final price. The selected
+panel/category travel inside callback data as 8-char short ids, so browsing
+is stateless and survives bot restarts; the draft (product + panel +
+discount) lives in the session.
 
 ## Catalog filters
 
@@ -40,9 +45,10 @@ A product is browsable/purchasable when ALL hold:
   only** (safe default, documented per spec)
 - service products: panel exists, `panel.status = ACTIVE` (MAINTENANCE and
   FAILED are not purchasable) and `panel.isVisible = true`
-- service products with a selected location: `allLocations = true` or
-  `serviceLocation` equals the selection; «همه سرویس‌ها» skips the location
-  filter
+- service products additionally: `product.panelId` equals the **selected**
+  panel (Phase 11.1) — categories/products of other panels are never shown
+  (`serviceLocation`/`allLocations` remain product metadata on the
+  pre-invoice, not a selection step)
 
 Visibility is re-checked when a product callback resolves AND again at
 continue-click time, so stale buttons cannot buy hidden products. Empty
@@ -90,8 +96,10 @@ Created only on continue, using the existing Phase 2 model fields:
 
 ## Callbacks
 
-`user:buy`, `user:buy:loc:<M|D|T|A>`, `user:buy:cat:<loc>:<sid>`,
-`user:buy:p:<loc>:<sid>`, `user:other_products`, `user:op:cat:<sid>`,
+`user:buy`, `user:buy:panel:<panelSid>`, `user:buy:cat:<panelSid>:<catSid>`,
+`user:buy:prod:<panelSid>:<catSid>:<prodSid>` (the legacy
+`user:buy:loc/cat/p:<M|D|T|A>…` callbacks answer «این مرحله حذف شده است…»
+and redirect into the new flow), `user:other_products`, `user:op:cat:<sid>`,
 `user:op:p:<sid>`, `user:co:discount`, `user:co:discount:clear`,
 `user:co:back`, `user:co:continue`, `user:co:view:<sid>` — all short-id
 (8-char UUID prefix) based.

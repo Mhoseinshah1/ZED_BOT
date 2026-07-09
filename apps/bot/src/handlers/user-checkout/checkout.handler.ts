@@ -7,10 +7,11 @@ import { logger } from "../../core/logger.js";
 import type { CheckoutDraft } from "../../core/session.js";
 import {
   categoriesOf,
+  getPurchasablePanelByShortId,
   isProductVisible,
+  purchasablePanels,
   visibleOtherProducts,
   visibleServiceProducts,
-  type LocationCode,
 } from "../../services/catalog.service.js";
 import {
   checkoutShortId,
@@ -27,7 +28,14 @@ import {
   categoryListKeyboard,
   checkoutViewText,
   EMPTY_CATALOG_TEXT,
-  locationMenuKeyboard,
+  LEGACY_STEP_TEXT,
+  NO_CATEGORY_TEXT,
+  NO_PANEL_TEXT,
+  NO_PRODUCT_TEXT,
+  panelListKeyboard,
+  PICK_CATEGORY_TEXT,
+  PICK_PANEL_TEXT,
+  PICK_PRODUCT_TEXT,
   preInvoiceKeyboard,
   preInvoiceText,
   productListKeyboard,
@@ -68,17 +76,13 @@ async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {
   }
 }
 
-async function startPreInvoice(
-  ctx: BotContext,
-  product: ProductWithRelations,
-  locationCode?: LocationCode,
-): Promise<void> {
+async function startPreInvoice(ctx: BotContext, product: ProductWithRelations): Promise<void> {
   ctx.session.currentFlow = null;
   const draft: CheckoutDraft = {
     productId: product.id,
     categoryId: product.categoryId,
+    panelId: product.panelId ?? undefined,
     flowType: product.type,
-    locationCode,
     originalPriceToman: product.priceToman,
     discountAmountToman: 0,
     finalPriceToman: product.priceToman,
@@ -87,70 +91,141 @@ async function startPreInvoice(
   await renderPreInvoice(ctx, true);
 }
 
-// --- Buy subscription flow -----------------------------------------------------------
+// --- Buy subscription flow (panel-first, Phase 11.1) ------------------------------
+// No hardcoded "service type" step: real ACTIVE + visible panels are the
+// first choice, skipped entirely when only one panel exists.
 
-checkoutHandler.callbackQuery(CO_CB.BUY, async (ctx) => {
-  clearCheckoutState(ctx);
-  await safeAnswerCallback(ctx);
-  await safeEditOrReply(ctx, "نوع سرویس را انتخاب کنید:", locationMenuKeyboard());
-});
-
-checkoutHandler.callbackQuery(/^user:buy:loc:(M|D|T|A)$/, async (ctx) => {
+/** Categories of one panel that contain >=1 buyable product for this user. */
+async function renderCategoriesForPanel(ctx: BotContext, panelId: string): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     return;
   }
-  const location = ctx.match[1] as LocationCode;
-  const products = await visibleServiceProducts(user.group, location);
-  await safeAnswerCallback(ctx);
+  const panels = await purchasablePanels();
+  const panel = panels.find((p) => p.id === panelId);
+  if (panel === undefined) {
+    await safeEditOrReply(ctx, NO_PANEL_TEXT, backKeyboard(CB.USER_MENU));
+    return;
+  }
+  const multiplePanels = panels.length > 1;
+  const backCb = multiplePanels ? CO_CB.BUY : CB.USER_MENU;
+  const backLabel = multiplePanels ? "بازگشت به انتخاب پنل" : "بازگشت به منو";
+  const products = await visibleServiceProducts(user.group, panel.id);
   if (products.length === 0) {
-    await safeEditOrReply(ctx, EMPTY_CATALOG_TEXT, backKeyboard(CO_CB.BUY));
+    await safeEditOrReply(
+      ctx,
+      NO_CATEGORY_TEXT,
+      new InlineKeyboard().text(backLabel, backCb).row().text("بازگشت به منو", CB.USER_MENU),
+    );
     return;
   }
   const categories = categoriesOf(products);
-  await safeEditOrReply(
-    ctx,
-    "دسته‌بندی را انتخاب کنید:",
-    categoryListKeyboard(categories, (catSid) => ccb.buyCategory(location, catSid), CO_CB.BUY),
-  );
+  const panelSid = panel.id.slice(0, 8);
+  const kb = categoryListKeyboard(categories, (catSid) => ccb.buyCategory(panelSid, catSid), backCb);
+  await safeEditOrReply(ctx, PICK_CATEGORY_TEXT, kb);
+}
+
+async function startBuyFlow(ctx: BotContext): Promise<void> {
+  clearCheckoutState(ctx);
+  const panels = await purchasablePanels();
+  if (panels.length === 0) {
+    await safeEditOrReply(ctx, NO_PANEL_TEXT, backKeyboard(CB.USER_MENU));
+    return;
+  }
+  if (panels.length === 1) {
+    // Single panel: skip panel selection entirely.
+    await renderCategoriesForPanel(ctx, panels[0].id);
+    return;
+  }
+  await safeEditOrReply(ctx, PICK_PANEL_TEXT, panelListKeyboard(panels));
+}
+
+checkoutHandler.callbackQuery(CO_CB.BUY, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  await startBuyFlow(ctx);
 });
 
-checkoutHandler.callbackQuery(/^user:buy:cat:(M|D|T|A):([0-9a-f-]+)$/, async (ctx) => {
+checkoutHandler.callbackQuery(/^user:buy:panel:([0-9a-f-]+)$/, async (ctx) => {
+  const panel = await getPurchasablePanelByShortId(ctx.match[1]);
+  if (panel === null) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await renderCategoriesForPanel(ctx, panel.id);
+});
+
+checkoutHandler.callbackQuery(/^user:buy:cat:([0-9a-f-]+):([0-9a-f-]+)$/, async (ctx) => {
   const user = ctx.dbUser;
   if (user === null) {
     return;
   }
-  const location = ctx.match[1] as LocationCode;
+  const panel = await getPurchasablePanelByShortId(ctx.match[1]);
+  if (panel === null) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
   const catPrefix = ctx.match[2];
-  const products = (await visibleServiceProducts(user.group, location)).filter((p) =>
+  const products = (await visibleServiceProducts(user.group, panel.id)).filter((p) =>
     p.categoryId.startsWith(catPrefix),
   );
   await safeAnswerCallback(ctx);
+  const panelSid = panel.id.slice(0, 8);
   if (products.length === 0) {
-    await safeEditOrReply(ctx, EMPTY_CATALOG_TEXT, backKeyboard(ccb.buyLocation(location)));
+    await safeEditOrReply(
+      ctx,
+      NO_PRODUCT_TEXT,
+      new InlineKeyboard()
+        .text("بازگشت به دسته‌بندی‌ها", ccb.buyPanel(panelSid))
+        .row()
+        .text("بازگشت به منو", CB.USER_MENU),
+    );
     return;
   }
   await safeEditOrReply(
     ctx,
-    "محصول را انتخاب کنید:",
-    productListKeyboard(products, (sid) => ccb.buyProduct(location, sid), ccb.buyLocation(location)),
+    PICK_PRODUCT_TEXT,
+    productListKeyboard(
+      products,
+      (sid) => ccb.buyProduct(panelSid, catPrefix.slice(0, 8), sid),
+      ccb.buyPanel(panelSid),
+    ),
   );
 });
 
-checkoutHandler.callbackQuery(/^user:buy:p:(M|D|T|A):([0-9a-f-]+)$/, async (ctx) => {
+checkoutHandler.callbackQuery(/^user:buy:prod:([0-9a-f-]+):([0-9a-f-]+):([0-9a-f-]+)$/, async (ctx) => {
   const user = ctx.dbUser;
   if (user === null) {
     return;
   }
-  const location = ctx.match[1] as LocationCode;
-  const product = await getProductByShortId(ctx.match[2]);
-  if (product === null || !isProductVisible(product, user.group, location)) {
+  // Never trust the callback alone: panel/category/product are re-resolved
+  // and cross-checked against each other and the user's group.
+  const panel = await getPurchasablePanelByShortId(ctx.match[1]);
+  const product = await getProductByShortId(ctx.match[3]);
+  if (
+    panel === null ||
+    product === null ||
+    product.type !== "SERVICE_PRODUCT" ||
+    product.panelId !== panel.id ||
+    !product.categoryId.startsWith(ctx.match[2]) ||
+    !isProductVisible(product, user.group)
+  ) {
     await safeAnswerCallback(ctx, "این محصول در دسترس نیست.");
     return;
   }
   await safeAnswerCallback(ctx);
-  await startPreInvoice(ctx, product, location);
+  await startPreInvoice(ctx, product);
 });
+
+// Legacy compatibility: the removed "service type" step (old keyboards may
+// still be open in chats). Redirect into the panel-first flow.
+checkoutHandler.callbackQuery(
+  [/^user:buy:loc:(M|D|T|A)$/, /^user:buy:cat:(M|D|T|A):([0-9a-f-]+)$/, /^user:buy:p:(M|D|T|A):([0-9a-f-]+)$/],
+  async (ctx) => {
+    await safeAnswerCallback(ctx, LEGACY_STEP_TEXT);
+    await startBuyFlow(ctx);
+  },
+);
 
 // --- Other products flow --------------------------------------------------------------
 
@@ -260,7 +335,7 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
   if (
     product === null ||
     product.id !== draft.productId ||
-    !isProductVisible(product, user.group, draft.locationCode)
+    !isProductVisible(product, user.group)
   ) {
     clearCheckoutState(ctx);
     await safeAnswerCallback(ctx);

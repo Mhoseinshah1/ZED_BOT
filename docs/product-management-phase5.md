@@ -57,16 +57,20 @@ stops, clears its flow and shows «ابتدا باید از بخش مدیریت 
 a disabled notice and never creates anything), and no fallback-named category
 can ever be created — a broken flow state aborts instead.
 
-## Add service product wizard
+## Add service product wizard (panel-first since Phase 11.1)
 
-Panel (picker with status emoji; guarded by «ابتدا از مدیریت پنل‌ها یک پنل
-اضافه کنید.» when none) → name → display groups (F/N/N2/ALL stored as Json
-array; ALL = `["F","N","N2"]`) → location (multi / dedicated / test / all —
-"all" stores `allLocations=true, serviceLocation=null`) → category (picker of
-existing active categories only — see above) → volume GB (0 = unlimited) →
-duration days (0 = unlimited) → price → traffic reset cycle (**Marzban
-panels only**; XUI stores null) → invoice description (`-` = empty) →
-display position (0 = end) → confirmation page → save → detail.
+SERVICE_PRODUCT creation selects a **real panel first** — there is no fake
+"service type" step, and the no-auto-category rule above still applies.
+Panel (picker with status emoji; when none exists: «ابتدا باید از بخش
+مدیریت پنل‌ها یک پنل اضافه کنید.» with a «رفتن به مدیریت پنل‌ها» button) →
+category (picker of existing active categories only — see above) → name →
+display groups (F/N/N2/ALL stored as Json array; ALL = `["F","N","N2"]`) →
+location metadata (multi / dedicated / test / all — "all" stores
+`allLocations=true, serviceLocation=null`; product metadata, not a purchase
+step) → volume GB (0 = unlimited) → duration days (0 = unlimited) → price →
+traffic reset cycle (**Marzban panels only**; XUI stores null) → invoice
+description (`-` = empty) → display position (0 = end) → confirmation page
+→ save → detail.
 
 ## Add other product wizard
 
