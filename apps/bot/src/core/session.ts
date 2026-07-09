@@ -31,7 +31,6 @@ export interface ProductAddState {
     | "groups"
     | "location"
     | "category"
-    | "newcatName"
     | "volume"
     | "duration"
     | "price"

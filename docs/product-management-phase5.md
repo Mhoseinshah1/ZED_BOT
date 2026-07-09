@@ -44,17 +44,29 @@ activate/deactivate. **Delete never removes the row** — it deactivates, and
 when products exist the admin sees «این دسته‌بندی محصول دارد؛ حذف فیزیکی
 انجام نشد و فقط غیرفعال شد.»
 
+## Categories are never created automatically (Phase 7.1)
+
+**Fresh installs have an empty catalog**: the seed intentionally creates no
+`ProductCategory` and no `Product` rows — the operator creates every
+category manually (with their own names) via «مدیریت دسته‌بندی‌ها» →
+«افزودن دسته‌بندی». Product creation **requires an existing active
+category**: when none exists for the product type, the add-product wizard
+stops, clears its flow and shows «ابتدا باید از بخش مدیریت دسته‌بندی‌ها یک
+دسته‌بندی بسازید.» with a button to category management. The old inline
+«ساخت دسته‌بندی جدید» shortcut was removed (its legacy callback answers with
+a disabled notice and never creates anything), and no fallback-named category
+can ever be created — a broken flow state aborts instead.
+
 ## Add service product wizard
 
 Panel (picker with status emoji; guarded by «ابتدا از مدیریت پنل‌ها یک پنل
 اضافه کنید.» when none) → name → display groups (F/N/N2/ALL stored as Json
 array; ALL = `["F","N","N2"]`) → location (multi / dedicated / test / all —
-"all" stores `allLocations=true, serviceLocation=null`) → category (active
-service categories + inline «ساخت دسته‌بندی جدید», auto-fallback to creation
-when none exist) → volume GB (0 = unlimited) → duration days (0 = unlimited)
-→ price → traffic reset cycle (**Marzban panels only**; XUI stores null) →
-invoice description (`-` = empty) → display position (0 = end) →
-confirmation page → save → detail.
+"all" stores `allLocations=true, serviceLocation=null`) → category (picker of
+existing active categories only — see above) → volume GB (0 = unlimited) →
+duration days (0 = unlimited) → price → traffic reset cycle (**Marzban
+panels only**; XUI stores null) → invoice description (`-` = empty) →
+display position (0 = end) → confirmation page → save → detail.
 
 ## Add other product wizard
 

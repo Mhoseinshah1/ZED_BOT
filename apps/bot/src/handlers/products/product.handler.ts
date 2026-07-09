@@ -623,15 +623,21 @@ function addState(ctx: BotContext, step: ProductAddState["step"]): ProductAddSta
   return state;
 }
 
+// Categories are NEVER created implicitly. Product creation requires an
+// existing active category made intentionally via category management.
 async function askCategoryStep(ctx: BotContext, state: ProductAddState): Promise<void> {
   state.step = "category";
   const categories = await activeCategories(state.kind);
   if (categories.length === 0) {
-    state.step = "newcatName";
+    clearProductFlows(ctx);
+    const kb = new InlineKeyboard()
+      .text("رفتن به مدیریت دسته‌بندی‌ها 📂", PROD_CB.CAT_MENU)
+      .row()
+      .text("بازگشت", PROD_CB.MENU);
     await safeEditOrReply(
       ctx,
-      "هیچ دسته‌بندی فعالی وجود ندارد. نام دسته‌بندی جدید را وارد کنید.",
-      cancelKeyboard(),
+      "ابتدا باید از بخش مدیریت دسته‌بندی‌ها یک دسته‌بندی بسازید.",
+      kb,
     );
     return;
   }
@@ -639,7 +645,6 @@ async function askCategoryStep(ctx: BotContext, state: ProductAddState): Promise
     ctx,
     "دسته‌بندی محصول را انتخاب کنید:",
     categoryPickerKeyboard(categories, (catSid) => pcb.flowCategory(catSid), {
-      newCategoryCb: pcb.flowNewCategory(),
       backCb: PROD_CB.CANCEL,
     }),
   );
@@ -729,15 +734,20 @@ productHandler.callbackQuery(/^admin:prod:f:cat:(.+)$/, async (ctx) => {
   }
 });
 
+// Backward compatibility for old keyboards only: inline category creation is
+// disabled. Categories are created exclusively via category management.
 productHandler.callbackQuery("admin:prod:f:newcat", async (ctx) => {
-  const state = addState(ctx, "category");
-  if (state === null) {
-    await safeAnswerCallback(ctx, "این مرحله معتبر نیست.");
-    return;
-  }
-  state.step = "newcatName";
+  clearProductFlows(ctx);
   await safeAnswerCallback(ctx);
-  await safeEditOrReply(ctx, "نام دسته‌بندی جدید را وارد کنید.", cancelKeyboard());
+  const kb = new InlineKeyboard()
+    .text("رفتن به مدیریت دسته‌بندی‌ها 📂", PROD_CB.CAT_MENU)
+    .row()
+    .text("بازگشت", PROD_CB.MENU);
+  await safeEditOrReply(
+    ctx,
+    "ساخت دسته‌بندی از داخل افزودن محصول غیرفعال است. ابتدا از مدیریت دسته‌بندی‌ها دسته‌بندی بسازید.",
+    kb,
+  );
 });
 
 productHandler.callbackQuery(/^admin:prod:f:trc:(NO_RESET|DAY|WEEK|MONTH|YEAR)$/, async (ctx) => {
@@ -911,7 +921,14 @@ async function handleCategoryAddText(ctx: BotContext, text: string): Promise<voi
     await safeReply(ctx, "لطفاً فقط یک عدد صحیح (۰ یا بیشتر) وارد کنید.");
     return;
   }
-  const category = await createCategoryAtOrder(state.type, state.name ?? "دسته‌بندی", order);
+  // Never create a category with a fallback name - a missing name means the
+  // flow state is broken, so abort instead of inventing "دسته‌بندی".
+  if (state.name === undefined) {
+    clearProductFlows(ctx);
+    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره از «افزودن دسته‌بندی» شروع کنید.");
+    return;
+  }
+  const category = await createCategoryAtOrder(state.type, state.name, order);
   clearProductFlows(ctx);
   await safeReply(ctx, "دسته‌بندی ذخیره شد ✅");
   await showCategoryDetail(ctx, category);
@@ -972,24 +989,6 @@ async function handleProductAddText(ctx: BotContext, text: string): Promise<void
         "گروه نمایش محصول را انتخاب کنید:",
         groupsKeyboard((g) => pcb.flowGroups(g), PROD_CB.CANCEL),
       );
-      return;
-    }
-    case "newcatName": {
-      const name = validName(value);
-      if (name === null) {
-        await safeReply(ctx, "نام باید بین ۱ تا ۱۲۰ کاراکتر باشد. دوباره وارد کنید.");
-        return;
-      }
-      const category = await createCategoryAtOrder(state.kind, name, 0);
-      state.categoryId = category.id;
-      state.categoryName = category.name;
-      if (state.kind === "SERVICE_PRODUCT") {
-        state.step = "volume";
-        await safeReply(ctx, "حجم را به گیگ وارد کنید. برای نامحدود عدد 0 را بفرستید.", cancelKeyboard());
-      } else {
-        state.step = "duration";
-        await safeReply(ctx, "مدت/اعتبار محصول را به روز وارد کنید. اگر ندارد 0 بفرستید.", cancelKeyboard());
-      }
       return;
     }
     case "volume": {
