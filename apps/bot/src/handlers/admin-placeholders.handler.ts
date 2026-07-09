@@ -16,7 +16,7 @@ const ADMIN_SECTIONS: Array<{ callback: string; title: string }> = [
   { callback: CB.ADMIN_MINI_APP_SETTINGS, title: "تنظیمات مینی اپ ⚙️" },
   { callback: CB.ADMIN_USERS, title: "مدیریت کاربران 👤" },
   { callback: CB.ADMIN_PRODUCTS, title: "مدیریت محصولات/پلن‌ها" },
-  { callback: CB.ADMIN_PANELS, title: "مدیریت پنل‌ها" },
+  // admin:panels is handled by the real panel management flow (panel.handler).
   { callback: CB.ADMIN_CUSTOM_SERVICE_PRICE, title: "قیمت سرویس دلخواه 🛰" },
   { callback: CB.ADMIN_OTHER_PRODUCTS, title: "محصولات دیگر / سفارش‌های محصولات دیگر" },
   { callback: CB.ADMIN_REPORTS_BACKUP, title: "گزارشات / بکاپ" },

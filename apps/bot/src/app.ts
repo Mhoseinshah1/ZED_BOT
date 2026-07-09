@@ -9,6 +9,7 @@ import { rateLimitMiddleware } from "./middlewares/rate-limit.middleware.js";
 import { userAccessMiddleware } from "./middlewares/user-access.middleware.js";
 import { adminHandler } from "./handlers/admin.handler.js";
 import { adminPlaceholdersHandler } from "./handlers/admin-placeholders.handler.js";
+import { panelHandler, panelTextHandler } from "./handlers/panels/panel.handler.js";
 import { forceJoinHandler } from "./handlers/force-join.handler.js";
 import { menuHandler } from "./handlers/menu.handler.js";
 import { pingHandler } from "./handlers/ping.handler.js";
@@ -45,13 +46,25 @@ export function createBot(token: string): Bot<BotContext> {
   bot.use(forceJoinHandler);
 
   // Admin area: /admin + admin:* callbacks behind admin auth. Admin access is
-  // intentionally independent of the user-facing gates.
+  // intentionally independent of the user-facing gates. panelHandler owns the
+  // real admin:panels* / admin:panel:* routes; the placeholder handler covers
+  // the other admin sections.
   const adminArea = new Composer<BotContext>();
   adminArea.use(adminAuthMiddleware());
   adminArea.use(adminHandler);
+  adminArea.use(panelHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
+
+  // Admin flow text input (panel add/edit steps). Only active admins currently
+  // in a panel:* flow are consumed; every other text falls through untouched.
+  bot.on("message:text", async (ctx, next) => {
+    if (ctx.admin === null || ctx.session.currentFlow === null) {
+      return next();
+    }
+    await panelTextHandler.middleware()(ctx, next);
+  });
 
   // User area: /menu + user:* / common:* callbacks behind the access gates.
   const userArea = new Composer<BotContext>();
