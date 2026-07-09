@@ -10,10 +10,10 @@ export const PLACEHOLDER_TEXT = "این بخش در فاز بعدی تکمیل �
 
 // callback -> ButtonText key used as the section title.
 // user:buy and user:other_products are handled by the real checkout flow
-// (handlers/user-checkout); everything else stays placeholder in this phase.
+// (handlers/user-checkout) and user:services by the real "My Services"
+// handler (Phase 10); everything else stays placeholder in this phase.
 const USER_SECTIONS: Array<{ callback: string; buttonKey: string }> = [
   { callback: CB.USER_RENEW, buttonKey: "renew_service" },
-  { callback: CB.USER_SERVICES, buttonKey: "my_services" },
   { callback: CB.USER_WALLET, buttonKey: "wallet" },
   { callback: CB.USER_REFERRAL, buttonKey: "referral" },
   { callback: CB.USER_FREE_TEST, buttonKey: "free_test" },

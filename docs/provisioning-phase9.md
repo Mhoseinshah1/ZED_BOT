@@ -11,6 +11,10 @@ Source: `apps/bot/src/services/provisioning.service.ts`,
 `packages/panel-adapters/src/` (adapter extension), integration in
 `apps/bot/src/handlers/admin-receipts/receipts.handler.ts`.
 
+> **Phase 10 update:** users can now browse the services this phase creates
+> via the read-only «سرویس‌های من 🛍» section — see
+> `docs/user-services-phase10.md`.
+
 ## Status flow
 
 ```
