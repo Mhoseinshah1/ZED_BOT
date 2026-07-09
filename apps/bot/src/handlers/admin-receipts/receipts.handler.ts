@@ -1,26 +1,44 @@
+import { PaymentStatus, type User } from "@zedbot/database";
+import { errorMessage } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
+import { logger } from "../../core/logger.js";
 import {
   getPaymentByShortId,
   listPendingReviewPayments,
   paymentShortId,
   type PaymentWithRelations,
 } from "../../services/payment-method.service.js";
+import {
+  approvalUserNotice,
+  approveReceiptPayment,
+  REJECT_REASON_MAX,
+  rejectionUserNotice,
+  rejectReceiptPayment,
+} from "../../services/receipt-review.service.js";
 import { escapeHtml } from "../../utils/html.js";
-import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
+import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 
 // =============================================================================
-// Admin "رسیدهای تایید نشده" - read-only foundation. Approval/rejection is
-// Phase 8; this phase only lists PENDING_REVIEW payments and shows details.
+// Admin "رسیدهای تایید نشده" - Phase 8: list + detail + approve / reject.
+// Approval creates the PAID Order and finalizes discount usage (in the
+// service); rejection first asks the admin for a reason ("receipt:reject"
+// flow) and sends it verbatim to the user. No Service / provisioning here -
+// that is Phase 9.
 // =============================================================================
 
 const HTML = { parseMode: "HTML" as const };
+const REJECT_REASON_PROMPT =
+  "دلیل رد رسید را بنویسید (۱ تا ۱۰۰۰ کاراکتر).\n" +
+  "همین متن عیناً برای کاربر ارسال می‌شود.";
 
 const rcb = {
   list: (page: number): string => `admin:rec:list:${page}`,
   view: (sid: string): string => `admin:rec:view:${sid}`,
+  approve: (sid: string): string => `admin:rec:ap:${sid}`,
+  reject: (sid: string): string => `admin:rec:rj:${sid}`,
 } as const;
 
 function formatToman(value: number): string {
@@ -36,9 +54,40 @@ function userLabel(payment: PaymentWithRelations): string {
   return user.username !== null ? `@${user.username}` : (user.firstName ?? String(user.telegramId));
 }
 
+/** Leaves the reject-reason flow (if any) without touching other flows. */
+function clearReceiptReviewFlow(ctx: BotContext): void {
+  if (ctx.session.currentFlow === "receipt:reject") {
+    ctx.session.currentFlow = null;
+  }
+  ctx.session.temp.rejectingPaymentId = undefined;
+}
+
+function backKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("بازگشت به لیست", rcb.list(1)).row().text("بازگشت به ادمین", CB.ADMIN_MENU);
+}
+
+/**
+ * Sends a review-result notice to the paying user. Failures never roll back
+ * the review - they are logged (without file ids / card numbers) and reported
+ * to the admin.
+ */
+async function notifyUserSafe(ctx: BotContext, user: User, text: string): Promise<boolean> {
+  try {
+    await ctx.api.sendMessage(user.telegramId.toString(), text);
+    return true;
+  } catch (err) {
+    logger.warn("receipt review: user notification failed", {
+      userId: user.id,
+      error: errorMessage(err),
+    });
+    return false;
+  }
+}
+
 export const receiptsHandler = new Composer<BotContext>();
 
 receiptsHandler.callbackQuery([CB.ADMIN_RECEIPTS, /^admin:rec:list:(\d+)$/], async (ctx) => {
+  clearReceiptReviewFlow(ctx);
   const page = ctx.match !== undefined && typeof ctx.match !== "string"
     ? Number.parseInt(ctx.match[1] ?? "1", 10)
     : 1;
@@ -67,11 +116,25 @@ receiptsHandler.callbackQuery([CB.ADMIN_RECEIPTS, /^admin:rec:list:(\d+)$/], asy
   const title =
     total === 0
       ? "رسید در انتظار بررسی وجود ندارد ✅"
-      : `رسیدهای تایید نشده 💵 (${total})\n\nبررسی/تایید رسیدها در فاز بعدی فعال می‌شود.`;
+      : `رسیدهای تایید نشده 💵 (${total})\n\nبرای بررسی روی یک رسید بزنید.`;
   await safeEditOrReply(ctx, title, kb);
 });
 
+function statusLabel(status: PaymentStatus): string {
+  switch (status) {
+    case PaymentStatus.PENDING_REVIEW:
+      return "در انتظار بررسی ⏳";
+    case PaymentStatus.APPROVED:
+      return "تایید شده ✅";
+    case PaymentStatus.REJECTED:
+      return "رد شده ❌";
+    default:
+      return status;
+  }
+}
+
 receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
+  clearReceiptReviewFlow(ctx);
   const payment = await getPaymentByShortId(ctx.match[1]);
   if (payment === null) {
     await safeAnswerCallback(ctx, "مورد یافت نشد.");
@@ -91,6 +154,7 @@ receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
   const lines = [
     `🧾 <b>رسید ${escapeHtml(paymentShortId(payment))}</b>`,
     "",
+    `وضعیت: ${escapeHtml(statusLabel(payment.status))}`,
     `کاربر: ${escapeHtml(userLabel(payment))} | <code>${payment.user.telegramId}</code>`,
     `نام: ${escapeHtml([payment.user.firstName, payment.user.lastName].filter(Boolean).join(" ") || "-")}`,
     `مبلغ: <b>${formatToman(payment.amountToman)}</b>`,
@@ -102,15 +166,132 @@ receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
   if (receipt?.text != null && receipt.text !== "") {
     lines.push(`متن رسید: ${escapeHtml(receipt.text)}`);
   }
-  lines.push(
-    `ثبت: ${payment.createdAt.toISOString().replace("T", " ").slice(0, 16)} (UTC)`,
-    "",
-    "تایید/رد رسید در فاز بعدی فعال می‌شود.",
-  );
+  if (payment.status === PaymentStatus.REJECTED && payment.rejectReason !== null) {
+    lines.push(`دلیل رد: ${escapeHtml(payment.rejectReason)}`);
+  }
+  lines.push(`ثبت: ${payment.createdAt.toISOString().replace("T", " ").slice(0, 16)} (UTC)`);
 
-  const kb = new InlineKeyboard()
-    .text("بازگشت به لیست", rcb.list(1))
-    .row()
-    .text("بازگشت به ادمین", CB.ADMIN_MENU);
+  const kb = new InlineKeyboard();
+  if (payment.status === PaymentStatus.PENDING_REVIEW) {
+    kb.text("تایید رسید ✅", rcb.approve(paymentShortId(payment)))
+      .text("رد رسید ❌", rcb.reject(paymentShortId(payment)))
+      .row();
+  }
+  kb.text("بازگشت به لیست", rcb.list(1)).row().text("بازگشت به ادمین", CB.ADMIN_MENU);
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
+});
+
+// --- approval ------------------------------------------------------------------
+
+receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+)$/, async (ctx) => {
+  clearReceiptReviewFlow(ctx);
+  const admin = ctx.admin;
+  if (admin === null) {
+    await safeAnswerCallback(ctx);
+    return;
+  }
+  const payment = await getPaymentByShortId(ctx.match[1]);
+  if (payment === null) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+
+  try {
+    const result = await approveReceiptPayment(payment.id, admin);
+    if (!result.ok) {
+      await safeAnswerCallback(ctx, result.error);
+      return;
+    }
+    await safeAnswerCallback(ctx, "تایید شد ✅");
+    logger.info("receipt approved", {
+      paymentId: result.payment.id,
+      orderId: result.order.id,
+      adminId: admin.id,
+    });
+
+    // Notification goes out after the transaction; a failure never rolls back.
+    await notifyUserSafe(ctx, result.user, approvalUserNotice(result.orderType));
+    await safeEditOrReply(ctx, result.message, backKeyboard());
+  } catch (err) {
+    logger.error("receipt approval failed", { paymentId: payment.id, error: errorMessage(err) });
+    await safeAnswerCallback(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.");
+  }
+});
+
+// --- rejection (asks for a reason first) --------------------------------------------
+
+receiptsHandler.callbackQuery(/^admin:rec:rj:([0-9a-f-]+)$/, async (ctx) => {
+  clearReceiptReviewFlow(ctx);
+  const payment = await getPaymentByShortId(ctx.match[1]);
+  if (payment === null) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+  if (payment.status !== PaymentStatus.PENDING_REVIEW) {
+    await safeAnswerCallback(ctx, "این رسید قبلاً بررسی شده است.");
+    return;
+  }
+  ctx.session.currentFlow = "receipt:reject";
+  ctx.session.temp.rejectingPaymentId = payment.id;
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    REJECT_REASON_PROMPT,
+    new InlineKeyboard().text("انصراف", rcb.view(paymentShortId(payment))),
+  );
+});
+
+/**
+ * Reject-reason intake ("receipt:reject" flow). Routed from app.ts before the
+ * user text flows; only active admins ever reach it. Slash commands cancel the
+ * flow and continue normally (/admin itself already clears every flow when it
+ * renders the admin menu).
+ */
+export const receiptReviewTextHandler = new Composer<BotContext>();
+
+receiptReviewTextHandler.on("message:text", async (ctx, next) => {
+  if (ctx.session.currentFlow !== "receipt:reject") {
+    return next();
+  }
+  const admin = ctx.admin;
+  if (admin === null) {
+    return next();
+  }
+  const text = ctx.message.text;
+  if (text.startsWith("/")) {
+    clearReceiptReviewFlow(ctx);
+    return next();
+  }
+
+  const paymentId = ctx.session.temp.rejectingPaymentId;
+  if (paymentId === undefined) {
+    clearReceiptReviewFlow(ctx);
+    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره از لیست رسیدها شروع کنید.", backKeyboard());
+    return;
+  }
+  const reason = text.trim();
+  if (reason.length === 0 || reason.length > REJECT_REASON_MAX) {
+    // Stay in the flow so the admin can retype the reason.
+    await safeReply(ctx, "دلیل رد باید بین ۱ تا ۱۰۰۰ کاراکتر باشد. دوباره وارد کنید.");
+    return;
+  }
+
+  clearReceiptReviewFlow(ctx);
+  try {
+    const result = await rejectReceiptPayment(paymentId, admin, reason);
+    if (!result.ok) {
+      await safeReply(ctx, result.error, backKeyboard());
+      return;
+    }
+    logger.info("receipt rejected", { paymentId: result.payment.id, adminId: admin.id });
+    const notified = await notifyUserSafe(ctx, result.user, rejectionUserNotice(result.reason));
+    await safeReply(
+      ctx,
+      notified ? result.message : "رسید رد شد ❌\nاما ارسال پیام به کاربر ناموفق بود.",
+      backKeyboard(),
+    );
+  } catch (err) {
+    logger.error("receipt rejection failed", { error: errorMessage(err) });
+    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.", backKeyboard());
+  }
 });

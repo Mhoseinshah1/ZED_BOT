@@ -19,7 +19,10 @@ import {
   paymentHandler,
   paymentReceiptHandler,
 } from "./handlers/user-checkout/payment.handler.js";
-import { receiptsHandler } from "./handlers/admin-receipts/receipts.handler.js";
+import {
+  receiptReviewTextHandler,
+  receiptsHandler,
+} from "./handlers/admin-receipts/receipts.handler.js";
 import { forceJoinHandler } from "./handlers/force-join.handler.js";
 import { menuHandler } from "./handlers/menu.handler.js";
 import { pingHandler } from "./handlers/ping.handler.js";
@@ -69,9 +72,10 @@ export function createBot(token: string): Bot<BotContext> {
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
 
-  // Flow input router. Receipt upload accepts text/photo/document; discount
-  // entry is text-only; panel/product/category wizards are text-only and
-  // require an active admin. Everything else falls through untouched.
+  // Flow input router. Receipt upload accepts text/photo/document; the admin
+  // reject-reason flow and discount entry are text-only; panel/product/category
+  // wizards are text-only and require an active admin. Everything else falls
+  // through untouched.
   const adminFlowText = new Composer<BotContext>();
   adminFlowText.use(panelTextHandler);
   adminFlowText.use(productTextHandler);
@@ -86,6 +90,12 @@ export function createBot(token: string): Bot<BotContext> {
     }
     if (ctx.message.text === undefined) {
       return next();
+    }
+    // Admin receipt rejection reason - before any user text flow. The handler
+    // itself passes through when ctx.admin is null.
+    if (flow === "receipt:reject") {
+      await receiptReviewTextHandler.middleware()(ctx, next);
+      return;
     }
     if (flow === "checkout:discount") {
       await checkoutTextHandler.middleware()(ctx, next);

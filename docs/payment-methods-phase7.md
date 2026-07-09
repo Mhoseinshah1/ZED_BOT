@@ -8,7 +8,12 @@ list.
 writes are one `Payment` (status `PENDING_REVIEW`) plus its `ManualReceipt`
 when the user submits a receipt. The checkout stays `PENDING`, wallets are
 untouched, discount usage is not finalized, panels are never called.
-Approval/rejection is Phase 8.
+
+> **Phase 8 update:** approval/rejection now exists on top of this
+> foundation — see `docs/receipt-review-phase8.md`. Phase 7 itself still
+> only creates the `PENDING_REVIEW` Payment/ManualReceipt; approving a
+> payment creates the `PAID` Order but still provisions no Service until
+> Phase 9.
 
 Source: `apps/bot/src/services/payment-method.service.ts`,
 `apps/bot/src/handlers/user-checkout/{payment-views,payment.handler}.ts`,
@@ -84,9 +89,9 @@ newest-first, paginated, labeled `مبلغ | کاربر | تاریخ`. The detai
 shows payment short id, user (username/name/telegram id), amount, gateway
 name+type, checkout short id, product name from the snapshot, receipt kind
 (photo/file vs text — media is not forwarded yet, only noted as «فایل رسید
-ثبت شده است»), receipt text, and creation time. Back-to-list / back-to-admin
-buttons only — **no approve/reject buttons** (Phase 8). The section is behind
-admin auth like every admin route.
+ثبت شده است»), receipt text, and creation time. As of Phase 8 the detail view
+also carries approve/reject buttons (`docs/receipt-review-phase8.md`). The
+section is behind admin auth like every admin route.
 
 ## Callbacks
 
@@ -95,10 +100,12 @@ admin auth like every admin route.
 draft to keep callback data tiny), `admin:receipts`, `admin:rec:list:<page>`,
 `admin:rec:view:<paymentSid>` — all 8-char short-id based.
 
-## Intentionally NOT implemented
+## Intentionally NOT implemented (in Phase 7)
 
-Receipt approval/rejection, automatic verification, wallet deduction, Order
-/ Service creation, discount usage finalization, online gateways (Plisio,
+Receipt approval/rejection, Order creation and discount usage finalization
+arrived in Phase 8 (`docs/receipt-review-phase8.md`). Still missing after
+Phase 8: automatic verification, wallet deduction,
+Service creation, online gateways (Plisio,
 NowPayments, آقای پرداخت, زرین‌پال), Telegram Stars, provisioning, media
 forwarding to admins/log groups, checkout/payment expiry worker, and admin
 management of gateways/card accounts. Nothing payment-related is seeded:
