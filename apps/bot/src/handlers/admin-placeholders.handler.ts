@@ -15,7 +15,7 @@ const ADMIN_SECTIONS: Array<{ callback: string; title: string }> = [
   { callback: CB.ADMIN_GENERAL_SETTINGS, title: "تنظیمات عمومی ⚙️" },
   { callback: CB.ADMIN_MINI_APP_SETTINGS, title: "تنظیمات مینی اپ ⚙️" },
   { callback: CB.ADMIN_USERS, title: "مدیریت کاربران 👤" },
-  { callback: CB.ADMIN_PRODUCTS, title: "مدیریت محصولات/پلن‌ها" },
+  // admin:products is handled by the real product management flow (product.handler).
   // admin:panels is handled by the real panel management flow (panel.handler).
   { callback: CB.ADMIN_CUSTOM_SERVICE_PRICE, title: "قیمت سرویس دلخواه 🛰" },
   { callback: CB.ADMIN_OTHER_PRODUCTS, title: "محصولات دیگر / سفارش‌های محصولات دیگر" },

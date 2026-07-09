@@ -1,4 +1,10 @@
-import type { PanelType } from "@zedbot/database";
+import type {
+  OtherProductDeliveryType,
+  PanelType,
+  ProductType,
+  ServiceLocation,
+  TrafficResetCycle,
+} from "@zedbot/database";
 
 /** In-progress "add panel" wizard state. */
 export interface PanelAddState {
@@ -7,6 +13,53 @@ export interface PanelAddState {
   name?: string;
   baseUrl?: string;
   username?: string;
+}
+
+/** In-progress "add category" wizard state. */
+export interface CategoryAddState {
+  step: "name" | "order";
+  type: ProductType;
+  name?: string;
+}
+
+/** In-progress "add product" wizard state (service + other products). */
+export interface ProductAddState {
+  kind: ProductType;
+  step:
+    | "panel"
+    | "name"
+    | "groups"
+    | "location"
+    | "category"
+    | "newcatName"
+    | "volume"
+    | "duration"
+    | "price"
+    | "resetCycle"
+    | "invoice"
+    | "userInfo"
+    | "userInfoPrompt"
+    | "delivery"
+    | "order"
+    | "confirm";
+  panelId?: string;
+  panelType?: PanelType;
+  panelName?: string;
+  name?: string;
+  groups?: string[];
+  serviceLocation?: ServiceLocation | null;
+  allLocations?: boolean;
+  categoryId?: string;
+  categoryName?: string;
+  volumeGb?: number;
+  durationDays?: number;
+  priceToman?: number;
+  trafficResetCycle?: TrafficResetCycle | null;
+  invoiceDescription?: string;
+  requiredUserInfoEnabled?: boolean;
+  requiredUserInfoPromptText?: string | null;
+  deliveryType?: OtherProductDeliveryType;
+  displayOrder?: number;
 }
 
 /** Minimal per-user session state. Complex conversations arrive later. */
@@ -21,6 +74,14 @@ export interface SessionData {
     editingField?: string;
     // For credential edits ("password" | "token").
     editingCredential?: "password" | "token";
+    // Category management flows.
+    categoryAdd?: CategoryAddState;
+    editingCategoryId?: string;
+    editingCategoryField?: "name" | "order";
+    // Product management flows.
+    productAdd?: ProductAddState;
+    editingProductId?: string;
+    editingProductField?: string;
     [key: string]: unknown;
   };
 }
