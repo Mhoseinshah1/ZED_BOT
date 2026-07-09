@@ -42,7 +42,10 @@ import { escapeHtml } from "../utils/html.js";
 //   - the refund is created only by the call that flips the order to FAILED,
 //     and never when a refund transaction for the order already exists;
 //   - panel usernames are deterministic per order, and the Marzban adapter
-//     recovers (not duplicates) an account left by a crashed attempt.
+//     recovers (not duplicates) an account left by a crashed attempt;
+//   - (9.1) a DB failure AFTER panel success runs a recovery ladder
+//     (existing service -> repair by username -> one retry -> refund), so
+//     the order never stays PROVISIONING without a service or a refund.
 //
 // No renewal, extra volume/time, location change, service management or
 // OtherProductOrder handling here - later phases.
@@ -283,48 +286,155 @@ export async function provisionPaidOrder(orderId: string): Promise<ProvisionOutc
     return { ok: false, refunded, error: "ساخت سرویس ناموفق بود." };
   }
 
-  const service = await prisma.$transaction(async (tx) => {
-    // Last-line duplicate guard (username is also unique per order).
-    const duplicate = await tx.service.findFirst({ where: { orderId: order.id } });
-    if (duplicate !== null) {
-      return duplicate;
-    }
-    const row = await tx.service.create({
-      data: {
-        userId: order.userId,
-        orderId: order.id,
-        panelId: panel.id,
-        productId: product.id,
-        panelType: panel.type,
-        username: created.username ?? username,
-        note,
-        status: ServiceStatus.ACTIVE,
-        serviceLocation: product.serviceLocation ?? ServiceLocation.MULTI_LOCATION,
-        productNameSnapshot: order.productNameSnapshot ?? product.name,
-        panelNameSnapshot: order.panelNameSnapshot ?? panel.name,
-        volumeBytes: volumeBytes ?? 0n,
-        usedBytes: 0n,
-        remainingBytes: volumeBytes ?? 0n,
-        durationDays,
-        startsAt: now,
-        expiresAt,
-        subscriptionUrl: created.subscriptionUrl ?? null,
-        subscriptionToken: created.subscriptionToken ?? null,
-        ...(created.configLinks !== undefined ? { configLinks: created.configLinks } : {}),
-      },
+  // The panel account now exists (or was recovered). From here on the user
+  // must end up with a recorded Service OR a refund - never a silent charge.
+  const persistService = (): Promise<Service> =>
+    prisma.$transaction(async (tx) => {
+      // Last-line duplicate guard (username is also unique per order).
+      const duplicate = await tx.service.findFirst({ where: { orderId: order.id } });
+      if (duplicate !== null) {
+        return duplicate;
+      }
+      const row = await tx.service.create({
+        data: {
+          userId: order.userId,
+          orderId: order.id,
+          panelId: panel.id,
+          productId: product.id,
+          panelType: panel.type,
+          username: created.username ?? username,
+          note,
+          status: ServiceStatus.ACTIVE,
+          serviceLocation: product.serviceLocation ?? ServiceLocation.MULTI_LOCATION,
+          productNameSnapshot: order.productNameSnapshot ?? product.name,
+          panelNameSnapshot: order.panelNameSnapshot ?? panel.name,
+          volumeBytes: volumeBytes ?? 0n,
+          usedBytes: 0n,
+          remainingBytes: volumeBytes ?? 0n,
+          durationDays,
+          startsAt: now,
+          expiresAt,
+          subscriptionUrl: created.subscriptionUrl ?? null,
+          subscriptionToken: created.subscriptionToken ?? null,
+          ...(created.configLinks !== undefined ? { configLinks: created.configLinks } : {}),
+        },
+      });
+      await tx.order.updateMany({
+        where: { id: order.id, status: OrderStatus.PROVISIONING },
+        data: { status: OrderStatus.COMPLETED, completedAt: now },
+      });
+      return row;
     });
-    await tx.order.updateMany({
-      where: { id: order.id, status: OrderStatus.PROVISIONING },
-      data: { status: OrderStatus.COMPLETED, completedAt: now },
+
+  let service: Service;
+  try {
+    service = await persistService();
+  } catch (err) {
+    // Phase 9.1: panel success + DB failure must never strand the user.
+    logger.error("provisioning persistence failed after panel success", {
+      orderId: order.id,
+      panelId: panel.id,
+      username: created.username ?? username,
+      error: errorMessage(err),
     });
-    return row;
-  });
+    return recoverOrRefundAfterPanelSuccess(order, panel, created.username ?? username, persistService);
+  }
   logger.info("provisioning succeeded", {
     orderId: order.id,
     serviceId: service.id,
     panelId: panel.id,
   });
   return { ok: true, service, alreadyExisted: false };
+}
+
+/** Completes an order that still sits in the provisioning pipeline. */
+async function completeOrder(orderId: string): Promise<void> {
+  await prisma.order.updateMany({
+    where: { id: orderId, status: { in: [OrderStatus.PAID, OrderStatus.PROVISIONING] } },
+    data: { status: OrderStatus.COMPLETED, completedAt: new Date() },
+  });
+}
+
+/**
+ * Phase 9.1: recovery ladder for "panel account exists but DB persistence
+ * threw". In order:
+ *
+ *   1. a Service for this order already exists -> complete the order, done;
+ *   2. a Service with this username exists and belongs to this user (orderId
+ *      null or this order) -> link/repair it, complete the order, done -
+ *      another user's service is never touched;
+ *   3. otherwise retry the identical persistence transaction ONCE;
+ *   4. still failing -> Order FAILED + wallet refund (panel delete/revoke is
+ *      not implemented yet, so the refund is the safe business outcome; the
+ *      possibly-orphaned panel account is logged for manual cleanup).
+ *
+ * The order is never left stuck in PROVISIONING without a service or refund.
+ */
+async function recoverOrRefundAfterPanelSuccess(
+  order: OrderForProvisioning,
+  panel: Panel,
+  username: string,
+  persistService: () => Promise<Service>,
+): Promise<ProvisionOutcome> {
+  let usernameTakenByOtherUser = false;
+  try {
+    const byOrder = await prisma.service.findFirst({ where: { orderId: order.id } });
+    if (byOrder !== null) {
+      await completeOrder(order.id);
+      return { ok: true, service: byOrder, alreadyExisted: true };
+    }
+    const byUsername = await prisma.service.findUnique({ where: { username } });
+    if (byUsername !== null) {
+      if (
+        byUsername.userId === order.userId &&
+        (byUsername.orderId === null || byUsername.orderId === order.id)
+      ) {
+        const repaired =
+          byUsername.orderId === null
+            ? await prisma.service.update({
+                where: { id: byUsername.id },
+                data: { orderId: order.id },
+              })
+            : byUsername;
+        await completeOrder(order.id);
+        logger.info("provisioning recovery: existing service repaired", {
+          orderId: order.id,
+          serviceId: repaired.id,
+        });
+        return { ok: true, service: repaired, alreadyExisted: true };
+      }
+      // Foreign service owns this username - never touch it, and a retry
+      // would hit the same unique constraint, so skip straight to refund.
+      usernameTakenByOtherUser = true;
+    }
+    if (!usernameTakenByOtherUser) {
+      // One retry of the identical transaction (covers transient DB errors).
+      const service = await persistService();
+      logger.info("provisioning persistence retry succeeded", {
+        orderId: order.id,
+        serviceId: service.id,
+      });
+      return { ok: true, service, alreadyExisted: false };
+    }
+  } catch (err) {
+    logger.error("provisioning recovery attempt failed", {
+      orderId: order.id,
+      error: errorMessage(err),
+    });
+  }
+
+  // Refund is the safe outcome; the panel account may be orphaned until an
+  // admin cleans it up manually (delete/revoke arrives in a later phase).
+  logger.warn("possible orphan panel account - manual cleanup may be needed", {
+    orderId: order.id,
+    panelId: panel.id,
+    username,
+  });
+  const refunded = await failOrderWithRefund(
+    order,
+    "service persistence failed after panel success",
+  );
+  return { ok: false, refunded, error: "ساخت سرویس ناموفق بود." };
 }
 
 /**
