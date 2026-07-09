@@ -11,6 +11,11 @@ Source: `apps/bot/src/handlers/user-renewal/`,
 `apps/bot/src/services/{renewal-checkout,service-renewal}.service.ts`,
 adapter extension in `packages/panel-adapters`.
 
+> **Phase 13 update:** the read-only wallet page
+> (`docs/user-wallet-phase13.md`) now shows the user's balance and latest
+> wallet transactions — renewal/provisioning refunds are directly visible
+> there.
+
 ## User flow
 
 `user:renew` lists renewable services (5/page, newest first): owned,

@@ -30,6 +30,7 @@ import {
   renewalTextHandler,
 } from "./handlers/user-renewal/renewal.handler.js";
 import { servicesHandler } from "./handlers/user-services/services.handler.js";
+import { walletHandler } from "./handlers/user-wallet/wallet.handler.js";
 import { pingHandler } from "./handlers/ping.handler.js";
 import { startHandler } from "./handlers/start.handler.js";
 import { termsHandler } from "./handlers/terms.handler.js";
@@ -124,6 +125,7 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(paymentHandler);
   userArea.use(servicesHandler);
   userArea.use(renewalHandler);
+  userArea.use(walletHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());
