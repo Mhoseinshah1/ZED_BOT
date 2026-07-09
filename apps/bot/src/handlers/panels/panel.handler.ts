@@ -30,6 +30,8 @@ import {
   USERNAME_PATTERNS,
 } from "./panel-views.js";
 
+const HTML = { parseMode: "HTML" as const };
+
 export const panelHandler = new Composer<BotContext>();
 
 // --- helpers -----------------------------------------------------------------
@@ -51,7 +53,7 @@ async function resolvePanel(ctx: BotContext, sid: string): Promise<Panel | null>
 }
 
 async function showDetail(ctx: BotContext, panel: Panel): Promise<void> {
-  await safeEditOrReply(ctx, panelDetailText(panel), panelDetailKeyboard(panel));
+  await safeEditOrReply(ctx, panelDetailText(panel), panelDetailKeyboard(panel), HTML);
 }
 
 // --- root menu + list --------------------------------------------------------
@@ -212,7 +214,7 @@ for (const route of PAGE_ROUTES) {
     }
     await safeAnswerCallback(ctx);
     const view = panelPageView(panel, route.page);
-    await safeEditOrReply(ctx, view.text, view.keyboard);
+    await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
   });
 }
 
@@ -224,7 +226,7 @@ panelHandler.callbackQuery(/^admin:panel:us:(.+)$/, async (ctx) => {
   }
   await safeAnswerCallback(ctx);
   const view = panelPageView(panel, "username");
-  await safeEditOrReply(ctx, view.text, view.keyboard);
+  await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
 });
 
 panelHandler.callbackQuery(/^admin:panel:up:([^:]+):(-?\d+)$/, async (ctx) => {
@@ -247,7 +249,7 @@ panelHandler.callbackQuery(/^admin:panel:up:([^:]+):(-?\d+)$/, async (ctx) => {
   const updated = await updatePanel(panel.id, { usernamePatternType: pattern });
   await safeAnswerCallback(ctx, "روش ساخت username بروزرسانی شد ✅");
   const view = panelPageView(updated, "username");
-  await safeEditOrReply(ctx, view.text, view.keyboard);
+  await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
 });
 
 // --- toggles -----------------------------------------------------------------
@@ -268,7 +270,7 @@ panelHandler.callbackQuery(/^admin:panel:tg:([^:]+):([a-z0-9]+)$/, async (ctx) =
   } as Prisma.PanelUpdateInput);
   await safeAnswerCallback(ctx, !current ? "فعال شد ✅" : "غیرفعال شد ❌");
   const view = panelPageView(updated, toggle.page === "test" ? "test" : "features");
-  await safeEditOrReply(ctx, view.text, view.keyboard);
+  await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
 });
 
 // --- field edit entry points -------------------------------------------------
@@ -422,7 +424,7 @@ async function handleAddStep(ctx: BotContext, text: string): Promise<void> {
         ? "بعداً باید تنظیمات پروتکل/اینباند/اکانت نمونه/دامنه ساب را از مدیریت پنل تکمیل کنید."
         : "بعداً باید inbound/domain/protocol settings را از مدیریت پنل تکمیل کنید.";
     await safeReply(ctx, warning);
-    await safeReply(ctx, panelDetailText(panel), panelDetailKeyboard(panel));
+    await safeReply(ctx, panelDetailText(panel), panelDetailKeyboard(panel), HTML);
   }
 }
 
@@ -440,7 +442,7 @@ async function handleEditUrl(ctx: BotContext, text: string): Promise<void> {
   const updated = await updatePanel(panelId, { baseUrl: result.value });
   clearFlow(ctx);
   await safeReply(ctx, "آدرس بروزرسانی شد ✅");
-  await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated));
+  await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated), HTML);
 }
 
 async function handleEditCredential(ctx: BotContext, text: string): Promise<void> {
@@ -461,7 +463,7 @@ async function handleEditCredential(ctx: BotContext, text: string): Promise<void
   const updated = await updatePanel(panelId, data);
   clearFlow(ctx);
   await safeReply(ctx, `${kind === "password" ? "رمز" : "توکن"} بروزرسانی شد ✅ (${maskSecretEdges(value)})`);
-  await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated));
+  await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated), HTML);
 }
 
 async function handleEditField(ctx: BotContext, text: string): Promise<void> {
@@ -488,9 +490,9 @@ async function handleEditField(ctx: BotContext, text: string): Promise<void> {
   await safeReply(ctx, `«${field.label}» بروزرسانی شد ✅`);
   // The name field belongs to the detail view; group fields return to their page.
   if (field.page === "detail") {
-    await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated));
+    await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated), HTML);
     return;
   }
   const view = panelPageView(updated, field.page);
-  await safeReply(ctx, view.text, view.keyboard);
+  await safeReply(ctx, view.text, view.keyboard, HTML);
 }

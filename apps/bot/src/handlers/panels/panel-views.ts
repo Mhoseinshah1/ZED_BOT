@@ -4,6 +4,7 @@ import { InlineKeyboard } from "grammy";
 import { cb, PANEL_CB } from "./panel-cb.js";
 import { fieldsForPage, togglesForPage, type PanelPage } from "./panel-fields.js";
 import { panelShortId } from "../../services/panel.service.js";
+import { escapeHtml } from "../../utils/html.js";
 
 const STATUS_EMOJI: Record<PanelStatus, string> = {
   ACTIVE: "🟢",
@@ -80,20 +81,21 @@ function groupsText(value: unknown): string {
   return "همه گروه‌ها";
 }
 
+// HTML parse mode: every dynamic (operator-entered) value must be escaped.
 export function panelDetailText(panel: Panel): string {
   const lines = [
-    `📋 <b>${panel.name}</b>`,
+    `📋 <b>${escapeHtml(panel.name)}</b>`,
     "",
     `نوع پنل: ${panel.type}`,
-    `آدرس: ${panel.baseUrl}`,
+    `آدرس: ${escapeHtml(panel.baseUrl)}`,
     `وضعیت: ${STATUS_EMOJI[panel.status]} ${STATUS_LABEL[panel.status]}`,
     `نمایش: ${panel.isVisible ? "قابل نمایش 👁" : "مخفی 🙈"}`,
-    `گروه‌های قابل نمایش: ${groupsText(panel.visibleForGroups)}`,
+    `گروه‌های قابل نمایش: ${escapeHtml(groupsText(panel.visibleForGroups))}`,
     `روش تمدید: ${panel.renewalMethod}`,
     `ظرفیت ساخت اکانت: ${panel.accountLimitEnabled ? (panel.accountLimitCount ?? "-") : "نامحدود"}`,
     `تعداد ساخته‌شده: ${panel.createdAccountsCount}`,
     `تعداد فعال: ${panel.activeAccountsCount}`,
-    `دامنه ساب: ${panel.subscriptionDomain ?? "-"}`,
+    `دامنه ساب: ${escapeHtml(panel.subscriptionDomain ?? "-")}`,
     `روش ساخت username: ${panel.usernamePatternType}`,
     `تست رایگان: ${yesNo(panel.testEnabled)}`,
     `تمدید: ${yesNo(panel.renewalEnabled)}`,
@@ -156,14 +158,15 @@ const PAGE_TITLE: Record<PanelPage, string> = {
   cfg: "تنظیمات پنل ⚙️",
 };
 
+// Output is embedded in HTML parse mode - everything dynamic gets escaped.
 function formatValue(value: unknown): string {
   if (value === null || value === undefined) {
     return "-";
   }
   if (typeof value === "object") {
-    return `<code>${JSON.stringify(value)}</code>`;
+    return `<code>${escapeHtml(JSON.stringify(value))}</code>`;
   }
-  return String(value);
+  return escapeHtml(value);
 }
 
 export const USERNAME_PATTERNS = [
@@ -208,7 +211,7 @@ export function panelPageView(
     kb.text(`${on ? "✅" : "❌"} ${toggle.label}`, cb.toggle(sid, toggle.key)).row();
   }
 
-  const lines = [`<b>${PAGE_TITLE[page]}</b> — ${panel.name}`, ""];
+  const lines = [`<b>${PAGE_TITLE[page]}</b> — ${escapeHtml(panel.name)}`, ""];
   if (page === "username") {
     lines.push(`روش فعلی ساخت username: ${panel.usernamePatternType}`, "");
     kb.text("تغییر روش ساخت username", cb.usernamePattern(sid, -1)).row();

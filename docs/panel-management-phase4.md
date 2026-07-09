@@ -110,6 +110,15 @@ role-based admin restrictions (any active admin manages panels), username
 generation, and use of the stored test/username/protocol settings. Other
 admin sections (finance, receipts, users, products, ...) remain placeholders.
 
+## HTML formatting (Phase 4.1)
+
+Panel detail and settings pages use Telegram HTML parse mode. `safeReply` /
+`safeEditOrReply` accept an optional `{ parseMode }` — there is **no global
+parse mode**; plain-text messages stay plain. Every dynamic value rendered
+inside HTML (panel name, base URL, sub domain, JSON settings, field values)
+is escaped with `escapeHtml` (`& < > "`), so operator-entered characters can
+never break formatting or inject markup.
+
 ## Safety rules
 
 - Credentials encrypted at rest; never logged, never shown in full.
