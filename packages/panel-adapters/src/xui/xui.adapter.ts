@@ -2,6 +2,8 @@ import type { PanelAdapter } from "../core/panel-adapter.interface.js";
 import type {
   CreateServiceAccountInput,
   CreateServiceAccountResult,
+  GetServiceAccountInput,
+  GetServiceAccountResult,
   PanelHealthResult,
 } from "../core/panel.types.js";
 import { XuiClient } from "./xui.client.js";
@@ -42,5 +44,17 @@ export class XuiAdapter implements PanelAdapter {
       errorMessage:
         "XUI create-client is not implemented in this phase (safe TODO); no account was created.",
     };
+  }
+
+  /**
+   * Phase 11: NOT implemented - the token-authenticated read-client endpoint
+   * surface must come from the Sanaei API reference (same reason as
+   * createServiceAccount). Never fakes success, never mutates the panel;
+   * callers keep showing the stored DB values.
+   *
+   * TODO(xui-sync): implement per sanaei-api.txt once available.
+   */
+  async getServiceAccount(_input: GetServiceAccountInput): Promise<GetServiceAccountResult> {
+    return { ok: false, errorMessage: "XUI service sync is not implemented yet." };
   }
 }

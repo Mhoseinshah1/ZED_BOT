@@ -12,18 +12,12 @@ import {
   type Service,
   type User,
 } from "@zedbot/database";
-import {
-  MarzbanAdapter,
-  MarzbanClient,
-  XuiAdapter,
-  XuiClient,
-  type CreateServiceAccountResult,
-  type PanelAdapter,
-} from "@zedbot/panel-adapters";
-import { decryptSecret, errorMessage } from "@zedbot/shared";
+import { type CreateServiceAccountResult } from "@zedbot/panel-adapters";
+import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
+import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 
 // =============================================================================
 // Provisioning (Phase 9): turns a PAID SERVICE_PURCHASE Order into a panel
@@ -83,37 +77,11 @@ export function generatePanelUsername(telegramId: bigint, orderId: string): stri
   return username.toLowerCase().replace(/[^a-z0-9_]/g, "_");
 }
 
-/** Decrypts credentials and builds the panel adapter. Throws on missing config. */
-function buildAdapterForPanel(panel: Panel): PanelAdapter {
-  if (panel.type === "MARZBAN") {
-    if (panel.username === null || panel.passwordEncrypted === null) {
-      throw new Error("Marzban credentials are incomplete.");
-    }
-    const password = decryptSecret(panel.passwordEncrypted);
-    return new MarzbanAdapter(
-      new MarzbanClient({ baseUrl: panel.baseUrl, username: panel.username, password }),
-    );
-  }
-  if (panel.tokenEncrypted === null) {
-    throw new Error("XUI token is missing.");
-  }
-  const token = decryptSecret(panel.tokenEncrypted);
-  return new XuiAdapter(new XuiClient({ baseUrl: panel.baseUrl, token }));
-}
-
 function parseInboundIds(raw: unknown): number[] {
   if (!Array.isArray(raw)) {
     return [];
   }
   return raw.filter((v): v is number => typeof v === "number" && Number.isInteger(v));
-}
-
-function normalizeSubscriptionBase(panel: Panel): string | null {
-  const domain = panel.subscriptionDomain?.trim() ?? "";
-  if (domain === "") {
-    return null;
-  }
-  return /^https?:\/\//i.test(domain) ? domain : `https://${domain}`;
 }
 
 /**

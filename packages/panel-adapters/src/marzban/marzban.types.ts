@@ -1,7 +1,7 @@
 // Marzban API types - minimal Phase 9 surface (token auth, read user,
 // create user). Field names follow the Marzban API reference.
 
-/** Subset of the Marzban user object used for provisioning. */
+/** Subset of the Marzban user object used for provisioning and sync. */
 export interface MarzbanUser {
   username: string;
   status?: string;
@@ -16,6 +16,12 @@ export interface MarzbanUser {
   note?: string | null;
   subscription_url?: string;
   links?: unknown[];
+  /** Bytes used (sync). */
+  used_traffic?: number | null;
+  /** Last-online timestamp; API shape varies, parsed defensively. */
+  online_at?: string | null;
+  last_online?: string | null;
+  last_connected_at?: string | null;
 }
 
 /** Payload for POST /api/user. */

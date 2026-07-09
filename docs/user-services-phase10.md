@@ -15,7 +15,7 @@ Source: `apps/bot/src/handlers/user-services/{services.handler,service-views}.ts
 | `user:services` | Entry (the existing main-menu button/`ButtonText` key `my_services`; only this placeholder route was replaced) |
 | `user:svc:list:<page>` | Paginated list (5 per page) |
 | `user:svc:view:<serviceSid>` | Service detail |
-| `user:svc:refresh:<serviceSid>` | Re-reads the row from the **database** and re-renders — answers «اطلاعات از دیتابیس بروزرسانی شد.» Panel sync is a later phase. |
+| `user:svc:refresh:<serviceSid>` | ~~DB-only re-read~~ **Phase 11:** now syncs from the panel (read-only) and re-renders — see `docs/service-sync-phase11.md`. List/detail remain read-only for user actions. |
 | `user:svc:link:<serviceSid>` | Sends the stored subscription URL |
 | `user:svc:configs:<serviceSid>` | Sends the stored config links |
 
@@ -70,6 +70,6 @@ internal fields ever reach the user.
 
 Renewal, extra volume/time, location change, enable/disable, change
 subscription link, change note, transfer, delete, rating, QR generation,
-panel usage sync (the refresh button is DB-only), Marzban/XUI API calls,
 service search by username, "username is not mine", admin service
-management, web panel, mini app.
+management, web panel, mini app. (Panel usage sync for the refresh button —
+DB-only in Phase 10 — arrived in Phase 11: `docs/service-sync-phase11.md`.)

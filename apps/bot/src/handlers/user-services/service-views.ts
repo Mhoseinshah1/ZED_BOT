@@ -129,6 +129,9 @@ export function serviceDetailText(service: Service): string {
     lines.push(`آخرین اتصال: ${formatDate(service.lastConnectedAt)}`);
   }
   lines.push(`تاریخ ساخت: ${formatDate(service.createdAt)}`);
+  if (service.lastSubscriptionUpdateAt !== null) {
+    lines.push(`آخرین بروزرسانی: ${formatDate(service.lastSubscriptionUpdateAt)}`);
+  }
   return lines.join("\n");
 }
 
