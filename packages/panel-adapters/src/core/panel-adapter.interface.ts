@@ -1,9 +1,15 @@
-import type { PanelHealthResult, PanelType } from "./panel.types.js";
+import type {
+  CreateServiceAccountInput,
+  CreateServiceAccountResult,
+  PanelHealthResult,
+  PanelType,
+} from "./panel.types.js";
 
 /**
  * Contract every VPN panel integration (Marzban, XUI/Sanaei, ...) implements.
- * Phase 4 surface: connectivity testing only. Provisioning methods (create
- * user, usage, revoke, renew, ...) are added in later phases.
+ * Phase 4 surface: connectivity testing. Phase 9 adds minimal account
+ * creation for SERVICE_PURCHASE provisioning. Delete/update/renew/revoke
+ * are later phases.
  */
 export interface PanelAdapter {
   /** Unique adapter identifier. */
@@ -15,4 +21,11 @@ export interface PanelAdapter {
    * { ok: false }. Never include credentials in the result.
    */
   testConnection(): Promise<PanelHealthResult>;
+
+  /**
+   * Creates one service account on the panel. Never throws and NEVER fakes
+   * success - unimplemented or misconfigured paths return { ok: false }
+   * with a safe internal errorMessage (no credentials).
+   */
+  createServiceAccount(input: CreateServiceAccountInput): Promise<CreateServiceAccountResult>;
 }
