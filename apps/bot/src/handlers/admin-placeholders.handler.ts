@@ -10,7 +10,7 @@ const ADMIN_SECTIONS: Array<{ callback: string; title: string }> = [
   { callback: CB.ADMIN_FINANCE, title: "مالی 💎" },
   { callback: CB.ADMIN_PANEL_FEATURES, title: "قابلیت‌های پنل 🛠" },
   { callback: CB.ADMIN_UPDATE_BOT, title: "آپدیت ربات 🆕" },
-  { callback: CB.ADMIN_RECEIPTS, title: "رسیدهای تایید نشده 💵" },
+  // admin:receipts is handled by the real receipts list (receipts.handler).
   { callback: CB.ADMIN_TUTORIALS, title: "بخش آموزش 📚" },
   { callback: CB.ADMIN_GENERAL_SETTINGS, title: "تنظیمات عمومی ⚙️" },
   { callback: CB.ADMIN_MINI_APP_SETTINGS, title: "تنظیمات مینی اپ ⚙️" },

@@ -9,8 +9,12 @@ import type { BotContext } from "../../core/context.js";
  * never cleared here (their own handlers/commands manage that).
  */
 export function clearCheckoutState(ctx: BotContext): void {
-  if (ctx.session.currentFlow === "checkout:discount") {
+  if (
+    ctx.session.currentFlow === "checkout:discount" ||
+    ctx.session.currentFlow === "payment:receipt"
+  ) {
     ctx.session.currentFlow = null;
   }
   ctx.session.temp.checkoutDraft = undefined;
+  ctx.session.temp.paymentDraft = undefined;
 }

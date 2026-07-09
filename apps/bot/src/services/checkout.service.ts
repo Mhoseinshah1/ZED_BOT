@@ -87,6 +87,14 @@ export async function createCheckoutSession(
   });
 }
 
+/** Loads a checkout by full id, enforcing ownership. */
+export async function getOwnedCheckout(
+  id: string,
+  userId: string,
+): Promise<CheckoutSession | null> {
+  return prisma.checkoutSession.findFirst({ where: { id, userId } });
+}
+
 /** Resolve a checkout by 8-char short id; ownership is enforced by userId. */
 export async function getCheckoutByShortId(
   shortId: string,
