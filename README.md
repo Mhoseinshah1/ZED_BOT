@@ -283,6 +283,15 @@ The dev processes read the same environment variables as the containers
 (`DATABASE_URL`, `REDIS_URL` or `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`,
 `TELEGRAM_BOT_TOKEN`, `API_PORT`).
 
+### Database schema
+
+The full Prisma schema (users, wallet ledger, panels, products, checkout,
+orders, payments, services, referrals, support, tutorials, broadcasts,
+logging) is documented in
+[`docs/database-schema.md`](docs/database-schema.md) — including the money
+rules (toman as `Int`, bytes as `BigInt`), the snapshot strategy, and why a
+`CheckoutSession` exists before any `Order`.
+
 ### Database migrations
 
 Migrations live in `packages/database/prisma/migrations` and are applied
