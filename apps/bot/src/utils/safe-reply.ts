@@ -4,14 +4,37 @@ import type { InlineKeyboard } from "grammy";
 import type { BotContext } from "../core/context.js";
 import { logger } from "../core/logger.js";
 
+export interface ReplyOptions {
+  /**
+   * Telegram parse mode. Only set this when the text is guaranteed valid
+   * for that mode (dynamic values escaped, e.g. with escapeHtml for "HTML").
+   * There is deliberately no global default - plain text stays plain.
+   */
+  parseMode?: "HTML" | "MarkdownV2";
+}
+
+function buildOther(
+  keyboard?: InlineKeyboard,
+  options?: ReplyOptions,
+): { reply_markup?: InlineKeyboard; parse_mode?: "HTML" | "MarkdownV2" } | undefined {
+  if (keyboard === undefined && options?.parseMode === undefined) {
+    return undefined;
+  }
+  return {
+    ...(keyboard === undefined ? {} : { reply_markup: keyboard }),
+    ...(options?.parseMode === undefined ? {} : { parse_mode: options.parseMode }),
+  };
+}
+
 /** Replies without ever throwing (blocked users, closed chats, ...). */
 export async function safeReply(
   ctx: BotContext,
   text: string,
   keyboard?: InlineKeyboard,
+  options?: ReplyOptions,
 ): Promise<void> {
   try {
-    await ctx.reply(text, keyboard === undefined ? undefined : { reply_markup: keyboard });
+    await ctx.reply(text, buildOther(keyboard, options));
   } catch (err) {
     logger.debug("reply failed", { error: errorMessage(err) });
   }
@@ -38,11 +61,11 @@ export async function safeEditOrReply(
   ctx: BotContext,
   text: string,
   keyboard?: InlineKeyboard,
+  options?: ReplyOptions,
 ): Promise<void> {
-  const markup = keyboard === undefined ? undefined : { reply_markup: keyboard };
   if (ctx.callbackQuery?.message !== undefined) {
     try {
-      await ctx.editMessageText(text, markup);
+      await ctx.editMessageText(text, buildOther(keyboard, options));
       return;
     } catch (err) {
       logger.debug("editMessageText failed, falling back to reply", {
@@ -50,5 +73,5 @@ export async function safeEditOrReply(
       });
     }
   }
-  await safeReply(ctx, text, keyboard);
+  await safeReply(ctx, text, keyboard, options);
 }
