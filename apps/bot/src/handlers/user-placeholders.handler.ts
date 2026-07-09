@@ -9,8 +9,9 @@ import { safeAnswerCallback, safeEditOrReply } from "../utils/safe-reply.js";
 export const PLACEHOLDER_TEXT = "این بخش در فاز بعدی تکمیل می‌شود.";
 
 // callback -> ButtonText key used as the section title.
+// user:buy and user:other_products are handled by the real checkout flow
+// (handlers/user-checkout); everything else stays placeholder in this phase.
 const USER_SECTIONS: Array<{ callback: string; buttonKey: string }> = [
-  { callback: CB.USER_BUY, buttonKey: "buy_subscription" },
   { callback: CB.USER_RENEW, buttonKey: "renew_service" },
   { callback: CB.USER_SERVICES, buttonKey: "my_services" },
   { callback: CB.USER_WALLET, buttonKey: "wallet" },
@@ -21,7 +22,6 @@ const USER_SECTIONS: Array<{ callback: string; buttonKey: string }> = [
   { callback: CB.USER_SUPPORT, buttonKey: "support" },
   { callback: CB.USER_PRICING, buttonKey: "pricing" },
   { callback: CB.USER_REPRESENTATIVE, buttonKey: "representative_request" },
-  { callback: CB.USER_OTHER_PRODUCTS, buttonKey: "other_products" },
 ];
 
 /** Every user menu button opens a placeholder page in this phase. */
