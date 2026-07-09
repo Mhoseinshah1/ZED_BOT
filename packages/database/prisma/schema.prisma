@@ -7,13 +7,15 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// OWNER            = full access
+// SELLER           = seller / admin operator
+// SUPPORT          = support operator
+// RECEIPT_REVIEWER = payment receipt reviewer
 enum AdminRole {
   OWNER
-  SUPER_ADMIN
+  SELLER
   SUPPORT
-  PAYMENT_MANAGER
-  PRODUCT_MANAGER
-  REPORT_VIEWER
+  RECEIPT_REVIEWER
 }
 
 enum SettingType {

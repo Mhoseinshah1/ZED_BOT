@@ -61,22 +61,25 @@ require_root() {
 require_ubuntu() {
   local os_id os_version os_pretty
   if [ ! -r /etc/os-release ]; then
-    log_error "Cannot detect the operating system. ZED_BOT supports Ubuntu 22.04 and 24.04."
+    log_error "Cannot detect the operating system. ZED_BOT supports Ubuntu 24.04 and 26.04."
     exit 1
   fi
   os_id="$(. /etc/os-release && printf '%s' "${ID:-}")"
   os_version="$(. /etc/os-release && printf '%s' "${VERSION_ID:-}")"
   os_pretty="$(. /etc/os-release && printf '%s' "${PRETTY_NAME:-unknown}")"
   if [ "$os_id" != "ubuntu" ]; then
-    log_error "Unsupported OS: ${os_pretty}. ZED_BOT supports Ubuntu 22.04 and 24.04."
+    log_error "Unsupported OS: ${os_pretty}. ZED_BOT supports Ubuntu 24.04 and 26.04."
     exit 1
   fi
   case "$os_version" in
-    22.04 | 24.04 | 26.04)
+    24.04 | 26.04)
       log_info "Detected supported OS: ${os_pretty}"
       ;;
+    22.04)
+      log_warn "Detected ${os_pretty}. Ubuntu 22.04 is supported on a best-effort basis only; the primary targets are 24.04 and 26.04."
+      ;;
     *)
-      log_warn "Detected ${os_pretty}. Officially supported: Ubuntu 24.04 / 26.04 (22.04 also works). Continuing anyway."
+      log_warn "Detected ${os_pretty}. Primary supported versions: Ubuntu 24.04 / 26.04. Continuing anyway."
       ;;
   esac
 }

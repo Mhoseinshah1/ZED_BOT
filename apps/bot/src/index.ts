@@ -25,6 +25,11 @@ if (token === "") {
 async function run(botToken: string): Promise<void> {
   const bot = new Bot(botToken);
 
+  // Phase 1 placeholder: /start only confirms the installation works and
+  // /ping answers pong. No menus, purchases, wallets or admin flows exist
+  // yet. The user upsert below is TEMPORARY smoke-test behaviour proving the
+  // bot -> database path; the real registration flow replaces it in a later
+  // phase.
   bot.command("start", async (ctx) => {
     const from = ctx.from;
     if (from === undefined) {

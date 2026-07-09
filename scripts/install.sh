@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ZED_BOT installer for Ubuntu 22.04 / 24.04
+# ZED_BOT installer for Ubuntu 24.04 / 26.04
+# (Ubuntu 22.04 is accepted on a best-effort basis only.)
 #
 # Usage (as root):
 #   bash <(curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/ZED_BOT/main/scripts/install.sh)
@@ -77,22 +78,26 @@ require_root() {
 require_ubuntu() {
   local os_id os_version os_pretty
   if [ ! -r /etc/os-release ]; then
-    log_error "Cannot detect the operating system. ZED_BOT supports Ubuntu 22.04 and 24.04."
+    log_error "Cannot detect the operating system. ZED_BOT supports Ubuntu 24.04 and 26.04."
     exit 1
   fi
   os_id="$(. /etc/os-release && printf '%s' "${ID:-}")"
   os_version="$(. /etc/os-release && printf '%s' "${VERSION_ID:-}")"
   os_pretty="$(. /etc/os-release && printf '%s' "${PRETTY_NAME:-unknown}")"
   if [ "$os_id" != "ubuntu" ]; then
-    log_error "Unsupported OS: ${os_pretty}. ZED_BOT supports Ubuntu 22.04 and 24.04."
+    log_error "Unsupported OS: ${os_pretty}. ZED_BOT supports Ubuntu 24.04 and 26.04."
     exit 1
   fi
   case "$os_version" in
-    22.04 | 24.04 | 26.04)
+    24.04 | 26.04)
       log_info "Detected supported OS: ${os_pretty}"
       ;;
+    22.04)
+      log_warn "Detected ${os_pretty}. Ubuntu 22.04 is supported on a best-effort basis only;"
+      log_warn "the primary targets are Ubuntu 24.04 and 26.04. Continuing."
+      ;;
     *)
-      log_warn "Detected ${os_pretty}. ZED_BOT supports Ubuntu 24.04 and 26.04 (22.04 also works)."
+      log_warn "Detected ${os_pretty}. ZED_BOT supports Ubuntu 24.04 and 26.04."
       if ! confirm "Continue on this unsupported Ubuntu version anyway?" "n"; then
         log_error "Installation cancelled: unsupported Ubuntu version."
         exit 1

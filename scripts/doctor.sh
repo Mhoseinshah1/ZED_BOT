@@ -125,7 +125,7 @@ main() {
   printf '  %-6s %s\n' "------" "-----------------------------------------"
 
   # Core system
-  optional_check "OS is Ubuntu" "only Ubuntu 22.04/24.04 are supported" check_ubuntu
+  optional_check "OS is Ubuntu" "primary supported versions are Ubuntu 24.04/26.04" check_ubuntu
   core_check "Docker installed" has_command docker
   core_check "Docker daemon running" docker info
   core_check "Docker Compose available" check_compose_available
