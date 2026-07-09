@@ -1,15 +1,27 @@
+import { errorMessage } from "@zedbot/shared";
 import { Composer } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
+import { logger } from "../../core/logger.js";
+import {
+  createWalletTopupCheckout,
+  parseTopupAmount,
+  walletTopupLimits,
+} from "../../services/wallet-topup.service.js";
 import {
   getWalletSummary,
   listWalletTransactions,
 } from "../../services/wallet.service.js";
-import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
+import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
+import { clearCheckoutState } from "../user-checkout/checkout-state.js";
+import { showPaymentMethods } from "../user-checkout/payment.handler.js";
 import {
-  topupPlaceholderKeyboard,
-  TOPUP_PLACEHOLDER_TEXT,
+  formatToman,
+  topupAmountKeyboard,
+  TOPUP_AMOUNT_PROMPT,
+  topupPreInvoiceKeyboard,
+  topupPreInvoiceText,
   transactionHistoryKeyboard,
   transactionHistoryText,
   WALLET_CB,
@@ -18,21 +30,31 @@ import {
 } from "./wallet-views.js";
 
 // =============================================================================
-// "کیف پول + شارژ 🏦" (Phase 13) - strictly READ-ONLY wallet/profile page.
-// No payment, no checkout, no wallet mutation; the top-up button is a
-// placeholder that never asks for an amount. Everything is scoped to
-// ctx.dbUser.id - other users' data is unreachable.
+// "کیف پول + شارژ 🏦" (Phase 13 read-only page + Phase 14 top-up flow).
+// The top-up browse steps write nothing; the WALLET_CHARGE CheckoutSession
+// is created only on "ادامه و انتخاب روش پرداخت ✅" and then reuses the
+// shared Phase 7 payment-method/card-to-card/receipt surface. The balance
+// itself moves only when an admin approves the receipt (Phase 14 approval).
 // =============================================================================
 
 const HTML = { parseMode: "HTML" as const };
 
 export const walletHandler = new Composer<BotContext>();
 
+/** Leaves the top-up flow (if any) without touching other flows. */
+function clearTopupState(ctx: BotContext): void {
+  if (ctx.session.currentFlow === "wallet:topup:amount") {
+    ctx.session.currentFlow = null;
+  }
+  ctx.session.temp.walletTopupDraft = undefined;
+}
+
 async function renderWallet(ctx: BotContext, answer?: string): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     return;
   }
+  clearTopupState(ctx);
   const summary = await getWalletSummary(user.id);
   await safeAnswerCallback(ctx, answer);
   await safeEditOrReply(ctx, walletSummaryText(summary), walletMainKeyboard(), HTML);
@@ -63,11 +85,98 @@ walletHandler.callbackQuery(/^user:wallet:tx:(\d+)$/, async (ctx) => {
   );
 });
 
-// Phase 13: top-up is a placeholder - no amount, no payment, no writes.
+// --- top-up flow (Phase 14) ---------------------------------------------------------
+
 walletHandler.callbackQuery(WALLET_CB.TOPUP, async (ctx) => {
   if (ctx.dbUser === null) {
     return;
   }
+  clearCheckoutState(ctx);
+  ctx.session.currentFlow = "wallet:topup:amount";
+  ctx.session.temp.walletTopupDraft = {};
   await safeAnswerCallback(ctx);
-  await safeEditOrReply(ctx, TOPUP_PLACEHOLDER_TEXT, topupPlaceholderKeyboard());
+  await safeEditOrReply(ctx, TOPUP_AMOUNT_PROMPT, topupAmountKeyboard());
+});
+
+walletHandler.callbackQuery(WALLET_CB.TOPUP_CANCEL, async (ctx) => {
+  clearTopupState(ctx);
+  await renderWallet(ctx, "لغو شد.");
+});
+
+// The ONLY write of the flow: the WALLET_CHARGE CheckoutSession.
+walletHandler.callbackQuery(WALLET_CB.TOPUP_CONTINUE, async (ctx) => {
+  const user = ctx.dbUser;
+  const amount = ctx.session.temp.walletTopupDraft?.amountToman;
+  if (user === null || amount === undefined) {
+    await safeAnswerCallback(ctx, "مبلغ در دسترس نیست؛ لطفاً دوباره شروع کنید.");
+    return;
+  }
+  const limits = await walletTopupLimits();
+  if (amount < limits.minToman || amount > limits.maxToman) {
+    clearTopupState(ctx);
+    await safeAnswerCallback(ctx, "مبلغ وارد شده معتبر نیست.");
+    return;
+  }
+  try {
+    const checkout = await createWalletTopupCheckout(user, amount);
+    clearCheckoutState(ctx);
+    await safeAnswerCallback(ctx, "ثبت شد ✅");
+    await showPaymentMethods(ctx, checkout, { created: true });
+    logger.info("wallet topup checkout created", {
+      checkoutId: checkout.id,
+      userId: user.id,
+      amountToman: amount,
+    });
+  } catch (err) {
+    logger.error("wallet topup checkout failed", { error: errorMessage(err) });
+    await safeAnswerCallback(ctx);
+    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.");
+  }
+});
+
+// =============================================================================
+// Top-up amount text input ("wallet:topup:amount", routed in app.ts).
+// =============================================================================
+
+export const walletTopupTextHandler = new Composer<BotContext>();
+
+walletTopupTextHandler.on("message:text", async (ctx, next) => {
+  if (ctx.session.currentFlow !== "wallet:topup:amount") {
+    return next();
+  }
+  const text = ctx.message.text;
+  // Commands cancel the top-up flow and continue normally.
+  if (text.startsWith("/")) {
+    clearTopupState(ctx);
+    return next();
+  }
+  const user = ctx.dbUser;
+  const draft = ctx.session.temp.walletTopupDraft;
+  if (user === null || draft === undefined) {
+    clearTopupState(ctx);
+    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره از کیف پول شروع کنید.");
+    return;
+  }
+  const amount = parseTopupAmount(text);
+  if (amount === null) {
+    await safeReply(ctx, "مبلغ وارد شده معتبر نیست.");
+    return;
+  }
+  const limits = await walletTopupLimits();
+  if (amount < limits.minToman) {
+    await safeReply(ctx, `حداقل مبلغ شارژ کیف پول ${formatToman(limits.minToman)} است.`);
+    return;
+  }
+  if (amount > limits.maxToman) {
+    await safeReply(ctx, `حداکثر مبلغ شارژ کیف پول ${formatToman(limits.maxToman)} است.`);
+    return;
+  }
+  draft.amountToman = amount;
+  ctx.session.currentFlow = null;
+  await safeReply(
+    ctx,
+    topupPreInvoiceText(amount, user.balanceToman),
+    topupPreInvoiceKeyboard(),
+    HTML,
+  );
 });

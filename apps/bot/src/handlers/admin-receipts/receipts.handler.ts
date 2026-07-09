@@ -27,6 +27,7 @@ import {
   REJECT_REASON_MAX,
   rejectionUserNotice,
   rejectReceiptPayment,
+  walletTopupSuccessNotice,
 } from "../../services/receipt-review.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
@@ -252,16 +253,18 @@ receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
         ? "فایل/عکس (فایل رسید ثبت شده است)"
         : "متن";
 
+  const isWalletTopup = payment.purpose === "WALLET_CHARGE";
   const lines = [
     `🧾 <b>رسید ${escapeHtml(paymentShortId(payment))}</b>`,
     "",
+    `نوع پرداخت: ${isWalletTopup ? "شارژ کیف پول 🏦" : "پرداخت سفارش"}`,
     `وضعیت: ${escapeHtml(statusLabel(payment.status))}`,
     `کاربر: ${escapeHtml(userLabel(payment))} | <code>${payment.user.telegramId}</code>`,
     `نام: ${escapeHtml([payment.user.firstName, payment.user.lastName].filter(Boolean).join(" ") || "-")}`,
     `مبلغ: <b>${formatToman(payment.amountToman)}</b>`,
     `درگاه: ${escapeHtml(payment.gateway?.name ?? "-")} (${payment.gateway?.type ?? "-"})`,
     `پیش‌فاکتور: <code>${escapeHtml(payment.checkoutSessionId?.slice(0, 8) ?? "-")}</code>`,
-    `محصول: ${escapeHtml(String(snapshot.productName ?? "-"))}`,
+    ...(isWalletTopup ? [] : [`محصول: ${escapeHtml(String(snapshot.productName ?? "-"))}`]),
     `نوع رسید: ${receiptKind}`,
   ];
   if (receipt?.text != null && receipt.text !== "") {
@@ -329,13 +332,28 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       return;
     }
     await safeAnswerCallback(ctx, "تایید شد ✅");
+
+    // Notifications go out after the transaction; failures never roll back.
+    if (result.kind === "WALLET_TOPUP") {
+      // Phase 14: the balance already moved inside the approval transaction.
+      logger.info("wallet topup approved", {
+        paymentId: result.payment.id,
+        adminId: admin.id,
+      });
+      await notifyUserSafe(
+        ctx,
+        result.user,
+        walletTopupSuccessNotice(result.amountToman, result.newBalanceToman),
+      );
+      await safeEditOrReply(ctx, result.message, backKeyboard());
+      return;
+    }
+
     logger.info("receipt approved", {
       paymentId: result.payment.id,
       orderId: result.order.id,
       adminId: admin.id,
     });
-
-    // Notifications go out after the transaction; failures never roll back.
     if (result.orderType === OrderType.SERVICE_PURCHASE) {
       // Phase 9: provision the PAID order right away (synchronously).
       await safeEditOrReply(
@@ -440,7 +458,11 @@ receiptReviewTextHandler.on("message:text", async (ctx, next) => {
       return;
     }
     logger.info("receipt rejected", { paymentId: result.payment.id, adminId: admin.id });
-    const notified = await notifyUserSafe(ctx, result.user, rejectionUserNotice(result.reason));
+    const notified = await notifyUserSafe(
+      ctx,
+      result.user,
+      rejectionUserNotice(result.reason, result.payment.purpose),
+    );
     await safeReply(
       ctx,
       notified ? result.message : "رسید رد شد ❌\nاما ارسال پیام به کاربر ناموفق بود.",

@@ -281,7 +281,11 @@ paymentReceiptHandler.on("message", async (ctx, next) => {
       checkoutSessionId: checkout.id,
       userId: user.id,
     });
-    await safeReply(ctx, "رسید شما ثبت شد و در انتظار بررسی است ✅", receiptRegisteredKeyboard());
+    const submittedText =
+      checkout.purpose === "WALLET_CHARGE"
+        ? "رسید شارژ کیف پول شما ثبت شد و در انتظار بررسی است."
+        : "رسید شما ثبت شد و در انتظار بررسی است ✅";
+    await safeReply(ctx, submittedText, receiptRegisteredKeyboard());
   } catch (err) {
     clearCheckoutState(ctx);
     logger.error("receipt submission failed", { error: errorMessage(err) });

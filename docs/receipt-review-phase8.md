@@ -15,6 +15,12 @@ leaves a `PAID` Order behind.
 > `docs/provisioning-phase9.md`. `OTHER_PRODUCT` orders are still not
 > provisioned or delivered.
 
+> **Phase 14 update:** receipt review now also covers `WALLET_CHARGE`
+> (wallet top-up) payments — approval increases the user's wallet balance
+> and creates a CHARGE WalletTransaction and does **NOT** create an Order;
+> see `docs/wallet-topup-phase14.md`. Order payments keep the exact
+> behavior documented here.
+
 Source: `apps/bot/src/services/receipt-review.service.ts`,
 `apps/bot/src/handlers/admin-receipts/receipts.handler.ts`.
 

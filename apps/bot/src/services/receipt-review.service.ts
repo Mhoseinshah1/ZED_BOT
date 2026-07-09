@@ -5,13 +5,18 @@ import {
   PaymentPurpose,
   PaymentStatus,
   prisma,
+  WalletTransactionSource,
+  WalletTransactionType,
   type Admin,
   type CheckoutSession,
   type ManualReceipt,
   type Order,
   type Payment,
   type User,
+  type WalletTransaction,
 } from "@zedbot/database";
+
+import { WALLET_TOPUP_REASON } from "./wallet-topup.service.js";
 
 // =============================================================================
 // Receipt review (Phase 8): approve / reject PENDING_REVIEW card-to-card
@@ -50,7 +55,25 @@ export type PaymentForReview = Payment & {
 };
 
 export type ApproveReceiptResult =
-  | { ok: true; payment: Payment; order: Order; user: User; orderType: OrderType; message: string }
+  | {
+      ok: true;
+      kind: "ORDER_PAYMENT";
+      payment: Payment;
+      order: Order;
+      user: User;
+      orderType: OrderType;
+      message: string;
+    }
+  | {
+      ok: true;
+      kind: "WALLET_TOPUP";
+      payment: Payment;
+      user: User;
+      walletTransaction: WalletTransaction;
+      amountToman: number;
+      newBalanceToman: number;
+      message: string;
+    }
   | { ok: false; error: string };
 
 export type RejectReceiptResult =
@@ -70,7 +93,11 @@ class ReviewAbortError extends Error {
 
 async function loadReviewPayment(paymentId: string): Promise<PaymentForReview | null> {
   return prisma.payment.findFirst({
-    where: { id: paymentId, purpose: PaymentPurpose.ORDER_PAYMENT },
+    where: {
+      id: paymentId,
+      // Reviewable purposes: orders (Phase 8) and wallet top-ups (Phase 14).
+      purpose: { in: [PaymentPurpose.ORDER_PAYMENT, PaymentPurpose.WALLET_CHARGE] },
+    },
     include: { user: true, checkoutSession: true, receipts: true },
   });
 }
@@ -114,11 +141,27 @@ export function approvalUserNotice(orderType: OrderType): string {
 }
 
 /** Customer-facing rejection notice carrying the admin's exact reason. */
-export function rejectionUserNotice(reason: string): string {
+export function rejectionUserNotice(
+  reason: string,
+  purpose: PaymentPurpose = PaymentPurpose.ORDER_PAYMENT,
+): string {
+  const head =
+    purpose === PaymentPurpose.WALLET_CHARGE
+      ? "رسید شارژ کیف پول شما رد شد ❌"
+      : "رسید پرداخت شما رد شد ❌";
   return (
-    "رسید پرداخت شما رد شد ❌\n\n" +
+    `${head}\n\n` +
     `دلیل رد:\n${reason}\n\n` +
     "لطفاً در صورت نیاز دوباره پرداخت را انجام دهید یا با پشتیبانی تماس بگیرید."
+  );
+}
+
+/** Customer-facing wallet top-up success notice. */
+export function walletTopupSuccessNotice(amountToman: number, newBalanceToman: number): string {
+  return (
+    "شارژ کیف پول شما تایید شد ✅\n\n" +
+    `مبلغ شارژ: ${amountToman.toLocaleString("en-US")} تومان\n` +
+    `موجودی جدید: ${newBalanceToman.toLocaleString("en-US")} تومان`
   );
 }
 
@@ -167,6 +210,13 @@ export async function approveReceiptPayment(
   }
 
   const now = new Date();
+
+  // Phase 14: wallet top-ups share every validation above but follow their
+  // own approval path - balance moves, NO Order/provisioning/discount.
+  if (payment.purpose === PaymentPurpose.WALLET_CHARGE) {
+    return approveWalletTopup(payment, checkout, admin, now);
+  }
+
   const snapshot = (checkout.productSnapshot ?? {}) as Record<string, unknown>;
   const orderType = resolveOrderType(checkout, snapshot);
 
@@ -284,11 +334,115 @@ export async function approveReceiptPayment(
 
     return {
       ok: true,
+      kind: "ORDER_PAYMENT",
       payment,
       order,
       user: payment.user,
       orderType,
       message: "رسید تایید شد ✅\n\nOrder ساخته شد.\nساخت سرویس/تحویل در فاز بعدی انجام می‌شود.",
+    };
+  } catch (err) {
+    if (err instanceof ReviewAbortError) {
+      return { ok: false, error: err.userError };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Wallet top-up approval (Phase 14): in ONE transaction the payment/receipt
+ * flip APPROVED, the checkout flips PAID, the user's balanceToman +
+ * totalChargedToman increase and exactly one CHARGE WalletTransaction is
+ * created (guarded by relatedPaymentId + reason, so a re-run or pathological
+ * state can never double-increment). Because everything commits together,
+ * an approved wallet payment always has its transaction - no partial state.
+ * NO Order, NO provisioning, NO discount finalization.
+ */
+async function approveWalletTopup(
+  payment: PaymentForReview,
+  checkout: CheckoutSession,
+  admin: Admin,
+  now: Date,
+): Promise<ApproveReceiptResult> {
+  try {
+    const { walletTransaction, newBalanceToman } = await prisma.$transaction(async (tx) => {
+      const flipped = await tx.payment.updateMany({
+        where: {
+          id: payment.id,
+          status: PaymentStatus.PENDING_REVIEW,
+          purpose: PaymentPurpose.WALLET_CHARGE,
+        },
+        data: {
+          status: PaymentStatus.APPROVED,
+          paidAt: now,
+          reviewedAt: now,
+          reviewedByAdminId: admin.id,
+        },
+      });
+      if (flipped.count === 0) {
+        throw new ReviewAbortError(ALREADY_REVIEWED);
+      }
+      const receiptsFlipped = await tx.manualReceipt.updateMany({
+        where: { paymentId: payment.id, status: PaymentStatus.PENDING_REVIEW },
+        data: {
+          status: PaymentStatus.APPROVED,
+          reviewedAt: now,
+          reviewedByAdminId: admin.id,
+        },
+      });
+      if (receiptsFlipped.count === 0) {
+        throw new ReviewAbortError(NO_PENDING_RECEIPT);
+      }
+      const checkoutFlipped = await tx.checkoutSession.updateMany({
+        where: { id: checkout.id, status: CheckoutStatus.PENDING },
+        data: { status: CheckoutStatus.PAID, paidAt: now },
+      });
+      if (checkoutFlipped.count === 0) {
+        throw new ReviewAbortError(CHECKOUT_NOT_PENDING);
+      }
+
+      // Idempotency net: never a second CHARGE for the same payment.
+      const existing = await tx.walletTransaction.findFirst({
+        where: { relatedPaymentId: payment.id, reason: WALLET_TOPUP_REASON },
+      });
+      if (existing !== null) {
+        return { walletTransaction: existing, newBalanceToman: existing.balanceAfterToman };
+      }
+
+      const freshUser = await tx.user.findUniqueOrThrow({ where: { id: payment.userId } });
+      const balanceBefore = freshUser.balanceToman;
+      const balanceAfter = balanceBefore + payment.amountToman;
+      await tx.user.update({
+        where: { id: payment.userId },
+        data: {
+          balanceToman: { increment: payment.amountToman },
+          totalChargedToman: { increment: payment.amountToman },
+        },
+      });
+      const created = await tx.walletTransaction.create({
+        data: {
+          userId: payment.userId,
+          amountToman: payment.amountToman,
+          type: WalletTransactionType.CHARGE,
+          source: WalletTransactionSource.USER_PAYMENT,
+          reason: WALLET_TOPUP_REASON,
+          relatedPaymentId: payment.id,
+          balanceBeforeToman: balanceBefore,
+          balanceAfterToman: balanceAfter,
+        },
+      });
+      return { walletTransaction: created, newBalanceToman: balanceAfter };
+    });
+
+    return {
+      ok: true,
+      kind: "WALLET_TOPUP",
+      payment,
+      user: payment.user,
+      walletTransaction,
+      amountToman: payment.amountToman,
+      newBalanceToman,
+      message: "رسید شارژ کیف پول تایید شد ✅\nموجودی کاربر افزایش یافت.",
     };
   } catch (err) {
     if (err instanceof ReviewAbortError) {

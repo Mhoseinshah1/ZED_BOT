@@ -88,6 +88,11 @@ export interface RenewalDraft {
   finalPriceToman: number;
 }
 
+/** Wallet top-up draft (Phase 14). No DB rows until "continue". */
+export interface WalletTopupDraft {
+  amountToman?: number;
+}
+
 /** Card-to-card payment context while the user views the card / sends a receipt. */
 export interface PaymentDraft {
   checkoutSessionId: string;
@@ -121,6 +126,8 @@ export interface SessionData {
     checkoutDraft?: CheckoutDraft;
     // Renewal pre-invoice draft (Phase 12).
     renewalDraft?: RenewalDraft;
+    // Wallet top-up draft (Phase 14).
+    walletTopupDraft?: WalletTopupDraft;
     // Card-to-card payment / receipt-upload context.
     paymentDraft?: PaymentDraft;
     // Admin receipt review: payment awaiting a rejection reason ("receipt:reject").

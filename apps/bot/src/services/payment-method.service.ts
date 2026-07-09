@@ -151,13 +151,16 @@ export async function submitReceipt(
     method: "CARD_TO_CARD",
     ...(cardAccountId === undefined ? {} : { cardAccountId }),
   };
+  // The payment mirrors the checkout's purpose: wallet top-ups (Phase 14)
+  // carry WALLET_CHARGE, everything else stays ORDER_PAYMENT.
+  const purpose = checkout.purpose === "WALLET_CHARGE" ? "WALLET_CHARGE" : "ORDER_PAYMENT";
   const payment = await prisma.$transaction(async (tx) => {
     const created = await tx.payment.create({
       data: {
         userId: user.id,
         checkoutSessionId: checkout.id,
         gatewayId,
-        purpose: "ORDER_PAYMENT",
+        purpose,
         status: PaymentStatus.PENDING_REVIEW,
         amountToman: checkout.finalPriceToman,
         payableAmountToman: checkout.finalPriceToman,
