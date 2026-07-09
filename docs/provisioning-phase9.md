@@ -112,6 +112,30 @@ default MULTI_LOCATION), `productNameSnapshot`, `panelNameSnapshot`,
 them. A Service is never duplicated for the same order (checked before
 starting and re-checked inside the creation transaction).
 
+## Persistence failure after panel success (Phase 9.1)
+
+The adapter succeeding means a panel account exists — if the Service/Order
+database transaction then throws, the user must still end up with a recorded
+Service or a refund. The persistence block is wrapped in try/catch; on
+failure it logs `provisioning persistence failed after panel success`
+(orderId, panelId, username, safe error — never subscription URLs, config
+links or raw responses) and runs `recoverOrRefundAfterPanelSuccess`:
+
+1. A `Service` for this `orderId` now exists → complete the order, return it.
+2. A `Service` with the generated username exists **and belongs to this
+   user** (`orderId` null → link it to this order; `orderId` = this order →
+   as-is) → complete the order, return it. A service owned by another user
+   is never touched (and a retry is skipped — it would hit the same unique
+   constraint).
+3. Otherwise the identical persistence transaction is retried **once**
+   (covers transient DB errors; all data is still in hand).
+4. Still failing → `Order FAILED` + wallet refund via the standard
+   idempotent refund path, plus a `possible orphan panel account` warning —
+   panel delete/revoke is not implemented yet, so the refund is the safe
+   business outcome and the admin can clean the panel account up manually.
+
+The order is never left stuck in `PROVISIONING` without a service or refund.
+
 ## Refund on failure
 
 One transaction in `failOrderWithRefund`:
