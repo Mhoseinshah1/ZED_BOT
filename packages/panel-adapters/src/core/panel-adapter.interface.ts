@@ -1,4 +1,6 @@
 import type {
+  AddServiceVolumeInput,
+  AddServiceVolumeResult,
   CreateServiceAccountInput,
   CreateServiceAccountResult,
   GetServiceAccountInput,
@@ -46,4 +48,11 @@ export interface PanelAdapter {
    * username, never fakes success - unclear endpoints return { ok: false }.
    */
   renewServiceAccount(input: RenewServiceAccountInput): Promise<RenewServiceAccountResult>;
+
+  /**
+   * Adds purchased volume to one EXISTING account: new (larger) total quota
+   * on the same username with the expiry passed through unchanged. Same
+   * contract: never delete/recreate, never rename, never fake success.
+   */
+  addServiceVolume(input: AddServiceVolumeInput): Promise<AddServiceVolumeResult>;
 }

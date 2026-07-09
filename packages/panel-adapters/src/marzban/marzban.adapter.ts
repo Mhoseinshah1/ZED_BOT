@@ -1,5 +1,7 @@
 import type { PanelAdapter } from "../core/panel-adapter.interface.js";
 import type {
+  AddServiceVolumeInput,
+  AddServiceVolumeResult,
   CreateServiceAccountInput,
   CreateServiceAccountResult,
   GetServiceAccountInput,
@@ -232,6 +234,21 @@ export class MarzbanAdapter implements PanelAdapter {
       result.lastConnectedAt = lastConnected;
     }
     return result;
+  }
+
+  /**
+   * Extra volume (Phase 16) uses the exact same documented endpoints and
+   * semantics as renewal - reset usage, then PUT the new data_limit while
+   * passing the UNCHANGED expiry - so it delegates to renewServiceAccount.
+   */
+  async addServiceVolume(input: AddServiceVolumeInput): Promise<AddServiceVolumeResult> {
+    return this.renewServiceAccount({
+      username: input.username,
+      totalBytes: input.totalBytes,
+      expiresAt: input.expiresAt,
+      note: input.note,
+      subscriptionBaseUrl: input.subscriptionBaseUrl,
+    });
   }
 
   /**

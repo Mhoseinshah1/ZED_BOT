@@ -92,6 +92,21 @@ export interface RenewalDraft {
   draftNonce?: string;
 }
 
+/** Extra-volume pre-invoice draft (Phase 16). No DB rows until continue/wallet confirm. */
+export interface ExtraVolumeDraft {
+  serviceId: string;
+  productId: string;
+  panelId: string;
+  categoryId: string;
+  discountCode?: string;
+  discountCodeId?: string;
+  originalPriceToman: number;
+  discountAmountToman: number;
+  finalPriceToman: number;
+  /** Unique per pre-invoice; wallet-payment idempotency key. */
+  draftNonce?: string;
+}
+
 /** Wallet top-up draft (Phase 14). No DB rows until "continue". */
 export interface WalletTopupDraft {
   amountToman?: number;
@@ -132,6 +147,8 @@ export interface SessionData {
     renewalDraft?: RenewalDraft;
     // Wallet top-up draft (Phase 14).
     walletTopupDraft?: WalletTopupDraft;
+    // Extra-volume pre-invoice draft (Phase 16).
+    extraVolumeDraft?: ExtraVolumeDraft;
     // Card-to-card payment / receipt-upload context.
     paymentDraft?: PaymentDraft;
     // Admin receipt review: payment awaiting a rejection reason ("receipt:reject").

@@ -101,6 +101,19 @@ export interface RenewServiceAccountInput {
   subscriptionBaseUrl?: string | null;
 }
 
+/**
+ * Input for adding purchased volume to ONE existing account (Phase 16).
+ * totalBytes is the NEW total quota (never null - extra volume is only sold
+ * for finite-volume services); expiresAt is passed through UNCHANGED.
+ */
+export interface AddServiceVolumeInput {
+  username: string;
+  totalBytes: bigint;
+  expiresAt: Date | null;
+  note?: string | null;
+  subscriptionBaseUrl?: string | null;
+}
+
 /** Result of renewServiceAccount - same field semantics as GetServiceAccountResult. */
 export interface RenewServiceAccountResult {
   ok: boolean;
@@ -118,6 +131,9 @@ export interface RenewServiceAccountResult {
   /** Safe internal diagnostic (no credentials); for logs/admin only. */
   errorMessage?: string;
 }
+
+/** Result of addServiceVolume - identical shape/semantics to a renewal result. */
+export type AddServiceVolumeResult = RenewServiceAccountResult;
 
 /**
  * Result of getServiceAccount. Optional fields are OMITTED (undefined) when
