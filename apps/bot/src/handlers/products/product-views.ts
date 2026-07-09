@@ -300,17 +300,16 @@ export function deliveryKeyboard(build: (d: string) => string, backCb: string): 
     .text("لغو ❌", backCb);
 }
 
+// Deliberately offers NO "create new category" shortcut: categories are
+// created only through the category-management section.
 export function categoryPickerKeyboard(
   categories: ProductCategory[],
   build: (catSid: string) => string,
-  options: { newCategoryCb?: string; backCb: string },
+  options: { backCb: string },
 ): InlineKeyboard {
   const kb = new InlineKeyboard();
   for (const category of categories) {
     kb.text(category.name, build(categoryShortId(category))).row();
-  }
-  if (options.newCategoryCb !== undefined) {
-    kb.text("ساخت دسته‌بندی جدید ➕", options.newCategoryCb).row();
   }
   kb.text("لغو ❌", options.backCb);
   return kb;

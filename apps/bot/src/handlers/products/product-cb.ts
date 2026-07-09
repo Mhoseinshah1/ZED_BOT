@@ -50,7 +50,8 @@ export const pcb = {
   flowGroups: (g: string): string => `admin:prod:f:grp:${g}`,
   flowLocation: (l: string): string => `admin:prod:f:loc:${l}`,
   flowCategory: (catSid: string): string => `admin:prod:f:cat:${catSid}`,
-  flowNewCategory: (): string => "admin:prod:f:newcat",
+  // "admin:prod:f:newcat" is intentionally NOT built anymore - inline
+  // category creation is disabled (a compat handler answers old keyboards).
   flowResetCycle: (c: string): string => `admin:prod:f:trc:${c}`,
   flowUserInfo: (v: "y" | "n"): string => `admin:prod:f:rui:${v}`,
   flowDelivery: (d: string): string => `admin:prod:f:dlv:${d}`,

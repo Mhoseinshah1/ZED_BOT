@@ -10,6 +10,10 @@ import { connectDatabase, disconnectDatabase, prisma } from "./client.js";
 //     re-asserted on every run so an OWNER can always recover access).
 //   - Everything else is create-if-missing only: operator-edited settings,
 //     log topics, and message templates are NEVER overwritten.
+//   - Product categories and products are intentionally NOT seeded: the
+//     operator creates them manually (with their own names) from the admin
+//     panel. A fresh install has an empty catalog. Payment gateways and card
+//     accounts are likewise not seeded.
 // =============================================================================
 
 // Parses the comma-separated ADMIN_TELEGRAM_IDS env var. Kept local so the

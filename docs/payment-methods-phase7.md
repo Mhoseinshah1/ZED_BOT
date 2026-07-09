@@ -101,5 +101,6 @@ Receipt approval/rejection, automatic verification, wallet deduction, Order
 / Service creation, discount usage finalization, online gateways (Plisio,
 NowPayments, آقای پرداخت, زرین‌پال), Telegram Stars, provisioning, media
 forwarding to admins/log groups, checkout/payment expiry worker, and admin
-management of gateways/card accounts (rows are currently seeded manually —
-gateway admin UI is a later phase).
+management of gateways/card accounts. Nothing payment-related is seeded:
+gateway and card-account rows are configured separately by the operator
+(admin UI for them is a later phase).
