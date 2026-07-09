@@ -37,6 +37,10 @@ export const REJECT_REASON_MAX = 1000;
 const NOT_FOUND = "مورد یافت نشد.";
 const ALREADY_REVIEWED = "این رسید قبلاً بررسی شده است.";
 const NO_CHECKOUT = "پیش‌فاکتور این پرداخت یافت نشد؛ رسید قابل تایید نیست.";
+const CHECKOUT_NOT_PENDING = "وضعیت پیش‌فاکتور برای تایید معتبر نیست.";
+const AMOUNT_MISMATCH = "مبلغ رسید با پیش‌فاکتور هم‌خوانی ندارد.";
+const NO_PENDING_RECEIPT = "رسید در انتظار بررسی برای این پرداخت وجود ندارد.";
+const SUBMITTED_AFTER_EXPIRY = "رسید بعد از انقضای پیش‌فاکتور ثبت شده و قابل تایید نیست.";
 export const REASON_LENGTH_ERROR = "دلیل رد باید بین ۱ تا ۱۰۰۰ کاراکتر باشد.";
 
 export type PaymentForReview = Payment & {
@@ -53,10 +57,14 @@ export type RejectReceiptResult =
   | { ok: true; payment: Payment; user: User; reason: string; message: string }
   | { ok: false; error: string };
 
-/** Thrown inside the transaction when the compare-and-set loses the race. */
-class AlreadyReviewedError extends Error {
-  constructor() {
-    super("payment already reviewed");
+/**
+ * Thrown inside the transaction when a re-checked condition no longer holds
+ * (compare-and-set lost a race, checkout left PENDING, receipt vanished).
+ * Rolls everything back and surfaces `userError` as the safe admin message.
+ */
+class ReviewAbortError extends Error {
+  constructor(readonly userError: string) {
+    super("review aborted: precondition no longer holds");
   }
 }
 
@@ -116,6 +124,13 @@ export function rejectionUserNotice(reason: string): string {
  * a payment that is no longer PENDING_REVIEW is refused, an existing Order
  * for the checkout is returned instead of duplicated, and discount usage is
  * finalized at most once per checkout.
+ *
+ * Validations (Phase 8.1): checkout must still be PENDING, the payment
+ * amounts must exactly match the checkout's final price, a PENDING_REVIEW
+ * ManualReceipt must exist, and the payment must have been created before
+ * the checkout expired (a receipt submitted in time may be approved after
+ * expiry, one submitted after expiry never). The status/receipt conditions
+ * are re-checked inside the transaction.
  */
 export async function approveReceiptPayment(
   paymentId: string,
@@ -131,6 +146,21 @@ export async function approveReceiptPayment(
   const checkout = payment.checkoutSession;
   if (checkout === null) {
     return { ok: false, error: NO_CHECKOUT };
+  }
+  if (checkout.status !== CheckoutStatus.PENDING) {
+    return { ok: false, error: CHECKOUT_NOT_PENDING };
+  }
+  if (
+    payment.amountToman !== checkout.finalPriceToman ||
+    payment.payableAmountToman !== checkout.finalPriceToman
+  ) {
+    return { ok: false, error: AMOUNT_MISMATCH };
+  }
+  if (!payment.receipts.some((r) => r.status === PaymentStatus.PENDING_REVIEW)) {
+    return { ok: false, error: NO_PENDING_RECEIPT };
+  }
+  if (payment.createdAt.getTime() > checkout.expiresAt.getTime()) {
+    return { ok: false, error: SUBMITTED_AFTER_EXPIRY };
   }
 
   const now = new Date();
@@ -150,10 +180,13 @@ export async function approveReceiptPayment(
         },
       });
       if (flipped.count === 0) {
-        throw new AlreadyReviewedError();
+        throw new ReviewAbortError(ALREADY_REVIEWED);
       }
 
-      await tx.manualReceipt.updateMany({
+      // Re-checks inside the transaction: both updateMany calls are filtered
+      // on the state validated above; zero matches means a concurrent change
+      // slipped in, so the whole approval rolls back.
+      const receiptsFlipped = await tx.manualReceipt.updateMany({
         where: { paymentId: payment.id, status: PaymentStatus.PENDING_REVIEW },
         data: {
           status: PaymentStatus.APPROVED,
@@ -161,11 +194,17 @@ export async function approveReceiptPayment(
           reviewedByAdminId: admin.id,
         },
       });
+      if (receiptsFlipped.count === 0) {
+        throw new ReviewAbortError(NO_PENDING_RECEIPT);
+      }
 
-      await tx.checkoutSession.update({
-        where: { id: checkout.id },
+      const checkoutFlipped = await tx.checkoutSession.updateMany({
+        where: { id: checkout.id, status: CheckoutStatus.PENDING },
         data: { status: CheckoutStatus.PAID, paidAt: now },
       });
+      if (checkoutFlipped.count === 0) {
+        throw new ReviewAbortError(CHECKOUT_NOT_PENDING);
+      }
 
       // One Order per checkout - a pre-existing one is reused, never duplicated.
       let order = await tx.order.findFirst({
@@ -249,8 +288,8 @@ export async function approveReceiptPayment(
       message: "رسید تایید شد ✅\n\nOrder ساخته شد.\nساخت سرویس/تحویل در فاز بعدی انجام می‌شود.",
     };
   } catch (err) {
-    if (err instanceof AlreadyReviewedError) {
-      return { ok: false, error: ALREADY_REVIEWED };
+    if (err instanceof ReviewAbortError) {
+      return { ok: false, error: err.userError };
     }
     throw err;
   }
@@ -292,7 +331,7 @@ export async function rejectReceiptPayment(
         },
       });
       if (flipped.count === 0) {
-        throw new AlreadyReviewedError();
+        throw new ReviewAbortError(ALREADY_REVIEWED);
       }
 
       await tx.manualReceipt.updateMany({
@@ -318,8 +357,8 @@ export async function rejectReceiptPayment(
       }
     });
   } catch (err) {
-    if (err instanceof AlreadyReviewedError) {
-      return { ok: false, error: ALREADY_REVIEWED };
+    if (err instanceof ReviewAbortError) {
+      return { ok: false, error: err.userError };
     }
     throw err;
   }

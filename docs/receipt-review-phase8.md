@@ -18,7 +18,8 @@ Source: `apps/bot/src/services/receipt-review.service.ts`,
 | --- | --- |
 | `admin:receipts` / `admin:rec:list:<page>` | Pending-review list (unchanged shape) |
 | `admin:rec:view:<paymentSid>` | Receipt detail — now shows status and, for `PENDING_REVIEW`, the two review buttons |
-| `admin:rec:ap:<paymentSid>` | «تایید رسید ✅» — approve immediately (double-click safe) |
+| `admin:rec:ap:<paymentSid>` | «تایید رسید ✅» — opens the confirmation screen «آیا از تایید این رسید مطمئن هستید؟» (changes nothing yet) |
+| `admin:rec:ap:<paymentSid>:yes` | «تایید نهایی ✅» — performs the actual approval (double-click safe); «انصراف» returns to the detail view with no status change |
 | `admin:rec:rj:<paymentSid>` | «رد رسید ❌» — asks for the rejection reason first |
 
 The detail view of an already-reviewed payment shows its status (تایید شده ✅
@@ -26,16 +27,35 @@ The detail view of an already-reviewed payment shows its status (تایید شد
 
 ## Approval behavior
 
-`approveReceiptPayment(paymentId, admin)` validates (payment exists, purpose
-`ORDER_PAYMENT`, status `PENDING_REVIEW`, checkout present) and then runs ONE
-transaction:
+Approval is never immediate: «تایید رسید ✅» only opens the confirmation
+screen, and only «تایید نهایی ✅» (`admin:rec:ap:<sid>:yes`) calls the
+service. `approveReceiptPayment(paymentId, admin)` then validates, in order
+(each failure returns a safe Persian error and changes nothing):
+
+1. payment exists and has purpose `ORDER_PAYMENT`;
+2. payment status is `PENDING_REVIEW` («این رسید قبلاً بررسی شده است.»);
+3. its checkout exists;
+4. checkout status is `PENDING` («وضعیت پیش‌فاکتور برای تایید معتبر نیست.»);
+5. `amountToman` AND `payableAmountToman` both exactly equal
+   `checkout.finalPriceToman` («مبلغ رسید با پیش‌فاکتور هم‌خوانی ندارد.»);
+6. at least one `ManualReceipt` is still `PENDING_REVIEW` («رسید در انتظار
+   بررسی برای این پرداخت وجود ندارد.»);
+7. `payment.createdAt <= checkout.expiresAt` — a receipt submitted before
+   expiry may be approved later, but one created after the checkout expired
+   never can be («رسید بعد از انقضای پیش‌فاکتور ثبت شده و قابل تایید
+   نیست.»).
+
+It then runs ONE transaction:
 
 1. **Compare-and-set** `Payment`: `PENDING_REVIEW → APPROVED` with
    `paidAt`/`reviewedAt` = now and `reviewedByAdminId`. The `updateMany` is
    filtered on `PENDING_REVIEW`, so a second click / concurrent approval
    flips nothing and gets «این رسید قبلاً بررسی شده است.»
-2. `ManualReceipt`(s) of the payment → `APPROVED` + review metadata.
-3. `CheckoutSession` → `PAID`, `paidAt` = now.
+2. `ManualReceipt`(s) of the payment → `APPROVED` + review metadata
+   (filtered on `PENDING_REVIEW`; zero matches aborts and rolls back —
+   in-transaction re-check of validation 6).
+3. `CheckoutSession` → `PAID`, `paidAt` = now (filtered on `PENDING`; zero
+   matches aborts and rolls back — in-transaction re-check of validation 4).
 4. **Order** — reused if one already exists for the `checkoutSessionId`
    (never duplicated), otherwise created with: `userId`,
    `checkoutSessionId`, `type` from `checkout.orderType` (fallback derived
