@@ -1,4 +1,4 @@
-import { PaymentStatus, type User } from "@zedbot/database";
+import { OrderType, PaymentStatus, type User } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
@@ -11,6 +11,11 @@ import {
   paymentShortId,
   type PaymentWithRelations,
 } from "../../services/payment-method.service.js";
+import {
+  buildServiceInfoMessage,
+  PROVISION_FAILED_USER_TEXT,
+  provisionPaidOrder,
+} from "../../services/provisioning.service.js";
 import {
   approvalUserNotice,
   approveReceiptPayment,
@@ -72,9 +77,18 @@ function backKeyboard(): InlineKeyboard {
  * the review - they are logged (without file ids / card numbers) and reported
  * to the admin.
  */
-async function notifyUserSafe(ctx: BotContext, user: User, text: string): Promise<boolean> {
+async function notifyUserSafe(
+  ctx: BotContext,
+  user: User,
+  text: string,
+  parseMode?: "HTML",
+): Promise<boolean> {
   try {
-    await ctx.api.sendMessage(user.telegramId.toString(), text);
+    await ctx.api.sendMessage(
+      user.telegramId.toString(),
+      text,
+      parseMode === undefined ? undefined : { parse_mode: parseMode },
+    );
     return true;
   } catch (err) {
     logger.warn("receipt review: user notification failed", {
@@ -82,6 +96,50 @@ async function notifyUserSafe(ctx: BotContext, user: User, text: string): Promis
       error: errorMessage(err),
     });
     return false;
+  }
+}
+
+/**
+ * Phase 9: synchronous provisioning right after a SERVICE_PURCHASE approval.
+ * The provisioning service owns the FAILED + refund path; this only relays
+ * the outcome to the user and the admin (raw adapter errors never leave the
+ * logs).
+ */
+async function runProvisioningAfterApproval(
+  ctx: BotContext,
+  orderId: string,
+  user: User,
+): Promise<void> {
+  try {
+    const outcome = await provisionPaidOrder(orderId);
+    if (outcome.ok) {
+      await notifyUserSafe(ctx, user, buildServiceInfoMessage(outcome.service), "HTML");
+      await safeReply(ctx, "سرویس ساخته شد ✅", backKeyboard());
+      return;
+    }
+    if (outcome.refunded) {
+      await notifyUserSafe(ctx, user, PROVISION_FAILED_USER_TEXT);
+      await safeReply(
+        ctx,
+        "ساخت سرویس ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
+        backKeyboard(),
+      );
+      return;
+    }
+    // Refused without refund (already provisioning, already failed, ...):
+    // the payment stays approved, so tell the user that much.
+    await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.SERVICE_PURCHASE));
+    await safeReply(ctx, outcome.error, backKeyboard());
+  } catch (err) {
+    logger.error("provisioning after approval crashed", {
+      orderId,
+      error: errorMessage(err),
+    });
+    await safeReply(
+      ctx,
+      "خطایی در ساخت سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
+      backKeyboard(),
+    );
   }
 }
 
@@ -235,7 +293,27 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       adminId: admin.id,
     });
 
-    // Notification goes out after the transaction; a failure never rolls back.
+    // Notifications go out after the transaction; failures never roll back.
+    if (result.orderType === OrderType.SERVICE_PURCHASE) {
+      // Phase 9: provision the PAID order right away (synchronously).
+      await safeEditOrReply(
+        ctx,
+        "رسید تایید شد ✅\n\nOrder ساخته شد.\nساخت سرویس شروع شد.",
+        backKeyboard(),
+      );
+      await runProvisioningAfterApproval(ctx, result.order.id, result.user);
+      return;
+    }
+    if (result.orderType === OrderType.OTHER_PRODUCT) {
+      // No provisioning and no OtherProductOrder yet - delivery is a later phase.
+      await notifyUserSafe(ctx, result.user, approvalUserNotice(result.orderType));
+      await safeEditOrReply(
+        ctx,
+        "رسید تایید شد ✅\n\nسفارش محصول ثبت شد و تحویل در فاز بعدی انجام می‌شود.",
+        backKeyboard(),
+      );
+      return;
+    }
     await notifyUserSafe(ctx, result.user, approvalUserNotice(result.orderType));
     await safeEditOrReply(ctx, result.message, backKeyboard());
   } catch (err) {

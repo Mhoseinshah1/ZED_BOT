@@ -5,9 +5,15 @@ admins approve or reject `PENDING_REVIEW` card-to-card payments. Approval
 creates the `PAID` Order and finalizes discount usage; rejection asks the
 admin for a reason and sends it verbatim to the user.
 
-**Core rule — still no Service, no panel call, no wallet deduction, no
-config/link, no OtherProductOrder.** Approval leaves a `PAID` Order behind;
-provisioning/delivery picks those up in Phase 9.
+**Core rule (Phase 8 itself) — no Service, no panel call, no wallet
+deduction, no config/link, no OtherProductOrder.** Phase 8 approval only
+leaves a `PAID` Order behind.
+
+> **Phase 9 update:** approving a `SERVICE_PURCHASE` receipt now triggers
+> provisioning of the PAID order immediately after approval (panel account +
+> Service row, or FAILED + wallet refund) — see
+> `docs/provisioning-phase9.md`. `OTHER_PRODUCT` orders are still not
+> provisioned or delivered.
 
 Source: `apps/bot/src/services/receipt-review.service.ts`,
 `apps/bot/src/handlers/admin-receipts/receipts.handler.ts`.

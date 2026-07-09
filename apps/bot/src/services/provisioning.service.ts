@@ -1,0 +1,384 @@
+import {
+  OrderStatus,
+  OrderType,
+  prisma,
+  ServiceLocation,
+  ServiceStatus,
+  WalletTransactionSource,
+  WalletTransactionType,
+  type Order,
+  type Panel,
+  type Product,
+  type Service,
+  type User,
+} from "@zedbot/database";
+import {
+  MarzbanAdapter,
+  MarzbanClient,
+  XuiAdapter,
+  XuiClient,
+  type CreateServiceAccountResult,
+  type PanelAdapter,
+} from "@zedbot/panel-adapters";
+import { decryptSecret, errorMessage } from "@zedbot/shared";
+
+import { logger } from "../core/logger.js";
+import { escapeHtml } from "../utils/html.js";
+
+// =============================================================================
+// Provisioning (Phase 9): turns a PAID SERVICE_PURCHASE Order into a panel
+// account + ACTIVE Service row, or FAILs the order and refunds the user's
+// wallet. Core guarantee: the user is never left charged without either a
+// service or a refund.
+//
+// Status flow: PAID -> PROVISIONING -> COMPLETED (success)
+//                                   -> FAILED + wallet refund (failure)
+//
+// Idempotency:
+//   - a Service already existing for the order short-circuits to success
+//     (and repairs the order status to COMPLETED);
+//   - the PAID -> PROVISIONING claim is a compare-and-set, so concurrent
+//     calls cannot double-provision;
+//   - the refund is created only by the call that flips the order to FAILED,
+//     and never when a refund transaction for the order already exists;
+//   - panel usernames are deterministic per order, and the Marzban adapter
+//     recovers (not duplicates) an account left by a crashed attempt.
+//
+// No renewal, extra volume/time, location change, service management or
+// OtherProductOrder handling here - later phases.
+// =============================================================================
+
+export const REFUND_PROVISIONING_REASON = "REFUND_PROVISIONING_FAILED";
+
+/** Customer-facing failure/refund notice (never contains adapter errors). */
+export const PROVISION_FAILED_USER_TEXT =
+  "پرداخت شما تایید شد ✅\n" +
+  "اما ساخت سرویس با خطا مواجه شد.\n" +
+  "مبلغ پرداختی به کیف پول شما برگشت داده شد.";
+
+export type ProvisionOutcome =
+  | { ok: true; service: Service; alreadyExisted: boolean }
+  | { ok: false; refunded: boolean; error: string };
+
+type OrderForProvisioning = Order & {
+  user: User;
+  product: (Product & { panel: Panel | null }) | null;
+};
+
+/**
+ * Deterministic, panel-safe username: zed_<telegramId>_<orderShortId>,
+ * lowercase [a-z0-9_], shortened via the telegramId's last 8 digits when it
+ * would exceed 32 chars. Same order always yields the same username.
+ */
+export function generatePanelUsername(telegramId: bigint, orderId: string): string {
+  const orderShort = orderId.replace(/-/g, "").slice(0, 8).toLowerCase();
+  const tg = telegramId.toString();
+  let username = `zed_${tg}_${orderShort}`;
+  if (username.length > 32) {
+    username = `zed_${tg.slice(-8)}_${orderShort}`;
+  }
+  return username.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+}
+
+/** Decrypts credentials and builds the panel adapter. Throws on missing config. */
+function buildAdapterForPanel(panel: Panel): PanelAdapter {
+  if (panel.type === "MARZBAN") {
+    if (panel.username === null || panel.passwordEncrypted === null) {
+      throw new Error("Marzban credentials are incomplete.");
+    }
+    const password = decryptSecret(panel.passwordEncrypted);
+    return new MarzbanAdapter(
+      new MarzbanClient({ baseUrl: panel.baseUrl, username: panel.username, password }),
+    );
+  }
+  if (panel.tokenEncrypted === null) {
+    throw new Error("XUI token is missing.");
+  }
+  const token = decryptSecret(panel.tokenEncrypted);
+  return new XuiAdapter(new XuiClient({ baseUrl: panel.baseUrl, token }));
+}
+
+function parseInboundIds(raw: unknown): number[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw.filter((v): v is number => typeof v === "number" && Number.isInteger(v));
+}
+
+function normalizeSubscriptionBase(panel: Panel): string | null {
+  const domain = panel.subscriptionDomain?.trim() ?? "";
+  if (domain === "") {
+    return null;
+  }
+  return /^https?:\/\//i.test(domain) ? domain : `https://${domain}`;
+}
+
+/**
+ * Marks the order FAILED and refunds finalPriceToman to the user's wallet,
+ * all in one transaction. Only the caller that actually flips the status
+ * creates the refund; an existing refund transaction for this order is never
+ * duplicated. Returns true when a refund is in place (created now or before).
+ */
+async function failOrderWithRefund(order: OrderForProvisioning, internalError: string): Promise<boolean> {
+  const refunded = await prisma.$transaction(async (tx) => {
+    const flipped = await tx.order.updateMany({
+      where: { id: order.id, status: { in: [OrderStatus.PAID, OrderStatus.PROVISIONING] } },
+      data: { status: OrderStatus.FAILED, failureReason: internalError.slice(0, 500) },
+    });
+    const existingRefund = await tx.walletTransaction.findFirst({
+      where: { relatedOrderId: order.id, reason: REFUND_PROVISIONING_REASON },
+    });
+    if (existingRefund !== null) {
+      return true;
+    }
+    if (flipped.count === 0) {
+      // Someone else owns the failure path; do not double-refund.
+      return false;
+    }
+    if (order.finalPriceToman <= 0) {
+      // Fully-discounted order: nothing to move, FAILED is enough.
+      return true;
+    }
+    const freshUser = await tx.user.findUniqueOrThrow({ where: { id: order.userId } });
+    const balanceBefore = freshUser.balanceToman;
+    const balanceAfter = balanceBefore + order.finalPriceToman;
+    await tx.user.update({
+      where: { id: order.userId },
+      data: {
+        balanceToman: { increment: order.finalPriceToman },
+        totalRefundedToman: { increment: order.finalPriceToman },
+      },
+    });
+    await tx.walletTransaction.create({
+      data: {
+        userId: order.userId,
+        amountToman: order.finalPriceToman,
+        type: WalletTransactionType.REFUND,
+        source: WalletTransactionSource.SYSTEM,
+        reason: REFUND_PROVISIONING_REASON,
+        relatedOrderId: order.id,
+        relatedPaymentId: order.paymentId,
+        balanceBeforeToman: balanceBefore,
+        balanceAfterToman: balanceAfter,
+      },
+    });
+    return true;
+  });
+  logger.warn("provisioning failed - order FAILED", {
+    orderId: order.id,
+    refunded,
+    error: internalError,
+  });
+  return refunded;
+}
+
+/**
+ * Provisions one PAID SERVICE_PURCHASE order. Safe to call repeatedly:
+ * every path is guarded (see module header). All returned error strings are
+ * admin-safe Persian; adapter internals only go to logs.
+ */
+export async function provisionPaidOrder(orderId: string): Promise<ProvisionOutcome> {
+  const order = (await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { user: true, product: { include: { panel: true } } },
+  })) as OrderForProvisioning | null;
+  if (order === null) {
+    return { ok: false, refunded: false, error: "سفارش یافت نشد." };
+  }
+
+  // Idempotency: an existing Service wins over everything.
+  const existingService = await prisma.service.findFirst({ where: { orderId: order.id } });
+  if (existingService !== null) {
+    if (order.status !== OrderStatus.COMPLETED) {
+      await prisma.order.update({
+        where: { id: order.id },
+        data: { status: OrderStatus.COMPLETED, completedAt: new Date() },
+      });
+    }
+    return { ok: true, service: existingService, alreadyExisted: true };
+  }
+
+  if (order.type !== OrderType.SERVICE_PURCHASE) {
+    return { ok: false, refunded: false, error: "این سفارش از نوع خرید سرویس نیست." };
+  }
+  if (order.status === OrderStatus.PROVISIONING) {
+    return { ok: false, refunded: false, error: "ساخت سرویس این سفارش هم‌اکنون در حال انجام است." };
+  }
+  if (order.status === OrderStatus.FAILED) {
+    // No automatic retry in this phase.
+    return { ok: false, refunded: false, error: "این سفارش قبلاً ناموفق شده است." };
+  }
+  if (order.status !== OrderStatus.PAID) {
+    return { ok: false, refunded: false, error: "وضعیت سفارش برای ساخت سرویس معتبر نیست." };
+  }
+
+  // Pre-flight configuration checks. The order is PAID, so any dead end here
+  // is a provisioning failure: FAIL + refund, never a silent charge.
+  const product = order.product;
+  const panel = product?.panel ?? null;
+  const preflightError =
+    product === null
+      ? "product row no longer exists"
+      : product.type !== "SERVICE_PRODUCT"
+        ? "product is not a SERVICE_PRODUCT"
+        : panel === null
+          ? "product has no panel"
+          : panel.status !== "ACTIVE"
+            ? `panel status is ${panel.status}`
+            : null;
+  if (preflightError !== null || product === null || panel === null) {
+    const refunded = await failOrderWithRefund(order, preflightError ?? "invalid configuration");
+    return { ok: false, refunded, error: "ساخت سرویس ناموفق بود." };
+  }
+
+  // Claim the order: only one caller wins PAID -> PROVISIONING.
+  const claimed = await prisma.order.updateMany({
+    where: { id: order.id, status: OrderStatus.PAID },
+    data: { status: OrderStatus.PROVISIONING },
+  });
+  if (claimed.count === 0) {
+    return { ok: false, refunded: false, error: "سفارش توسط فرایند دیگری در حال پردازش است." };
+  }
+  logger.info("provisioning started", {
+    orderId: order.id,
+    panelId: panel.id,
+    panelType: panel.type,
+  });
+
+  // Immutable sold values: order snapshots first, Product fields as fallback.
+  const volumeGb = order.volumeGbSnapshot ?? product.volumeGb ?? 0;
+  const durationDays = order.durationDaysSnapshot ?? product.durationDays ?? 0;
+  const volumeBytes = volumeGb > 0 ? BigInt(volumeGb) * 1024n * 1024n * 1024n : null;
+  const now = new Date();
+  const expiresAt = durationDays > 0 ? new Date(now.getTime() + durationDays * 86_400_000) : null;
+  const username = generatePanelUsername(order.user.telegramId, order.id);
+  const note = `zedbot order:${order.id.slice(0, 8)} tg:${order.user.telegramId}`;
+
+  let created: CreateServiceAccountResult;
+  try {
+    const adapter = buildAdapterForPanel(panel);
+    created = await adapter.createServiceAccount({
+      username,
+      note,
+      volumeBytes,
+      durationDays,
+      expiresAt,
+      templateUsername: panel.templateUsername,
+      dataLimitResetStrategy: panel.resetStrategy,
+      trafficResetCycle: product.trafficResetCycle,
+      subscriptionBaseUrl: normalizeSubscriptionBase(panel),
+      inboundIds: parseInboundIds(panel.inboundIds),
+      protocolSettings:
+        panel.protocolSettings !== null && typeof panel.protocolSettings === "object"
+          ? (panel.protocolSettings as Record<string, unknown>)
+          : null,
+    });
+  } catch (err) {
+    // Covers credential decryption/config errors - never exposed to users.
+    created = { ok: false, errorMessage: errorMessage(err) };
+  }
+
+  if (!created.ok) {
+    const refunded = await failOrderWithRefund(order, created.errorMessage ?? "unknown adapter error");
+    return { ok: false, refunded, error: "ساخت سرویس ناموفق بود." };
+  }
+
+  const service = await prisma.$transaction(async (tx) => {
+    // Last-line duplicate guard (username is also unique per order).
+    const duplicate = await tx.service.findFirst({ where: { orderId: order.id } });
+    if (duplicate !== null) {
+      return duplicate;
+    }
+    const row = await tx.service.create({
+      data: {
+        userId: order.userId,
+        orderId: order.id,
+        panelId: panel.id,
+        productId: product.id,
+        panelType: panel.type,
+        username: created.username ?? username,
+        note,
+        status: ServiceStatus.ACTIVE,
+        serviceLocation: product.serviceLocation ?? ServiceLocation.MULTI_LOCATION,
+        productNameSnapshot: order.productNameSnapshot ?? product.name,
+        panelNameSnapshot: order.panelNameSnapshot ?? panel.name,
+        volumeBytes: volumeBytes ?? 0n,
+        usedBytes: 0n,
+        remainingBytes: volumeBytes ?? 0n,
+        durationDays,
+        startsAt: now,
+        expiresAt,
+        subscriptionUrl: created.subscriptionUrl ?? null,
+        subscriptionToken: created.subscriptionToken ?? null,
+        ...(created.configLinks !== undefined ? { configLinks: created.configLinks } : {}),
+      },
+    });
+    await tx.order.updateMany({
+      where: { id: order.id, status: OrderStatus.PROVISIONING },
+      data: { status: OrderStatus.COMPLETED, completedAt: now },
+    });
+    return row;
+  });
+  logger.info("provisioning succeeded", {
+    orderId: order.id,
+    serviceId: service.id,
+    panelId: panel.id,
+  });
+  return { ok: true, service, alreadyExisted: false };
+}
+
+/**
+ * Provisions up to `limit` of the oldest PAID SERVICE_PURCHASE orders.
+ * Foundation for a future worker; nothing schedules it automatically yet.
+ */
+export async function provisionNextPaidOrders(
+  limit: number,
+): Promise<Array<{ orderId: string; outcome: ProvisionOutcome }>> {
+  const orders = await prisma.order.findMany({
+    where: { status: OrderStatus.PAID, type: OrderType.SERVICE_PURCHASE },
+    orderBy: { createdAt: "asc" },
+    take: Math.max(1, Math.min(limit, 50)),
+  });
+  const results: Array<{ orderId: string; outcome: ProvisionOutcome }> = [];
+  for (const order of orders) {
+    results.push({ orderId: order.id, outcome: await provisionPaidOrder(order.id) });
+  }
+  return results;
+}
+
+const MAX_CONFIG_LINKS_SHOWN = 10;
+
+/** HTML service-info message for the user after successful provisioning. */
+export function buildServiceInfoMessage(service: Service): string {
+  const gb = service.volumeBytes > 0n ? Number(service.volumeBytes / (1024n * 1024n * 1024n)) : 0;
+  const lines = [
+    "سرویس شما با موفقیت ساخته شد ✅",
+    "",
+    `نام سرویس: ${escapeHtml(service.productNameSnapshot ?? "-")}`,
+    `نام کاربری: <code>${escapeHtml(service.username)}</code>`,
+    `حجم: ${service.volumeBytes > 0n ? `${gb} گیگابایت` : "نامحدود"}`,
+    `مدت: ${service.durationDays > 0 ? `${service.durationDays} روز` : "نامحدود"}`,
+  ];
+  if (service.expiresAt !== null) {
+    lines.push(`تاریخ انقضا: ${service.expiresAt.toISOString().slice(0, 10)}`);
+  }
+  if (service.subscriptionUrl !== null) {
+    lines.push("", "لینک اشتراک:", `<code>${escapeHtml(service.subscriptionUrl)}</code>`);
+  }
+  const links = Array.isArray(service.configLinks)
+    ? service.configLinks.filter((l): l is string => typeof l === "string" && l !== "")
+    : [];
+  if (links.length > 0) {
+    lines.push("", "کانفیگ‌ها:");
+    for (const link of links.slice(0, MAX_CONFIG_LINKS_SHOWN)) {
+      lines.push(`<code>${escapeHtml(link)}</code>`);
+    }
+    if (links.length > MAX_CONFIG_LINKS_SHOWN) {
+      lines.push(`(+${links.length - MAX_CONFIG_LINKS_SHOWN} کانفیگ دیگر)`);
+    }
+  }
+  if (service.subscriptionUrl === null && links.length === 0) {
+    lines.push("", "اطلاعات اتصال کامل از پنل دریافت نشد؛ لطفاً با پشتیبانی تماس بگیرید.");
+  }
+  return lines.join("\n");
+}
