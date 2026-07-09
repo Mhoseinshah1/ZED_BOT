@@ -107,6 +107,8 @@ export interface SessionData {
     checkoutDraft?: CheckoutDraft;
     // Card-to-card payment / receipt-upload context.
     paymentDraft?: PaymentDraft;
+    // Admin receipt review: payment awaiting a rejection reason ("receipt:reject").
+    rejectingPaymentId?: string;
     [key: string]: unknown;
   };
 }
