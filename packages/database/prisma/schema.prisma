@@ -926,8 +926,10 @@ model UserHiddenPaymentGateway {
   @@index([paymentGatewayId])
 }
 
+// Single logical global row, addressed via singletonKey = "default".
 model StarsPricingSetting {
   id                          String           @id @default(uuid())
+  singletonKey                String           @unique @default("default")
   pricingMode                 StarsPricingMode @default(MANUAL_RATE)
   manualTomanPerStar          Int?
   currencyRateApiUrl          String?
@@ -937,6 +939,7 @@ model StarsPricingSetting {
   minStars                    Int?
   maxStars                    Int?
   cashbackPercent             Int              @default(0)
+  createdAt                   DateTime         @default(now())
   updatedAt                   DateTime         @updatedAt
 }
 
@@ -971,7 +974,8 @@ model Service {
   durationDays   Int    @default(0)
 
   startsAt                  DateTime  @default(now())
-  expiresAt                 DateTime
+  // Nullable: services with unlimited time (durationDays = 0) never expire.
+  expiresAt                 DateTime?
   firstConnectedAt          DateTime?
   lastConnectedAt           DateTime?
   lastSubscriptionUpdateAt  DateTime?

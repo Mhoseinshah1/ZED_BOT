@@ -87,12 +87,42 @@ Order COMPLETED + Service ACTIVE     Order FAILED + wallet refund
 - **Service**: `CREATING → ACTIVE → (DISABLED / LIMITED / EXPIRED) →
   DELETED`, `FAILED` when provisioning never succeeded. `panelDeletedAt`
   tracks deletion on the panel side separately from bot-side soft deletion.
+  `Service.expiresAt` is **nullable**: services with unlimited time
+  (`durationDays = 0`) have no expiration date at all.
 - **Wallet**: `WalletTransaction` rows are append-only; every row records the
   balance before and after, so the ledger can always be replayed and audited.
 - **Referral**: `Referral` links referrer→referred once (unique
   `referredUserId`); each qualifying order creates a `ReferralCommission`
   (`PENDING → PAID / CANCELLED`) optionally linked to the payout
   `WalletTransaction`.
+
+## Support mode
+
+The `SupportMode` enum (`PRIVATE_CHAT` / `TICKET`) is schema-ready, but the
+**active** support mode is stored as the `Setting` key `support_mode`
+(seeded as `PRIVATE_CHAT`). The `SupportTicket` / `SupportMessage` tables
+exist so the ticket mode can be switched on in a later phase without a
+migration.
+
+## Seed baselines (never overwritten)
+
+The seed is idempotent and only creates what is missing — operator edits are
+never clobbered:
+
+- **Settings**: `bot_name`, `maintenance_mode`, `support_username`,
+  `force_join_enabled`, `support_mode`.
+- **Log topics**: 13 rows with stable keys and Persian titles.
+- **Message templates**: `start_text`, `bot_off_text`, `support_text`,
+  `faq_text`.
+- **Button texts**: a 16-key baseline for the future main menu and
+  navigation (`buy_subscription`, `renew_service`, `my_services`, `wallet`,
+  `support`, `tutorials`, `free_test`, `referral`, `other_products`,
+  `pricing`, `representative_request`, `lucky_wheel`, `back`, `main_menu`,
+  `cancel`, `confirm`). `currentText` starts equal to `defaultText`; only
+  `currentText` is meant to be edited by operators.
+- **Stars pricing**: one `StarsPricingSetting` row (`singletonKey =
+  "default"`) so later phases can read/update the single global row without
+  existence checks.
 
 ## Intentionally NOT implemented in Phase 2
 

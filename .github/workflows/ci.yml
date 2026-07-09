@@ -120,11 +120,13 @@ jobs:
           setting_count="$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c 'SELECT COUNT(*) FROM "Setting";')"
           topic_count="$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c 'SELECT COUNT(*) FROM "LogTopic";')"
           template_count="$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c 'SELECT COUNT(*) FROM "MessageTemplate";')"
-          echo "seeded admins: ${admin_count}, settings: ${setting_count}, log topics: ${topic_count}, templates: ${template_count}"
+          button_count="$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c 'SELECT COUNT(*) FROM "ButtonText";')"
+          echo "seeded admins: ${admin_count}, settings: ${setting_count}, log topics: ${topic_count}, templates: ${template_count}, buttons: ${button_count}"
           test "$admin_count" = "1"
           test "$setting_count" -ge 5
           test "$topic_count" -ge 13
           test "$template_count" -ge 4
+          test "$button_count" -ge 16
 
       - name: Start Redis (password-protected)
         run: |
