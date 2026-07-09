@@ -132,6 +132,59 @@ async function seedLogTopics(): Promise<number> {
   return created;
 }
 
+// Baseline main-menu / navigation button texts. Final button set arrives
+// with the menu phase; operator edits are never clobbered.
+const INITIAL_BUTTON_TEXTS: Array<{ key: string; title: string; text: string }> = [
+  { key: "buy_subscription", title: "خرید اشتراک", text: "خرید اشتراک 🔐" },
+  { key: "renew_service", title: "تمدید سرویس", text: "تمدید سرویس ♻️" },
+  { key: "my_services", title: "سرویس‌های من", text: "سرویس‌های من 🛍" },
+  { key: "wallet", title: "کیف پول", text: "کیف پول + شارژ 🏦" },
+  { key: "support", title: "پشتیبانی", text: "پشتیبانی ☎️" },
+  { key: "tutorials", title: "آموزش", text: "آموزش 📚" },
+  { key: "free_test", title: "اشتراک رایگان تست", text: "اشتراک رایگان {تست}" },
+  { key: "referral", title: "زیرمجموعه گیری", text: "زیرمجموعه گیری 👥" },
+  { key: "other_products", title: "محصولات دیگر", text: "محصولات دیگر 🛍" },
+  { key: "pricing", title: "تعرفه اشتراک‌ها", text: "تعرفه اشتراک‌ها 💵" },
+  { key: "representative_request", title: "درخواست نمایندگی", text: "درخواست نمایندگی 👨‍💼" },
+  { key: "lucky_wheel", title: "گردونه شانس", text: "گردونه شانس 🎲" },
+  { key: "back", title: "بازگشت", text: "بازگشت" },
+  { key: "main_menu", title: "منوی اصلی", text: "منوی اصلی" },
+  { key: "cancel", title: "لغو", text: "لغو ❌" },
+  { key: "confirm", title: "تایید", text: "تایید ✅" },
+];
+
+async function seedButtonTexts(): Promise<number> {
+  let created = 0;
+  for (const button of INITIAL_BUTTON_TEXTS) {
+    const existing = await prisma.buttonText.findUnique({ where: { key: button.key } });
+    if (existing === null) {
+      await prisma.buttonText.create({
+        data: {
+          key: button.key,
+          title: button.title,
+          defaultText: button.text,
+          currentText: button.text,
+        },
+      });
+      created += 1;
+    }
+  }
+  return created;
+}
+
+// Ensures the single global Telegram Stars pricing row exists; existing
+// values are never touched.
+async function seedStarsPricingSetting(): Promise<number> {
+  const existing = await prisma.starsPricingSetting.findUnique({
+    where: { singletonKey: "default" },
+  });
+  if (existing !== null) {
+    return 0;
+  }
+  await prisma.starsPricingSetting.create({ data: { singletonKey: "default" } });
+  return 1;
+}
+
 async function seedMessageTemplates(): Promise<number> {
   let created = 0;
   for (const template of INITIAL_MESSAGE_TEMPLATES) {
@@ -159,11 +212,15 @@ async function main(): Promise<void> {
   const settingsCreated = await seedSettings();
   const logTopicsCreated = await seedLogTopics();
   const templatesCreated = await seedMessageTemplates();
+  const buttonsCreated = await seedButtonTexts();
+  const starsCreated = await seedStarsPricingSetting();
   console.log(
     `[seed] done: ${adminCount} OWNER admin(s) upserted, ` +
       `${settingsCreated}/${INITIAL_SETTINGS.length} setting(s) created, ` +
       `${logTopicsCreated}/${INITIAL_LOG_TOPICS.length} log topic(s) created, ` +
-      `${templatesCreated}/${INITIAL_MESSAGE_TEMPLATES.length} message template(s) created.`,
+      `${templatesCreated}/${INITIAL_MESSAGE_TEMPLATES.length} message template(s) created, ` +
+      `${buttonsCreated}/${INITIAL_BUTTON_TEXTS.length} button text(s) created, ` +
+      `${starsCreated} stars pricing row(s) created.`,
   );
   if (adminCount === 0) {
     console.warn(

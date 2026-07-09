@@ -539,6 +539,7 @@ CREATE TABLE "UserHiddenPaymentGateway" (
 -- CreateTable
 CREATE TABLE "StarsPricingSetting" (
     "id" TEXT NOT NULL,
+    "singletonKey" TEXT NOT NULL DEFAULT 'default',
     "pricingMode" "StarsPricingMode" NOT NULL DEFAULT 'MANUAL_RATE',
     "manualTomanPerStar" INTEGER,
     "currencyRateApiUrl" TEXT,
@@ -548,6 +549,7 @@ CREATE TABLE "StarsPricingSetting" (
     "minStars" INTEGER,
     "maxStars" INTEGER,
     "cashbackPercent" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "StarsPricingSetting_pkey" PRIMARY KEY ("id")
@@ -572,7 +574,7 @@ CREATE TABLE "Service" (
     "remainingBytes" BIGINT NOT NULL DEFAULT 0,
     "durationDays" INTEGER NOT NULL DEFAULT 0,
     "startsAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "expiresAt" TIMESTAMP(3),
     "firstConnectedAt" TIMESTAMP(3),
     "lastConnectedAt" TIMESTAMP(3),
     "lastSubscriptionUpdateAt" TIMESTAMP(3),
@@ -1070,6 +1072,9 @@ CREATE INDEX "UserHiddenPaymentGateway_paymentGatewayId_idx" ON "UserHiddenPayme
 
 -- CreateIndex
 CREATE UNIQUE INDEX "UserHiddenPaymentGateway_userId_paymentGatewayId_key" ON "UserHiddenPaymentGateway"("userId", "paymentGatewayId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "StarsPricingSetting_singletonKey_key" ON "StarsPricingSetting"("singletonKey");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Service_username_key" ON "Service"("username");
