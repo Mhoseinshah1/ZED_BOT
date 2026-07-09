@@ -73,6 +73,8 @@ export interface CheckoutDraft {
   originalPriceToman: number;
   discountAmountToman: number;
   finalPriceToman: number;
+  /** Unique per pre-invoice; wallet-payment idempotency key (Phase 15). */
+  draftNonce?: string;
 }
 
 /** Renewal pre-invoice draft (Phase 12). No DB rows until "continue". */
@@ -86,6 +88,8 @@ export interface RenewalDraft {
   originalPriceToman: number;
   discountAmountToman: number;
   finalPriceToman: number;
+  /** Unique per pre-invoice; wallet-payment idempotency key (Phase 15). */
+  draftNonce?: string;
 }
 
 /** Wallet top-up draft (Phase 14). No DB rows until "continue". */

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { errorMessage } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
@@ -21,6 +23,15 @@ import {
 import { validateDiscountCode } from "../../services/discount.service.js";
 import { getPendingReviewPayment } from "../../services/payment-method.service.js";
 import { getProductByShortId, type ProductWithRelations } from "../../services/product.service.js";
+import {
+  buildServiceInfoMessage,
+  PROVISION_FAILED_USER_TEXT,
+  provisionPaidOrder,
+} from "../../services/provisioning.service.js";
+import {
+  payPurchaseDraftWithWallet,
+  WALLET_PAYMENT_DONE_TEXT,
+} from "../../services/wallet-payment.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { clearCheckoutState } from "./checkout-state.js";
 import { ccb, CO_CB } from "./checkout-cb.js";
@@ -39,6 +50,8 @@ import {
   preInvoiceKeyboard,
   preInvoiceText,
   productListKeyboard,
+  walletConfirmText,
+  walletPayAvailable,
 } from "./checkout-views.js";
 import { showPaymentMethods } from "./payment.handler.js";
 import { CHECKOUT_EXPIRED_TEXT, paycb, RECEIPT_WAITING_TEXT } from "./payment-views.js";
@@ -68,7 +81,7 @@ async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {
     return;
   }
   const text = preInvoiceText(product, user, draft);
-  const keyboard = preInvoiceKeyboard(draft);
+  const keyboard = preInvoiceKeyboard(draft, user);
   if (edit) {
     await safeEditOrReply(ctx, text, keyboard, HTML);
   } else {
@@ -86,6 +99,8 @@ async function startPreInvoice(ctx: BotContext, product: ProductWithRelations): 
     originalPriceToman: product.priceToman,
     discountAmountToman: 0,
     finalPriceToman: product.priceToman,
+    // One nonce per pre-invoice: the wallet payment's idempotency key.
+    draftNonce: randomUUID(),
   };
   ctx.session.temp.checkoutDraft = draft;
   await renderPreInvoice(ctx, true);
@@ -322,7 +337,71 @@ checkoutHandler.callbackQuery(CO_CB.DISCOUNT_CLEAR, async (ctx) => {
   await renderPreInvoice(ctx, true);
 });
 
-// --- Continue: the only write ------------------------------------------------------------
+// --- Wallet payment (Phase 15) ------------------------------------------------------------
+
+checkoutHandler.callbackQuery(CO_CB.WALLET, async (ctx) => {
+  const draft = ctx.session.temp.checkoutDraft;
+  const user = ctx.dbUser;
+  if (draft === undefined || user === null) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  if (draft.flowType !== "SERVICE_PRODUCT" || !walletPayAvailable(user, draft.finalPriceToman)) {
+    await safeAnswerCallback(ctx, "موجودی کیف پول کافی نیست.");
+    await renderPreInvoice(ctx, true);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    walletConfirmText(draft.finalPriceToman, user.balanceToman),
+    new InlineKeyboard()
+      .text("تایید پرداخت ✅", CO_CB.WALLET_CONFIRM)
+      .row()
+      .text("انصراف", CO_CB.BACK_TO_INVOICE),
+  );
+});
+
+// Only this callback deducts - and only through the atomic service.
+checkoutHandler.callbackQuery(CO_CB.WALLET_CONFIRM, async (ctx) => {
+  const draft = ctx.session.temp.checkoutDraft;
+  const user = ctx.dbUser;
+  if (draft === undefined || user === null) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  try {
+    const result = await payPurchaseDraftWithWallet(user, draft);
+    if (!result.ok) {
+      await safeAnswerCallback(ctx, result.error);
+      await renderPreInvoice(ctx, true);
+      return;
+    }
+    clearCheckoutState(ctx);
+    if (result.alreadyPaid) {
+      await safeAnswerCallback(ctx, "پرداخت قبلاً انجام شده است.");
+      return;
+    }
+    await safeAnswerCallback(ctx, "پرداخت شد ✅");
+    await safeEditOrReply(ctx, WALLET_PAYMENT_DONE_TEXT, backKeyboard(CB.USER_MENU));
+
+    // Immediate provisioning through the unchanged Phase 9 pipeline.
+    const outcome = await provisionPaidOrder(result.order.id);
+    if (outcome.ok) {
+      await safeReply(ctx, buildServiceInfoMessage(outcome.service), backKeyboard(CB.USER_MENU), HTML);
+    } else if (outcome.refunded) {
+      await safeReply(ctx, PROVISION_FAILED_USER_TEXT, backKeyboard(CB.USER_MENU));
+    } else {
+      await safeReply(ctx, "پرداخت انجام شد و سفارش شما در حال آماده‌سازی است.", backKeyboard(CB.USER_MENU));
+    }
+  } catch (err) {
+    logger.error("wallet purchase payment failed", { error: errorMessage(err) });
+    await safeAnswerCallback(ctx);
+    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.");
+  }
+});
+
+// --- Continue: creates the PENDING checkout (card-to-card path) -----------------------------
 
 checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
   const draft = ctx.session.temp.checkoutDraft;

@@ -22,7 +22,9 @@ panel → «در حال حاضر پنلی برای خرید فعال نیست.»
 straight to its categories; multiple panels → «از کدام پنل می‌خواهید خرید
 کنید؟» panel list first. Then: category list (only categories with buyable
 products **for the selected panel**) → plan list (`name | price تومان`) →
-pre-invoice → optional discount code → continue.
+pre-invoice → optional discount code → continue. Since Phase 15 the
+pre-invoice also offers «پرداخت با کیف پول 🏦» when the wallet balance
+covers the amount (`docs/wallet-payment-phase15.md`).
 
 **محصولات دیگر 🛍 (`user:other_products`)**: category list → product list →
 pre-invoice (shows delivery type and, when enabled, the "information

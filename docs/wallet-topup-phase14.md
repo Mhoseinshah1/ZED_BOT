@@ -81,9 +81,13 @@ finalization, provisioning/renewal dispatch); `WALLET_CHARGE` takes the
 wallet path above. The result union carries `kind: "ORDER_PAYMENT" |
 "WALLET_TOPUP"` for the receipts handler.
 
-## Intentionally NOT implemented
+## Intentionally NOT implemented (in Phase 14)
 
-Paying orders from the wallet balance (no deduction anywhere), online
+> **Phase 15 update:** spending the wallet balance now exists for service
+> purchase/renewal pre-invoices only (`docs/wallet-payment-phase15.md`).
+> A wallet top-up itself can never be paid with the wallet.
+
+Online
 gateways, Telegram Stars, admin manual balance adjustment, representative
 debt, negative-balance purchase, cashback, automatic receipt verification,
 gateway management UI.
