@@ -6,6 +6,8 @@ import type {
   GetServiceAccountResult,
   NormalizedAccountStatus,
   PanelHealthResult,
+  RenewServiceAccountInput,
+  RenewServiceAccountResult,
 } from "../core/panel.types.js";
 import { MarzbanClient } from "./marzban.client.js";
 import type { MarzbanUser } from "./marzban.types.js";
@@ -228,6 +230,89 @@ export class MarzbanAdapter implements PanelAdapter {
       parseTimestamp(user.last_connected_at);
     if (lastConnected !== undefined) {
       result.lastConnectedAt = lastConnected;
+    }
+    return result;
+  }
+
+  /**
+   * Renewal via documented endpoints: usage is reset first
+   * (POST /api/user/{username}/reset), then the new limits land with
+   * PUT /api/user/{username} (data_limit, expire, status active). The
+   * existing proxies/inbounds are sent back unchanged and the username is
+   * never touched. If the reset succeeds but the PUT fails, nothing was
+   * upgraded (the caller fails the order and refunds) - the account merely
+   * has zeroed usage, which is logged upstream, never charged.
+   */
+  async renewServiceAccount(input: RenewServiceAccountInput): Promise<RenewServiceAccountResult> {
+    const auth = await this.client.getToken();
+    if (!auth.ok || auth.token === undefined) {
+      return { ok: false, errorMessage: `Marzban authentication failed: ${auth.message}` };
+    }
+    const existing = await this.client.getUser(auth.token, input.username);
+    if (!existing.ok || existing.user === undefined) {
+      if (existing.status === 404) {
+        return { ok: false, errorMessage: "Panel account not found." };
+      }
+      return { ok: false, errorMessage: `Marzban read user failed: ${existing.message}` };
+    }
+
+    const reset = await this.client.resetUserUsage(auth.token, input.username);
+    if (!reset.ok) {
+      return { ok: false, errorMessage: `Marzban usage reset failed: ${reset.message}` };
+    }
+
+    const modified = await this.client.modifyUser(auth.token, input.username, {
+      proxies: existing.user.proxies ?? {},
+      inbounds: existing.user.inbounds ?? {},
+      data_limit: input.totalBytes === null ? 0 : Number(input.totalBytes),
+      expire: input.expiresAt === null ? 0 : Math.floor(input.expiresAt.getTime() / 1000),
+      status: "active",
+      ...(input.note !== null && input.note !== undefined ? { note: input.note } : {}),
+    });
+    if (!modified.ok || modified.user === undefined) {
+      return { ok: false, errorMessage: `Marzban modify user failed: ${modified.message}` };
+    }
+
+    const subscriptionBase =
+      input.subscriptionBaseUrl !== null &&
+      input.subscriptionBaseUrl !== undefined &&
+      input.subscriptionBaseUrl !== ""
+        ? input.subscriptionBaseUrl
+        : this.client.credentials.baseUrl;
+    const user = modified.user;
+    const result: RenewServiceAccountResult = {
+      ok: true,
+      username: user.username,
+      status: normalizeStatus(user.status),
+    };
+    if (typeof user.used_traffic === "number") {
+      result.usedBytes = nonNegativeBigInt(user.used_traffic);
+    }
+    if (user.data_limit !== undefined) {
+      result.totalBytes =
+        typeof user.data_limit === "number" && user.data_limit > 0
+          ? nonNegativeBigInt(user.data_limit)
+          : null;
+      if (result.totalBytes === null) {
+        result.remainingBytes = null;
+      } else {
+        const used = result.usedBytes ?? 0n;
+        result.remainingBytes = result.totalBytes > used ? result.totalBytes - used : 0n;
+      }
+    }
+    if (user.expire !== undefined) {
+      result.expiresAt =
+        typeof user.expire === "number" && user.expire > 0 ? new Date(user.expire * 1000) : null;
+    }
+    const subscriptionUrl = resolveSubscriptionUrl(user.subscription_url, subscriptionBase);
+    if (subscriptionUrl !== undefined) {
+      result.subscriptionUrl = subscriptionUrl;
+    }
+    if (Array.isArray(user.links)) {
+      const links = user.links.filter((l): l is string => typeof l === "string" && l !== "");
+      if (links.length > 0) {
+        result.configLinks = links;
+      }
     }
     return result;
   }

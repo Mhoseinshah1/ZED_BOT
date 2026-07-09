@@ -5,6 +5,8 @@ import type {
   GetServiceAccountResult,
   PanelHealthResult,
   PanelType,
+  RenewServiceAccountInput,
+  RenewServiceAccountResult,
 } from "./panel.types.js";
 
 /**
@@ -37,4 +39,11 @@ export interface PanelAdapter {
    * failures, never fakes success, never includes credentials.
    */
   getServiceAccount(input: GetServiceAccountInput): Promise<GetServiceAccountResult>;
+
+  /**
+   * Renews one EXISTING service account: new traffic limit + expiry on the
+   * same username. Never deletes/recreates the account, never changes the
+   * username, never fakes success - unclear endpoints return { ok: false }.
+   */
+  renewServiceAccount(input: RenewServiceAccountInput): Promise<RenewServiceAccountResult>;
 }
