@@ -75,6 +75,15 @@ export interface CheckoutDraft {
   finalPriceToman: number;
 }
 
+/** Card-to-card payment context while the user views the card / sends a receipt. */
+export interface PaymentDraft {
+  checkoutSessionId: string;
+  paymentGatewayId: string;
+  cardAccountId?: string;
+  cardNumber?: string;
+  amountToman: number;
+}
+
 /** Minimal per-user session state. Complex conversations arrive later. */
 export interface SessionData {
   currentFlow: string | null;
@@ -97,6 +106,8 @@ export interface SessionData {
     editingProductField?: string;
     // User checkout draft (pre-invoice).
     checkoutDraft?: CheckoutDraft;
+    // Card-to-card payment / receipt-upload context.
+    paymentDraft?: PaymentDraft;
     [key: string]: unknown;
   };
 }

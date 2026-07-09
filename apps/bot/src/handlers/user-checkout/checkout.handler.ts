@@ -18,14 +18,13 @@ import {
   getCheckoutByShortId,
 } from "../../services/checkout.service.js";
 import { validateDiscountCode } from "../../services/discount.service.js";
+import { getPendingReviewPayment } from "../../services/payment-method.service.js";
 import { getProductByShortId, type ProductWithRelations } from "../../services/product.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { clearCheckoutState } from "./checkout-state.js";
 import { ccb, CO_CB } from "./checkout-cb.js";
 import {
   categoryListKeyboard,
-  checkoutCreatedKeyboard,
-  checkoutCreatedText,
   checkoutViewText,
   EMPTY_CATALOG_TEXT,
   locationMenuKeyboard,
@@ -33,6 +32,8 @@ import {
   preInvoiceText,
   productListKeyboard,
 } from "./checkout-views.js";
+import { showPaymentMethods } from "./payment.handler.js";
+import { CHECKOUT_EXPIRED_TEXT, paycb, RECEIPT_WAITING_TEXT } from "./payment-views.js";
 
 const HTML = { parseMode: "HTML" as const };
 const DRAFT_EXPIRED_TEXT = "پیش‌فاکتور در دسترس نیست؛ لطفاً دوباره محصول را انتخاب کنید.";
@@ -292,7 +293,7 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
     const checkout = await createCheckoutSession(user, product, draft);
     clearCheckoutState(ctx);
     await safeAnswerCallback(ctx, "ثبت شد ✅");
-    await safeEditOrReply(ctx, checkoutCreatedText(), checkoutCreatedKeyboard(checkout));
+    await showPaymentMethods(ctx, checkout, { created: true });
     logger.info("checkout session created", {
       checkoutId: checkout.id,
       userId: user.id,
@@ -317,15 +318,21 @@ checkoutHandler.callbackQuery(/^user:co:view:([0-9a-f-]+)$/, async (ctx) => {
     return;
   }
   await safeAnswerCallback(ctx);
-  await safeEditOrReply(
-    ctx,
-    checkoutViewText(checkout),
-    new InlineKeyboard()
-      .text("مشاهده دوباره پیش‌فاکتور", ccb.viewCheckout(checkoutShortId(checkout)))
-      .row()
-      .text("بازگشت به منوی اصلی", CB.USER_MENU),
-    HTML,
-  );
+
+  // Payment state decides what the view offers next.
+  const pendingReview = await getPendingReviewPayment(checkout.id);
+  const expired = checkout.status === "PENDING" && checkout.expiresAt.getTime() <= Date.now();
+  let statusLine = "";
+  const kb = new InlineKeyboard();
+  if (pendingReview !== null) {
+    statusLine = `\n\n${RECEIPT_WAITING_TEXT}`;
+  } else if (checkout.status === "PENDING" && !expired) {
+    kb.text("انتخاب روش پرداخت 💳", paycb.methods(checkoutShortId(checkout))).row();
+  } else if (expired) {
+    statusLine = `\n\n${CHECKOUT_EXPIRED_TEXT}`;
+  }
+  kb.text("بازگشت به منوی اصلی", CB.USER_MENU);
+  await safeEditOrReply(ctx, checkoutViewText(checkout) + statusLine, kb, HTML);
 });
 
 // =============================================================================

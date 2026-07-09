@@ -4,7 +4,6 @@ import { InlineKeyboard } from "grammy";
 import { CB } from "../../core/callbacks.js";
 import type { CheckoutDraft } from "../../core/session.js";
 import { categoryShortId } from "../../services/category.service.js";
-import { checkoutShortId } from "../../services/checkout.service.js";
 import { productShortId, type ProductWithRelations } from "../../services/product.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { ccb, CO_CB } from "./checkout-cb.js";
@@ -149,18 +148,9 @@ export function preInvoiceKeyboard(draft: CheckoutDraft): InlineKeyboard {
   return kb;
 }
 
-// --- Checkout created / view --------------------------------------------------------
-
-export function checkoutCreatedText(): string {
-  return "پیش‌فاکتور ثبت شد ✅\n\nمرحله انتخاب روش پرداخت در فاز بعدی فعال می‌شود.";
-}
-
-export function checkoutCreatedKeyboard(checkout: CheckoutSession): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("مشاهده دوباره پیش‌فاکتور", ccb.viewCheckout(checkoutShortId(checkout)))
-    .row()
-    .text("بازگشت به منوی اصلی", CB.USER_MENU);
-}
+// --- Checkout view -------------------------------------------------------------------
+// (The "created" screen now lives in payment-views: method selection follows
+// checkout creation directly since Phase 7.)
 
 export function checkoutViewText(checkout: CheckoutSession): string {
   const snapshot = (checkout.productSnapshot ?? {}) as Record<string, unknown>;
@@ -179,8 +169,6 @@ export function checkoutViewText(checkout: CheckoutSession): string {
     "",
     `وضعیت: ${checkout.status === "PENDING" ? "در انتظار پرداخت" : checkout.status}`,
     `اعتبار تا: ${checkout.expiresAt.toISOString().replace("T", " ").slice(0, 16)} (UTC)`,
-    "",
-    "مرحله انتخاب روش پرداخت در فاز بعدی فعال می‌شود.",
   );
   return lines.join("\n");
 }

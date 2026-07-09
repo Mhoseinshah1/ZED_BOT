@@ -15,6 +15,11 @@ import {
   checkoutHandler,
   checkoutTextHandler,
 } from "./handlers/user-checkout/checkout.handler.js";
+import {
+  paymentHandler,
+  paymentReceiptHandler,
+} from "./handlers/user-checkout/payment.handler.js";
+import { receiptsHandler } from "./handlers/admin-receipts/receipts.handler.js";
 import { forceJoinHandler } from "./handlers/force-join.handler.js";
 import { menuHandler } from "./handlers/menu.handler.js";
 import { pingHandler } from "./handlers/ping.handler.js";
@@ -59,19 +64,27 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(adminHandler);
   adminArea.use(panelHandler);
   adminArea.use(productHandler);
+  adminArea.use(receiptsHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
 
-  // Flow text input. Checkout discount entry is a user flow (any user who
-  // reached the gated pre-invoice); panel/product/category wizards require an
-  // active admin. Everything else falls through untouched.
+  // Flow input router. Receipt upload accepts text/photo/document; discount
+  // entry is text-only; panel/product/category wizards are text-only and
+  // require an active admin. Everything else falls through untouched.
   const adminFlowText = new Composer<BotContext>();
   adminFlowText.use(panelTextHandler);
   adminFlowText.use(productTextHandler);
-  bot.on("message:text", async (ctx, next) => {
+  bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {
+      return next();
+    }
+    if (flow === "payment:receipt") {
+      await paymentReceiptHandler.middleware()(ctx, next);
+      return;
+    }
+    if (ctx.message.text === undefined) {
       return next();
     }
     if (flow === "checkout:discount") {
@@ -89,6 +102,7 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(userAccessMiddleware());
   userArea.use(menuHandler);
   userArea.use(checkoutHandler);
+  userArea.use(paymentHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());
