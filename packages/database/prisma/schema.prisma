@@ -1,3 +1,22 @@
+// =============================================================================
+// ZED_BOT database schema (Phase 2)
+//
+// Conventions
+//   - Money amounts are TOMAN stored as Int (fields end in "Toman").
+//   - Data volumes are bytes stored as BigInt (fields end in "Bytes").
+//   - Telegram IDs are BigInt.
+//   - "...ByAdminId" / "...AdminId" audit fields are SOFT references (plain
+//     strings, no FK) so audit history survives any admin-row changes;
+//     structural ownership uses real relations.
+//   - Financial/service history (payments, orders, services, wallet
+//     transactions, receipts, referrals, logs) is never hard-deleted;
+//     status fields / soft-delete timestamps are used instead.
+//   - Orders and services carry snapshot fields so history stays correct
+//     when products/panels are renamed or repriced.
+//
+// See docs/database-schema.md for the full design notes.
+// =============================================================================
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -6,6 +25,10 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+// =============================================================================
+// Enums
+// =============================================================================
 
 // OWNER            = full access
 // SELLER           = seller / admin operator
@@ -18,11 +41,257 @@ enum AdminRole {
   RECEIPT_REVIEWER
 }
 
-enum SettingType {
-  STRING
-  NUMBER
-  BOOLEAN
-  JSON
+// F = normal user, N = representative type 1, N2 = representative type 2
+enum UserGroup {
+  F
+  N
+  N2
+}
+
+enum UserStatus {
+  ACTIVE
+  BLOCKED
+  DISABLED
+  DELETED
+}
+
+enum KycStatus {
+  NONE
+  APPROVED
+  REJECTED
+}
+
+enum WalletTransactionType {
+  CHARGE
+  SPEND
+  REFUND
+  CASHBACK
+  COMMISSION
+  MANUAL_ADD
+  MANUAL_DEDUCT
+  DEBT_ADD
+  DEBT_PAYMENT
+  DISCOUNT
+  SYSTEM_ADJUSTMENT
+}
+
+enum WalletTransactionSource {
+  USER_PAYMENT
+  ORDER
+  ADMIN
+  REFERRAL
+  CASHBACK
+  SYSTEM
+  REPRESENTATIVE_DEBT
+}
+
+enum PanelType {
+  MARZBAN
+  XUI
+}
+
+enum PanelStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+  FAILED
+}
+
+enum ServiceLocation {
+  MULTI_LOCATION
+  DEDICATED_LOCATION
+  TEST
+}
+
+enum RenewalMethod {
+  RESET_VOLUME_AND_TIME
+  ADD_TIME_AND_VOLUME_TO_NEXT_PERIOD
+  RESET_TIME_ADD_PREVIOUS_VOLUME
+  RESET_VOLUME_ADD_TIME
+  ADD_TIME_KEEP_REMAINING_VOLUME_AS_TOTAL
+}
+
+enum UsernamePatternType {
+  TELEGRAM_USERNAME_SEQUENCE
+  TELEGRAM_ID_RANDOM
+  CUSTOM
+  CUSTOM_RANDOM
+  CUSTOM_TEXT_RANDOM
+  CUSTOM_TEXT_SEQUENCE
+  TELEGRAM_ID_SEQUENCE
+  REPRESENTATIVE_TEXT_SEQUENCE
+}
+
+enum ProductType {
+  SERVICE_PRODUCT
+  OTHER_PRODUCT
+}
+
+enum OtherProductDeliveryType {
+  MANUAL_ADMIN
+  STOCK_ITEM
+}
+
+enum TrafficResetCycle {
+  NO_RESET
+  DAY
+  WEEK
+  MONTH
+  YEAR
+}
+
+enum DiscountType {
+  PERCENT
+  FIXED_AMOUNT
+}
+
+enum DiscountAppliesTo {
+  PURCHASE
+  RENEWAL
+  BOTH
+}
+
+enum CheckoutStatus {
+  PENDING
+  PAID
+  EXPIRED
+  CANCELLED
+  FAILED_REFUNDED
+  COMPLETED
+}
+
+enum CheckoutPurpose {
+  WALLET_CHARGE
+  ORDER_PAYMENT
+  PAY_WITH_WALLET
+}
+
+enum OrderType {
+  SERVICE_PURCHASE
+  SERVICE_RENEWAL
+  EXTRA_VOLUME
+  EXTRA_TIME
+  LOCATION_CHANGE
+  OTHER_PRODUCT
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  WAITING_RECEIPT
+  PENDING_REVIEW
+  PAID
+  PROVISIONING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentGatewayType {
+  CARD_TO_CARD
+  PLISIO
+  NOWPAYMENTS
+  AGHAYEPARDAKHT
+  ZARINPAL
+  TELEGRAM_STARS
+  CUSTOM
+}
+
+enum PaymentStatus {
+  PENDING
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  FAILED
+  EXPIRED
+  DELETED
+}
+
+enum PaymentPurpose {
+  WALLET_CHARGE
+  ORDER_PAYMENT
+  PAY_WITH_WALLET
+}
+
+enum StarsPricingMode {
+  MANUAL_RATE
+  AUTO_RATE_API
+}
+
+enum ServiceStatus {
+  CREATING
+  ACTIVE
+  DISABLED
+  EXPIRED
+  LIMITED
+  DELETED
+  FAILED
+}
+
+enum OtherProductOrderStatus {
+  PAID
+  WAITING_USER_INFO
+  WAITING_ADMIN_DELIVERY
+  DELIVERED
+  CANCELLED
+  REFUNDED
+  DELIVERY_CANCELLED_REFUNDED
+  DELIVERY_REJECTED_NO_REFUND
+}
+
+enum ReferralCommissionStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+enum SupportMode {
+  PRIVATE_CHAT
+  TICKET
+}
+
+enum SupportTicketStatus {
+  OPEN
+  ANSWERED
+  CLOSED
+}
+
+enum SupportMessageSenderType {
+  USER
+  ADMIN
+}
+
+enum TutorialMediaType {
+  PHOTO
+  VIDEO
+  DOCUMENT
+}
+
+enum BroadcastType {
+  SEND
+  FORWARD
+}
+
+enum BroadcastStatus {
+  DRAFT
+  CONFIRMING
+  RUNNING
+  CANCELLED
+  COMPLETED
+  FAILED
+}
+
+enum BroadcastRecipientStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+enum SystemLogLevel {
+  INFO
+  WARN
+  ERROR
 }
 
 enum ActorType {
@@ -32,37 +301,1057 @@ enum ActorType {
   WORKER
 }
 
+enum SettingType {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+}
+
+// =============================================================================
+// Admins
+// =============================================================================
+
+model Admin {
+  id            String    @id @default(uuid())
+  telegramId    BigInt    @unique
+  username      String?
+  firstName     String?
+  lastName      String?
+  role          AdminRole
+  isActive      Boolean   @default(true)
+  addedByAdminId String?
+  addedByAdmin  Admin?    @relation("AdminAddedBy", fields: [addedByAdminId], references: [id])
+  addedAdmins   Admin[]   @relation("AdminAddedBy")
+  permissions   AdminPermission[]
+  supportMessages SupportMessage[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([role])
+}
+
+model AdminPermission {
+  id            String   @id @default(uuid())
+  adminId       String
+  admin         Admin    @relation(fields: [adminId], references: [id])
+  permissionKey String
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([adminId, permissionKey])
+}
+
+// =============================================================================
+// Users
+// =============================================================================
+
 model User {
-  id           String    @id @default(uuid())
-  telegramId   BigInt    @unique
+  id           String     @id @default(uuid())
+  telegramId   BigInt     @unique
   username     String?
   firstName    String?
   lastName     String?
+  phoneNumber  String?
   languageCode String?
-  isBlocked    Boolean   @default(false)
-  isBanned     Boolean   @default(false)
-  lastSeenAt   DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  isBot        Boolean    @default(false)
+  status       UserStatus @default(ACTIVE)
+  group        UserGroup  @default(F)
+  adminNote    String?
+
+  // Representative (group N / N2) lifecycle
+  representativeSince      DateTime?
+  representativeRemovedAt  DateTime?
+  representativeDebtToman  Int       @default(0)
+  representativeDebtLocked Boolean   @default(false)
+
+  joinedAt   DateTime  @default(now())
+  lastSeenAt DateTime?
+
+  // Security / verification
+  blockedAt               DateTime?
+  blockedByAdminId        String?
+  blockReason             String?
+  disabledAt              DateTime?
+  disabledByAdminId       String?
+  isPhoneVerified         Boolean   @default(false)
+  phoneVerifiedAt         DateTime?
+  phoneVerifiedByAdminId  String?
+  kycStatus               KycStatus @default(NONE)
+  kycUpdatedAt            DateTime?
+  kycUpdatedByAdminId     String?
+  termsAcceptedAt         DateTime?
+  forceJoinBypass         Boolean   @default(false)
+  forceJoinBypassByAdminId String?
+
+  // Referral
+  referrerId            String?
+  referrer              User?     @relation("UserReferrer", fields: [referrerId], references: [id])
+  referredUsers         User[]    @relation("UserReferrer")
+  referralCode          String?   @unique
+  referralJoinedAt      DateTime?
+  referralGiftClaimedAt DateTime?
+  totalReferralCount               Int @default(0)
+  totalReferralPurchaseCount       Int @default(0)
+  totalReferralPurchaseAmountToman Int @default(0)
+  totalReferralCommissionToman     Int @default(0)
+
+  // Wallet totals (authoritative history in WalletTransaction)
+  balanceToman            Int     @default(0)
+  totalChargedToman       Int     @default(0)
+  totalSpentToman         Int     @default(0)
+  totalDiscountToman      Int     @default(0)
+  totalRefundedToman      Int     @default(0)
+  totalManualAddedToman   Int     @default(0)
+  totalManualDeductedToman Int    @default(0)
+  allowNegativeBalance    Boolean @default(false)
+
+  // Stats
+  referralCount            Int @default(0)
+  subServiceCount          Int @default(0)
+  ordersCount              Int @default(0)
+  paidOrdersCount          Int @default(0)
+  totalPurchaseAmountToman Int @default(0)
+  discountPercent          Int @default(0)
+  score                    Int @default(0)
+
+  // Test accounts
+  testAccountLimitOverride Int?
+  testAccountsCreatedCount Int       @default(0)
+  lastTestAccountCreatedAt DateTime?
+  testLimitResetAt         DateTime?
+
+  // Message preferences
+  cronNotificationsEnabled    Boolean @default(true)
+  marketingMessagesEnabled    Boolean @default(true)
+  supportMessagesEnabled      Boolean @default(true)
+  paymentNotificationsEnabled Boolean @default(true)
+  serviceNotificationsEnabled Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  walletTransactions      WalletTransaction[]
+  orders                  Order[]
+  payments                Payment[]
+  services                Service[]
+  checkoutSessions        CheckoutSession[]
+  discountCodeUsages      DiscountCodeUsage[]
+  manualReceipts          ManualReceipt[]
+  hiddenPanels            UserHiddenPanel[]
+  hiddenPaymentGateways   UserHiddenPaymentGateway[]
+  referralsAsReferrer     Referral[]           @relation("ReferralReferrer")
+  referralAsReferred      Referral?            @relation("ReferralReferred")
+  commissionsAsReferrer   ReferralCommission[] @relation("CommissionReferrer")
+  commissionsAsReferred   ReferralCommission[] @relation("CommissionReferred")
+  testAccountHistories    TestAccountHistory[]
+  wheelSpinHistories      WheelSpinHistory[]
+  supportTickets          SupportTicket[]
+  supportMessages         SupportMessage[]
+  broadcastRecipients     BroadcastRecipient[]
+  serviceRatings          ServiceRating[]
+  serviceEventLogs        ServiceEventLog[]
+  otherProductOrders      OtherProductOrder[]
+
+  @@index([status])
+  @@index([group])
+  @@index([referrerId])
+  @@index([createdAt])
 }
 
-model Admin {
-  id         String    @id @default(uuid())
-  telegramId BigInt    @unique
-  role       AdminRole
-  isActive   Boolean   @default(true)
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+// =============================================================================
+// Wallet (immutable transaction log)
+// =============================================================================
+
+model WalletTransaction {
+  id                 String                  @id @default(uuid())
+  userId             String
+  user               User                    @relation(fields: [userId], references: [id])
+  amountToman        Int
+  type               WalletTransactionType
+  source             WalletTransactionSource
+  reason             String?
+  relatedOrderId     String?
+  relatedOrder       Order?                  @relation("OrderWalletTransactions", fields: [relatedOrderId], references: [id])
+  relatedPaymentId   String?
+  relatedPayment     Payment?                @relation("PaymentWalletTransactions", fields: [relatedPaymentId], references: [id])
+  adminId            String?
+  balanceBeforeToman Int
+  balanceAfterToman  Int
+  createdAt          DateTime                @default(now())
+
+  referralCommissions ReferralCommission[]
+  wheelSpins          WheelSpinHistory[]
+
+  @@index([userId])
+  @@index([type])
+  @@index([relatedOrderId])
+  @@index([relatedPaymentId])
+  @@index([createdAt])
 }
 
-model Setting {
-  id        String      @id @default(uuid())
-  key       String      @unique
-  value     String
-  type      SettingType
-  isPublic  Boolean     @default(false)
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+// =============================================================================
+// Panels
+// =============================================================================
+
+model Panel {
+  id                String        @id @default(uuid())
+  type              PanelType
+  name              String
+  baseUrl           String
+  username          String? // Marzban
+  passwordEncrypted String? // Marzban
+  tokenEncrypted    String? // XUI
+  status            PanelStatus   @default(ACTIVE)
+  panelColor        String?
+  isVisible         Boolean       @default(true)
+  displayOrder      Int           @default(0)
+  visibleForGroups  Json? // array of UserGroup values
+  renewalMethod     RenewalMethod @default(RESET_VOLUME_AND_TIME)
+
+  // Feature toggles
+  showPanel                       Boolean @default(true)
+  showFreeTest                    Boolean @default(false)
+  renewalEnabled                  Boolean @default(true)
+  customServiceForF               Boolean @default(false)
+  customServiceForN               Boolean @default(false)
+  customServiceForN2              Boolean @default(false)
+  panelUserLimitEnabled           Boolean @default(false)
+  userLimitEnabled                Boolean @default(false)
+  extraUserPurchaseEnabled        Boolean @default(false)
+  sendConfigEnabled               Boolean @default(true)
+  happLinkEnabled                 Boolean @default(false)
+  configKeyboardEnabled           Boolean @default(false)
+  subscriptionLinkEnabled         Boolean @default(true)
+  firstConnectionEnabled          Boolean @default(false)
+  freeTestFirstConnectionEnabled  Boolean @default(false)
+  locationChangeEnabled           Boolean @default(false)
+  dedicatedSubscriptionLinkEnabled Boolean @default(false)
+  userCanDisableService           Boolean @default(false)
+  userCanEnableService            Boolean @default(false)
+
+  // Per-panel pricing
+  pricePerExtraGbToman          Int  @default(0)
+  pricePerExtraDayToman         Int  @default(0)
+  locationChangePriceToman      Int  @default(0)
+  extraUserPriceToman           Int  @default(0)
+  customServicePricePerGbToman  Int  @default(0)
+  customServicePricePerDayToman Int  @default(0)
+  customServiceMinGb            Int?
+  customServiceMaxGb            Int?
+  customServiceMinDays          Int?
+  customServiceMaxDays          Int?
+
+  // Free test settings
+  testEnabled          Boolean @default(false)
+  testVolumeMb         Int?
+  testDurationMinutes  Int?
+  testProductName      String?
+  testLocation         String?
+  testMessageTemplate  String?
+  testGuideAfterCreate String?
+
+  // Marzban / XUI provisioning settings
+  templateUsername                 String?
+  subscriptionDomain               String?
+  usernamePatternType              UsernamePatternType @default(TELEGRAM_ID_RANDOM)
+  usernameCustomText               String?
+  usernameRandomLength             Int?
+  usernameSequenceLastNumber       Int                 @default(0)
+  representativeUsernamePrefix     String?
+  representativeSequenceLastNumber Int                 @default(0)
+  inboundTemplateName              String? // Marzban
+  resetStrategy                    String? // Marzban
+  inboundIds                       Json? // XUI
+  protocolSettings                 Json? // XUI
+
+  // Capacity
+  accountLimitEnabled  Boolean @default(false)
+  accountLimitCount    Int?
+  createdAccountsCount Int     @default(0)
+  activeAccountsCount  Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products             Product[]
+  services             Service[]
+  orders               Order[]
+  hiddenForUsers       UserHiddenPanel[]
+  testAccountHistories TestAccountHistory[]
+  serviceEventLogs     ServiceEventLog[]
+
+  @@index([status])
+  @@index([type])
+}
+
+model UserHiddenPanel {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  panelId         String
+  panel           Panel    @relation(fields: [panelId], references: [id])
+  hiddenByAdminId String?
+  createdAt       DateTime @default(now())
+
+  @@unique([userId, panelId])
+  @@index([panelId])
+}
+
+// =============================================================================
+// Products
+// =============================================================================
+
+model ProductCategory {
+  id           String      @id @default(uuid())
+  type         ProductType
+  name         String
+  displayOrder Int         @default(0)
+  isActive     Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  products Product[]
+
+  @@index([type])
+}
+
+model Product {
+  id                 String           @id @default(uuid())
+  type               ProductType
+  categoryId         String
+  category           ProductCategory  @relation(fields: [categoryId], references: [id])
+  panelId            String?
+  panel              Panel?           @relation(fields: [panelId], references: [id])
+  name               String
+  displayGroups      Json? // array of UserGroup values
+  serviceLocation    ServiceLocation?
+  volumeGb           Int?
+  durationDays       Int?
+  priceToman         Int
+  invoiceDescription String?
+  isActive           Boolean          @default(true)
+  displayOrder       Int              @default(0)
+
+  // SERVICE_PRODUCT fields (trafficResetCycle has no effect on XUI panels)
+  trafficResetCycle TrafficResetCycle?
+  allLocations      Boolean            @default(false)
+
+  // OTHER_PRODUCT fields (stock implementation lands in a later phase)
+  requiredUserInfoEnabled    Boolean                   @default(false)
+  requiredUserInfoPromptText String?
+  deliveryType               OtherProductDeliveryType?
+  stockEnabled               Boolean                   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders             Order[]
+  checkoutSessions   CheckoutSession[]
+  services           Service[]
+  otherProductOrders OtherProductOrder[]
+
+  @@index([categoryId])
+  @@index([panelId])
+  @@index([type])
+  @@index([isActive])
+}
+
+// =============================================================================
+// Discount codes
+// =============================================================================
+
+model DiscountCode {
+  id                String            @id @default(uuid())
+  code              String            @unique
+  type              DiscountType
+  value             Int
+  totalUsageLimit   Int?
+  totalUsedCount    Int               @default(0)
+  perUserUsageLimit Int?
+  allowedGroups     Json? // array of UserGroup values
+  appliesTo         DiscountAppliesTo @default(BOTH)
+  startsAt          DateTime?
+  expiresAt         DateTime?
+  isActive          Boolean           @default(true)
+  createdByAdminId  String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  usages           DiscountCodeUsage[]
+  orders           Order[]
+  checkoutSessions CheckoutSession[]
+
+  @@index([isActive])
+  @@index([expiresAt])
+}
+
+model DiscountCodeUsage {
+  id                String           @id @default(uuid())
+  discountCodeId    String
+  discountCode      DiscountCode     @relation(fields: [discountCodeId], references: [id])
+  userId            String
+  user              User             @relation(fields: [userId], references: [id])
+  orderId           String?
+  order             Order?           @relation(fields: [orderId], references: [id])
+  checkoutSessionId String?
+  checkoutSession   CheckoutSession? @relation(fields: [checkoutSessionId], references: [id])
+  amountToman       Int
+  createdAt         DateTime         @default(now())
+
+  @@index([discountCodeId])
+  @@index([userId])
+  @@index([orderId])
+}
+
+// =============================================================================
+// Checkout (invoice before order - see docs/database-schema.md)
+// =============================================================================
+
+model CheckoutSession {
+  id                  String          @id @default(uuid())
+  userId              String
+  user                User            @relation(fields: [userId], references: [id])
+  purpose             CheckoutPurpose
+  productId           String?
+  product             Product?        @relation(fields: [productId], references: [id])
+  serviceId           String? // renewal / extra volume / extra time / location change
+  service             Service?        @relation("ServiceCheckoutSessions", fields: [serviceId], references: [id])
+  orderType           OrderType?
+  productSnapshot     Json?
+  originalPriceToman  Int             @default(0)
+  discountAmountToman Int             @default(0)
+  finalPriceToman     Int             @default(0)
+  discountCodeId      String?
+  discountCode        DiscountCode?   @relation(fields: [discountCodeId], references: [id])
+  status              CheckoutStatus  @default(PENDING)
+  expiresAt           DateTime
+  paidAt              DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  orders         Order[]
+  payments       Payment[]
+  discountUsages DiscountCodeUsage[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Orders
+// =============================================================================
+
+model Order {
+  id                String           @id @default(uuid())
+  userId            String
+  user              User             @relation(fields: [userId], references: [id])
+  checkoutSessionId String?
+  checkoutSession   CheckoutSession? @relation(fields: [checkoutSessionId], references: [id])
+  type              OrderType
+  status            OrderStatus      @default(PENDING_PAYMENT)
+  productId         String?
+  product           Product?         @relation(fields: [productId], references: [id])
+  serviceId         String? // target service for renewal / extras
+  service           Service?         @relation("ServiceTargetOrders", fields: [serviceId], references: [id])
+  paymentId         String? // primary payment that settled this order
+  payment           Payment?         @relation("OrderPrimaryPayment", fields: [paymentId], references: [id])
+  panelId           String?
+  panel             Panel?           @relation(fields: [panelId], references: [id])
+
+  originalPriceToman  Int           @default(0)
+  discountAmountToman Int           @default(0)
+  finalPriceToman     Int           @default(0)
+  discountCodeId      String?
+  discountCode        DiscountCode? @relation(fields: [discountCodeId], references: [id])
+
+  // Snapshots - immutable copies of what was sold
+  productNameSnapshot        String?
+  productDescriptionSnapshot String?
+  productPriceSnapshot       Int?
+  durationDaysSnapshot       Int?
+  volumeGbSnapshot           Int?
+  noteSnapshot               String?
+  panelNameSnapshot          String?
+  locationSnapshot           String?
+  categorySnapshot           String?
+
+  rating        Int?
+  failureReason String?
+  adminNote     String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  paidAt      DateTime?
+  completedAt DateTime?
+  cancelledAt DateTime?
+  refundedAt  DateTime?
+
+  payments            Payment[]            @relation("PaymentOrder")
+  walletTransactions  WalletTransaction[]  @relation("OrderWalletTransactions")
+  discountUsages      DiscountCodeUsage[]
+  createdServices     Service[]            @relation("OrderCreatedService")
+  otherProductOrder   OtherProductOrder?
+  referralCommissions ReferralCommission[]
+  firstPurchaseReferrals Referral[]        @relation("ReferralFirstPurchaseOrder")
+
+  @@index([userId])
+  @@index([status])
+  @@index([type])
+  @@index([productId])
+  @@index([serviceId])
+  @@index([paymentId])
+  @@index([panelId])
+  @@index([checkoutSessionId])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Payments
+// =============================================================================
+
+model PaymentGateway {
+  id                                  String             @id @default(uuid())
+  type                                PaymentGatewayType
+  name                                String
+  isEnabled                           Boolean            @default(true)
+  isHidden                            Boolean            @default(false)
+  configEncrypted                     String?
+  minAmountToman                      Int?
+  maxAmountToman                      Int?
+  activateAfterSuccessfulPaymentsCount Int               @default(0)
+  allowedGroups                       Json? // array of UserGroup values
+  cashbackPercent                     Int                @default(0)
+  supportUsername                     String?
+  instructionText                     String?
+  displayOrder                        Int                @default(0)
+  createdAt                           DateTime           @default(now())
+  updatedAt                           DateTime           @updatedAt
+
+  cardAccounts   CardToCardAccount[]
+  payments       Payment[]
+  hiddenForUsers UserHiddenPaymentGateway[]
+
+  @@index([type])
+  @@index([isEnabled])
+}
+
+model CardToCardAccount {
+  id                  String         @id @default(uuid())
+  gatewayId           String
+  gateway             PaymentGateway @relation(fields: [gatewayId], references: [id])
+  cardNumberEncrypted String
+  ownerName           String
+  isActive            Boolean        @default(true)
+  displayOrder        Int            @default(0)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  @@index([gatewayId])
+}
+
+model Payment {
+  id                    String          @id @default(uuid())
+  userId                String
+  user                  User            @relation(fields: [userId], references: [id])
+  orderId               String?
+  order                 Order?          @relation("PaymentOrder", fields: [orderId], references: [id])
+  checkoutSessionId     String?
+  checkoutSession       CheckoutSession? @relation(fields: [checkoutSessionId], references: [id])
+  gatewayId             String?
+  gateway               PaymentGateway? @relation(fields: [gatewayId], references: [id])
+  purpose               PaymentPurpose
+  status                PaymentStatus   @default(PENDING)
+  amountToman           Int
+  payableAmountToman    Int
+  externalTransactionId String?
+  callbackPayload       Json?
+  idempotencyKey        String?         @unique
+  expiresAt             DateTime?
+  paidAt                DateTime?
+  reviewedAt            DateTime?
+  reviewedByAdminId     String?
+  rejectReason          String?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  receipts           ManualReceipt[]
+  walletTransactions WalletTransaction[] @relation("PaymentWalletTransactions")
+  primaryForOrders   Order[]             @relation("OrderPrimaryPayment")
+
+  @@index([userId])
+  @@index([status])
+  @@index([orderId])
+  @@index([gatewayId])
+  @@index([checkoutSessionId])
+  @@index([externalTransactionId])
+  @@index([createdAt])
+}
+
+model ManualReceipt {
+  id                String        @id @default(uuid())
+  paymentId         String
+  payment           Payment       @relation(fields: [paymentId], references: [id])
+  userId            String
+  user              User          @relation(fields: [userId], references: [id])
+  fileId            String?
+  text              String?
+  status            PaymentStatus @default(PENDING_REVIEW)
+  reviewedByAdminId String?
+  reviewedAt        DateTime?
+  rejectReason      String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([paymentId])
+  @@index([userId])
+  @@index([status])
+}
+
+model UserHiddenPaymentGateway {
+  id               String         @id @default(uuid())
+  userId           String
+  user             User           @relation(fields: [userId], references: [id])
+  paymentGatewayId String
+  paymentGateway   PaymentGateway @relation(fields: [paymentGatewayId], references: [id])
+  hiddenByAdminId  String?
+  createdAt        DateTime       @default(now())
+
+  @@unique([userId, paymentGatewayId])
+  @@index([paymentGatewayId])
+}
+
+model StarsPricingSetting {
+  id                          String           @id @default(uuid())
+  pricingMode                 StarsPricingMode @default(MANUAL_RATE)
+  manualTomanPerStar          Int?
+  currencyRateApiUrl          String?
+  currencyRateApiTokenEncrypted String?
+  currencyCode                String?
+  starsPriceFormula           String?
+  minStars                    Int?
+  maxStars                    Int?
+  cashbackPercent             Int              @default(0)
+  updatedAt                   DateTime         @updatedAt
+}
+
+// =============================================================================
+// Services (provisioned VPN accounts)
+// =============================================================================
+
+model Service {
+  id        String        @id @default(uuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id])
+  orderId   String? // order that created this service
+  order     Order?        @relation("OrderCreatedService", fields: [orderId], references: [id])
+  panelId   String
+  panel     Panel         @relation(fields: [panelId], references: [id])
+  productId String?
+  product   Product?      @relation(fields: [productId], references: [id])
+  panelType PanelType // snapshot of the panel type at creation
+  username  String        @unique
+  note      String?
+  status    ServiceStatus @default(CREATING)
+
+  serviceLocation ServiceLocation @default(MULTI_LOCATION)
+
+  // Snapshots
+  productNameSnapshot String?
+  panelNameSnapshot   String?
+
+  volumeBytes    BigInt @default(0)
+  usedBytes      BigInt @default(0)
+  remainingBytes BigInt @default(0)
+  durationDays   Int    @default(0)
+
+  startsAt                  DateTime  @default(now())
+  expiresAt                 DateTime
+  firstConnectedAt          DateTime?
+  lastConnectedAt           DateTime?
+  lastSubscriptionUpdateAt  DateTime?
+  subscriptionUrl           String?
+  subscriptionToken         String?
+  configLinks               Json?
+  qrCodeFileId              String?
+  userAgent                 String?
+  rating                    Int?
+  transferredFromUserId     String?
+  transferredAt             DateTime?
+  deletedAt                 DateTime?
+  panelDeletedAt            DateTime?
+  failureReason             String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ratings              ServiceRating[]
+  eventLogs            ServiceEventLog[]
+  relatedOrders        Order[]              @relation("ServiceTargetOrders")
+  checkoutSessions     CheckoutSession[]    @relation("ServiceCheckoutSessions")
+  testAccountHistories TestAccountHistory[]
+
+  @@index([userId])
+  @@index([panelId])
+  @@index([productId])
+  @@index([orderId])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([createdAt])
+}
+
+model ServiceRating {
+  id        String   @id @default(uuid())
+  serviceId String
+  service   Service  @relation(fields: [serviceId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@index([serviceId])
+  @@index([userId])
+}
+
+model ServiceEventLog {
+  id        String   @id @default(uuid())
+  serviceId String
+  service   Service  @relation(fields: [serviceId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  panelId   String
+  panel     Panel    @relation(fields: [panelId], references: [id])
+  eventType String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([serviceId])
+  @@index([userId])
+  @@index([panelId])
+  @@index([eventType])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Other products (non-VPN digital products)
+// =============================================================================
+
+model OtherProductOrder {
+  id        String                  @id @default(uuid())
+  orderId   String                  @unique
+  order     Order                   @relation(fields: [orderId], references: [id])
+  userId    String
+  user      User                    @relation(fields: [userId], references: [id])
+  productId String
+  product   Product                 @relation(fields: [productId], references: [id])
+  status    OtherProductOrderStatus
+
+  userProvidedInfoText String?
+  userProvidedFiles    Json?
+  adminDeliveryText    String?
+  adminDeliveryFiles   Json?
+  deliveredByAdminId   String?
+  deliveredAt          DateTime?
+  adminRejectReason    String?
+  adminCancelReason    String?
+
+  userInfoReminderCount   Int       @default(0)
+  lastUserInfoReminderAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([productId])
+  @@index([status])
+}
+
+// =============================================================================
+// Referrals
+// =============================================================================
+
+model Referral {
+  id                        String    @id @default(uuid())
+  referrerUserId            String
+  referrer                  User      @relation("ReferralReferrer", fields: [referrerUserId], references: [id])
+  referredUserId            String    @unique
+  referred                  User      @relation("ReferralReferred", fields: [referredUserId], references: [id])
+  joinedAt                  DateTime  @default(now())
+  firstPurchaseAt           DateTime?
+  firstPurchaseOrderId      String?
+  firstPurchaseOrder        Order?    @relation("ReferralFirstPurchaseOrder", fields: [firstPurchaseOrderId], references: [id])
+  totalPurchaseAmountToman  Int       @default(0)
+  totalCommissionAmountToman Int      @default(0)
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+
+  commissions ReferralCommission[]
+
+  @@index([referrerUserId])
+}
+
+model ReferralCommission {
+  id                  String                   @id @default(uuid())
+  referralId          String
+  referral            Referral                 @relation(fields: [referralId], references: [id])
+  referrerUserId      String
+  referrer            User                     @relation("CommissionReferrer", fields: [referrerUserId], references: [id])
+  referredUserId      String
+  referred            User                     @relation("CommissionReferred", fields: [referredUserId], references: [id])
+  orderId             String
+  order               Order                    @relation(fields: [orderId], references: [id])
+  amountToman         Int
+  percent             Int
+  status              ReferralCommissionStatus @default(PENDING)
+  walletTransactionId String?
+  walletTransaction   WalletTransaction?       @relation(fields: [walletTransactionId], references: [id])
+  createdAt           DateTime                 @default(now())
+  paidAt              DateTime?
+
+  @@index([referralId])
+  @@index([referrerUserId])
+  @@index([referredUserId])
+  @@index([orderId])
+  @@index([status])
+}
+
+// =============================================================================
+// Free test accounts / lucky wheel
+// =============================================================================
+
+model TestAccountHistory {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  panelId   String
+  panel     Panel    @relation(fields: [panelId], references: [id])
+  serviceId String?
+  service   Service? @relation(fields: [serviceId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([panelId])
+  @@index([createdAt])
+}
+
+model WheelSpinHistory {
+  id                  String             @id @default(uuid())
+  userId              String
+  user                User               @relation(fields: [userId], references: [id])
+  diceValue           Int
+  isWinner            Boolean            @default(false)
+  prizeAmountToman    Int                @default(0)
+  walletTransactionId String?
+  walletTransaction   WalletTransaction? @relation(fields: [walletTransactionId], references: [id])
+  createdAt           DateTime           @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Support (schema only - UI uses PRIVATE_CHAT mode for now)
+// =============================================================================
+
+model SupportTicket {
+  id        String              @id @default(uuid())
+  userId    String
+  user      User                @relation(fields: [userId], references: [id])
+  status    SupportTicketStatus @default(OPEN)
+  subject   String?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  closedAt  DateTime?
+
+  messages SupportMessage[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model SupportMessage {
+  id            String                   @id @default(uuid())
+  ticketId      String
+  ticket        SupportTicket            @relation(fields: [ticketId], references: [id])
+  senderType    SupportMessageSenderType
+  senderUserId  String?
+  senderUser    User?                    @relation(fields: [senderUserId], references: [id])
+  senderAdminId String?
+  senderAdmin   Admin?                   @relation(fields: [senderAdminId], references: [id])
+  text          String?
+  fileId        String?
+  createdAt     DateTime                 @default(now())
+
+  @@index([ticketId])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Tutorials
+// =============================================================================
+
+model TutorialCategory {
+  id           String   @id @default(uuid())
+  name         String
+  displayOrder Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tutorials Tutorial[]
+}
+
+model Tutorial {
+  id           String           @id @default(uuid())
+  categoryId   String
+  category     TutorialCategory @relation(fields: [categoryId], references: [id])
+  title        String
+  caption      String?
+  description  String?
+  displayOrder Int              @default(0)
+  isActive     Boolean          @default(true)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  media TutorialMedia[]
+
+  @@index([categoryId])
+}
+
+model TutorialMedia {
+  id             String            @id @default(uuid())
+  tutorialId     String
+  tutorial       Tutorial          @relation(fields: [tutorialId], references: [id])
+  mediaType      TutorialMediaType
+  telegramFileId String
+  caption        String?
+  displayOrder   Int               @default(0)
+  createdAt      DateTime          @default(now())
+
+  @@index([tutorialId])
+}
+
+// =============================================================================
+// Message templates and button texts (Persian by default)
+// =============================================================================
+
+model MessageTemplate {
+  id               String   @id @default(uuid())
+  key              String   @unique
+  title            String
+  category         String?
+  defaultContent   String
+  currentContent   String
+  allowedVariables Json?
+  isEditable       Boolean  @default(true)
+  locale           String   @default("fa")
+  updatedByAdminId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model ButtonText {
+  id               String   @id @default(uuid())
+  key              String   @unique
+  title            String
+  defaultText      String
+  currentText      String
+  isEditable       Boolean  @default(true)
+  locale           String   @default("fa")
+  updatedByAdminId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// =============================================================================
+// Broadcasts
+// =============================================================================
+
+model Broadcast {
+  id               String          @id @default(uuid())
+  type             BroadcastType
+  status           BroadcastStatus @default(DRAFT)
+  targetFilter     Json?
+  messageText      String?
+  sourceChatId     BigInt?
+  sourceMessageId  Int?
+  pinMessage       Boolean         @default(false)
+  totalTargets     Int             @default(0)
+  sentCount        Int             @default(0)
+  failedCount      Int             @default(0)
+  pinFailedCount   Int             @default(0)
+  skippedCount     Int             @default(0)
+  createdByAdminId String
+  startedAt        DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  recipients BroadcastRecipient[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model BroadcastRecipient {
+  id           String                   @id @default(uuid())
+  broadcastId  String
+  broadcast    Broadcast                @relation(fields: [broadcastId], references: [id])
+  userId       String
+  user         User                     @relation(fields: [userId], references: [id])
+  status       BroadcastRecipientStatus @default(PENDING)
+  errorCode    String?
+  errorMessage String?
+  pinStatus    String?
+  sentAt       DateTime?
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+
+  @@unique([broadcastId, userId])
+  @@index([status])
+  @@index([userId])
+}
+
+// =============================================================================
+// Logging / audit
+// =============================================================================
+
+model LogTopic {
+  id             String   @id @default(uuid())
+  key            String   @unique
+  title          String
+  telegramChatId BigInt?
+  topicId        Int?
+  isEnabled      Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+// References are soft (plain ids) so log writes never fail on FK issues and
+// history survives entity changes.
+model SystemLog {
+  id        String         @id @default(uuid())
+  level     SystemLogLevel
+  eventType String
+  message   String
+  metadata  Json?
+  userId    String?
+  adminId   String?
+  orderId   String?
+  paymentId String?
+  serviceId String?
+  createdAt DateTime       @default(now())
+
+  @@index([level])
+  @@index([eventType])
+  @@index([userId])
+  @@index([createdAt])
 }
 
 model AuditLog {
@@ -74,4 +1363,21 @@ model AuditLog {
   entityId        String?
   metadata        Json?
   createdAt       DateTime  @default(now())
+
+  @@index([actorType])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Settings (flexible global configuration)
+// =============================================================================
+
+model Setting {
+  id        String      @id @default(uuid())
+  key       String      @unique
+  value     String
+  type      SettingType
+  isPublic  Boolean     @default(false)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
 }
