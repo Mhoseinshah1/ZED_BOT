@@ -80,9 +80,11 @@ decrypted only inside the shared `panel-adapter-factory`; logs carry
 serviceId/panelId/safe reason only — never passwords/tokens, subscription
 URLs, config links or raw panel payloads.
 
-## Intentionally NOT implemented
+## Intentionally NOT implemented (in Phase 11)
 
-Renewal, extra volume/time, location change, enable/disable, transfer,
-delete, note/link editing, rating, QR, XUI sync (safe TODO above), periodic
-background sync (refresh is user-triggered only), panel-side mutations of
-any kind, admin service management.
+Extra volume/time, location change, enable/disable, transfer, delete,
+note/link editing, rating, QR, XUI sync (safe TODO above), periodic
+background sync (refresh is user-triggered only), admin service management.
+(Renewal — with its own panel-mutating `renewServiceAccount` adapter method
+— arrived in Phase 12: `docs/service-renewal-phase12.md`. Sync itself
+remains strictly read-only.)

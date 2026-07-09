@@ -17,6 +17,9 @@ export type DiscountValidation =
     }
   | { ok: false; error: string };
 
+/** What the code is being applied to; checked against DiscountCode.appliesTo. */
+export type DiscountPurpose = "PURCHASE" | "RENEWAL";
+
 function invalid(error: string): DiscountValidation {
   return { ok: false, error };
 }
@@ -31,14 +34,17 @@ export function calculateDiscountAmount(code: DiscountCode, priceToman: number):
 }
 
 /**
- * Validates a user-entered discount code for a new purchase. Lookup tries the
- * exact input first, then the uppercase form. All failures return a safe,
- * user-friendly Persian message and never leak other codes' existence rules.
+ * Validates a user-entered discount code for a purchase or (Phase 12) a
+ * renewal. Lookup tries the exact input first, then the uppercase form. All
+ * failures return a safe, user-friendly Persian message and never leak other
+ * codes' existence rules. Usage is never incremented here - finalization
+ * happens only after payment approval (Phase 8).
  */
 export async function validateDiscountCode(
   rawCode: string,
   user: User,
   priceToman: number,
+  purpose: DiscountPurpose = "PURCHASE",
 ): Promise<DiscountValidation> {
   const input = rawCode.trim();
   if (input.length === 0 || input.length > 64) {
@@ -63,8 +69,11 @@ export async function validateDiscountCode(
   if (code.totalUsageLimit !== null && code.totalUsedCount >= code.totalUsageLimit) {
     return invalid("سقف استفاده از این کد تخفیف تکمیل شده است.");
   }
-  if (code.appliesTo === "RENEWAL") {
+  if (purpose === "PURCHASE" && code.appliesTo === "RENEWAL") {
     return invalid("این کد تخفیف برای خرید جدید قابل استفاده نیست.");
+  }
+  if (purpose === "RENEWAL" && code.appliesTo === "PURCHASE") {
+    return invalid("این کد تخفیف برای تمدید سرویس قابل استفاده نیست.");
   }
 
   // allowedGroups: null/empty => all groups; "ALL" entry => all groups.

@@ -75,6 +75,19 @@ export interface CheckoutDraft {
   finalPriceToman: number;
 }
 
+/** Renewal pre-invoice draft (Phase 12). No DB rows until "continue". */
+export interface RenewalDraft {
+  serviceId: string;
+  productId: string;
+  panelId: string;
+  categoryId: string;
+  discountCode?: string;
+  discountCodeId?: string;
+  originalPriceToman: number;
+  discountAmountToman: number;
+  finalPriceToman: number;
+}
+
 /** Card-to-card payment context while the user views the card / sends a receipt. */
 export interface PaymentDraft {
   checkoutSessionId: string;
@@ -106,6 +119,8 @@ export interface SessionData {
     editingProductField?: string;
     // User checkout draft (pre-invoice).
     checkoutDraft?: CheckoutDraft;
+    // Renewal pre-invoice draft (Phase 12).
+    renewalDraft?: RenewalDraft;
     // Card-to-card payment / receipt-upload context.
     paymentDraft?: PaymentDraft;
     // Admin receipt review: payment awaiting a rejection reason ("receipt:reject").

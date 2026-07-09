@@ -57,7 +57,7 @@ export type ProvisionOutcome =
   | { ok: true; service: Service; alreadyExisted: boolean }
   | { ok: false; refunded: boolean; error: string };
 
-type OrderForProvisioning = Order & {
+export type OrderForProvisioning = Order & {
   user: User;
   product: (Product & { panel: Panel | null }) | null;
 };
@@ -89,8 +89,12 @@ function parseInboundIds(raw: unknown): number[] {
  * all in one transaction. Only the caller that actually flips the status
  * creates the refund; an existing refund transaction for this order is never
  * duplicated. Returns true when a refund is in place (created now or before).
+ * Shared with the Phase 12 renewal pipeline.
  */
-async function failOrderWithRefund(order: OrderForProvisioning, internalError: string): Promise<boolean> {
+export async function failOrderWithRefund(
+  order: OrderForProvisioning,
+  internalError: string,
+): Promise<boolean> {
   const refunded = await prisma.$transaction(async (tx) => {
     const flipped = await tx.order.updateMany({
       where: { id: order.id, status: { in: [OrderStatus.PAID, OrderStatus.PROVISIONING] } },

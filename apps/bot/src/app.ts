@@ -25,6 +25,10 @@ import {
 } from "./handlers/admin-receipts/receipts.handler.js";
 import { forceJoinHandler } from "./handlers/force-join.handler.js";
 import { menuHandler } from "./handlers/menu.handler.js";
+import {
+  renewalHandler,
+  renewalTextHandler,
+} from "./handlers/user-renewal/renewal.handler.js";
 import { servicesHandler } from "./handlers/user-services/services.handler.js";
 import { pingHandler } from "./handlers/ping.handler.js";
 import { startHandler } from "./handlers/start.handler.js";
@@ -102,6 +106,10 @@ export function createBot(token: string): Bot<BotContext> {
       await checkoutTextHandler.middleware()(ctx, next);
       return;
     }
+    if (flow === "renew:discount") {
+      await renewalTextHandler.middleware()(ctx, next);
+      return;
+    }
     if (ctx.admin === null) {
       return next();
     }
@@ -115,6 +123,7 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(checkoutHandler);
   userArea.use(paymentHandler);
   userArea.use(servicesHandler);
+  userArea.use(renewalHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());

@@ -5,6 +5,8 @@ import type {
   GetServiceAccountInput,
   GetServiceAccountResult,
   PanelHealthResult,
+  RenewServiceAccountInput,
+  RenewServiceAccountResult,
 } from "../core/panel.types.js";
 import { XuiClient } from "./xui.client.js";
 
@@ -56,5 +58,16 @@ export class XuiAdapter implements PanelAdapter {
    */
   async getServiceAccount(_input: GetServiceAccountInput): Promise<GetServiceAccountResult> {
     return { ok: false, errorMessage: "XUI service sync is not implemented yet." };
+  }
+
+  /**
+   * Phase 12: NOT implemented - the token-authenticated update-client
+   * endpoint surface must come from the Sanaei API reference. Never fakes
+   * success; a paid renewal order fails safely and refunds.
+   *
+   * TODO(xui-renewal): implement per sanaei-api.txt once available.
+   */
+  async renewServiceAccount(_input: RenewServiceAccountInput): Promise<RenewServiceAccountResult> {
+    return { ok: false, errorMessage: "XUI renewal is not implemented yet." };
   }
 }

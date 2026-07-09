@@ -103,6 +103,9 @@ export function approvalUserNotice(orderType: OrderType): string {
   if (orderType === OrderType.OTHER_PRODUCT) {
     return "رسید پرداخت شما تایید شد ✅\n\nسفارش محصول شما ثبت شد و در انتظار مرحله تحویل است.";
   }
+  if (orderType === OrderType.SERVICE_RENEWAL) {
+    return "رسید پرداخت شما تایید شد ✅\n\nتمدید سرویس شما در حال انجام است.";
+  }
   return (
     "رسید پرداخت شما تایید شد ✅\n\n" +
     "سفارش شما ثبت شد و در مرحله آماده‌سازی قرار گرفت.\n" +

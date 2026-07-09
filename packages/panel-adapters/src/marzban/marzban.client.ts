@@ -10,10 +10,12 @@ import type {
 /**
  * Low-level HTTP client for the Marzban API.
  *
- * Phase 9 surface (documented endpoints only):
- *   - POST /api/admin/token          (authentication)
- *   - GET  /api/user/{username}      (read one user - used for templates)
- *   - POST /api/user                 (create user)
+ * Documented endpoints only:
+ *   - POST /api/admin/token             (authentication)
+ *   - GET  /api/user/{username}         (read one user - templates/sync)
+ *   - POST /api/user                    (create user, Phase 9)
+ *   - PUT  /api/user/{username}         (modify user, Phase 12 renewal)
+ *   - POST /api/user/{username}/reset   (reset data usage, Phase 12 renewal)
  *
  * Credentials/tokens travel only in requests to the configured baseUrl and
  * never appear in errors, logs or results.
@@ -94,6 +96,60 @@ export class MarzbanClient {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(PANEL_HTTP_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        return {
+          ok: false,
+          status: response.status,
+          message: `Panel responded with HTTP ${response.status}.`,
+        };
+      }
+      const user = (await response.json()) as MarzbanUser;
+      return { ok: true, user, status: response.status, message: "OK" };
+    } catch (err) {
+      return { ok: false, message: `Panel is not reachable: ${safeErrorText(err)}` };
+    }
+  }
+
+  /** PUT /api/user/{username} - modify an existing user (never the username). */
+  async modifyUser(
+    token: string,
+    username: string,
+    payload: Partial<MarzbanCreateUserPayload>,
+  ): Promise<MarzbanUserResult> {
+    const url = `${this.credentials.baseUrl}/api/user/${encodeURIComponent(username)}`;
+    try {
+      const response = await fetch(url, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(PANEL_HTTP_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        return {
+          ok: false,
+          status: response.status,
+          message: `Panel responded with HTTP ${response.status}.`,
+        };
+      }
+      const user = (await response.json()) as MarzbanUser;
+      return { ok: true, user, status: response.status, message: "OK" };
+    } catch (err) {
+      return { ok: false, message: `Panel is not reachable: ${safeErrorText(err)}` };
+    }
+  }
+
+  /** POST /api/user/{username}/reset - reset the user's data usage to zero. */
+  async resetUserUsage(token: string, username: string): Promise<MarzbanUserResult> {
+    const url = `${this.credentials.baseUrl}/api/user/${encodeURIComponent(username)}/reset`;
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(PANEL_HTTP_TIMEOUT_MS),
       });
       if (!response.ok) {

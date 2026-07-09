@@ -87,6 +87,39 @@ export interface GetServiceAccountInput {
 }
 
 /**
+ * Input for renewing ONE existing service account on a panel (Phase 12).
+ * The username is never changed and the account is never deleted/recreated.
+ */
+export interface RenewServiceAccountInput {
+  username: string;
+  /** New total traffic limit in bytes; null = unlimited. */
+  totalBytes: bigint | null;
+  /** New expiry; null = never expires. */
+  expiresAt: Date | null;
+  note?: string | null;
+  /** Base URL used to absolutize relative subscription URLs (falls back to the panel baseUrl). */
+  subscriptionBaseUrl?: string | null;
+}
+
+/** Result of renewServiceAccount - same field semantics as GetServiceAccountResult. */
+export interface RenewServiceAccountResult {
+  ok: boolean;
+  username?: string;
+  status?: NormalizedAccountStatus;
+  usedBytes?: bigint;
+  totalBytes?: bigint | null;
+  remainingBytes?: bigint | null;
+  expiresAt?: Date | null;
+  subscriptionUrl?: string;
+  subscriptionToken?: string;
+  configLinks?: string[];
+  /** Credential-free raw payload for debugging; never shown to users. */
+  raw?: Record<string, unknown>;
+  /** Safe internal diagnostic (no credentials); for logs/admin only. */
+  errorMessage?: string;
+}
+
+/**
  * Result of getServiceAccount. Optional fields are OMITTED (undefined) when
  * the panel did not report them - callers must not treat missing as zero.
  * `null` carries explicit meaning: totalBytes/remainingBytes null =

@@ -17,7 +17,8 @@ import type { ProductWithRelations } from "./product.service.js";
 
 const DEFAULT_EXPIRY_MINUTES = 30;
 
-async function checkoutExpiryMinutes(): Promise<number> {
+/** Operator-configurable checkout lifetime (shared with the renewal flow). */
+export async function checkoutExpiryMinutes(): Promise<number> {
   const raw = await getSetting("checkout_expiry_minutes", "");
   const value = Number.parseInt(raw, 10);
   return Number.isInteger(value) && value > 0 ? value : DEFAULT_EXPIRY_MINUTES;

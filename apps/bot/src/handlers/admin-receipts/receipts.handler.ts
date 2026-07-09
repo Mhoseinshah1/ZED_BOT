@@ -17,6 +17,11 @@ import {
   provisionPaidOrder,
 } from "../../services/provisioning.service.js";
 import {
+  buildRenewalSuccessMessage,
+  executeRenewalOrder,
+  RENEWAL_FAILED_USER_TEXT,
+} from "../../services/service-renewal.service.js";
+import {
   approvalUserNotice,
   approveReceiptPayment,
   REJECT_REASON_MAX,
@@ -96,6 +101,43 @@ async function notifyUserSafe(
       error: errorMessage(err),
     });
     return false;
+  }
+}
+
+/**
+ * Phase 12: synchronous renewal right after a SERVICE_RENEWAL approval. The
+ * renewal service owns the FAILED + refund path; this only relays outcomes.
+ */
+async function runRenewalAfterApproval(
+  ctx: BotContext,
+  orderId: string,
+  user: User,
+): Promise<void> {
+  try {
+    const outcome = await executeRenewalOrder(orderId);
+    if (outcome.ok) {
+      await notifyUserSafe(ctx, user, buildRenewalSuccessMessage(outcome.service), "HTML");
+      await safeReply(ctx, "سرویس تمدید شد ✅", backKeyboard());
+      return;
+    }
+    if (outcome.refunded) {
+      await notifyUserSafe(ctx, user, RENEWAL_FAILED_USER_TEXT);
+      await safeReply(
+        ctx,
+        "تمدید سرویس ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
+        backKeyboard(),
+      );
+      return;
+    }
+    await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.SERVICE_RENEWAL));
+    await safeReply(ctx, outcome.error, backKeyboard());
+  } catch (err) {
+    logger.error("renewal after approval crashed", { orderId, error: errorMessage(err) });
+    await safeReply(
+      ctx,
+      "خطایی در تمدید سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
+      backKeyboard(),
+    );
   }
 }
 
@@ -302,6 +344,16 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
         backKeyboard(),
       );
       await runProvisioningAfterApproval(ctx, result.order.id, result.user);
+      return;
+    }
+    if (result.orderType === OrderType.SERVICE_RENEWAL) {
+      // Phase 12: renew the existing panel account + Service right away.
+      await safeEditOrReply(
+        ctx,
+        "رسید تایید شد ✅\n\nOrder ساخته شد.\nتمدید سرویس شروع شد.",
+        backKeyboard(),
+      );
+      await runRenewalAfterApproval(ctx, result.order.id, result.user);
       return;
     }
     if (result.orderType === OrderType.OTHER_PRODUCT) {
