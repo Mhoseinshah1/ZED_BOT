@@ -29,6 +29,9 @@ export const rncb = {
   discountClear: "user:renew:discount:clear",
   continue: "user:renew:continue",
   back: "user:renew:back",
+  // Phase 15: pay the renewal pre-invoice from the wallet balance.
+  wallet: "user:renew:wallet",
+  walletConfirm: "user:renew:wallet:yes",
 } as const;
 
 function formatToman(value: number): string {
@@ -140,11 +143,17 @@ export function renewalPreInvoiceText(
     "",
     `موجودی کیف پول شما: ${formatToman(user.balanceToman)}`,
   );
+  if (draft.finalPriceToman > 0 && user.balanceToman < draft.finalPriceToman) {
+    lines.push("موجودی کیف پول برای پرداخت کافی نیست.");
+  }
   return lines.join("\n");
 }
 
-export function renewalPreInvoiceKeyboard(draft: RenewalDraft): InlineKeyboard {
+export function renewalPreInvoiceKeyboard(draft: RenewalDraft, user: User): InlineKeyboard {
   const kb = new InlineKeyboard().text("ادامه و انتخاب روش پرداخت ✅", rncb.continue).row();
+  if (draft.finalPriceToman > 0 && user.balanceToman >= draft.finalPriceToman) {
+    kb.text("پرداخت با کیف پول 🏦", rncb.wallet).row();
+  }
   if (draft.discountCode === undefined) {
     kb.text("وارد کردن کد تخفیف 🎁", rncb.discount).row();
   } else {

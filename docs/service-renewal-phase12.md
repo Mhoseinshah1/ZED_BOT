@@ -11,6 +11,10 @@ Source: `apps/bot/src/handlers/user-renewal/`,
 `apps/bot/src/services/{renewal-checkout,service-renewal}.service.ts`,
 adapter extension in `packages/panel-adapters`.
 
+> **Phase 15 update:** the renewal pre-invoice offers «پرداخت با کیف پول
+> 🏦» when the wallet balance covers the amount — settles instantly and
+> runs this same renewal pipeline (`docs/wallet-payment-phase15.md`).
+
 > **Phase 13 update:** the read-only wallet page
 > (`docs/user-wallet-phase13.md`) now shows the user's balance and latest
 > wallet transactions — renewal/provisioning refunds are directly visible

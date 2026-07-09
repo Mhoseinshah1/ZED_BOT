@@ -4,6 +4,7 @@ import {
   prisma,
   ServiceStatus,
   type CheckoutSession,
+  type Prisma,
   type Service,
   type User,
   type UserGroup,
@@ -129,6 +130,35 @@ export function isRenewalPlanValid(
   );
 }
 
+/** Renewal checkout snapshot (shared with the Phase 15 wallet payment). */
+export function buildRenewalSnapshot(
+  product: ProductWithRelations,
+  service: Service,
+  draft: RenewalDraft,
+): Prisma.InputJsonObject {
+  const baseSnapshot = buildProductSnapshot(product, {
+    productId: product.id,
+    categoryId: product.categoryId,
+    panelId: product.panelId ?? undefined,
+    flowType: product.type,
+    discountCode: draft.discountCode,
+    discountCodeId: draft.discountCodeId,
+    originalPriceToman: draft.originalPriceToman,
+    discountAmountToman: draft.discountAmountToman,
+    finalPriceToman: draft.finalPriceToman,
+  });
+  return {
+    ...baseSnapshot,
+    renewalTargetServiceId: service.id,
+    renewalTargetUsername: service.username,
+    renewalMethod: "ADD_TIME_AND_VOLUME_TO_NEXT_PERIOD",
+    renewalTargetStatus: service.status,
+    renewalTargetExpiresAt: service.expiresAt?.toISOString() ?? null,
+    renewalTargetRemainingBytes: service.remainingBytes.toString(),
+    renewalTargetVolumeBytes: service.volumeBytes.toString(),
+  };
+}
+
 /**
  * The ONLY write of the renewal browse flow: a PENDING CheckoutSession with
  * orderType SERVICE_RENEWAL targeting the existing service. Older PENDING
@@ -147,18 +177,6 @@ export async function createRenewalCheckoutSession(
     data: { status: CheckoutStatus.CANCELLED },
   });
 
-  const baseSnapshot = buildProductSnapshot(product, {
-    productId: product.id,
-    categoryId: product.categoryId,
-    panelId: product.panelId ?? undefined,
-    flowType: product.type,
-    discountCode: draft.discountCode,
-    discountCodeId: draft.discountCodeId,
-    originalPriceToman: draft.originalPriceToman,
-    discountAmountToman: draft.discountAmountToman,
-    finalPriceToman: draft.finalPriceToman,
-  });
-
   return prisma.checkoutSession.create({
     data: {
       userId: user.id,
@@ -166,16 +184,7 @@ export async function createRenewalCheckoutSession(
       productId: product.id,
       serviceId: service.id,
       orderType: "SERVICE_RENEWAL",
-      productSnapshot: {
-        ...baseSnapshot,
-        renewalTargetServiceId: service.id,
-        renewalTargetUsername: service.username,
-        renewalMethod: "ADD_TIME_AND_VOLUME_TO_NEXT_PERIOD",
-        renewalTargetStatus: service.status,
-        renewalTargetExpiresAt: service.expiresAt?.toISOString() ?? null,
-        renewalTargetRemainingBytes: service.remainingBytes.toString(),
-        renewalTargetVolumeBytes: service.volumeBytes.toString(),
-      },
+      productSnapshot: buildRenewalSnapshot(product, service, draft),
       originalPriceToman: draft.originalPriceToman,
       discountAmountToman: draft.discountAmountToman,
       finalPriceToman: draft.finalPriceToman,

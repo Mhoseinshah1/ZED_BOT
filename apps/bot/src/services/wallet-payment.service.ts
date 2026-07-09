@@ -1,0 +1,422 @@
+import {
+  CheckoutStatus,
+  OrderStatus,
+  OrderType,
+  PaymentPurpose,
+  PaymentStatus,
+  Prisma,
+  prisma,
+  WalletTransactionSource,
+  WalletTransactionType,
+  type CheckoutSession,
+  type Order,
+  type Payment,
+  type Service,
+  type User,
+  type WalletTransaction,
+} from "@zedbot/database";
+
+import { logger } from "../core/logger.js";
+import type { CheckoutDraft, RenewalDraft } from "../core/session.js";
+import { isProductVisible } from "./catalog.service.js";
+import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
+import { validateDiscountCode } from "./discount.service.js";
+import type { ProductWithRelations } from "./product.service.js";
+import {
+  buildRenewalSnapshot,
+  getRenewableServiceByShortId,
+  isRenewalPlanValid,
+} from "./renewal-checkout.service.js";
+
+// =============================================================================
+// Wallet payment for ORDER checkouts (Phase 15): an immediate payment method
+// for service purchase / renewal pre-invoices. ONE transaction creates the
+// PAID CheckoutSession, the APPROVED Payment (purpose PAY_WITH_WALLET,
+// method WALLET), the PAID Order, deducts the balance and writes the SPEND
+// WalletTransaction + discount finalization - they commit together, so a
+// deducted balance always has its order and vice versa. No ManualReceipt,
+// no PENDING_REVIEW, no admin review, no card account - and never for
+// WALLET_CHARGE (top-up) checkouts.
+//
+// Idempotency: Payment.idempotencyKey = wallet:<userId>:<draftNonce> (the
+// nonce is minted when the pre-invoice opens). A double click or concurrent
+// duplicate hits the unique key and gets the FIRST result back - the
+// balance can never be deducted twice for one pre-invoice.
+// =============================================================================
+
+export const WALLET_ORDER_PAYMENT_REASON = "WALLET_ORDER_PAYMENT";
+
+export const WALLET_PAYMENT_DONE_TEXT = "پرداخت با کیف پول انجام شد ✅\nسفارش شما ثبت شد.";
+export const INSUFFICIENT_BALANCE_TEXT = "موجودی کیف پول کافی نیست.";
+const DRAFT_STALE_TEXT = "پیش‌فاکتور در دسترس نیست؛ لطفاً دوباره شروع کنید.";
+const DISCOUNT_CHANGED_TEXT = "کد تخفیف دیگر معتبر نیست. لطفاً دوباره پیش‌فاکتور را بررسی کنید.";
+
+export type WalletPaymentResult =
+  | {
+      ok: true;
+      order: Order;
+      payment: Payment;
+      checkout: CheckoutSession;
+      walletTransaction: WalletTransaction;
+      newBalanceToman: number;
+      alreadyPaid: boolean;
+    }
+  | { ok: false; error: string };
+
+/** Thrown inside the transaction to abort with a safe user error. */
+class WalletPaymentAbort extends Error {
+  constructor(readonly userError: string) {
+    super("wallet payment aborted");
+  }
+}
+
+function snapshotString(snapshot: Record<string, unknown>, key: string): string | null {
+  const value = snapshot[key];
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+function snapshotInt(snapshot: Record<string, unknown>, key: string): number | null {
+  const value = snapshot[key];
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+interface WalletOrderArgs {
+  orderType: OrderType;
+  product: ProductWithRelations;
+  serviceId: string | null;
+  snapshot: Prisma.InputJsonObject;
+  originalPriceToman: number;
+  discountAmountToman: number;
+  finalPriceToman: number;
+  discountCodeId: string | null;
+  idempotencyKey: string;
+}
+
+/** Loads the settled result of a previously-executed idempotency key. */
+async function loadExistingWalletPayment(
+  idempotencyKey: string,
+): Promise<WalletPaymentResult | null> {
+  const payment = await prisma.payment.findUnique({ where: { idempotencyKey } });
+  if (payment === null || payment.orderId === null || payment.checkoutSessionId === null) {
+    return null;
+  }
+  const [order, checkout, walletTransaction] = await Promise.all([
+    prisma.order.findUnique({ where: { id: payment.orderId } }),
+    prisma.checkoutSession.findUnique({ where: { id: payment.checkoutSessionId } }),
+    prisma.walletTransaction.findFirst({
+      where: { relatedPaymentId: payment.id, reason: WALLET_ORDER_PAYMENT_REASON },
+    }),
+  ]);
+  if (order === null || checkout === null || walletTransaction === null) {
+    return null;
+  }
+  return {
+    ok: true,
+    order,
+    payment,
+    checkout,
+    walletTransaction,
+    newBalanceToman: walletTransaction.balanceAfterToman,
+    alreadyPaid: true,
+  };
+}
+
+/**
+ * The atomic wallet-payment transaction shared by purchase and renewal.
+ * Balance is re-checked on a fresh row INSIDE the transaction; a negative
+ * balance is impossible.
+ */
+async function executeWalletOrderPayment(
+  user: User,
+  args: WalletOrderArgs,
+): Promise<WalletPaymentResult> {
+  const existing = await loadExistingWalletPayment(args.idempotencyKey);
+  if (existing !== null) {
+    return existing;
+  }
+  const minutes = await checkoutExpiryMinutes();
+  const now = new Date();
+  const snapshotRecord = args.snapshot as Record<string, unknown>;
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const freshUser = await tx.user.findUniqueOrThrow({ where: { id: user.id } });
+      if (freshUser.balanceToman < args.finalPriceToman) {
+        throw new WalletPaymentAbort(INSUFFICIENT_BALANCE_TEXT);
+      }
+
+      const checkout = await tx.checkoutSession.create({
+        data: {
+          userId: user.id,
+          purpose: "ORDER_PAYMENT",
+          productId: args.product.id,
+          serviceId: args.serviceId,
+          orderType: args.orderType,
+          productSnapshot: args.snapshot,
+          originalPriceToman: args.originalPriceToman,
+          discountAmountToman: args.discountAmountToman,
+          finalPriceToman: args.finalPriceToman,
+          discountCodeId: args.discountCodeId,
+          status: CheckoutStatus.PAID,
+          paidAt: now,
+          expiresAt: new Date(now.getTime() + minutes * 60_000),
+        },
+      });
+
+      const payment = await tx.payment.create({
+        data: {
+          userId: user.id,
+          checkoutSessionId: checkout.id,
+          purpose: PaymentPurpose.PAY_WITH_WALLET,
+          status: PaymentStatus.APPROVED,
+          amountToman: args.finalPriceToman,
+          payableAmountToman: args.finalPriceToman,
+          paidAt: now,
+          callbackPayload: { method: "WALLET" },
+          idempotencyKey: args.idempotencyKey,
+        },
+      });
+
+      const order = await tx.order.create({
+        data: {
+          userId: user.id,
+          checkoutSessionId: checkout.id,
+          type: args.orderType,
+          status: OrderStatus.PAID,
+          productId: args.product.id,
+          serviceId: args.serviceId,
+          paymentId: payment.id,
+          originalPriceToman: args.originalPriceToman,
+          discountAmountToman: args.discountAmountToman,
+          finalPriceToman: args.finalPriceToman,
+          discountCodeId: args.discountCodeId,
+          productNameSnapshot: snapshotString(snapshotRecord, "productName"),
+          productDescriptionSnapshot: snapshotString(snapshotRecord, "invoiceDescription"),
+          productPriceSnapshot: snapshotInt(snapshotRecord, "originalPriceToman"),
+          durationDaysSnapshot: snapshotInt(snapshotRecord, "durationDays"),
+          volumeGbSnapshot: snapshotInt(snapshotRecord, "volumeGb"),
+          panelNameSnapshot: snapshotString(snapshotRecord, "panelName"),
+          locationSnapshot:
+            snapshotRecord.allLocations === true
+              ? "ALL"
+              : snapshotString(snapshotRecord, "serviceLocation"),
+          categorySnapshot: snapshotString(snapshotRecord, "categoryName"),
+          paidAt: now,
+        },
+      });
+      const settledPayment = await tx.payment.update({
+        where: { id: payment.id },
+        data: { orderId: order.id },
+      });
+
+      const balanceBefore = freshUser.balanceToman;
+      const balanceAfter = balanceBefore - args.finalPriceToman;
+      await tx.user.update({
+        where: { id: user.id },
+        data: {
+          balanceToman: { decrement: args.finalPriceToman },
+          totalSpentToman: { increment: args.finalPriceToman },
+          ...(args.discountAmountToman > 0
+            ? { totalDiscountToman: { increment: args.discountAmountToman } }
+            : {}),
+          ordersCount: { increment: 1 },
+          paidOrdersCount: { increment: 1 },
+          totalPurchaseAmountToman: { increment: args.finalPriceToman },
+        },
+      });
+      const walletTransaction = await tx.walletTransaction.create({
+        data: {
+          userId: user.id,
+          amountToman: args.finalPriceToman,
+          type: WalletTransactionType.SPEND,
+          source: WalletTransactionSource.ORDER,
+          reason: WALLET_ORDER_PAYMENT_REASON,
+          relatedOrderId: order.id,
+          relatedPaymentId: payment.id,
+          balanceBeforeToman: balanceBefore,
+          balanceAfterToman: balanceAfter,
+        },
+      });
+
+      // Discount finalization: the checkout is brand new, so at most once.
+      if (args.discountCodeId !== null && args.discountAmountToman > 0) {
+        const usage = await tx.discountCodeUsage.findFirst({
+          where: { checkoutSessionId: checkout.id },
+        });
+        if (usage === null) {
+          await tx.discountCodeUsage.create({
+            data: {
+              discountCodeId: args.discountCodeId,
+              userId: user.id,
+              orderId: order.id,
+              checkoutSessionId: checkout.id,
+              amountToman: args.discountAmountToman,
+            },
+          });
+          await tx.discountCode.update({
+            where: { id: args.discountCodeId },
+            data: { totalUsedCount: { increment: 1 } },
+          });
+        }
+      }
+
+      return {
+        order,
+        payment: settledPayment,
+        checkout,
+        walletTransaction,
+        newBalanceToman: balanceAfter,
+      };
+    });
+    logger.info("wallet payment settled", {
+      orderId: result.order.id,
+      paymentId: result.payment.id,
+      userId: user.id,
+      orderType: args.orderType,
+      amountToman: args.finalPriceToman,
+    });
+    return { ok: true, ...result, alreadyPaid: false };
+  } catch (err) {
+    if (err instanceof WalletPaymentAbort) {
+      return { ok: false, error: err.userError };
+    }
+    // Unique idempotencyKey collision: a concurrent duplicate won - return
+    // its settled result instead of failing.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      const settled = await loadExistingWalletPayment(args.idempotencyKey);
+      if (settled !== null) {
+        return settled;
+      }
+    }
+    throw err;
+  }
+}
+
+/** Wallet payment for a SERVICE_PRODUCT purchase pre-invoice draft. */
+export async function payPurchaseDraftWithWallet(
+  user: User,
+  draft: CheckoutDraft,
+): Promise<WalletPaymentResult> {
+  if (draft.draftNonce === undefined) {
+    return { ok: false, error: DRAFT_STALE_TEXT };
+  }
+  const product = await prisma.product.findUnique({
+    where: { id: draft.productId },
+    include: { category: true, panel: true },
+  });
+  if (
+    product === null ||
+    product.type !== "SERVICE_PRODUCT" ||
+    !isProductVisible(product, user.group) ||
+    (draft.panelId !== undefined && product.panelId !== draft.panelId)
+  ) {
+    return { ok: false, error: DRAFT_STALE_TEXT };
+  }
+
+  // Never trust the session price: recompute from the product + discount.
+  const originalPriceToman = product.priceToman;
+  let discountAmountToman = 0;
+  let discountCodeId: string | null = null;
+  if (draft.discountCode !== undefined) {
+    const validation = await validateDiscountCode(draft.discountCode, user, originalPriceToman);
+    if (!validation.ok) {
+      return { ok: false, error: DISCOUNT_CHANGED_TEXT };
+    }
+    discountAmountToman = validation.discountAmountToman;
+    discountCodeId = validation.discountCode.id;
+  }
+  const finalPriceToman = Math.max(0, originalPriceToman - discountAmountToman);
+  if (finalPriceToman <= 0) {
+    return { ok: false, error: "پرداخت رایگان در فاز بعدی فعال می‌شود." };
+  }
+  if (user.balanceToman < finalPriceToman) {
+    return { ok: false, error: INSUFFICIENT_BALANCE_TEXT };
+  }
+
+  const snapshot = buildProductSnapshot(product, {
+    ...draft,
+    originalPriceToman,
+    discountAmountToman,
+    finalPriceToman,
+  });
+  return executeWalletOrderPayment(user, {
+    orderType: OrderType.SERVICE_PURCHASE,
+    product,
+    serviceId: null,
+    snapshot,
+    originalPriceToman,
+    discountAmountToman,
+    finalPriceToman,
+    discountCodeId,
+    idempotencyKey: `wallet:${user.id}:${draft.draftNonce}`,
+  });
+}
+
+/** Wallet payment for a renewal pre-invoice draft (Phase 12 semantics). */
+export async function payRenewalDraftWithWallet(
+  user: User,
+  draft: RenewalDraft,
+): Promise<{ result: WalletPaymentResult; service: Service | null }> {
+  if (draft.draftNonce === undefined) {
+    return { result: { ok: false, error: DRAFT_STALE_TEXT }, service: null };
+  }
+  const service = await getRenewableServiceByShortId(draft.serviceId.slice(0, 8), user.id);
+  const product =
+    service === null
+      ? null
+      : await prisma.product.findUnique({
+          where: { id: draft.productId },
+          include: { category: true, panel: true },
+        });
+  if (
+    service === null ||
+    product === null ||
+    product.id !== draft.productId ||
+    !isRenewalPlanValid(product, service, user.group)
+  ) {
+    return { result: { ok: false, error: DRAFT_STALE_TEXT }, service: null };
+  }
+
+  const originalPriceToman = product.priceToman;
+  let discountAmountToman = 0;
+  let discountCodeId: string | null = null;
+  if (draft.discountCode !== undefined) {
+    const validation = await validateDiscountCode(
+      draft.discountCode,
+      user,
+      originalPriceToman,
+      "RENEWAL",
+    );
+    if (!validation.ok) {
+      return { result: { ok: false, error: DISCOUNT_CHANGED_TEXT }, service };
+    }
+    discountAmountToman = validation.discountAmountToman;
+    discountCodeId = validation.discountCode.id;
+  }
+  const finalPriceToman = Math.max(0, originalPriceToman - discountAmountToman);
+  if (finalPriceToman <= 0) {
+    return { result: { ok: false, error: "پرداخت رایگان در فاز بعدی فعال می‌شود." }, service };
+  }
+  if (user.balanceToman < finalPriceToman) {
+    return { result: { ok: false, error: INSUFFICIENT_BALANCE_TEXT }, service };
+  }
+
+  const snapshot = buildRenewalSnapshot(product, service, {
+    ...draft,
+    originalPriceToman,
+    discountAmountToman,
+    finalPriceToman,
+  });
+  const result = await executeWalletOrderPayment(user, {
+    orderType: OrderType.SERVICE_RENEWAL,
+    product,
+    serviceId: service.id,
+    snapshot,
+    originalPriceToman,
+    discountAmountToman,
+    finalPriceToman,
+    discountCodeId,
+    idempotencyKey: `wallet:${user.id}:${draft.draftNonce}`,
+  });
+  return { result, service };
+}

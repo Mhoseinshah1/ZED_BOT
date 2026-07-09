@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { errorMessage } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
@@ -14,10 +16,20 @@ import {
   listRenewableServices,
   renewalPlansForPanel,
 } from "../../services/renewal-checkout.service.js";
+import {
+  buildRenewalSuccessMessage,
+  executeRenewalOrder,
+  RENEWAL_FAILED_USER_TEXT,
+} from "../../services/service-renewal.service.js";
 import { getButtonText } from "../../services/text.service.js";
+import {
+  payRenewalDraftWithWallet,
+  WALLET_PAYMENT_DONE_TEXT,
+} from "../../services/wallet-payment.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { clearCheckoutState } from "../user-checkout/checkout-state.js";
 import { CO_CB } from "../user-checkout/checkout-cb.js";
+import { walletConfirmText, walletPayAvailable } from "../user-checkout/checkout-views.js";
 import { showPaymentMethods } from "../user-checkout/payment.handler.js";
 import {
   NO_RENEWABLE_TEXT,
@@ -118,7 +130,7 @@ async function renderRenewalPreInvoice(ctx: BotContext, edit: boolean): Promise<
     return;
   }
   const text = renewalPreInvoiceText(service, product, user, draft);
-  const keyboard = renewalPreInvoiceKeyboard(draft);
+  const keyboard = renewalPreInvoiceKeyboard(draft, user);
   if (edit) {
     await safeEditOrReply(ctx, text, keyboard, HTML);
   } else {
@@ -146,6 +158,8 @@ renewalHandler.callbackQuery(/^user:renew:plan:([0-9a-f-]+):([0-9a-f-]+)$/, asyn
     originalPriceToman: product.priceToman,
     discountAmountToman: 0,
     finalPriceToman: product.priceToman,
+    // One nonce per pre-invoice: the wallet payment's idempotency key.
+    draftNonce: randomUUID(),
   };
   ctx.session.temp.renewalDraft = draft;
   await safeAnswerCallback(ctx);
@@ -190,7 +204,71 @@ renewalHandler.callbackQuery(rncb.discountClear, async (ctx) => {
   await renderRenewalPreInvoice(ctx, true);
 });
 
-// --- continue: the only write ---------------------------------------------------------
+// --- wallet payment (Phase 15) ---------------------------------------------------------
+
+renewalHandler.callbackQuery(rncb.wallet, async (ctx) => {
+  const draft = ctx.session.temp.renewalDraft;
+  const user = ctx.dbUser;
+  if (draft === undefined || user === null) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  if (!walletPayAvailable(user, draft.finalPriceToman)) {
+    await safeAnswerCallback(ctx, "موجودی کیف پول کافی نیست.");
+    await renderRenewalPreInvoice(ctx, true);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    walletConfirmText(draft.finalPriceToman, user.balanceToman),
+    new InlineKeyboard()
+      .text("تایید پرداخت ✅", rncb.walletConfirm)
+      .row()
+      .text("انصراف", rncb.back),
+  );
+});
+
+// Only this callback deducts - and only through the atomic service.
+renewalHandler.callbackQuery(rncb.walletConfirm, async (ctx) => {
+  const draft = ctx.session.temp.renewalDraft;
+  const user = ctx.dbUser;
+  if (draft === undefined || user === null) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  try {
+    const { result } = await payRenewalDraftWithWallet(user, draft);
+    if (!result.ok) {
+      await safeAnswerCallback(ctx, result.error);
+      await renderRenewalPreInvoice(ctx, true);
+      return;
+    }
+    clearCheckoutState(ctx);
+    if (result.alreadyPaid) {
+      await safeAnswerCallback(ctx, "پرداخت قبلاً انجام شده است.");
+      return;
+    }
+    await safeAnswerCallback(ctx, "پرداخت شد ✅");
+    await safeEditOrReply(ctx, WALLET_PAYMENT_DONE_TEXT, menuKeyboard());
+
+    // Immediate renewal through the unchanged Phase 12 pipeline.
+    const outcome = await executeRenewalOrder(result.order.id);
+    if (outcome.ok) {
+      await safeReply(ctx, buildRenewalSuccessMessage(outcome.service), menuKeyboard(), HTML);
+    } else if (outcome.refunded) {
+      await safeReply(ctx, RENEWAL_FAILED_USER_TEXT, menuKeyboard());
+    } else {
+      await safeReply(ctx, "پرداخت انجام شد و تمدید سرویس شما در حال انجام است.", menuKeyboard());
+    }
+  } catch (err) {
+    logger.error("wallet renewal payment failed", { error: errorMessage(err) });
+    await safeAnswerCallback(ctx);
+    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.");
+  }
+});
+
+// --- continue: creates the PENDING checkout (card-to-card path) ---------------------------
 
 renewalHandler.callbackQuery(rncb.continue, async (ctx) => {
   const user = ctx.dbUser;

@@ -137,11 +137,37 @@ export function preInvoiceText(
     "",
     `موجودی کیف پول شما: ${formatToman(user.balanceToman)}`,
   );
+  if (
+    product.type === "SERVICE_PRODUCT" &&
+    draft.finalPriceToman > 0 &&
+    user.balanceToman < draft.finalPriceToman
+  ) {
+    lines.push("موجودی کیف پول برای پرداخت کافی نیست.");
+  }
   return lines.join("\n");
 }
 
-export function preInvoiceKeyboard(draft: CheckoutDraft): InlineKeyboard {
+/** True when the wallet-pay button may be offered for this draft (Phase 15). */
+export function walletPayAvailable(user: User, finalPriceToman: number): boolean {
+  return finalPriceToman > 0 && user.balanceToman >= finalPriceToman;
+}
+
+/** Wallet payment confirmation screen text (shared with the renewal flow). */
+export function walletConfirmText(amountToman: number, balanceToman: number): string {
+  return [
+    "آیا از پرداخت با کیف پول مطمئن هستید؟",
+    "",
+    `مبلغ پرداخت: ${formatToman(amountToman)}`,
+    `موجودی فعلی: ${formatToman(balanceToman)}`,
+    `موجودی بعد از پرداخت: ${formatToman(balanceToman - amountToman)}`,
+  ].join("\n");
+}
+
+export function preInvoiceKeyboard(draft: CheckoutDraft, user: User): InlineKeyboard {
   const kb = new InlineKeyboard().text("ادامه و انتخاب روش پرداخت ✅", CO_CB.CONTINUE).row();
+  if (draft.flowType === "SERVICE_PRODUCT" && walletPayAvailable(user, draft.finalPriceToman)) {
+    kb.text("پرداخت با کیف پول 🏦", CO_CB.WALLET).row();
+  }
   if (draft.discountCode === undefined) {
     kb.text("وارد کردن کد تخفیف 🎁", CO_CB.DISCOUNT).row();
   } else {

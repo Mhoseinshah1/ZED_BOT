@@ -10,6 +10,9 @@ export const CO_CB = {
   DISCOUNT_CLEAR: "user:co:discount:clear",
   CONTINUE: "user:co:continue",
   BACK_TO_INVOICE: "user:co:back",
+  // Phase 15: pay the pre-invoice from the wallet balance.
+  WALLET: "user:co:wallet",
+  WALLET_CONFIRM: "user:co:wallet:yes",
 } as const;
 
 export const ccb = {
