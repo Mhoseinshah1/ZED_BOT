@@ -6,6 +6,13 @@ import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
 import {
+  initManualDelivery,
+  notifyAdminsAboutManualOrder,
+  userInfoButtonKeyboard,
+  userInfoPromptText,
+  WAITING_DELIVERY_USER_TEXT,
+} from "../../services/other-product-delivery.service.js";
+import {
   getPaymentByShortId,
   listPendingReviewPayments,
   paymentShortId,
@@ -98,13 +105,13 @@ async function notifyUserSafe(
   user: User,
   text: string,
   parseMode?: "HTML",
+  keyboard?: InlineKeyboard,
 ): Promise<boolean> {
   try {
-    await ctx.api.sendMessage(
-      user.telegramId.toString(),
-      text,
-      parseMode === undefined ? undefined : { parse_mode: parseMode },
-    );
+    await ctx.api.sendMessage(user.telegramId.toString(), text, {
+      ...(parseMode === undefined ? {} : { parse_mode: parseMode }),
+      ...(keyboard === undefined ? {} : { reply_markup: keyboard }),
+    });
     return true;
   } catch (err) {
     logger.warn("receipt review: user notification failed", {
@@ -508,12 +515,56 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       return;
     }
     if (result.orderType === OrderType.OTHER_PRODUCT) {
-      // No provisioning and no OtherProductOrder yet - delivery is a later phase.
-      await notifyUserSafe(ctx, result.user, approvalUserNotice(result.orderType));
+      // Phase 23: initialize the manual-delivery record (no provisioning,
+      // no panel, no Service). The user is asked for required info when the
+      // product needs it, otherwise waits for admin delivery.
+      const init = await initManualDelivery(result.order.id);
+      if (!init.ok) {
+        logger.error("manual delivery init after approval failed", {
+          orderId: result.order.id,
+          error: init.error,
+        });
+        await notifyUserSafe(ctx, result.user, approvalUserNotice(result.orderType));
+        await safeEditOrReply(
+          ctx,
+          "رسید تایید شد ✅\n\nسفارش ثبت شد اما ساخت سفارش دستی با خطا مواجه شد؛ از بخش سفارش‌های دستی پیگیری کنید.",
+          backKeyboard(),
+        );
+        return;
+      }
+      if (init.requiresInfo) {
+        await notifyUserSafe(
+          ctx,
+          result.user,
+          `رسید پرداخت شما تایید شد ✅\n\n${userInfoPromptText(init.promptText)}`,
+          undefined,
+          userInfoButtonKeyboard(result.order.id),
+        );
+      } else {
+        await notifyUserSafe(
+          ctx,
+          result.user,
+          `رسید پرداخت شما تایید شد ✅\n\n${WAITING_DELIVERY_USER_TEXT}`,
+        );
+        // Ready for delivery right away - tell the active admins.
+        await notifyAdminsAboutManualOrder(ctx.api, init.record);
+      }
       await safeEditOrReply(
         ctx,
-        "رسید تایید شد ✅\n\nسفارش محصول ثبت شد و تحویل در فاز بعدی انجام می‌شود.",
-        backKeyboard(),
+        [
+          "رسید تایید شد ✅",
+          "",
+          "سفارش دستی ساخته شد 📦",
+          init.requiresInfo
+            ? "از کاربر اطلاعات موردنیاز خواسته شد."
+            : "سفارش آماده تحویل است.",
+        ].join("\n"),
+        new InlineKeyboard()
+          .text("مشاهده سفارش 📦", `admin:mo:view:${init.record.id.slice(0, 8)}`)
+          .row()
+          .text("بازگشت به لیست رسیدها", rcb.list(1))
+          .row()
+          .text("بازگشت به ادمین", CB.ADMIN_MENU),
       );
       return;
     }

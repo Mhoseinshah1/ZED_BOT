@@ -141,3 +141,8 @@ gateway and card-account rows are configured separately by the operator
 >   existing `admin:rec:view` detail (approve/reject unchanged). A failed
 >   notification never rolls back the submitted receipt. The admin detail
 >   page also forwards the receipt media when opened.
+
+> **Phase 23 update:** approved `OTHER_PRODUCT` receipts now flow into the
+> manual admin-delivery lifecycle
+> (`docs/other-products-manual-delivery-phase23.md`); receipt
+> submission/review mechanics here are unchanged.

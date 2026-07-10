@@ -15,6 +15,14 @@ leaves a `PAID` Order behind.
 > `docs/provisioning-phase9.md`. `OTHER_PRODUCT` orders are still not
 > provisioned or delivered.
 
+> **Phase 23 update:** approving an `OTHER_PRODUCT` receipt now initializes
+> the manual-delivery record (`OtherProductOrder`): the user is asked for
+> required info (with a «تکمیل اطلاعات سفارش 📝» button) or told the order
+> awaits admin delivery, active admins are notified, and the admin sees a
+> «مشاهده سفارش 📦» link into «سفارش‌های دستی 📦» — see
+> `docs/other-products-manual-delivery-phase23.md`. Still no provisioning
+> for OTHER_PRODUCT; service purchase/renewal/extra behavior unchanged.
+
 > **Phase 14 update:** receipt review now also covers `WALLET_CHARGE`
 > (wallet top-up) payments — approval increases the user's wallet balance
 > and creates a CHARGE WalletTransaction and does **NOT** create an Order;
@@ -127,7 +135,8 @@ the review — it is logged (no card numbers, no file ids) and the admin sees
   می‌شود.»
 - Approval (`OTHER_PRODUCT`, determined from checkout/orderType snapshot):
   «رسید پرداخت شما تایید شد ✅ / سفارش محصول شما ثبت شد و در انتظار مرحله
-  تحویل است.» (No `OtherProductOrder` is created in this phase.)
+  تحویل است.» (No `OtherProductOrder` was created in THIS phase — Phase 23
+  now creates it and sends purpose-specific notices instead.)
 - Rejection — exact format:
 
   ```
