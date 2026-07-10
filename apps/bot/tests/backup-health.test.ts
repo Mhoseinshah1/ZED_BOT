@@ -1,0 +1,200 @@
+import { spawnSync } from "node:child_process";
+import { mkdir, readdir, stat, utimes, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+process.env.APP_SECRET ??= "phase35-test-secret-phase35-test-secret";
+
+import { prisma } from "@zedbot/database";
+
+import {
+  backupShortIdFromName,
+  buildRestoreInstructions,
+  cleanupOldBackups,
+  createDatabaseBackup,
+  formatBytes,
+  getBackupFile,
+  getSystemHealth,
+  isBackupFileName,
+  listBackups,
+} from "../src/services/backup-health.service.js";
+
+// =============================================================================
+// Phase 35 backup/health. All file operations run in a per-run TEMP backup
+// directory (BACKUP_DIR env) - /opt/zedbot/backups is never touched. The
+// real pg_dump round-trip runs only where pg_dump is installed.
+// =============================================================================
+
+const hasDb =
+  typeof process.env.DATABASE_URL === "string" && process.env.DATABASE_URL !== "";
+const hasPgDump = spawnSync("pg_dump", ["--version"]).status === 0;
+
+const runTag = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+const tempDir = path.join(os.tmpdir(), `zedbot-backup-test-${runTag}`);
+
+async function writeBackupFile(name: string, content = "data", ageDays = 0): Promise<void> {
+  const filePath = path.join(tempDir, name);
+  await writeFile(filePath, content);
+  if (ageDays > 0) {
+    const when = new Date(Date.now() - ageDays * 24 * 60 * 60 * 1000);
+    await utimes(filePath, when, when);
+  }
+}
+
+describe("backup/health file layer (Phase 35)", () => {
+  beforeAll(async () => {
+    process.env.BACKUP_DIR = tempDir;
+    await mkdir(tempDir, { recursive: true });
+  });
+
+  it("accepts only the expected backup filename pattern", () => {
+    expect(isBackupFileName("zedbot-db-20260710-183000.sql.gz")).toBe(true);
+    expect(backupShortIdFromName("zedbot-db-20260710-183000.sql.gz")).toBe("20260710-183000");
+    for (const bad of [
+      "zedbot-db-20260710-183000.sql",
+      "zedbot-db-2026071-183000.sql.gz",
+      "other-db-20260710-183000.sql.gz",
+      "zedbot-db-20260710-183000.sql.gz.bak",
+      "../../etc/passwd",
+      "notes.txt",
+    ]) {
+      expect(isBackupFileName(bad)).toBe(false);
+      expect(backupShortIdFromName(bad)).toBeNull();
+    }
+  });
+
+  it("lists only matching files, newest first, paginated", async () => {
+    await writeBackupFile("zedbot-db-20260101-000000.sql.gz");
+    await writeBackupFile("zedbot-db-20260301-120000.sql.gz");
+    await writeBackupFile("zedbot-db-20260201-060000.sql.gz");
+    await writeBackupFile("junk.txt");
+    await writeBackupFile("zedbot-db-junk.sql.gz");
+
+    const page = await listBackups(1);
+    const names = page.backups.map((backup) => backup.name);
+    expect(names).toEqual([
+      "zedbot-db-20260301-120000.sql.gz",
+      "zedbot-db-20260201-060000.sql.gz",
+      "zedbot-db-20260101-000000.sql.gz",
+    ]);
+    expect(page.total).toBe(3);
+    expect((await listBackups(999)).page).toBe(1);
+  });
+
+  it("resolves files safely: traversal, garbage and unknown ids refused; too-large flagged", async () => {
+    await writeBackupFile("zedbot-db-20260401-090000.sql.gz", "0123456789");
+
+    const ok = await getBackupFile("20260401-090000");
+    expect(ok.ok).toBe(true);
+    if (!ok.ok) return;
+    expect(ok.name).toBe("zedbot-db-20260401-090000.sql.gz");
+    expect(ok.sizeBytes).toBe(10);
+    expect(ok.path.startsWith(path.resolve(tempDir))).toBe(true);
+
+    for (const bad of ["../../etc/passwd", "20260401-09000x", "zzzz", "", "99999999-999999"]) {
+      const refused = await getBackupFile(bad);
+      expect(refused.ok).toBe(false);
+      if (refused.ok) return;
+      expect(refused.tooLarge).toBe(false);
+    }
+
+    const tooLarge = await getBackupFile("20260401-090000", 5);
+    expect(tooLarge.ok).toBe(false);
+    if (tooLarge.ok) return;
+    expect(tooLarge.tooLarge).toBe(true);
+    expect(tooLarge.safeMessage).toContain(tempDir);
+  });
+
+  it("cleanup deletes only OLD MATCHING backups", async () => {
+    await writeBackupFile("zedbot-db-20250101-000000.sql.gz", "old", 30);
+    await writeBackupFile("old-junk.txt", "junk", 30);
+    const freshName = "zedbot-db-20260501-000000.sql.gz";
+    await writeBackupFile(freshName, "fresh");
+
+    const result = await cleanupOldBackups(7);
+    expect(result.deletedCount).toBeGreaterThanOrEqual(1);
+    expect(result.freedBytes).toBeGreaterThan(0);
+
+    const remaining = await readdir(tempDir);
+    expect(remaining).not.toContain("zedbot-db-20250101-000000.sql.gz");
+    expect(remaining).toContain("old-junk.txt"); // non-matching never deleted
+    expect(remaining).toContain(freshName); // fresh backup kept
+  });
+
+  it("restore instructions carry placeholders, never the DATABASE_URL", () => {
+    const instructions = buildRestoreInstructions();
+    expect(instructions).toContain("<POSTGRES_USER>");
+    expect(instructions).toContain("<POSTGRES_DB>");
+    expect(instructions).toContain("docker compose");
+    expect(instructions).toContain("بکاپ تازه");
+    const url = process.env.DATABASE_URL;
+    if (typeof url === "string" && url !== "") {
+      expect(instructions).not.toContain(url);
+    }
+    expect(instructions).not.toMatch(/postgres(ql)?:\/\//);
+  });
+
+  it("formats byte sizes readably", () => {
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(2048)).toBe("2.0 KB");
+    expect(formatBytes(13_002_342)).toBe("12.4 MB");
+    expect(formatBytes(3 * 1024 * 1024 * 1024)).toBe("3.0 GB");
+  });
+});
+
+describe.runIf(hasDb)("system health (Phase 35)", () => {
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it("reports a healthy database with latency and a writable backup dir", async () => {
+    const health = await getSystemHealth();
+    expect(health.db.ok).toBe(true);
+    expect(health.db.latencyMs).not.toBeNull();
+    expect(health.db.error).toBeNull();
+    expect(health.redis.checked).toBe(false);
+    expect(health.backupDirectory.path).toBe(tempDir);
+    expect(health.backupDirectory.exists).toBe(true);
+    expect(health.backupDirectory.writable).toBe(true);
+    expect(health.node.uptimeSeconds).toBeGreaterThanOrEqual(0);
+    expect(health.node.rssBytes).toBeGreaterThan(0);
+  });
+});
+
+describe.runIf(hasDb && hasPgDump)("pg_dump backup round-trip (Phase 35)", () => {
+  it("creates a real non-empty gzip backup that lists with a short id", async () => {
+    const outcome = await createDatabaseBackup();
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(isBackupFileName(outcome.backup.name)).toBe(true);
+    expect(outcome.backup.sizeBytes).toBeGreaterThan(0);
+    const stats = await stat(path.join(tempDir, outcome.backup.name));
+    expect(stats.size).toBe(outcome.backup.sizeBytes);
+    const page = await listBackups(1);
+    expect(page.backups.some((backup) => backup.name === outcome.backup.name)).toBe(true);
+  });
+
+  it("fails safely on an unreachable DATABASE_URL and removes the partial file", async () => {
+    const original = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://postgres@127.0.0.1:59999/nope";
+    try {
+      const before = (await readdir(tempDir)).filter(isBackupFileName).length;
+      const outcome = await createDatabaseBackup();
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(outcome.safeMessage).not.toContain("59999");
+      const after = (await readdir(tempDir)).filter(isBackupFileName).length;
+      expect(after).toBe(before); // partial file deleted
+    } finally {
+      process.env.DATABASE_URL = original;
+    }
+  });
+});
+
+describe.skipIf(hasDb)("backup/health (skipped)", () => {
+  it("health/backup integration tests require DATABASE_URL - see docs/testing.md", () => {
+    expect(hasDb).toBe(false);
+  });
+});
