@@ -203,8 +203,8 @@ export interface SessionData {
     adminManualOrderSearchQuery?: string;
     adminManualOrderLastFilter?: "open" | "info" | "ready" | "delivered";
     adminManualOrderLastPage?: number;
-    // Admin stock add-item wizard (Phase 25) + bulk add (Phase 27);
-    // content NEVER logged.
+    // Admin stock add-item wizard (Phase 25), bulk add (Phase 27) and
+    // low-stock threshold editing (Phase 28); content NEVER logged.
     adminStockDraft?: {
       productId: string;
       content?: string;
@@ -212,6 +212,7 @@ export interface SessionData {
       bulkItems?: string[];
       invalidCount?: number;
       duplicateCount?: number;
+      thresholdEditing?: true;
     };
     [key: string]: unknown;
   };
