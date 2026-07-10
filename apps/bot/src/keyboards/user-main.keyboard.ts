@@ -3,13 +3,18 @@ import { InlineKeyboard } from "grammy";
 import { CB } from "../core/callbacks.js";
 import { getButtonText } from "../services/text.service.js";
 
-/** Main user menu - button texts come from the database (operator-editable). */
+/**
+ * Main user menu - button texts come from the database (operator-editable).
+ * Phase 18.1: «خرید حجم اضافه ➕»/«خرید زمان اضافه ⏳» moved OFF the main
+ * menu into the service detail page («سرویس‌های من 🛍» → select a service) -
+ * they act on one existing service, so they live next to it. The old
+ * CB.USER_EXTRA_VOLUME / CB.USER_EXTRA_TIME handlers stay registered for
+ * old Telegram messages that still show the removed buttons.
+ */
 export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
   const [
     buy,
     renew,
-    extraVolume,
-    extraTime,
     services,
     wallet,
     referral,
@@ -23,8 +28,6 @@ export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
   ] = await Promise.all([
     getButtonText("buy_subscription"),
     getButtonText("renew_service"),
-    getButtonText("extra_volume"),
-    getButtonText("extra_time"),
     getButtonText("my_services"),
     getButtonText("wallet"),
     getButtonText("referral"),
@@ -40,9 +43,6 @@ export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
   return new InlineKeyboard()
     .text(buy, CB.USER_BUY)
     .text(renew, CB.USER_RENEW)
-    .row()
-    .text(extraVolume, CB.USER_EXTRA_VOLUME)
-    .text(extraTime, CB.USER_EXTRA_TIME)
     .row()
     .text(services, CB.USER_SERVICES)
     .text(wallet, CB.USER_WALLET)

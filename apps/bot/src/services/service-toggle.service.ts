@@ -86,15 +86,6 @@ export function availableToggleAction(
   return null;
 }
 
-/** Toggle button for the detail view (rendered only when action is allowed). */
-export async function resolveToggleAction(service: Service): Promise<ToggleAction | null> {
-  const panel = await prisma.panel.findUnique({
-    where: { id: service.panelId },
-    select: { status: true },
-  });
-  return panel === null ? null : availableToggleAction(service, panel.status);
-}
-
 export type ToggleEligibility =
   | { eligible: true }
   | { eligible: false; internalReason: string; safeUserMessage: string };

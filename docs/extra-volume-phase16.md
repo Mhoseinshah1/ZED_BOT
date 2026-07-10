@@ -1,11 +1,19 @@
 # ZED_BOT extra volume (Phase 16)
 
-Phase 16 wires «خرید حجم اضافه ➕» (new main-menu button, ButtonText key
-`extra_volume`, callback `user:extra_volume`) end-to-end: purchased volume
-is added to an EXISTING finite-volume service — the existing panel account
-and existing `Service` row are updated in place, **never a new Service**.
-Payment goes through card-to-card (Phase 7/8 receipt review) or the wallet
-(Phase 15), both unchanged.
+Phase 16 wires «خرید حجم اضافه ➕» end-to-end: purchased volume is added to
+an EXISTING finite-volume service — the existing panel account and existing
+`Service` row are updated in place, **never a new Service**. Payment goes
+through card-to-card (Phase 7/8 receipt review) or the wallet (Phase 15),
+both unchanged.
+
+> **Phase 18.1 entry-point change:** the button is **no longer on the main
+> menu**. It now lives on the selected-service detail page inside
+> «سرویس‌های من 🛍» and routes straight into this flow's existing
+> `user:ev:svc:<serviceSid>` step (skipping the eligible-services list).
+> The old entry `CB.USER_EXTRA_VOLUME` (`user:extra_volume`, ButtonText key
+> `extra_volume`) and its eligible-list handler **remain registered** for
+> old Telegram messages that still show the removed main-menu button — the
+> flow itself is unchanged.
 
 Source: `apps/bot/src/services/extra-volume.service.ts`, flow in
 `apps/bot/src/handlers/user-extra-volume/`, wallet path in

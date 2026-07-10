@@ -7,7 +7,6 @@ import { syncServiceFromPanel } from "../../services/service-sync.service.js";
 import {
   buildTogglePreview,
   getToggleableServiceByShortId,
-  resolveToggleAction,
   toggleEligibility,
   toggleServiceStatus,
   TOGGLE_ALREADY_DONE_TEXT,
@@ -19,6 +18,7 @@ import { getButtonText } from "../../services/text.service.js";
 import {
   getOwnedServiceByShortId,
   listUserServices,
+  resolveServiceDetailActions,
 } from "../../services/user-services.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
@@ -44,13 +44,13 @@ const HTML = { parseMode: "HTML" as const };
 
 export const servicesHandler = new Composer<BotContext>();
 
-/** Detail view; the toggle button appears only when the state allows it. */
+/** Detail view; toggle/extra-volume/extra-time buttons only when allowed. */
 async function renderDetail(ctx: BotContext, service: Service): Promise<void> {
-  const toggleAction = await resolveToggleAction(service);
+  const actions = await resolveServiceDetailActions(service);
   await safeEditOrReply(
     ctx,
     serviceDetailText(service),
-    serviceDetailKeyboard(service, toggleAction),
+    serviceDetailKeyboard(service, actions),
     HTML,
   );
 }

@@ -3,13 +3,21 @@ import { InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { ToggleAction } from "../../services/service-toggle.service.js";
-import { serviceShortId, type ServiceListPage } from "../../services/user-services.service.js";
+import {
+  serviceShortId,
+  type ServiceDetailActions,
+  type ServiceListPage,
+} from "../../services/user-services.service.js";
 import { escapeHtml } from "../../utils/html.js";
+import { etcb } from "../user-extra-time/extra-time-views.js";
+import { evcb } from "../user-extra-volume/extra-volume-views.js";
 
 // =============================================================================
 // "My Services" rendering (Phase 10) - read-only views over stored Service
 // rows. No panel data, no actions beyond opening stored links. Phase 18
-// added the enable/disable toggle button + confirmation keyboard.
+// added the enable/disable toggle button + confirmation keyboard; Phase 18.1
+// moved «خرید حجم اضافه ➕»/«خرید زمان اضافه ⏳» here from the main menu
+// (they route straight into the existing Phase 16/17 selected-service flows).
 // =============================================================================
 
 export const svcCb = {
@@ -141,9 +149,15 @@ export function serviceDetailText(service: Service): string {
   return lines.join("\n");
 }
 
+const NO_DETAIL_ACTIONS: ServiceDetailActions = {
+  toggleAction: null,
+  canBuyExtraVolume: false,
+  canBuyExtraTime: false,
+};
+
 export function serviceDetailKeyboard(
   service: Service,
-  toggleAction: ToggleAction | null = null,
+  actions: ServiceDetailActions = NO_DETAIL_ACTIONS,
 ): InlineKeyboard {
   const sid = serviceShortId(service);
   const kb = new InlineKeyboard().text("بروزرسانی اطلاعات ♻️", svcCb.refresh(sid)).row();
@@ -158,10 +172,21 @@ export function serviceDetailKeyboard(
   if (hasLink || hasConfigs) {
     kb.row();
   }
+  // Phase 18.1: straight into the existing Phase 16/17 selected-service
+  // flows - those routes re-validate eligibility on click.
+  if (actions.canBuyExtraVolume) {
+    kb.text("خرید حجم اضافه ➕", evcb.service(sid));
+  }
+  if (actions.canBuyExtraTime) {
+    kb.text("خرید زمان اضافه ⏳", etcb.service(sid));
+  }
+  if (actions.canBuyExtraVolume || actions.canBuyExtraTime) {
+    kb.row();
+  }
   // Phase 18: shown ONLY when the service/panel state actually allows it.
-  if (toggleAction === "DISABLE") {
+  if (actions.toggleAction === "DISABLE") {
     kb.text("خاموش کردن سرویس ⏸", svcCb.disable(sid)).row();
-  } else if (toggleAction === "ENABLE") {
+  } else if (actions.toggleAction === "ENABLE") {
     kb.text("روشن کردن سرویس ▶️", svcCb.enable(sid)).row();
   }
   kb.text("بازگشت به لیست", svcCb.list(1)).row().text("بازگشت به منو", CB.USER_MENU);
