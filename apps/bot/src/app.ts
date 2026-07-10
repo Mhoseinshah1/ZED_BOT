@@ -21,6 +21,7 @@ import {
   manualOrdersHandler,
   manualOrdersTextHandler,
 } from "./handlers/admin-manual-orders/manual-orders.handler.js";
+import { stockHandler, stockTextHandler } from "./handlers/admin-stock/stock.handler.js";
 import {
   otherProductInfoHandler,
   otherProductInfoTextHandler,
@@ -104,6 +105,7 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(adminUsersHandler);
   adminArea.use(adminFinanceHandler);
   adminArea.use(manualOrdersHandler);
+  adminArea.use(stockHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
@@ -118,6 +120,7 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(adminUsersTextHandler);
   adminFlowText.use(adminFinanceTextHandler);
   adminFlowText.use(manualOrdersTextHandler);
+  adminFlowText.use(stockTextHandler);
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {

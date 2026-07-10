@@ -652,6 +652,7 @@ model Product {
   checkoutSessions   CheckoutSession[]
   services           Service[]
   otherProductOrders OtherProductOrder[]
+  stockItems         OtherProductStockItem[]
 
   @@index([categoryId])
   @@index([panelId])
@@ -1074,6 +1075,38 @@ model OtherProductOrder {
   @@index([userId])
   @@index([productId])
   @@index([status])
+}
+
+enum StockItemStatus {
+  AVAILABLE
+  RESERVED
+  DELIVERED
+  DISABLED
+}
+
+// Phase 25: encrypted stock inventory for auto-delivered OTHER_PRODUCTs.
+// contentEncrypted is AES-256-GCM (APP_SECRET) - raw content is never
+// logged and only the buying user sees it decrypted, on delivery.
+model OtherProductStockItem {
+  id        String          @id @default(uuid())
+  productId String
+  product   Product         @relation(fields: [productId], references: [id])
+  status    StockItemStatus @default(AVAILABLE)
+
+  contentEncrypted  String
+  label             String?
+  deliveredOrderId  String?
+  deliveredToUserId String?
+  deliveredAt       DateTime?
+  disabledAt        DateTime?
+  createdByAdminId  String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([productId])
+  @@index([status])
+  @@index([deliveredOrderId])
+  @@index([createdAt])
 }
 
 // =============================================================================
