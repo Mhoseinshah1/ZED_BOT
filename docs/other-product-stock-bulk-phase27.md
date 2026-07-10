@@ -4,6 +4,9 @@ Phase 27 adds a **multiline bulk-add flow** to the Phase 25 stock inventory
 (`docs/other-product-stock-phase25.md`): one message, one item per line, all
 stored encrypted. Pure admin configuration — auto-delivery, payments,
 receipts and orders are untouched, no Service rows, no user notification.
+Bulk add is also the intended **refill path** after a Phase 28 low/out-of-
+stock alert (`docs/other-product-stock-alerts-phase28.md`), which links
+straight here with an «افزودن گروهی آیتم‌ها ➕➕» button.
 
 Source: `parseBulkStockInput` / `addStockItemsBulk` in
 `apps/bot/src/services/other-product-stock.service.ts`, wizard in
@@ -73,4 +76,5 @@ contains raw content.
 CSV upload, file upload, Excel import, stock export, per-line labels in
 bulk (single add keeps labels), DB-wide duplicate detection (above),
 refunds/cancellation, wallet payment for OTHER_PRODUCT, online gateways,
-Telegram Stars, reports, web panel, mini app, Phase 28+.
+Telegram Stars, reports, web panel, mini app, Phase 29+ (low-stock alerts
+arrived in Phase 28).

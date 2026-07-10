@@ -12,7 +12,10 @@ import {
   userInfoPromptText,
   WAITING_DELIVERY_USER_TEXT,
 } from "../../services/other-product-delivery.service.js";
-import { autoDeliverStockOrder } from "../../services/other-product-stock.service.js";
+import {
+  autoDeliverStockOrder,
+  notifyAdminsAboutStockAlert,
+} from "../../services/other-product-stock.service.js";
 import {
   getPaymentByShortId,
   listPendingReviewPayments,
@@ -522,6 +525,15 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       // through to the Phase 23 manual path below.
       const auto = await autoDeliverStockOrder(ctx.api, result.order.id);
       if (auto.status === "DELIVERED" || auto.status === "ALREADY_DELIVERED") {
+        // Phase 28: warn active admins when this delivery left the stock low
+        // or empty. Fresh deliveries only (an ALREADY_DELIVERED repeat did
+        // not change the count); never throws, never affects the delivery.
+        if (auto.status === "DELIVERED") {
+          await notifyAdminsAboutStockAlert(ctx.api, {
+            productId: auto.item.productId,
+            orderId: result.order.id,
+          });
+        }
         await safeEditOrReply(
           ctx,
           "رسید تایید شد ✅\n\nسفارش استاک به صورت خودکار تحویل شد 🎟",
@@ -587,7 +599,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
           ...(auto.status === "SEND_FAILED"
             ? ["⚠️ تحویل خودکار ناموفق شد؛ سفارش برای تحویل دستی ثبت شد."]
             : auto.status === "NO_STOCK"
-              ? ["⚠️ موجودی خودکار تمام شده است؛ سفارش برای تحویل دستی ثبت شد."]
+              ? ["🚨 موجودی محصول تمام شده و سفارش برای تحویل دستی ثبت شد."]
               : ["سفارش دستی ساخته شد 📦"]),
           init.requiresInfo
             ? "از کاربر اطلاعات موردنیاز خواسته شد."

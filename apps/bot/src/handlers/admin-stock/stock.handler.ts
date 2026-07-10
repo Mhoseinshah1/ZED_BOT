@@ -10,17 +10,23 @@ import {
   disableStockItem,
   getStockCounts,
   getStockItemByShortId,
+  getStockLowThreshold,
   getStockProductByShortId,
   INVALID_STOCK_CONTENT_TEXT,
   INVALID_STOCK_LABEL_TEXT,
+  INVALID_THRESHOLD_TEXT,
   isStockDeliveryProduct,
   listStockItems,
   listStockProducts,
   parseBulkStockInput,
+  parseThresholdInput,
   releaseReservedStockItem,
+  setStockLowThreshold,
   STOCK_BULK_MAX_ITEMS,
   STOCK_CONTENT_MAX,
   STOCK_LABEL_MAX,
+  STOCK_THRESHOLD_MAX,
+  stockAlertLevel,
   stockContentPreview,
   toggleProductStockEnabled,
 } from "../../services/other-product-stock.service.js";
@@ -43,6 +49,7 @@ const HTML = { parseMode: "HTML" as const };
 const CONTENT_FLOW = "admin_stock:content";
 const LABEL_FLOW = "admin_stock:label";
 const BULK_FLOW = "admin_stock:bulk_content";
+const THRESHOLD_FLOW = "admin_stock:threshold";
 
 const ST_CB = {
   products: "admin:stock:products",
@@ -54,6 +61,8 @@ const ST_CB = {
   bulkAdd: (sid: string): string => `admin:stock:bulk_add:${sid}`,
   bulkConfirm: "admin:stock:bulk_confirm",
   bulkCancel: "admin:stock:bulk_cancel",
+  threshold: (sid: string): string => `admin:stock:threshold:${sid}`,
+  thresholdClear: (sid: string): string => `admin:stock:threshold_clear:${sid}`,
   items: (sid: string, page: number): string => `admin:stock:items:${sid}:${page}`,
   disableItem: (itemSid: string): string => `admin:stock:item_off:${itemSid}`,
   releaseReserved: (itemSid: string): string => `admin:stock:item_release:${itemSid}`,
@@ -62,12 +71,13 @@ const ST_CB = {
 
 export const stockHandler = new Composer<BotContext>();
 
-/** Full admin-stock state cleanup (Phase 25 wizard + Phase 27 bulk). */
+/** Full admin-stock state cleanup (Phase 25 wizard, Phase 27 bulk, Phase 28 threshold). */
 export function clearAdminStockState(ctx: BotContext): void {
   if (
     ctx.session.currentFlow === CONTENT_FLOW ||
     ctx.session.currentFlow === LABEL_FLOW ||
-    ctx.session.currentFlow === BULK_FLOW
+    ctx.session.currentFlow === BULK_FLOW ||
+    ctx.session.currentFlow === THRESHOLD_FLOW
   ) {
     ctx.session.currentFlow = null;
   }
@@ -84,8 +94,18 @@ async function renderProducts(ctx: BotContext): Promise<void> {
   await safeAnswerCallback(ctx);
   const kb = new InlineKeyboard();
   for (const row of rows.slice(0, 30)) {
+    // Badge (Phase 28): 🚨 out / ⚠️ low / 🎟 stock-eligible / 📦 manual.
+    const level = stockAlertLevel(row, row.counts.available, row.lowThreshold);
+    const badge = !isStockDeliveryProduct(row)
+      ? "📦"
+      : level === "out"
+        ? "🚨"
+        : level === "low"
+          ? "⚠️"
+          : "🎟";
+    const thresholdPart = row.lowThreshold === null ? "" : ` | حد: ${row.lowThreshold}`;
     kb.text(
-      `${isStockDeliveryProduct(row) ? "🎟" : "📦"} ${row.name} | ${row.isActive ? "فعال" : "غیرفعال"} | موجود: ${row.counts.available}`,
+      `${badge} ${row.name} | ${row.isActive ? "فعال" : "غیرفعال"} | موجود: ${row.counts.available}${thresholdPart}`,
       ST_CB.product(productShortId(row)),
     ).row();
   }
@@ -100,7 +120,10 @@ async function renderProducts(ctx: BotContext): Promise<void> {
 }
 
 async function renderProductPage(ctx: BotContext, product: Product): Promise<void> {
-  const counts = await getStockCounts(product.id);
+  const [counts, threshold] = await Promise.all([
+    getStockCounts(product.id),
+    getStockLowThreshold(product.id),
+  ]);
   const sid = productShortId(product);
   const lines = [
     `مدیریت موجودی 🎟 (${escapeHtml(product.name)})`,
@@ -110,9 +133,17 @@ async function renderProductPage(ctx: BotContext, product: Product): Promise<voi
     `تحویل استاک: ${isStockDeliveryProduct(product) ? "روشن ✅" : "خاموش ⏸"}`,
     `موجود: ${counts.available} | تحویل‌شده: ${counts.delivered} | غیرفعال: ${counts.disabled}`,
     `رزروشده/گیرکرده: ${counts.reserved}`,
+    `حد هشدار کمبود: ${threshold === null ? "تنظیم نشده" : threshold === 0 ? "فقط صفر" : `≤ ${threshold}`}`,
   ];
-  if (isStockDeliveryProduct(product) && counts.available === 0) {
-    lines.push("", "⚠️ موجودی خودکار تمام شده است؛ سفارش‌های جدید به تحویل دستی می‌روند.");
+  // Phase 28 warnings: 🚨 exhausted / ⚠️ at-or-below threshold.
+  const level = stockAlertLevel(product, counts.available, threshold);
+  if (level === "out") {
+    lines.push("", "🚨 موجودی تمام شده است.");
+    if (isStockDeliveryProduct(product)) {
+      lines.push("سفارش‌های جدید به تحویل دستی می‌روند.");
+    }
+  } else if (level === "low") {
+    lines.push("", "⚠️ موجودی کم است.");
   }
   const kb = new InlineKeyboard()
     .text("افزودن آیتم موجودی ➕", ST_CB.add(sid))
@@ -121,10 +152,15 @@ async function renderProductPage(ctx: BotContext, product: Product): Promise<voi
     .row()
     .text("مشاهده آیتم‌های موجودی", ST_CB.items(sid, 1))
     .row()
-    .text(
-      product.stockEnabled ? "خاموش کردن تحویل استاک ⏸" : "روشن کردن تحویل استاک ✅",
-      ST_CB.toggle(sid),
-    )
+    .text("تنظیم هشدار کمبود موجودی 🔔", ST_CB.threshold(sid))
+    .row();
+  if (threshold !== null) {
+    kb.text("حذف هشدار کمبود موجودی", ST_CB.thresholdClear(sid)).row();
+  }
+  kb.text(
+    product.stockEnabled ? "خاموش کردن تحویل استاک ⏸" : "روشن کردن تحویل استاک ✅",
+    ST_CB.toggle(sid),
+  )
     .row()
     .text("بازگشت", ST_CB.products);
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
@@ -424,13 +460,59 @@ stockHandler.callbackQuery(ST_CB.bulkConfirm, async (ctx) => {
   }
 });
 
+// --- low-stock threshold (Phase 28) ----------------------------------------------------------
+
+stockHandler.callbackQuery(/^admin:stock:threshold:([0-9a-f-]+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  const product = await getStockProductByShortId(ctx.match[1]);
+  if (product === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  ctx.session.temp.adminStockDraft = { productId: product.id, thresholdEditing: true };
+  ctx.session.currentFlow = THRESHOLD_FLOW;
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    [
+      "هشدار کمبود موجودی 🔔",
+      "",
+      "حد آلارم موجودی را وارد کنید.",
+      "برای هشدار فقط هنگام صفر شدن، عدد 0 را وارد کنید.",
+      "برای حذف، - را بزنید.",
+      `(عدد صحیح 0 تا ${STOCK_THRESHOLD_MAX})`,
+    ].join("\n"),
+    new InlineKeyboard().text("انصراف", ST_CB.product(ctx.match[1])),
+  );
+});
+
+stockHandler.callbackQuery(/^admin:stock:threshold_clear:([0-9a-f-]+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminStockState(ctx);
+  const product = await getStockProductByShortId(ctx.match[1]);
+  if (product === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  await setStockLowThreshold(product.id, null);
+  await safeAnswerCallback(ctx, "هشدار کمبود موجودی حذف شد.");
+  await renderProductPage(ctx, product);
+});
+
 // --- text inputs (content / label) ----------------------------------------------------------
 
 export const stockTextHandler = new Composer<BotContext>();
 
 stockTextHandler.on("message:text", async (ctx, next) => {
   const flow = ctx.session.currentFlow;
-  if (ctx.admin === null || (flow !== CONTENT_FLOW && flow !== LABEL_FLOW && flow !== BULK_FLOW)) {
+  if (
+    ctx.admin === null ||
+    (flow !== CONTENT_FLOW && flow !== LABEL_FLOW && flow !== BULK_FLOW && flow !== THRESHOLD_FLOW)
+  ) {
     return next();
   }
   const text = ctx.message.text;
@@ -446,6 +528,34 @@ stockTextHandler.on("message:text", async (ctx, next) => {
     return;
   }
   const cancelKb = new InlineKeyboard().text("انصراف", ST_CB.addCancel);
+
+  if (flow === THRESHOLD_FLOW) {
+    const parsed = parseThresholdInput(text);
+    if (parsed.kind === "invalid") {
+      // Flow stays active so the admin can resend a corrected value.
+      await safeReply(
+        ctx,
+        INVALID_THRESHOLD_TEXT,
+        new InlineKeyboard().text("انصراف", ST_CB.product(draft.productId.slice(0, 8))),
+      );
+      return;
+    }
+    const product = await getStockProductByShortId(draft.productId.slice(0, 8));
+    clearAdminStockState(ctx);
+    if (product === null) {
+      await safeReply(ctx, DRAFT_EXPIRED_TEXT);
+      return;
+    }
+    await setStockLowThreshold(product.id, parsed.kind === "clear" ? null : parsed.value);
+    await safeReply(
+      ctx,
+      parsed.kind === "clear"
+        ? "هشدار کمبود موجودی حذف شد."
+        : "حد هشدار کمبود موجودی ثبت شد ✅",
+    );
+    await renderProductPage(ctx, product);
+    return;
+  }
 
   if (flow === BULK_FLOW) {
     const bulkCancelKb = new InlineKeyboard().text("انصراف", ST_CB.bulkCancel);

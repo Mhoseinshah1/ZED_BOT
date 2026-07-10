@@ -38,8 +38,10 @@ add-item confirmation; item lists show status/label/dates, never content.
 manual orders since both manage OTHER_PRODUCT fulfilment). Product list:
 `🎟/📦 name | فعال/غیرفعال | موجود: N` (stock-eligible first). Product page:
 deliveryType, تحویل استاک روشن/خاموش, available/delivered/disabled counters
-plus an always-visible «رزروشده/گیرکرده» counter (Phase 26), and a ⚠️
-warning when stock delivery is on with zero available items. Buttons: «افزودن آیتم موجودی ➕», «مشاهده
+plus an always-visible «رزروشده/گیرکرده» counter (Phase 26), the low-stock
+threshold line and 🚨/⚠️ exhausted/low warnings (Phase 28:
+`docs/other-product-stock-alerts-phase28.md`, which also adds post-delivery
+admin alerts and list badges). Buttons: «افزودن آیتم موجودی ➕», «مشاهده
 آیتم‌های موجودی», the `stockEnabled` toggle, «بازگشت».
 
 ## Add / list / disable
@@ -153,5 +155,6 @@ File delivery, CSV/file import (multiline bulk add arrived in Phase 27:
 `docs/other-product-stock-bulk-phase27.md`), hard delete, wallet payment for
 OTHER_PRODUCT, refunds/cancellation, auto-delivery after required-info
 submission (manual path instead — TODO), low-stock counter on the
-manual-orders landing (optional in spec), online gateways, Telegram Stars,
-reports/export, web panel, mini app, Phase 28+.
+manual-orders landing (per-product alerts arrived in Phase 28 instead:
+`docs/other-product-stock-alerts-phase28.md`), online gateways, Telegram
+Stars, reports/export, web panel, mini app, Phase 29+.

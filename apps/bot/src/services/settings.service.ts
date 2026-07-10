@@ -53,3 +53,12 @@ export async function setSetting(key: string, value: string, type: SettingType):
   });
   cache.set(key, { value, at: Date.now() });
 }
+
+/**
+ * Removes a Setting row (missing key is fine) and refreshes the cache so the
+ * deletion is visible immediately, like setSetting.
+ */
+export async function deleteSetting(key: string): Promise<void> {
+  await prisma.setting.deleteMany({ where: { key } });
+  cache.set(key, { value: null, at: Date.now() });
+}

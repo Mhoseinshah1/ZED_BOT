@@ -8,10 +8,12 @@ import {
   type User,
 } from "@zedbot/database";
 import { decryptSecret, encryptSecret, errorMessage } from "@zedbot/shared";
+import { InlineKeyboard } from "grammy";
 
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import type { DeliverySendApi } from "./other-product-delivery.service.js";
+import { deleteSetting, getSetting, setSetting } from "./settings.service.js";
 
 // =============================================================================
 // OTHER_PRODUCT stock inventory + auto-delivery (Phase 25). Stock items are
@@ -65,11 +67,12 @@ export async function getStockCounts(productId: string): Promise<StockCounts> {
   return { available, reserved, delivered, disabled };
 }
 
-export type StockProductRow = Product & { counts: StockCounts };
+export type StockProductRow = Product & { counts: StockCounts; lowThreshold: number | null };
 
 /**
  * OTHER_PRODUCT products for the stock admin - stock-eligible ones first,
- * then by name, each with its inventory counters.
+ * then by name, each with its inventory counters and alert threshold
+ * (Phase 28).
  */
 export async function listStockProducts(): Promise<StockProductRow[]> {
   const products = await prisma.product.findMany({
@@ -77,7 +80,11 @@ export async function listStockProducts(): Promise<StockProductRow[]> {
     orderBy: [{ name: "asc" }],
   });
   const rows = await Promise.all(
-    products.map(async (product) => ({ ...product, counts: await getStockCounts(product.id) })),
+    products.map(async (product) => ({
+      ...product,
+      counts: await getStockCounts(product.id),
+      lowThreshold: await getStockLowThreshold(product.id),
+    })),
   );
   return rows.sort((a, b) => Number(isStockDeliveryProduct(b)) - Number(isStockDeliveryProduct(a)));
 }
@@ -426,6 +433,178 @@ export async function toggleProductStockEnabled(productId: string): Promise<Prod
     stockEnabled: updated.stockEnabled,
   });
   return updated;
+}
+
+// --- low-stock alerts (Phase 28) -------------------------------------------------------------
+//
+// A per-product alert threshold lives in the existing Setting model
+// (`stock.low_threshold.<productId>` - no migration): missing = no low
+// threshold, 0 = alert only when stock reaches zero, N > 0 = alert when
+// available <= N. Out-of-stock (available = 0) alerts fire for any
+// stock-enabled product even without a threshold. Alerts go to active
+// admins after every successful auto-delivery while the condition holds
+// (deliberately simple - no scheduled jobs, low volume; documented) and
+// never carry stock content.
+
+export const STOCK_THRESHOLD_MAX = 100_000;
+export const INVALID_THRESHOLD_TEXT = `حد هشدار باید عددی صحیح بین 0 تا ${STOCK_THRESHOLD_MAX} باشد. برای حذف، - را بزنید.`;
+export const STOCK_OUT_ALERT_TITLE = "🚨 موجودی محصول تمام شد";
+export const STOCK_LOW_ALERT_TITLE = "⚠️ موجودی محصول کم است";
+
+function stockThresholdKey(productId: string): string {
+  return `stock.low_threshold.${productId}`;
+}
+
+/** Reads the per-product alert threshold (null = not set / unreadable). */
+export async function getStockLowThreshold(productId: string): Promise<number | null> {
+  const raw = await getSetting(stockThresholdKey(productId), "");
+  if (!/^\d{1,6}$/.test(raw)) {
+    return null;
+  }
+  const value = Number.parseInt(raw, 10);
+  return value >= 0 && value <= STOCK_THRESHOLD_MAX ? value : null;
+}
+
+/** Sets (0..STOCK_THRESHOLD_MAX) or clears (null) the alert threshold. */
+export async function setStockLowThreshold(
+  productId: string,
+  threshold: number | null,
+): Promise<void> {
+  if (threshold === null) {
+    await deleteSetting(stockThresholdKey(productId));
+    logger.info("stock low threshold cleared", { productId });
+    return;
+  }
+  await setSetting(stockThresholdKey(productId), String(threshold), "NUMBER");
+  logger.info("stock low threshold set", { productId, threshold });
+}
+
+/**
+ * Parses the admin's threshold input: "-" clears, an integer 0..100000
+ * (Persian/Arabic digits accepted) sets. Pure.
+ */
+export function parseThresholdInput(
+  text: string,
+): { kind: "clear" } | { kind: "set"; value: number } | { kind: "invalid" } {
+  const normalized = text
+    .trim()
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
+  if (normalized === "-") {
+    return { kind: "clear" };
+  }
+  if (!/^\d{1,6}$/.test(normalized)) {
+    return { kind: "invalid" };
+  }
+  const value = Number.parseInt(normalized, 10);
+  return value <= STOCK_THRESHOLD_MAX ? { kind: "set", value } : { kind: "invalid" };
+}
+
+export type StockAlertLevel = "none" | "low" | "out";
+
+/**
+ * Alert rule (pure): out when available = 0 and the product is
+ * stock-enabled OR has any threshold set; low when a positive threshold is
+ * set and available <= threshold; none otherwise.
+ */
+export function stockAlertLevel(
+  product: Pick<Product, "deliveryType" | "stockEnabled">,
+  available: number,
+  threshold: number | null,
+): StockAlertLevel {
+  if (available === 0 && (isStockDeliveryProduct(product) || threshold !== null)) {
+    return "out";
+  }
+  if (threshold !== null && threshold > 0 && available <= threshold) {
+    return "low";
+  }
+  return "none";
+}
+
+export interface StockAlertEvaluation {
+  level: StockAlertLevel;
+  available: number;
+  threshold: number | null;
+}
+
+/** Current alert state of one product (missing product = none). */
+export async function evaluateStockAlert(productId: string): Promise<StockAlertEvaluation> {
+  const product = await prisma.product.findUnique({ where: { id: productId } });
+  if (product === null || product.type !== "OTHER_PRODUCT") {
+    return { level: "none", available: 0, threshold: null };
+  }
+  const [available, threshold] = await Promise.all([
+    prisma.otherProductStockItem.count({ where: { productId, status: "AVAILABLE" } }),
+    getStockLowThreshold(productId),
+  ]);
+  return { level: stockAlertLevel(product, available, threshold), available, threshold };
+}
+
+/**
+ * Sends the low/out-of-stock alert to every ACTIVE admin (fault-isolated
+ * per admin, never throws) when the product's alert condition holds.
+ * Returns how many admins were reached (0 when level is "none"). Carries
+ * counts and ids only - never stock content, never user delivery content.
+ */
+export async function notifyAdminsAboutStockAlert(
+  api: DeliverySendApi,
+  args: { productId: string; orderId?: string },
+): Promise<number> {
+  let reached = 0;
+  try {
+    const evaluation = await evaluateStockAlert(args.productId);
+    if (evaluation.level === "none") {
+      return 0;
+    }
+    const product = await prisma.product.findUnique({ where: { id: args.productId } });
+    if (product === null) {
+      return 0;
+    }
+    const lines = [
+      evaluation.level === "out" ? STOCK_OUT_ALERT_TITLE : STOCK_LOW_ALERT_TITLE,
+      "",
+      `محصول: ${escapeHtml(product.name)}`,
+      `موجودی فعلی: ${evaluation.available}`,
+    ];
+    if (evaluation.threshold !== null) {
+      lines.push(
+        `حد هشدار: ${evaluation.threshold === 0 ? "فقط صفر" : `≤ ${evaluation.threshold}`}`,
+      );
+    }
+    if (args.orderId !== undefined) {
+      lines.push(`سفارش: <code>${args.orderId.slice(0, 8)}</code>`);
+    }
+    const sid = product.id.slice(0, 8);
+    const keyboard = new InlineKeyboard()
+      .text("مدیریت موجودی محصول 🎟", `admin:stock:p:${sid}`)
+      .row()
+      .text("افزودن گروهی آیتم‌ها ➕➕", `admin:stock:bulk_add:${sid}`);
+    const admins = await prisma.admin.findMany({
+      where: { isActive: true },
+      select: { telegramId: true },
+    });
+    for (const admin of admins) {
+      try {
+        await api.sendMessage(admin.telegramId.toString(), lines.join("\n"), {
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        });
+        reached += 1;
+      } catch (err) {
+        logger.warn("stock alert admin notification failed", {
+          productId: args.productId,
+          adminTelegramId: admin.telegramId.toString(),
+          error: errorMessage(err),
+        });
+      }
+    }
+  } catch (err) {
+    logger.warn("stock alert notification failed", {
+      productId: args.productId,
+      error: errorMessage(err),
+    });
+  }
+  return reached;
 }
 
 // --- auto-delivery -------------------------------------------------------------------------
