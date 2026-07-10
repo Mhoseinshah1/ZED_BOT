@@ -5,6 +5,10 @@ import { Composer, InlineKeyboard } from "grammy";
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
+import {
+  notifyAdminsAboutReceipt,
+  type ReceiptKind,
+} from "../../services/admin-receipt-notification.service.js";
 import { getCheckoutByShortId, getOwnedCheckout } from "../../services/checkout.service.js";
 import {
   getAvailablePaymentMethods,
@@ -170,31 +174,31 @@ paymentHandler.callbackQuery(/^user:pay:g:([0-9a-f-]+):([0-9a-f-]+)$/, async (ct
     gateway.instructionText !== null && gateway.instructionText !== ""
       ? `${cardToCardText(checkout, account, cardNumber)}\n\n${escapeHtml(gateway.instructionText)}`
       : cardToCardText(checkout, account, cardNumber);
-  await safeEditOrReply(ctx, text, cardToCardKeyboard(checkout), HTML);
+  await safeEditOrReply(ctx, text, cardToCardKeyboard(checkout, cardNumber), HTML);
 });
 
-// --- copy helpers ---------------------------------------------------------------------
-// Telegram cannot write to the clipboard from a callback; monospace (<code>)
-// messages are tap-to-copy in official clients.
+// --- legacy copy callbacks (Phase 21.1) -------------------------------------------------
+// New keyboards use Telegram copy_text buttons (client-side clipboard, no
+// callback). These handlers remain ONLY for old messages that still carry
+// the callback buttons: they answer with a popup and NEVER send a chat
+// message.
 
 paymentHandler.callbackQuery(PAY_CB.COPY_CARD, async (ctx) => {
   const draft = ctx.session.temp.paymentDraft;
   if (draft?.cardNumber === undefined) {
-    await safeAnswerCallback(ctx, "ابتدا روش پرداخت را انتخاب کنید.");
+    await safeAnswerCallback(ctx, "برای کپی، از دکمه جدید کپی استفاده کنید.");
     return;
   }
   await safeAnswerCallback(ctx, formatCardNumber(draft.cardNumber));
-  await safeReply(ctx, `شماره کارت:\n<code>${escapeHtml(draft.cardNumber)}</code>`, undefined, HTML);
 });
 
 paymentHandler.callbackQuery(PAY_CB.COPY_AMOUNT, async (ctx) => {
   const draft = ctx.session.temp.paymentDraft;
   if (draft === undefined) {
-    await safeAnswerCallback(ctx, "ابتدا روش پرداخت را انتخاب کنید.");
+    await safeAnswerCallback(ctx, "برای کپی، از دکمه جدید کپی استفاده کنید.");
     return;
   }
   await safeAnswerCallback(ctx, `${draft.amountToman}`);
-  await safeReply(ctx, `مبلغ:\n<code>${draft.amountToman}</code>`, undefined, HTML);
 });
 
 // --- receipt flow ----------------------------------------------------------------------
@@ -238,13 +242,18 @@ paymentReceiptHandler.on("message", async (ctx, next) => {
     return;
   }
 
-  // Accepted kinds: photo (largest size), document, plain text.
+  // Accepted kinds: photo (largest size), document, plain text. The kind is
+  // remembered here (ManualReceipt has no kind column) so the admin
+  // notification can forward the media correctly.
   let receipt: { fileId?: string; text?: string } | null = null;
+  let receiptKind: ReceiptKind = "TEXT";
   const photos = ctx.message.photo;
   if (photos !== undefined && photos.length > 0) {
     receipt = { fileId: photos[photos.length - 1].file_id, text: ctx.message.caption };
+    receiptKind = "PHOTO";
   } else if (ctx.message.document !== undefined) {
     receipt = { fileId: ctx.message.document.file_id, text: ctx.message.caption };
+    receiptKind = "DOCUMENT";
   } else if (text !== undefined && text.trim().length > 0) {
     receipt = { text: text.trim().slice(0, 1000) };
   }
@@ -286,6 +295,18 @@ paymentReceiptHandler.on("message", async (ctx, next) => {
         ? "رسید شارژ کیف پول شما ثبت شد و در انتظار بررسی است."
         : "رسید شما ثبت شد و در انتظار بررسی است ✅";
     await safeReply(ctx, submittedText, receiptRegisteredKeyboard());
+    // Phase 21.1: forward the receipt to active admins for review. The
+    // helper never throws and a failed send never rolls back the receipt.
+    await notifyAdminsAboutReceipt(ctx.api, {
+      payment: result.payment,
+      checkout,
+      user,
+      receiptKind,
+      receiptFileId: receipt.fileId,
+      receiptText: receipt.text,
+      cardNumber: draft.cardNumber,
+      cardAccountId: draft.cardAccountId,
+    });
   } catch (err) {
     clearCheckoutState(ctx);
     logger.error("receipt submission failed", { error: errorMessage(err) });

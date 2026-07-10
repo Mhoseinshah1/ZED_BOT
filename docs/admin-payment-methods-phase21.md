@@ -105,6 +105,22 @@ sees the gateway with an active card and amount in range, hides it below
 min/above max/with the only card deactivated/with the gateway disabled;
 and no payment-side rows from any admin action.
 
+## Phase 21.1 fixes
+
+- The user card screen's «کپی شماره کارت»/«کپی مبلغ» became Telegram
+  **`copy_text`** buttons (raw 16 digits / plain numeric amount copied
+  client-side; no callback round-trip, no extra chat message). The legacy
+  copy callbacks remain registered for old keyboards but only answer with
+  a popup.
+- Receipt submission now notifies every ACTIVE admin immediately: the
+  receipt photo/document is forwarded by file_id (text receipts inline),
+  captioned with type/amount/user/**masked** card + owner/payment +
+  checkout short ids/date/status, plus «بررسی رسید 🧾» into the existing
+  `admin:rec:view` page and «رسیدهای تایید نشده 💵». Sends are per-admin
+  fault-isolated and a total failure only logs a warning — the submitted
+  receipt is never rolled back. Opening the admin receipt detail also
+  forwards the media (photo first, document fallback).
+
 ## Intentionally NOT implemented
 
 Online gateways (Zarinpal/Plisio/NowPayments/AghayePardakht), Telegram
@@ -112,4 +128,5 @@ Stars, automatic receipt verification, receipt approval changes, card
 delete (no `deletedAt` — deactivate instead), per-group gateway targeting
 UI (`allowedGroups` stays whatever the DB holds), cashback/
 activateAfterSuccessfulPaymentsCount editing, gateway hide/show per user,
-seeding defaults, Phase 22+.
+seeding defaults, a log-group notification target (active admins are
+messaged directly in this phase), Phase 22+.

@@ -77,11 +77,22 @@ export function cardToCardText(
   ].join("\n");
 }
 
-export function cardToCardKeyboard(checkout: CheckoutSession): InlineKeyboard {
+/**
+ * Card-to-card actions. The copy buttons are Telegram `copy_text` buttons
+ * (Bot API 7.11+): the client writes the RAW value straight to the
+ * clipboard - no callback round-trip and no extra chat message. The visible
+ * message shows the dashed card number; the button copies raw digits and
+ * the plain numeric amount (copy_text is limited to 1..256 chars - both
+ * values are far below that).
+ */
+export function cardToCardKeyboard(
+  checkout: CheckoutSession,
+  cardNumber: string,
+): InlineKeyboard {
   const coSid = checkoutShortId(checkout);
   return new InlineKeyboard()
-    .text("کپی شماره کارت", PAY_CB.COPY_CARD)
-    .text("کپی مبلغ", PAY_CB.COPY_AMOUNT)
+    .copyText("کپی شماره کارت", cardNumber)
+    .copyText("کپی مبلغ", String(checkout.finalPriceToman))
     .row()
     .text("ارسال رسید 🧾", PAY_CB.SEND_RECEIPT)
     .row()
