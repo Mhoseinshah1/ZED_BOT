@@ -150,6 +150,7 @@ const INITIAL_BUTTON_TEXTS: Array<{ key: string; title: string; text: string }> 
   { key: "free_test", title: "اشتراک رایگان تست", text: "اشتراک رایگان {تست}" },
   { key: "referral", title: "زیرمجموعه گیری", text: "زیرمجموعه گیری 👥" },
   { key: "other_products", title: "محصولات دیگر", text: "محصولات دیگر 🛍" },
+  { key: "my_orders", title: "سفارش‌های من", text: "سفارش‌های من 🧾" },
   { key: "pricing", title: "تعرفه اشتراک‌ها", text: "تعرفه اشتراک‌ها 💵" },
   { key: "representative_request", title: "درخواست نمایندگی", text: "درخواست نمایندگی 👨‍💼" },
   { key: "lucky_wheel", title: "گردونه شانس", text: "گردونه شانس 🎲" },

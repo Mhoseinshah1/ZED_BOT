@@ -70,6 +70,10 @@ import {
   adminBroadcastTextHandler,
 } from "./handlers/admin-broadcast/broadcast.handler.js";
 import {
+  adminTextSettingsHandler,
+  adminTextSettingsTextHandler,
+} from "./handlers/admin-settings/text-settings.handler.js";
+import {
   walletHandler,
   walletTopupTextHandler,
 } from "./handlers/user-wallet/wallet.handler.js";
@@ -126,6 +130,9 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(adminSupportHandler);
   // Phase 33: text broadcasts («پیام همگانی 📣»).
   adminArea.use(adminBroadcastHandler);
+  // Phase 34: general settings + text management («مدیریت متن‌ها ✍️») -
+  // must run before the placeholder handler.
+  adminArea.use(adminTextSettingsHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
@@ -143,6 +150,7 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(stockTextHandler);
   adminFlowText.use(adminSupportTextHandler);
   adminFlowText.use(adminBroadcastTextHandler);
+  adminFlowText.use(adminTextSettingsTextHandler);
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {

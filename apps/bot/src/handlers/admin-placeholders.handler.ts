@@ -12,7 +12,7 @@ const ADMIN_SECTIONS: Array<{ callback: string; title: string }> = [
   { callback: CB.ADMIN_UPDATE_BOT, title: "آپدیت ربات 🆕" },
   // admin:receipts is handled by the real receipts list (receipts.handler).
   { callback: CB.ADMIN_TUTORIALS, title: "بخش آموزش 📚" },
-  { callback: CB.ADMIN_GENERAL_SETTINGS, title: "تنظیمات عمومی ⚙️" },
+  // admin:general_settings is handled by the real text-settings flow (Phase 34).
   { callback: CB.ADMIN_MINI_APP_SETTINGS, title: "تنظیمات مینی اپ ⚙️" },
   // admin:users is handled by the real user management flow (admin-users.handler).
   // admin:products is handled by the real product management flow (product.handler).
