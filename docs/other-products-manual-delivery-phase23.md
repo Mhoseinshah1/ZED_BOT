@@ -77,6 +77,12 @@ schema's reminder counters), «بازگشت».
 > `docs/manual-order-management-phase24.md`. Delivery mutation semantics
 > here are unchanged.
 
+> **Phase 29 update:** users can now track these manual orders themselves
+> under «سفارش‌های من 🧾» — status, required-info resume (the same
+> `user:op:info` callback) and the delivered text — see
+> `docs/user-other-product-orders-phase29.md`. Read-only; nothing in this
+> flow changed.
+
 ## Delivery flow
 
 «تحویل سفارش 📦» → flow `admin_manual:deliver_text` asks «متن تحویل سفارش

@@ -25,6 +25,7 @@ export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
     pricing,
     representative,
     otherProducts,
+    myOrders,
   ] = await Promise.all([
     getButtonText("buy_subscription"),
     getButtonText("renew_service"),
@@ -38,6 +39,7 @@ export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
     getButtonText("pricing"),
     getButtonText("representative_request"),
     getButtonText("other_products"),
+    getButtonText("my_orders"),
   ]);
 
   return new InlineKeyboard()
@@ -57,5 +59,8 @@ export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
     .text(pricing, CB.USER_PRICING)
     .row()
     .text(representative, CB.USER_REPRESENTATIVE)
-    .text(otherProducts, CB.USER_OTHER_PRODUCTS);
+    .text(otherProducts, CB.USER_OTHER_PRODUCTS)
+    .row()
+    // Phase 29: OTHER_PRODUCT order tracking.
+    .text(myOrders, CB.USER_ORDERS);
 }

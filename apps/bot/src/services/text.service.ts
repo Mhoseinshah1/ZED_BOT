@@ -25,6 +25,7 @@ const BUTTON_FALLBACKS: Record<string, string> = {
   free_test: "اشتراک رایگان {تست}",
   referral: "زیرمجموعه گیری 👥",
   other_products: "محصولات دیگر 🛍",
+  my_orders: "سفارش‌های من 🧾",
   pricing: "تعرفه اشتراک‌ها 💵",
   representative_request: "درخواست نمایندگی 👨‍💼",
   lucky_wheel: "گردونه شانس 🎲",

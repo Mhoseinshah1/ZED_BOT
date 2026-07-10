@@ -54,6 +54,7 @@ import {
   renewalHandler,
   renewalTextHandler,
 } from "./handlers/user-renewal/renewal.handler.js";
+import { userOrdersHandler } from "./handlers/user-orders/orders.handler.js";
 import { servicesHandler } from "./handlers/user-services/services.handler.js";
 import {
   walletHandler,
@@ -181,6 +182,8 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(extraTimeHandler);
   userArea.use(walletHandler);
   userArea.use(otherProductInfoHandler);
+  // Phase 29: read-only OTHER_PRODUCT order tracking («سفارش‌های من 🧾»).
+  userArea.use(userOrdersHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());
