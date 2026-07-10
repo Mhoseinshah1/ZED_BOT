@@ -32,6 +32,13 @@ export const FIN_CB = {
   toggleAccountYes: (asid: string): string => `admin:finance:card:account:toggle:${asid}:yes`,
   accountConfirm: "admin:finance:card:acc_confirm",
   accountCancel: "admin:finance:card:acc_cancel",
+  settings: "admin:finance:settings",
+  settingsToggleTopup: "admin:finance:settings:toggle_topup",
+  settingsToggleWalletPayment: "admin:finance:settings:toggle_wallet_payment",
+  settingsMinTopup: "admin:finance:settings:min_topup",
+  settingsMaxTopup: "admin:finance:settings:max_topup",
+  settingsTopupInstruction: "admin:finance:settings:topup_instruction",
+  settingsPaymentNotice: "admin:finance:settings:payment_notice",
 } as const;
 
 export const FINANCE_LANDING_TEXT = "مالی 💎";
@@ -44,9 +51,71 @@ export function financeLandingKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("روش‌های پرداخت 💳", FIN_CB.methods)
     .row()
+    .text("تنظیمات پرداخت و کیف پول ⚙️", FIN_CB.settings)
+    .row()
     .text("رسیدهای تایید نشده 💵", CB.ADMIN_RECEIPTS)
     .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
+}
+
+// --- payment/wallet settings (Phase 22) --------------------------------------------
+
+export interface PaymentSettingsView {
+  topupEnabled: boolean;
+  walletPaymentEnabled: boolean;
+  minTopupToman: number;
+  maxTopupToman: number;
+  topupInstruction: string | null;
+  paymentNotice: string | null;
+}
+
+function onOff(enabled: boolean): string {
+  return enabled ? "روشن ✅" : "خاموش ⏸";
+}
+
+function textPreview(text: string | null): string {
+  if (text === null) {
+    return "تنظیم نشده —";
+  }
+  const short = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+  return `تنظیم شده ✅ («${escapeHtml(short)}»)`;
+}
+
+export function paymentSettingsText(view: PaymentSettingsView): string {
+  return [
+    "تنظیمات پرداخت و کیف پول ⚙️",
+    "",
+    `شارژ کیف پول: ${onOff(view.topupEnabled)}`,
+    `پرداخت با کیف پول: ${onOff(view.walletPaymentEnabled)}`,
+    `حداقل شارژ کیف پول: ${formatToman(view.minTopupToman)}`,
+    `حداکثر شارژ کیف پول: ${formatToman(view.maxTopupToman)}`,
+    `متن راهنمای شارژ کیف پول: ${textPreview(view.topupInstruction)}`,
+    `پیام صفحه روش پرداخت: ${textPreview(view.paymentNotice)}`,
+  ].join("\n");
+}
+
+export function paymentSettingsKeyboard(view: PaymentSettingsView): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(
+      view.topupEnabled ? "خاموش کردن شارژ کیف پول ⏸" : "روشن کردن شارژ کیف پول ✅",
+      FIN_CB.settingsToggleTopup,
+    )
+    .row()
+    .text(
+      view.walletPaymentEnabled
+        ? "خاموش کردن پرداخت با کیف پول ⏸"
+        : "روشن کردن پرداخت با کیف پول ✅",
+      FIN_CB.settingsToggleWalletPayment,
+    )
+    .row()
+    .text("تنظیم حداقل شارژ", FIN_CB.settingsMinTopup)
+    .text("تنظیم حداکثر شارژ", FIN_CB.settingsMaxTopup)
+    .row()
+    .text("تنظیم متن راهنمای شارژ", FIN_CB.settingsTopupInstruction)
+    .row()
+    .text("تنظیم پیام صفحه پرداخت", FIN_CB.settingsPaymentNotice)
+    .row()
+    .text("بازگشت", FIN_CB.root);
 }
 
 function limitLabel(value: number | null): string {

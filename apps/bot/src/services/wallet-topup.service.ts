@@ -6,6 +6,7 @@ import {
 } from "@zedbot/database";
 
 import { checkoutExpiryMinutes } from "./checkout.service.js";
+import { isWalletTopupEnabled } from "./payment-settings.service.js";
 import { getSetting } from "./settings.service.js";
 
 // =============================================================================
@@ -70,12 +71,17 @@ export function parseTopupAmount(raw: string): number | null {
 /**
  * The ONLY write of the top-up browse flow: a PENDING WALLET_CHARGE
  * CheckoutSession. Older PENDING top-up sessions of the same user are
- * cancelled first so repeated confirms never pile up.
+ * cancelled first so repeated confirms never pile up. Phase 22: refuses to
+ * write anything while top-up is operator-disabled (the handler checks
+ * first with a friendly message; this throw is the belt-and-braces layer).
  */
 export async function createWalletTopupCheckout(
   user: User,
   amountToman: number,
 ): Promise<CheckoutSession> {
+  if (!(await isWalletTopupEnabled())) {
+    throw new Error("wallet topup is disabled by settings");
+  }
   const minutes = await checkoutExpiryMinutes();
 
   await prisma.checkoutSession.updateMany({

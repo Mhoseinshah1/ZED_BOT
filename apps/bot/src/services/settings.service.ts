@@ -1,4 +1,4 @@
-import { prisma } from "@zedbot/database";
+import { prisma, type SettingType } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
@@ -39,4 +39,17 @@ export async function getBooleanSetting(key: string, fallback: boolean): Promise
     return fallback;
   }
   return raw === "true" || raw === "1" || raw === "yes";
+}
+
+/**
+ * Writes (upserts) a Setting and refreshes the cache entry so the new value
+ * is visible immediately (no 30s TTL lag for the writer's own reads).
+ */
+export async function setSetting(key: string, value: string, type: SettingType): Promise<void> {
+  await prisma.setting.upsert({
+    where: { key },
+    update: { value, type },
+    create: { key, value, type },
+  });
+  cache.set(key, { value, at: Date.now() });
 }

@@ -10,5 +10,9 @@ export default defineConfig({
     environment: "node",
     testTimeout: 60_000,
     hookTimeout: 60_000,
+    // Phase 22+: some suites mutate GLOBAL Setting rows (wallet/payment
+    // kill-switches) that other suites' flows read - files must not run
+    // concurrently against the shared test database.
+    fileParallelism: false,
   },
 });

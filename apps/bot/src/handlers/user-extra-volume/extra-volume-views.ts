@@ -135,9 +135,10 @@ export function extraVolumePreInvoiceText(
 export function extraVolumePreInvoiceKeyboard(
   draft: ExtraVolumeDraft,
   user: User,
+  walletPaymentEnabled = true,
 ): InlineKeyboard {
   const kb = new InlineKeyboard().text("ادامه و انتخاب روش پرداخت ✅", evcb.continue).row();
-  if (draft.finalPriceToman > 0 && user.balanceToman >= draft.finalPriceToman) {
+  if (walletPaymentEnabled && draft.finalPriceToman > 0 && user.balanceToman >= draft.finalPriceToman) {
     kb.text("پرداخت با کیف پول 🏦", evcb.wallet).row();
   }
   if (draft.discountCode === undefined) {

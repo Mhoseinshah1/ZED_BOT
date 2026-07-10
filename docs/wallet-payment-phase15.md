@@ -115,3 +115,13 @@ cashback.
 > — only a MANUAL_ADD/MANUAL_DEDUCT WalletTransaction — and use the same
 > atomic conditional-updateMany balance mutation as this phase's race fix,
 > so admin decreases and user spends can race safely without overdrawing.
+
+> **Phase 22 update:** wallet payment is now operator-controllable
+> (`docs/payment-wallet-settings-phase22.md`, key
+> `wallet_payment_enabled`). When disabled, BOTH layers enforce it: the
+> «پرداخت با کیف پول 🏦» button disappears from all four pre-invoices and
+> `executeWalletOrderPayment` refuses («پرداخت با کیف پول در حال حاضر
+> غیرفعال است.») before any DB write — placed after the idempotent-replay
+> lookup, so settled payments still return their result while no NEW money
+> moves. The atomic conditional-updateMany race fix, idempotency keys and
+> revalidation are unchanged.

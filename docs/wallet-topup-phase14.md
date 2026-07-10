@@ -94,6 +94,14 @@ wallet path above. The result union carries `kind: "ORDER_PAYMENT" |
 > WalletTransaction (`totalManualAddedToman`/`totalManualDeductedToman`) —
 > `totalChargedToman` remains reserved for real user top-ups.
 
+> **Phase 22 update:** top-up is now operator-controllable
+> (`docs/payment-wallet-settings-phase22.md`): it can be disabled entirely
+> («شارژ کیف پول در حال حاضر غیرفعال است.» — no draft/CheckoutSession is
+> created, re-checked at action time and inside
+> `createWalletTopupCheckout`), the min/max keys this phase already read
+> (`wallet_topup_min_toman`/`wallet_topup_max_toman`) got an admin UI, and
+> an optional instruction text joins the amount prompt.
+
 > **Phase 21 update:** the top-up's card-to-card step depends on the
 > admin-configured CARD_TO_CARD gateway + at least one ACTIVE card account
 > (`docs/admin-payment-methods-phase21.md`). Until an admin sets those up
