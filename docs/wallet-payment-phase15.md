@@ -107,4 +107,11 @@ Card-to-card continue/receipt behavior is unchanged on both pre-invoices.
 Wallet payment for wallet top-up (a top-up can never be paid from the
 wallet) or OTHER_PRODUCT, free (0-Toman) checkout, extra volume/time,
 online gateways, Telegram Stars, representative debt / negative balance,
-cashback, admin manual balance adjustment.
+cashback.
+
+> **Phase 20 update:** admin MANUAL wallet adjustments now exist
+> (`docs/admin-user-wallet-phase20.md`) but are a completely separate
+> surface from order payments: they create NO CheckoutSession/Payment/Order
+> — only a MANUAL_ADD/MANUAL_DEDUCT WalletTransaction — and use the same
+> atomic conditional-updateMany balance mutation as this phase's race fix,
+> so admin decreases and user spends can race safely without overdrawing.

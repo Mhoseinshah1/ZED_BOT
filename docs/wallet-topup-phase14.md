@@ -87,7 +87,13 @@ wallet path above. The result union carries `kind: "ORDER_PAYMENT" |
 > purchase/renewal pre-invoices only (`docs/wallet-payment-phase15.md`).
 > A wallet top-up itself can never be paid with the wallet.
 
+> **Phase 20 update:** admins can now MANUALLY increase/decrease a user's
+> balance (`docs/admin-user-wallet-phase20.md`). That is NOT a user
+> payment: it creates no Payment, no ManualReceipt and no CheckoutSession,
+> never enters receipt review, and books as a MANUAL_ADD/MANUAL_DEDUCT
+> WalletTransaction (`totalManualAddedToman`/`totalManualDeductedToman`) —
+> `totalChargedToman` remains reserved for real user top-ups.
+
 Online
-gateways, Telegram Stars, admin manual balance adjustment, representative
-debt, negative-balance purchase, cashback, automatic receipt verification,
-gateway management UI.
+gateways, Telegram Stars, representative debt, negative-balance purchase,
+cashback, automatic receipt verification, gateway management UI.

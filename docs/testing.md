@@ -1,8 +1,10 @@
 # ZED_BOT tests
 
 The repo uses **Vitest** (first and currently only test framework, added
-with the wallet-payment race fix). Scope today: one PostgreSQL integration
-suite for the security-critical wallet balance deduction.
+with the wallet-payment race fix). Scope today: PostgreSQL integration
+suites for the security-critical wallet balance mutations — the user
+wallet-payment deduction (`tests/wallet-payment.race.test.ts`) and the
+Phase 20 admin manual adjustments (`tests/admin-user-wallet.test.ts`).
 
 ## Layout
 

@@ -136,6 +136,16 @@ export interface PaymentDraft {
   amountToman: number;
 }
 
+/** Admin manual wallet adjustment draft (Phase 20). No DB rows until confirm. */
+export interface AdminUserWalletDraft {
+  targetUserId: string;
+  action: "INCREASE" | "DECREASE";
+  amountToman?: number;
+  reason?: string;
+  /** Minted when the flow starts; cleared with the draft on confirm/cancel. */
+  draftNonce?: string;
+}
+
 /** Minimal per-user session state. Complex conversations arrive later. */
 export interface SessionData {
   currentFlow: string | null;
@@ -170,6 +180,10 @@ export interface SessionData {
     paymentDraft?: PaymentDraft;
     // Admin receipt review: payment awaiting a rejection reason ("receipt:reject").
     rejectingPaymentId?: string;
+    // Admin manual wallet adjustment (Phase 20).
+    adminUserWalletDraft?: AdminUserWalletDraft;
+    // Last admin user-search query ("بازگشت به نتایج" re-runs it).
+    adminUserSearchQuery?: string;
     [key: string]: unknown;
   };
 }
