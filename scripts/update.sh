@@ -15,8 +15,8 @@ on_update_error() {
   log_error "Recovery steps:"
   log_error "  1. Inspect what went wrong:   zedbot logs        (or: zedbot doctor)"
   log_error "  2. Retry the update:          zedbot update"
-  log_error "  3. If the app is broken, restore the pre-update backup:"
-  log_error "       zedbot restore           (pick the newest backup from the list)"
+  log_error "  3. If the app is broken, restore the pre-update backup MANUALLY:"
+  log_error "       zedbot restore-help      (prints the manual restore steps)"
 }
 trap on_update_error ERR
 
