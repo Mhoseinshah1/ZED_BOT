@@ -209,6 +209,8 @@ export interface SessionData {
     adminSupportReplyTicketId?: string;
     // Admin broadcast draft (Phase 33).
     adminBroadcastDraft?: { text?: string };
+    // Admin text-settings edit target (Phase 34).
+    adminTextEditDraft?: { kind: "template" | "button"; id: string };
     // Admin stock add-item wizard (Phase 25), bulk add (Phase 27) and
     // low-stock threshold editing (Phase 28); content NEVER logged.
     adminStockDraft?: {

@@ -7,6 +7,7 @@ import { safeAnswerCallback, safeEditOrReply, safeReply } from "../utils/safe-re
 import { clearAdminBroadcastState } from "./admin-broadcast/broadcast.handler.js";
 import { clearAdminPaymentState } from "./admin-finance/admin-finance.handler.js";
 import { clearManualOrderState } from "./admin-manual-orders/manual-orders.handler.js";
+import { clearAdminTextSettingsState } from "./admin-settings/text-settings.handler.js";
 import { clearAdminStockState } from "./admin-stock/stock.handler.js";
 import { clearAdminSupportState } from "./admin-support/support-admin.handler.js";
 import { clearAdminUsersState } from "./admin-users/admin-users.handler.js";
@@ -36,6 +37,7 @@ export async function showAdminMenu(ctx: BotContext): Promise<void> {
   clearSupportState(ctx);
   clearAdminSupportState(ctx);
   clearAdminBroadcastState(ctx);
+  clearAdminTextSettingsState(ctx);
   ctx.session.currentFlow = null;
   ctx.session.lastMenu = "admin_main";
 }
