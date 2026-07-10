@@ -55,6 +55,9 @@ export function financeLandingKeyboard(): InlineKeyboard {
     .row()
     .text("رسیدهای تایید نشده 💵", CB.ADMIN_RECEIPTS)
     .row()
+    // Phase 31: read-only financial reports.
+    .text("گزارش مالی 📊", "admin:fin:reports")
+    .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
 }
 
