@@ -136,6 +136,23 @@ export interface RenewServiceAccountResult {
 export type AddServiceVolumeResult = RenewServiceAccountResult;
 
 /**
+ * Input for extending ONE existing account's expiry (Phase 17). totalBytes
+ * is the CURRENT quota passed through unchanged (null = unlimited);
+ * expiresAt is the NEW expiry (never null - extra time is only sold for
+ * services with a finite expiry). Usage is NEVER reset for extra time.
+ */
+export interface AddServiceTimeInput {
+  username: string;
+  totalBytes: bigint | null;
+  expiresAt: Date;
+  note?: string | null;
+  subscriptionBaseUrl?: string | null;
+}
+
+/** Result of addServiceTime - identical shape/semantics to a renewal result. */
+export type AddServiceTimeResult = RenewServiceAccountResult;
+
+/**
  * Result of getServiceAccount. Optional fields are OMITTED (undefined) when
  * the panel did not report them - callers must not treat missing as zero.
  * `null` carries explicit meaning: totalBytes/remainingBytes null =

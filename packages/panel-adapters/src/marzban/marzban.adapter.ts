@@ -1,5 +1,7 @@
 import type { PanelAdapter } from "../core/panel-adapter.interface.js";
 import type {
+  AddServiceTimeInput,
+  AddServiceTimeResult,
   AddServiceVolumeInput,
   AddServiceVolumeResult,
   CreateServiceAccountInput,
@@ -249,6 +251,81 @@ export class MarzbanAdapter implements PanelAdapter {
       note: input.note,
       subscriptionBaseUrl: input.subscriptionBaseUrl,
     });
+  }
+
+  /**
+   * Extra time (Phase 17) via documented endpoints: GET the user, then PUT
+   * the NEW expire while sending data_limit and proxies/inbounds back
+   * UNCHANGED. Usage is deliberately NOT reset (no /reset call) - extra
+   * time must never wipe traffic accounting. Username never changes.
+   */
+  async addServiceTime(input: AddServiceTimeInput): Promise<AddServiceTimeResult> {
+    const auth = await this.client.getToken();
+    if (!auth.ok || auth.token === undefined) {
+      return { ok: false, errorMessage: `Marzban authentication failed: ${auth.message}` };
+    }
+    const existing = await this.client.getUser(auth.token, input.username);
+    if (!existing.ok || existing.user === undefined) {
+      if (existing.status === 404) {
+        return { ok: false, errorMessage: "Panel account not found." };
+      }
+      return { ok: false, errorMessage: `Marzban read user failed: ${existing.message}` };
+    }
+
+    const modified = await this.client.modifyUser(auth.token, input.username, {
+      proxies: existing.user.proxies ?? {},
+      inbounds: existing.user.inbounds ?? {},
+      data_limit: input.totalBytes === null ? 0 : Number(input.totalBytes),
+      expire: Math.floor(input.expiresAt.getTime() / 1000),
+      status: "active",
+      ...(input.note !== null && input.note !== undefined ? { note: input.note } : {}),
+    });
+    if (!modified.ok || modified.user === undefined) {
+      return { ok: false, errorMessage: `Marzban modify user failed: ${modified.message}` };
+    }
+
+    const subscriptionBase =
+      input.subscriptionBaseUrl !== null &&
+      input.subscriptionBaseUrl !== undefined &&
+      input.subscriptionBaseUrl !== ""
+        ? input.subscriptionBaseUrl
+        : this.client.credentials.baseUrl;
+    const user = modified.user;
+    const result: AddServiceTimeResult = {
+      ok: true,
+      username: user.username,
+      status: normalizeStatus(user.status),
+    };
+    if (typeof user.used_traffic === "number") {
+      result.usedBytes = nonNegativeBigInt(user.used_traffic);
+    }
+    if (user.data_limit !== undefined) {
+      result.totalBytes =
+        typeof user.data_limit === "number" && user.data_limit > 0
+          ? nonNegativeBigInt(user.data_limit)
+          : null;
+      if (result.totalBytes === null) {
+        result.remainingBytes = null;
+      } else {
+        const used = result.usedBytes ?? 0n;
+        result.remainingBytes = result.totalBytes > used ? result.totalBytes - used : 0n;
+      }
+    }
+    if (user.expire !== undefined) {
+      result.expiresAt =
+        typeof user.expire === "number" && user.expire > 0 ? new Date(user.expire * 1000) : null;
+    }
+    const subscriptionUrl = resolveSubscriptionUrl(user.subscription_url, subscriptionBase);
+    if (subscriptionUrl !== undefined) {
+      result.subscriptionUrl = subscriptionUrl;
+    }
+    if (Array.isArray(user.links)) {
+      const links = user.links.filter((l): l is string => typeof l === "string" && l !== "");
+      if (links.length > 0) {
+        result.configLinks = links;
+      }
+    }
+    return result;
   }
 
   /**

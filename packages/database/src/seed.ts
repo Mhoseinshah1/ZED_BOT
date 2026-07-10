@@ -142,6 +142,7 @@ const INITIAL_BUTTON_TEXTS: Array<{ key: string; title: string; text: string }> 
   { key: "buy_subscription", title: "خرید اشتراک", text: "خرید اشتراک 🔐" },
   { key: "renew_service", title: "تمدید سرویس", text: "تمدید سرویس ♻️" },
   { key: "extra_volume", title: "خرید حجم اضافه", text: "خرید حجم اضافه ➕" },
+  { key: "extra_time", title: "خرید زمان اضافه", text: "خرید زمان اضافه ⏳" },
   { key: "my_services", title: "سرویس‌های من", text: "سرویس‌های من 🛍" },
   { key: "wallet", title: "کیف پول", text: "کیف پول + شارژ 🏦" },
   { key: "support", title: "پشتیبانی", text: "پشتیبانی ☎️" },

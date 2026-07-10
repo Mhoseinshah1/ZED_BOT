@@ -91,6 +91,10 @@ existing failure texts. In-progress edge cases get «پرداخت انجام ش�
 > `wallet:<userId>:extra-volume:<draftNonce>`) — see
 > `docs/extra-volume-phase16.md`.
 
+> **Phase 17 update:** ... and `EXTRA_TIME` orders (idempotency key
+> `wallet:<userId>:extra-time:<draftNonce>`) — see
+> `docs/extra-time-phase17.md`.
+
 ## Receipt review untouched
 
 `PAY_WITH_WALLET` payments are born APPROVED with no `ManualReceipt`, so
