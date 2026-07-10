@@ -8,6 +8,7 @@ export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
   const [
     buy,
     renew,
+    extraVolume,
     services,
     wallet,
     referral,
@@ -21,6 +22,7 @@ export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
   ] = await Promise.all([
     getButtonText("buy_subscription"),
     getButtonText("renew_service"),
+    getButtonText("extra_volume"),
     getButtonText("my_services"),
     getButtonText("wallet"),
     getButtonText("referral"),
@@ -36,6 +38,8 @@ export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
   return new InlineKeyboard()
     .text(buy, CB.USER_BUY)
     .text(renew, CB.USER_RENEW)
+    .row()
+    .text(extraVolume, CB.USER_EXTRA_VOLUME)
     .row()
     .text(services, CB.USER_SERVICES)
     .text(wallet, CB.USER_WALLET)

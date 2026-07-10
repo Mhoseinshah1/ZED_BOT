@@ -17,6 +17,11 @@ import {
   provisionPaidOrder,
 } from "../../services/provisioning.service.js";
 import {
+  buildExtraVolumeSuccessMessage,
+  executeExtraVolumeOrder,
+  EXTRA_VOLUME_FAILED_USER_TEXT,
+} from "../../services/extra-volume.service.js";
+import {
   buildRenewalSuccessMessage,
   executeRenewalOrder,
   RENEWAL_FAILED_USER_TEXT,
@@ -102,6 +107,48 @@ async function notifyUserSafe(
       error: errorMessage(err),
     });
     return false;
+  }
+}
+
+/**
+ * Phase 16: synchronous extra-volume application right after an EXTRA_VOLUME
+ * approval. The executor owns the FAILED + refund path.
+ */
+async function runExtraVolumeAfterApproval(
+  ctx: BotContext,
+  orderId: string,
+  user: User,
+): Promise<void> {
+  try {
+    const outcome = await executeExtraVolumeOrder(orderId);
+    if (outcome.ok) {
+      await notifyUserSafe(
+        ctx,
+        user,
+        buildExtraVolumeSuccessMessage(outcome.service, outcome.addedVolumeGb),
+        "HTML",
+      );
+      await safeReply(ctx, "حجم سرویس افزایش یافت ✅", backKeyboard());
+      return;
+    }
+    if (outcome.refunded) {
+      await notifyUserSafe(ctx, user, EXTRA_VOLUME_FAILED_USER_TEXT);
+      await safeReply(
+        ctx,
+        "افزایش حجم ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
+        backKeyboard(),
+      );
+      return;
+    }
+    await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.EXTRA_VOLUME));
+    await safeReply(ctx, outcome.error, backKeyboard());
+  } catch (err) {
+    logger.error("extra volume after approval crashed", { orderId, error: errorMessage(err) });
+    await safeReply(
+      ctx,
+      "خطایی در افزایش حجم سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
+      backKeyboard(),
+    );
   }
 }
 
@@ -372,6 +419,16 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
         backKeyboard(),
       );
       await runRenewalAfterApproval(ctx, result.order.id, result.user);
+      return;
+    }
+    if (result.orderType === OrderType.EXTRA_VOLUME) {
+      // Phase 16: apply the purchased volume right away.
+      await safeEditOrReply(
+        ctx,
+        "رسید تایید شد ✅\n\nOrder ساخته شد.\nافزایش حجم سرویس شروع شد.",
+        backKeyboard(),
+      );
+      await runExtraVolumeAfterApproval(ctx, result.order.id, result.user);
       return;
     }
     if (result.orderType === OrderType.OTHER_PRODUCT) {

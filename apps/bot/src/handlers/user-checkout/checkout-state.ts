@@ -12,6 +12,7 @@ export function clearCheckoutState(ctx: BotContext): void {
   if (
     ctx.session.currentFlow === "checkout:discount" ||
     ctx.session.currentFlow === "renew:discount" ||
+    ctx.session.currentFlow === "extra_volume:discount" ||
     ctx.session.currentFlow === "wallet:topup:amount" ||
     ctx.session.currentFlow === "payment:receipt"
   ) {
@@ -19,6 +20,7 @@ export function clearCheckoutState(ctx: BotContext): void {
   }
   ctx.session.temp.checkoutDraft = undefined;
   ctx.session.temp.renewalDraft = undefined;
+  ctx.session.temp.extraVolumeDraft = undefined;
   ctx.session.temp.walletTopupDraft = undefined;
   ctx.session.temp.paymentDraft = undefined;
 }

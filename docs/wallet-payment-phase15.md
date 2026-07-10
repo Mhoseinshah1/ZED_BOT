@@ -86,6 +86,11 @@ SPEND followed by the REFUND and the balance is restored; the user gets the
 existing failure texts. In-progress edge cases get «پرداخت انجام شد و
 سفارش/تمدید شما در حال آماده‌سازی است.»
 
+> **Phase 16 update:** the same atomic wallet-payment transaction now also
+> settles `EXTRA_VOLUME` orders (idempotency key
+> `wallet:<userId>:extra-volume:<draftNonce>`) — see
+> `docs/extra-volume-phase16.md`.
+
 ## Receipt review untouched
 
 `PAY_WITH_WALLET` payments are born APPROVED with no `ManualReceipt`, so

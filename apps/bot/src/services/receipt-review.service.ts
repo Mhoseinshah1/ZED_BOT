@@ -133,6 +133,9 @@ export function approvalUserNotice(orderType: OrderType): string {
   if (orderType === OrderType.SERVICE_RENEWAL) {
     return "رسید پرداخت شما تایید شد ✅\n\nتمدید سرویس شما در حال انجام است.";
   }
+  if (orderType === OrderType.EXTRA_VOLUME) {
+    return "رسید پرداخت شما تایید شد ✅\n\nافزایش حجم سرویس شما در حال انجام است.";
+  }
   return (
     "رسید پرداخت شما تایید شد ✅\n\n" +
     "سفارش شما ثبت شد و در مرحله آماده‌سازی قرار گرفت.\n" +

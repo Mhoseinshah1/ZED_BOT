@@ -18,6 +18,7 @@ export const CB = {
   USER_PRICING: "user:pricing",
   USER_REPRESENTATIVE: "user:representative_request",
   USER_OTHER_PRODUCTS: "user:other_products",
+  USER_EXTRA_VOLUME: "user:extra_volume",
 
   // Admin menu
   ADMIN_MENU: "admin:menu",

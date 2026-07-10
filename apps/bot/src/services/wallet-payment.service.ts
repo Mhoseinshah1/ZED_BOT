@@ -17,10 +17,15 @@ import {
 } from "@zedbot/database";
 
 import { logger } from "../core/logger.js";
-import type { CheckoutDraft, RenewalDraft } from "../core/session.js";
+import type { CheckoutDraft, ExtraVolumeDraft, RenewalDraft } from "../core/session.js";
 import { isProductVisible } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
 import { validateDiscountCode } from "./discount.service.js";
+import {
+  buildExtraVolumeSnapshot,
+  getExtraVolumeServiceByShortId,
+  isExtraVolumePackageValid,
+} from "./extra-volume.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 import {
   buildRenewalSnapshot,
@@ -417,6 +422,72 @@ export async function payRenewalDraftWithWallet(
     finalPriceToman,
     discountCodeId,
     idempotencyKey: `wallet:${user.id}:${draft.draftNonce}`,
+  });
+  return { result, service };
+}
+
+/** Wallet payment for an extra-volume pre-invoice draft (Phase 16). */
+export async function payExtraVolumeDraftWithWallet(
+  user: User,
+  draft: ExtraVolumeDraft,
+): Promise<{ result: WalletPaymentResult; service: Service | null }> {
+  if (draft.draftNonce === undefined) {
+    return { result: { ok: false, error: DRAFT_STALE_TEXT }, service: null };
+  }
+  // The eligibility lookup already excludes unlimited/foreign/deleted services.
+  const service = await getExtraVolumeServiceByShortId(draft.serviceId.slice(0, 8), user.id);
+  const product =
+    service === null
+      ? null
+      : await prisma.product.findUnique({
+          where: { id: draft.productId },
+          include: { category: true, panel: true },
+        });
+  if (
+    service === null ||
+    product === null ||
+    product.id !== draft.productId ||
+    !isExtraVolumePackageValid(product, service, user.group)
+  ) {
+    return { result: { ok: false, error: DRAFT_STALE_TEXT }, service: null };
+  }
+
+  const originalPriceToman = product.priceToman;
+  let discountAmountToman = 0;
+  let discountCodeId: string | null = null;
+  if (draft.discountCode !== undefined) {
+    // Extra volume counts as a PURCHASE for discount semantics (Phase 16).
+    const validation = await validateDiscountCode(draft.discountCode, user, originalPriceToman);
+    if (!validation.ok) {
+      return { result: { ok: false, error: DISCOUNT_CHANGED_TEXT }, service };
+    }
+    discountAmountToman = validation.discountAmountToman;
+    discountCodeId = validation.discountCode.id;
+  }
+  const finalPriceToman = Math.max(0, originalPriceToman - discountAmountToman);
+  if (finalPriceToman <= 0) {
+    return { result: { ok: false, error: "پرداخت رایگان در فاز بعدی فعال می‌شود." }, service };
+  }
+  if (user.balanceToman < finalPriceToman) {
+    return { result: { ok: false, error: INSUFFICIENT_BALANCE_TEXT }, service };
+  }
+
+  const snapshot = buildExtraVolumeSnapshot(product, service, {
+    ...draft,
+    originalPriceToman,
+    discountAmountToman,
+    finalPriceToman,
+  });
+  const result = await executeWalletOrderPayment(user, {
+    orderType: OrderType.EXTRA_VOLUME,
+    product,
+    serviceId: service.id,
+    snapshot,
+    originalPriceToman,
+    discountAmountToman,
+    finalPriceToman,
+    discountCodeId,
+    idempotencyKey: `wallet:${user.id}:extra-volume:${draft.draftNonce}`,
   });
   return { result, service };
 }

@@ -1,5 +1,7 @@
 import type { PanelAdapter } from "../core/panel-adapter.interface.js";
 import type {
+  AddServiceVolumeInput,
+  AddServiceVolumeResult,
   CreateServiceAccountInput,
   CreateServiceAccountResult,
   GetServiceAccountInput,
@@ -69,5 +71,16 @@ export class XuiAdapter implements PanelAdapter {
    */
   async renewServiceAccount(_input: RenewServiceAccountInput): Promise<RenewServiceAccountResult> {
     return { ok: false, errorMessage: "XUI renewal is not implemented yet." };
+  }
+
+  /**
+   * Phase 16: NOT implemented - same reason as create/sync/renewal (the
+   * token-authenticated endpoint surface needs the Sanaei API reference).
+   * Never fakes success; a paid extra-volume order fails safely and refunds.
+   *
+   * TODO(xui-extra-volume): implement per sanaei-api.txt once available.
+   */
+  async addServiceVolume(_input: AddServiceVolumeInput): Promise<AddServiceVolumeResult> {
+    return { ok: false, errorMessage: "XUI extra volume is not implemented yet." };
   }
 }

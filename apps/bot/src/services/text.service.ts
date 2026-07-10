@@ -16,6 +16,7 @@ const TEMPLATE_FALLBACKS: Record<string, string> = {
 const BUTTON_FALLBACKS: Record<string, string> = {
   buy_subscription: "خرید اشتراک 🔐",
   renew_service: "تمدید سرویس ♻️",
+  extra_volume: "خرید حجم اضافه ➕",
   my_services: "سرویس‌های من 🛍",
   wallet: "کیف پول + شارژ 🏦",
   support: "پشتیبانی ☎️",
