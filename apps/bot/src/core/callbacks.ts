@@ -37,6 +37,7 @@ export const CB = {
   ADMIN_CUSTOM_SERVICE_PRICE: "admin:custom_service_price",
   ADMIN_OTHER_PRODUCTS: "admin:other_products",
   ADMIN_SUPPORT: "admin:support",
+  ADMIN_BROADCAST: "admin:broadcast",
   ADMIN_REPORTS_BACKUP: "admin:reports_backup",
 
   // Common / gates
