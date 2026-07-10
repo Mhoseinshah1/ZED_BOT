@@ -60,7 +60,11 @@ const REASON_FLOW = "admin_wallet:reason";
 
 export const adminUsersHandler = new Composer<BotContext>();
 
-function clearAdminUsersState(ctx: BotContext): void {
+/**
+ * Clears the wallet-adjustment flow/draft but keeps the stored search query
+ * so «بازگشت به نتایج» still works while navigating profiles/wallets.
+ */
+function clearAdminWalletFlowState(ctx: BotContext): void {
   if (
     ctx.session.currentFlow === SEARCH_FLOW ||
     ctx.session.currentFlow === AMOUNT_FLOW ||
@@ -71,9 +75,18 @@ function clearAdminUsersState(ctx: BotContext): void {
   delete ctx.session.temp.adminUserWalletDraft;
 }
 
-async function renderLanding(ctx: BotContext): Promise<void> {
-  clearAdminUsersState(ctx);
+/**
+ * Full Phase 20 state cleanup (flow + wallet draft + search query). Called
+ * on the «مدیریت کاربران» landing and from showAdminMenu, so returning to
+ * the admin main menu never leaves a stale draft or query behind.
+ */
+export function clearAdminUsersState(ctx: BotContext): void {
+  clearAdminWalletFlowState(ctx);
   delete ctx.session.temp.adminUserSearchQuery;
+}
+
+async function renderLanding(ctx: BotContext): Promise<void> {
+  clearAdminUsersState(ctx); // full clear: flow + draft + stored search query
   await safeAnswerCallback(ctx);
   await safeEditOrReply(ctx, USERS_LANDING_TEXT, usersLandingKeyboard());
   ctx.session.lastMenu = AU_CB.root;
@@ -100,7 +113,7 @@ adminUsersHandler.callbackQuery(AU_CB.search, async (ctx) => {
   if (ctx.admin === null) {
     return;
   }
-  clearAdminUsersState(ctx);
+  clearAdminWalletFlowState(ctx);
   ctx.session.currentFlow = SEARCH_FLOW;
   await safeAnswerCallback(ctx);
   await safeEditOrReply(ctx, SEARCH_PROMPT_TEXT, searchCancelKeyboard());
@@ -110,7 +123,7 @@ adminUsersHandler.callbackQuery(AU_CB.recent, async (ctx) => {
   if (ctx.admin === null) {
     return;
   }
-  clearAdminUsersState(ctx);
+  clearAdminWalletFlowState(ctx);
   const users = await listRecentUsers(5);
   await safeAnswerCallback(ctx);
   if (users.length === 0) {
@@ -125,7 +138,7 @@ adminUsersHandler.callbackQuery(AU_CB.results, async (ctx) => {
   if (ctx.admin === null) {
     return;
   }
-  clearAdminUsersState(ctx);
+  clearAdminWalletFlowState(ctx);
   const query = ctx.session.temp.adminUserSearchQuery;
   if (typeof query !== "string" || query === "") {
     await renderLanding(ctx);
@@ -144,7 +157,7 @@ adminUsersHandler.callbackQuery(/^admin:users:view:([0-9a-f-]+)$/, async (ctx) =
   if (ctx.admin === null) {
     return;
   }
-  clearAdminUsersState(ctx);
+  clearAdminWalletFlowState(ctx);
   const user = await getAdminTargetUserByShortId(ctx.match[1]);
   if (user === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);
@@ -158,7 +171,7 @@ adminUsersHandler.callbackQuery(/^admin:user_wallet:open:([0-9a-f-]+)$/, async (
   if (ctx.admin === null) {
     return;
   }
-  clearAdminUsersState(ctx);
+  clearAdminWalletFlowState(ctx);
   const user = await getAdminTargetUserByShortId(ctx.match[1]);
   if (user === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);
@@ -210,7 +223,7 @@ adminUsersHandler.callbackQuery(AU_CB.walletCancel, async (ctx) => {
     return;
   }
   const targetUserId = ctx.session.temp.adminUserWalletDraft?.targetUserId;
-  clearAdminUsersState(ctx);
+  clearAdminWalletFlowState(ctx);
   await safeAnswerCallback(ctx, "لغو شد.");
   const user = targetUserId === undefined ? null : await getUserById(targetUserId);
   if (user === null) {
@@ -228,7 +241,7 @@ adminUsersHandler.callbackQuery(AU_CB.walletConfirm, async (ctx) => {
   const draft = ctx.session.temp.adminUserWalletDraft;
   // The draft is consumed BEFORE executing: a double-clicked confirmation
   // finds no draft and cannot apply twice.
-  clearAdminUsersState(ctx);
+  clearAdminWalletFlowState(ctx);
   if (
     draft === undefined ||
     draft.amountToman === undefined ||
@@ -308,7 +321,7 @@ adminUsersTextHandler.on("message:text", async (ctx, next) => {
   const text = ctx.message.text;
   // Commands cancel the flow and continue normally.
   if (text.startsWith("/")) {
-    clearAdminUsersState(ctx);
+    clearAdminWalletFlowState(ctx);
     return next();
   }
 
@@ -331,7 +344,7 @@ adminUsersTextHandler.on("message:text", async (ctx, next) => {
 
   const draft = ctx.session.temp.adminUserWalletDraft;
   if (draft === undefined) {
-    clearAdminUsersState(ctx);
+    clearAdminWalletFlowState(ctx);
     await safeReply(ctx, DRAFT_EXPIRED_TEXT, usersLandingKeyboard());
     return;
   }
@@ -368,7 +381,7 @@ adminUsersTextHandler.on("message:text", async (ctx, next) => {
   ctx.session.currentFlow = null;
   const user = await getUserById(draft.targetUserId);
   if (user === null || draft.amountToman === undefined) {
-    clearAdminUsersState(ctx);
+    clearAdminWalletFlowState(ctx);
     await safeReply(ctx, DRAFT_EXPIRED_TEXT, usersLandingKeyboard());
     return;
   }
