@@ -57,9 +57,12 @@ or «روشن کردن سرویس ▶️» (DISABLED + panel ACTIVE + not expire
 ⏳» (status ACTIVE/EXPIRED/LIMITED/DISABLED + finite expiry + panel ACTIVE)
 moved here from the main menu — they jump straight into the existing Phase
 16/17 flows (`user:ev:svc:<sid>` / `user:et:svc:<sid>`), which re-validate
-eligibility on click. All button visibility comes from ONE panel read
-(`resolveServiceDetailActions`). Everything else on the page stays
-read-only.
+eligibility on click. **Phase 19:** «تغییر لینک اشتراک 🔄» regenerates the
+subscription link for eligible services (ACTIVE/LIMITED/DISABLED + panel
+ACTIVE, after confirmation) — see
+`docs/service-link-regeneration-phase19.md`. All button visibility comes
+from ONE panel read (`resolveServiceDetailActions`). Everything else on
+the page stays read-only.
 
 ## Link / config display
 
@@ -86,10 +89,10 @@ internal fields ever reach the user.
 
 ## Intentionally NOT implemented
 
-Renewal, extra volume/time, location change, change subscription link,
-change note, transfer, delete, rating, QR generation, service search by
-username, "username is not mine", admin service management, web panel, mini
-app. (Panel usage sync for the refresh button — DB-only in Phase 10 —
-arrived in Phase 11: `docs/service-sync-phase11.md`; the user
-enable/disable toggle arrived in Phase 18:
-`docs/service-toggle-phase18.md`.)
+Renewal, extra volume/time, location change, change note, transfer, delete,
+rating, QR generation, service search by username, "username is not mine",
+admin service management, web panel, mini app. (Panel usage sync for the
+refresh button — DB-only in Phase 10 — arrived in Phase 11:
+`docs/service-sync-phase11.md`; the user enable/disable toggle arrived in
+Phase 18: `docs/service-toggle-phase18.md`; subscription link regeneration
+arrived in Phase 19: `docs/service-link-regeneration-phase19.md`.)

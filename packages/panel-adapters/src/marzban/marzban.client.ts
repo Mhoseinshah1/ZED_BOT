@@ -11,11 +11,12 @@ import type {
  * Low-level HTTP client for the Marzban API.
  *
  * Documented endpoints only:
- *   - POST /api/admin/token             (authentication)
- *   - GET  /api/user/{username}         (read one user - templates/sync)
- *   - POST /api/user                    (create user, Phase 9)
- *   - PUT  /api/user/{username}         (modify user, Phase 12 renewal)
- *   - POST /api/user/{username}/reset   (reset data usage, Phase 12 renewal)
+ *   - POST /api/admin/token                  (authentication)
+ *   - GET  /api/user/{username}              (read one user - templates/sync)
+ *   - POST /api/user                         (create user, Phase 9)
+ *   - PUT  /api/user/{username}              (modify user, Phase 12 renewal)
+ *   - POST /api/user/{username}/reset        (reset data usage, Phase 12 renewal)
+ *   - POST /api/user/{username}/revoke_sub   (revoke subscription, Phase 19)
  *
  * Credentials/tokens travel only in requests to the configured baseUrl and
  * never appear in errors, logs or results.
@@ -127,6 +128,34 @@ export class MarzbanClient {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(PANEL_HTTP_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        return {
+          ok: false,
+          status: response.status,
+          message: `Panel responded with HTTP ${response.status}.`,
+        };
+      }
+      const user = (await response.json()) as MarzbanUser;
+      return { ok: true, user, status: response.status, message: "OK" };
+    } catch (err) {
+      return { ok: false, message: `Panel is not reachable: ${safeErrorText(err)}` };
+    }
+  }
+
+  /**
+   * POST /api/user/{username}/revoke_sub - revokes the user's subscription
+   * (subscription link and proxies get fresh tokens; the old link stops
+   * working). Returns the updated user with the NEW subscription_url/links.
+   * Never changes username, quota, expiry or usage.
+   */
+  async revokeUserSubscription(token: string, username: string): Promise<MarzbanUserResult> {
+    const url = `${this.credentials.baseUrl}/api/user/${encodeURIComponent(username)}/revoke_sub`;
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(PANEL_HTTP_TIMEOUT_MS),
       });
       if (!response.ok) {

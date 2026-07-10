@@ -44,7 +44,9 @@ everywhere); wiring them up is a possible later refinement.
 > both purchase buttons — is now resolved with one panel read by
 > `resolveServiceDetailActions` in `user-services.service.ts`, which
 > replaced this module's single-purpose `resolveToggleAction` helper
-> (`availableToggleAction` is unchanged).
+> (`availableToggleAction` is unchanged). **Phase 19** added «تغییر لینک
+> اشتراک 🔄» (subscription link regeneration) to the same resolver/keyboard
+> — `docs/service-link-regeneration-phase19.md`.
 
 ## Confirmation first — the panel is never called before «yes»
 
@@ -110,8 +112,9 @@ subscription/config links in logs; no payment-side rows are ever touched
 
 ## Intentionally NOT implemented
 
-Change subscription link, change note, transfer, rating, admin service
-management, online gateways, Telegram Stars, XUI toggle (safe TODO),
-per-panel `userCanDisableService`/`userCanEnableService` gating, auto
-re-enable, Phase 19+. (Extra volume/time buttons — absent from the detail
-page in Phase 18 — were added there by Phase 18.1.)
+Change note, transfer, rating, admin service management, online gateways,
+Telegram Stars, XUI toggle (safe TODO), per-panel
+`userCanDisableService`/`userCanEnableService` gating, auto re-enable.
+(Extra volume/time buttons — absent from the detail page in Phase 18 —
+were added there by Phase 18.1; change subscription link arrived in Phase
+19: `docs/service-link-regeneration-phase19.md`.)

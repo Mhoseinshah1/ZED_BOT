@@ -166,6 +166,19 @@ export interface SetServiceStatusInput {
 export type SetServiceStatusResult = RenewServiceAccountResult;
 
 /**
+ * Input for regenerating ONE existing account's subscription link/token
+ * (Phase 19). The account itself is untouched: no username change, no
+ * quota/expiry change, no usage reset, never delete/recreate.
+ */
+export interface RegenerateSubscriptionInput {
+  username: string;
+  subscriptionBaseUrl?: string | null;
+}
+
+/** Result of regenerateSubscription - identical shape/semantics to a renewal result. */
+export type RegenerateSubscriptionResult = RenewServiceAccountResult;
+
+/**
  * Result of getServiceAccount. Optional fields are OMITTED (undefined) when
  * the panel did not report them - callers must not treat missing as zero.
  * `null` carries explicit meaning: totalBytes/remainingBytes null =
