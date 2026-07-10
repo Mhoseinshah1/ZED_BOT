@@ -484,7 +484,9 @@ EOF
 install_cli() {
   log_info "Installing the zedbot CLI to ${CLI_PATH} ..."
   chmod +x "${APP_DIR}/scripts/"*.sh "${APP_DIR}/scripts/zedbot"
-  install -m 0755 "${APP_DIR}/scripts/zedbot" "$CLI_PATH"
+  # scripts/zedbot.sh is the canonical CLI; scripts/zedbot stays as a
+  # compatibility wrapper for anything that still calls it directly.
+  install -m 0755 "${APP_DIR}/scripts/zedbot.sh" "$CLI_PATH"
   log_success "zedbot CLI installed."
 }
 
@@ -560,11 +562,11 @@ print_summary() {
     http://${domain}:${port}/health
 
   Useful commands
-    zedbot status    - show service status
-    zedbot doctor    - run health checks
-    zedbot logs      - tail all logs (zedbot logs api|bot|worker)
-    zedbot update    - update to the latest version
-    zedbot backup    - create an encrypted backup
+    zedbot status     - show service status
+    zedbot logs       - tail all logs (zedbot logs api|bot|worker)
+    zedbot doctor     - run health checks
+    zedbot backup     - create a database backup (zedbot-db-YYYYMMDD-HHMMSS.sql.gz)
+    zedbot env-check  - validate the .env configuration (never prints values)
 
 EOF
 }

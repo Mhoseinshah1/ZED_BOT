@@ -77,9 +77,12 @@ All management goes through the `zedbot` CLI (run as root):
 | `zedbot start`                 | Start all services                                      |
 | `zedbot stop`                  | Stop all services                                       |
 | `zedbot update`                | Update to the latest version (creates a backup first)   |
-| `zedbot backup`                | Create a backup (`.env` + PostgreSQL dump)              |
-| `zedbot restore <backup-file>` | Restore from a backup archive (asks for confirmation)   |
-| `zedbot uninstall`             | Remove ZED_BOT (data/backups kept unless confirmed)     |
+| `zedbot backup`                | Create a database backup (`zedbot-db-YYYYMMDD-HHMMSS.sql.gz`) |
+| `zedbot health`                | Quick health summary (services, database, disk)         |
+| `zedbot ps`                    | Alias of `zedbot status`                                 |
+| `zedbot shell [service]`       | Open a shell inside a container (default: bot)           |
+| `zedbot env-check`             | Validate `.env` (prints key names + OK/MISSING/INVALID only) |
+| `zedbot restore-help`          | Print MANUAL restore instructions (executes nothing)     |
 | `zedbot help`                  | Show usage                                              |
 
 ### Update
@@ -115,22 +118,24 @@ zedbot logs worker
 ### Backup and restore
 
 ```bash
-zedbot backup
-zedbot restore                    # lists backups and asks which to restore
-zedbot restore /opt/zedbot/backups/zedbot_backup_2026-01-01_12-00-00.tar.gz.enc
+zedbot backup                     # database backup: zedbot-db-YYYYMMDD-HHMMSS.sql.gz
+zedbot restore-help               # prints the MANUAL restore steps (executes nothing)
 ```
 
-Backups are written to `/opt/zedbot/backups` as
-`zedbot_backup_YYYY-MM-DD_HH-mm-ss.tar.gz` and contain the `.env`
-configuration and a full PostgreSQL dump. When `BACKUP_ENCRYPTION_PASSWORD`
-is set in `.env` (the installer generates one), the archive is encrypted with
-AES-256 and gets the `.enc` suffix — **keep a copy of that password off the
-server**, encrypted backups cannot be opened without it. Old backups are
-never deleted automatically.
+`zedbot backup` writes a database-only dump to `/opt/zedbot/backups` as
+`zedbot-db-YYYYMMDD-HHMMSS.sql.gz` — the same format the in-bot admin backup
+page (Phase 35) creates and lists, so both appear together. It never
+includes `.env`. When `BACKUP_RETENTION_DAYS` is set to a positive number,
+matching `zedbot-db-*.sql.gz` files older than that many days are removed
+after a successful backup; nothing else is ever deleted. (`zedbot update`
+additionally creates a `.env`+database safety archive via `scripts/backup.sh`
+before updating.)
 
-Restore is destructive and asks for confirmation; the replaced `.env` is kept
-next to the restored one, and encrypted archives are decrypted with the
-password from `.env` (or an interactive prompt).
+**Restore is intentionally manual.** Neither the bot nor the CLI executes a
+restore — `zedbot restore-help` prints the exact server commands
+(stop the app services, `gunzip -c … | docker compose exec -T postgres
+psql …`, start again) with placeholders you fill from `.env`. Always take a
+fresh backup first.
 
 ### Start / stop / restart
 
@@ -140,14 +145,11 @@ zedbot stop
 zedbot start
 ```
 
-### Uninstall
+### Restore
 
-```bash
-zedbot uninstall
-```
-
-Stops the services and removes the CLI. Data, backups and the application
-code are **kept by default** and only deleted when you explicitly confirm.
+Restore is **manual and instructions-only** — neither the bot nor the CLI
+ever executes a restore. Run `zedbot restore-help` for the exact server
+commands, and always take a fresh `zedbot backup` first.
 
 ## Services
 
@@ -248,11 +250,12 @@ pnpm workspaces monorepo:
 │   ├── install.sh        # One-command installer (self-contained)
 │   ├── update.sh         # Updater (backup → pull → rebuild → doctor)
 │   ├── migrate.sh        # prisma migrate deploy + seed (run by install/update)
-│   ├── backup.sh         # Backup (.env + PostgreSQL dump)
-│   ├── restore.sh        # Restore from a backup archive
+│   ├── backup.sh         # Update safety archive (.env + PostgreSQL dump)
+│   ├── backup-db.sh      # Database backup (zedbot-db-YYYYMMDD-HHMMSS.sql.gz)
+│   ├── validate-env.sh   # .env validation (never prints values)
 │   ├── doctor.sh         # Health checks
-│   ├── uninstall.sh      # Uninstaller
-│   ├── zedbot            # Management CLI (installed to /usr/local/bin)
+│   ├── zedbot.sh         # Management CLI (installed to /usr/local/bin/zedbot)
+│   ├── zedbot            # Compatibility wrapper for zedbot.sh
 │   └── lib/common.sh     # Shared shell helpers
 ├── Dockerfile            # Shared image for api / bot / worker
 ├── docker-compose.yml
@@ -389,5 +392,5 @@ or passwords) and validates:
 - PostgreSQL and Redis are **not** published on host ports — they are only
   reachable on the internal Docker network.
 - Backup archives contain credentials and are written with `chmod 600`.
-- Destructive actions (restore, uninstall, data deletion) always ask for
-  confirmation.
+- Restore execution and uninstall are intentionally NOT part of the CLI;
+  restore is manual (`zedbot restore-help` prints the steps).

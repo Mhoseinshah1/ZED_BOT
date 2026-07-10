@@ -2,8 +2,8 @@
 # =============================================================================
 # ZED_BOT - shared shell helpers
 #
-# This file is sourced by the ZED_BOT management scripts (zedbot, update.sh,
-# backup.sh, restore.sh, doctor.sh, uninstall.sh). It is not meant to be
+# This file is sourced by the ZED_BOT management scripts (zedbot.sh,
+# update.sh, backup.sh, backup-db.sh, doctor.sh). It is not meant to be
 # executed directly.
 #
 # NOTE: scripts/install.sh intentionally does NOT source this file, because
