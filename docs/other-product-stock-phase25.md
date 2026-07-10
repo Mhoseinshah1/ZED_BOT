@@ -1,0 +1,132 @@
+# ZED_BOT other-product stock auto-delivery (Phase 25)
+
+Phase 25 adds an **encrypted stock inventory** for OTHER_PRODUCT products
+(gift-card codes, license keys, ready accounts, vouchers) and delivers one
+item **automatically** right after payment approval. When stock is
+unavailable or a send fails, the order falls back safely to the Phase 23
+manual-delivery path. No Service rows, no panel calls, no refunds; the VPN
+provisioning pipeline is untouched.
+
+Source: `apps/bot/src/services/other-product-stock.service.ts`, admin UI in
+`apps/bot/src/handlers/admin-stock/stock.handler.ts`, approval integration
+in `admin-receipts/receipts.handler.ts`.
+
+## Schema — one migration
+
+The schema had `Product.deliveryType` (`STOCK_ITEM`) and
+`Product.stockEnabled` but no inventory model, so migration
+`20260710130944_other_product_stock` adds `enum StockItemStatus
+{AVAILABLE, RESERVED, DELIVERED, DISABLED}` and `model
+OtherProductStockItem` (productId, status, `contentEncrypted`, label?,
+deliveredOrderId/ToUserId/At, disabledAt, createdByAdminId, timestamps,
+indexes on productId/status/deliveredOrderId/createdAt) plus the Product
+relation. The migration was unavoidable — nothing existing could hold
+per-item encrypted content with claim/delivery state.
+
+## Encryption / no raw logs
+
+Content is encrypted with the existing `encryptSecret` (AES-256-GCM,
+APP_SECRET) at creation and decrypted exactly once — for the buyer's
+delivery message. It is **never logged** (logs carry item/order ids only),
+and admins only ever see an 8-char masked preview (`CODE-123…`) in the
+add-item confirmation; item lists show status/label/dates, never content.
+
+## Admin path
+
+پنل مدیریت 🛠 → «محصولات دیگر / سفارش‌های محصولات دیگر» → «سفارش‌های دستی
+📦» → «مدیریت موجودی محصولات 🎟» (`admin:stock:products`; kept next to the
+manual orders since both manage OTHER_PRODUCT fulfilment). Product list:
+`🎟/📦 name | فعال/غیرفعال | موجود: N` (stock-eligible first). Product page:
+deliveryType, تحویل استاک روشن/خاموش, available/delivered/disabled
+(+reserved when non-zero) counters, and a ⚠️ warning when stock delivery is
+on with zero available items. Buttons: «افزودن آیتم موجودی ➕», «مشاهده
+آیتم‌های موجودی», the `stockEnabled` toggle, «بازگشت».
+
+## Add / list / disable
+
+Add wizard (flows `admin_stock:content` → `admin_stock:label`): content
+1..4000 chars → optional label («-» skips, ≤100) → confirmation showing the
+product, label and the **masked preview only** → «تایید افزودن ✅» encrypts
+and creates the item AVAILABLE with `createdByAdminId`. The draft is
+consumed before creating (double-click safe); nothing is sent to any user
+and no Payment/Order/CheckoutSession is written. Item list: 10/page,
+`status | label | createdAt` (+deliveredAt/order short id when delivered),
+a disable button per AVAILABLE item (AVAILABLE → DISABLED, status-guarded —
+delivered/reserved items are not actionable), **no hard delete**.
+
+## Auto-delivery lifecycle
+
+`autoDeliverStockOrder(api, orderId)` runs from the receipt-approval
+OTHER_PRODUCT branch, before the manual path:
+
+1. Eligibility: PAID OTHER_PRODUCT whose product has
+   `deliveryType = STOCK_ITEM` **or** `stockEnabled`, and
+   `requiredUserInfoEnabled = false` (see below). Otherwise NOT_ELIGIBLE.
+2. Idempotency: a COMPLETED order, or an item already DELIVERED for this
+   order id, returns ALREADY_DELIVERED without sending.
+3. **Atomic claim**: oldest AVAILABLE item first; CAS `updateMany`
+   (AVAILABLE → RESERVED + this order/user id) with a few retries against
+   racing orders — two orders can never hold the same item
+   (test: concurrent orders over one item → exactly one delivery).
+   No item → NO_STOCK.
+4. Decrypt + send «سفارش شما آماده شد ✅» + product name + the full content
+   in tap-to-copy `<code>` (HTML-escaped, never a file). An undecryptable
+   item is auto-DISABLED and treated as NO_STOCK.
+5. Send succeeded → one transaction: item RESERVED → DELIVERED
+   (+deliveredAt) and Order PAID → COMPLETED (+completedAt); finalize
+   retries once on DB failure and logs loudly after that. Send failed →
+   the claim rolls back to AVAILABLE (scoped to our own order id, so a
+   newer claim is never cleared) and SEND_FAILED is returned.
+
+Crash-window note: a crash between claim and finalize leaves the item
+RESERVED with this order's id; the next attempt **resumes that same item**
+(never a second item, never another user's item) — the user could then
+receive the same content twice, which is harmless for single-use codes and
+documented here.
+
+## Fallback to manual delivery
+
+- **NO_STOCK** → user gets «پرداخت تایید شد ✅ / موجودی خودکار این محصول
+  فعلاً تمام شده است. / سفارش شما برای تحویل دستی ادمین ثبت شد.», the Phase
+  23 `initManualDelivery` record is created, active admins are notified and
+  the approving admin sees the ⚠️ exhausted-stock note (the stock page
+  shows the same warning).
+- **SEND_FAILED** → the user received nothing (send precedes finalize), so
+  the manual fallback is safe: manual record + admin warning «تحویل خودکار
+  ناموفق شد؛ سفارش برای تحویل دستی ثبت شد.»
+- Successful auto-deliveries create **no** OtherProductOrder record — the
+  stock item row (order/user/admin/date) is the history.
+- Nothing is refunded automatically.
+
+## requiredUserInfoEnabled behavior
+
+Phase 25 takes the spec's safer option: products that require user info
+**never auto-deliver** — they go through the unchanged Phase 23 flow (info
+prompt → manual admin delivery), even when stock is enabled. Auto-delivery
+after info submission is a possible later refinement (TODO).
+
+## Wallet status
+
+Wallet payment for OTHER_PRODUCT remains disabled (unchanged from Phase
+23); card-to-card approval is the only trigger for auto-delivery.
+
+## Testing
+
+`apps/bot/tests/other-product-stock.test.ts`: encrypted storage
+(ciphertext ≠ plaintext, round-trip), input validation, counters and
+disable; oldest-first delivery with exactly one message containing the full
+content, item DELIVERED + order COMPLETED, zero Service rows and zero
+manual records on success, idempotent repeat; NO_STOCK leaves the order
+PAID and disabled items are never delivered; failed send rolls the claim
+back (fields cleared) and the same item delivers later; two concurrent
+orders over one item → exactly one DELIVERED + one NO_STOCK with one send;
+requiredUserInfoEnabled products return NOT_ELIGIBLE without touching
+stock. Stable across repeated runs.
+
+## Intentionally NOT implemented
+
+File delivery, CSV/bulk import, hard delete, wallet payment for
+OTHER_PRODUCT, refunds/cancellation, auto-delivery after required-info
+submission (manual path instead — TODO), low-stock counter on the
+manual-orders landing (optional in spec), online gateways, Telegram Stars,
+reports/export, web panel, mini app, Phase 26+.

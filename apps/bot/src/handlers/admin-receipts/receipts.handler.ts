@@ -12,6 +12,7 @@ import {
   userInfoPromptText,
   WAITING_DELIVERY_USER_TEXT,
 } from "../../services/other-product-delivery.service.js";
+import { autoDeliverStockOrder } from "../../services/other-product-stock.service.js";
 import {
   getPaymentByShortId,
   listPendingReviewPayments,
@@ -515,6 +516,32 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       return;
     }
     if (result.orderType === OrderType.OTHER_PRODUCT) {
+      // Phase 25: stock-eligible products (deliveryType STOCK_ITEM or
+      // stockEnabled, without required user info) auto-deliver from the
+      // encrypted inventory. NOT_ELIGIBLE / NO_STOCK / SEND_FAILED fall
+      // through to the Phase 23 manual path below.
+      const auto = await autoDeliverStockOrder(ctx.api, result.order.id);
+      if (auto.status === "DELIVERED" || auto.status === "ALREADY_DELIVERED") {
+        await safeEditOrReply(
+          ctx,
+          "رسید تایید شد ✅\n\nسفارش استاک به صورت خودکار تحویل شد 🎟",
+          backKeyboard(),
+        );
+        return;
+      }
+      if (auto.status === "NO_STOCK") {
+        await notifyUserSafe(
+          ctx,
+          result.user,
+          "پرداخت تایید شد ✅\nموجودی خودکار این محصول فعلاً تمام شده است.\nسفارش شما برای تحویل دستی ادمین ثبت شد.",
+        );
+      } else if (auto.status === "SEND_FAILED") {
+        // The user received NO content (send failed before finalize), so the
+        // manual fallback is safe - admins get an explicit warning below.
+        logger.warn("stock auto-delivery failed; falling back to manual", {
+          orderId: result.order.id,
+        });
+      }
       // Phase 23: initialize the manual-delivery record (no provisioning,
       // no panel, no Service). The user is asked for required info when the
       // product needs it, otherwise waits for admin delivery.
@@ -541,11 +568,14 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
           userInfoButtonKeyboard(result.order.id),
         );
       } else {
-        await notifyUserSafe(
-          ctx,
-          result.user,
-          `رسید پرداخت شما تایید شد ✅\n\n${WAITING_DELIVERY_USER_TEXT}`,
-        );
+        // The NO_STOCK fallback already told the user (exhausted-stock notice).
+        if (auto.status !== "NO_STOCK") {
+          await notifyUserSafe(
+            ctx,
+            result.user,
+            `رسید پرداخت شما تایید شد ✅\n\n${WAITING_DELIVERY_USER_TEXT}`,
+          );
+        }
         // Ready for delivery right away - tell the active admins.
         await notifyAdminsAboutManualOrder(ctx.api, init.record);
       }
@@ -554,7 +584,11 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
         [
           "رسید تایید شد ✅",
           "",
-          "سفارش دستی ساخته شد 📦",
+          ...(auto.status === "SEND_FAILED"
+            ? ["⚠️ تحویل خودکار ناموفق شد؛ سفارش برای تحویل دستی ثبت شد."]
+            : auto.status === "NO_STOCK"
+              ? ["⚠️ موجودی خودکار تمام شده است؛ سفارش برای تحویل دستی ثبت شد."]
+              : ["سفارش دستی ساخته شد 📦"]),
           init.requiresInfo
             ? "از کاربر اطلاعات موردنیاز خواسته شد."
             : "سفارش آماده تحویل است.",

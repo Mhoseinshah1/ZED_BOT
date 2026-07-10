@@ -6,6 +6,7 @@ import { buildAdminMainKeyboard } from "../keyboards/admin-main.keyboard.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../utils/safe-reply.js";
 import { clearAdminPaymentState } from "./admin-finance/admin-finance.handler.js";
 import { clearManualOrderState } from "./admin-manual-orders/manual-orders.handler.js";
+import { clearAdminStockState } from "./admin-stock/stock.handler.js";
 import { clearAdminUsersState } from "./admin-users/admin-users.handler.js";
 import { clearCheckoutState } from "./user-checkout/checkout-state.js";
 
@@ -28,6 +29,7 @@ export async function showAdminMenu(ctx: BotContext): Promise<void> {
   clearAdminUsersState(ctx);
   clearAdminPaymentState(ctx);
   clearManualOrderState(ctx);
+  clearAdminStockState(ctx);
   ctx.session.currentFlow = null;
   ctx.session.lastMenu = "admin_main";
 }

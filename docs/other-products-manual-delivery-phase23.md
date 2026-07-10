@@ -63,6 +63,12 @@ prompt + submitted info, and delivery text/time once delivered. Buttons:
 📝» (only when منتظر اطلاعات — re-sends the prompt+button and bumps the
 schema's reminder counters), «بازگشت».
 
+> **Phase 25 update:** stock-eligible products (`deliveryType STOCK_ITEM`
+> or `stockEnabled`, without required user info) now **auto-deliver** from
+> an encrypted inventory right after approval; exhausted stock or a failed
+> send falls back to THIS manual path with explicit user/admin notices —
+> see `docs/other-product-stock-phase25.md`.
+
 > **Phase 24 update:** the section became a landing hub with status
 > filters (open / waiting-info / ready / delivered history sorted by
 > deliveredAt), free-text search (order/manual short id, telegram id,
@@ -130,7 +136,8 @@ covered by code review — no grammY harness.
 
 ## Intentionally NOT implemented
 
-STOCK_ITEM auto-delivery, file delivery (`userProvidedFiles`/
+STOCK_ITEM auto-delivery (arrived in Phase 25:
+`docs/other-product-stock-phase25.md`), file delivery (`userProvidedFiles`/
 `adminDeliveryFiles` stay unused), cancellation/rejection/refund flows
 (enum values reserved), wallet payment for OTHER_PRODUCT (TODO above),
 online gateways, Telegram Stars, order-history pages, advanced reports,

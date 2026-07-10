@@ -166,6 +166,8 @@ async function renderLanding(ctx: BotContext): Promise<void> {
       .row()
       .text("جستجوی سفارش 🔎", MO_CB.search)
       .row()
+      .text("مدیریت موجودی محصولات 🎟", "admin:stock:products")
+      .row()
       .text("بازگشت به ادمین", CB.ADMIN_MENU),
   );
 }
