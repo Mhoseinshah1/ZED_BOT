@@ -18,6 +18,8 @@ Source: `apps/bot/src/handlers/user-services/{services.handler,service-views}.ts
 | `user:svc:refresh:<serviceSid>` | ~~DB-only re-read~~ **Phase 11:** now syncs from the panel (read-only) and re-renders — see `docs/service-sync-phase11.md`. List/detail remain read-only for user actions. |
 | `user:svc:link:<serviceSid>` | Sends the stored subscription URL |
 | `user:svc:configs:<serviceSid>` | Sends the stored config links |
+| `user:svc:disable:<serviceSid>[:yes]` | **Phase 18:** disable confirmation / execution — `docs/service-toggle-phase18.md` |
+| `user:svc:enable:<serviceSid>[:yes]` | **Phase 18:** enable confirmation / execution — `docs/service-toggle-phase18.md` |
 
 `<serviceSid>` is the 8-char uuid prefix (`serviceShortId`), resolved with
 `startsWith` **scoped to the owner's userId** — unknown, ambiguous, deleted
@@ -47,7 +49,11 @@ are **never** shown.
 Buttons: «بروزرسانی اطلاعات ♻️», «لینک اشتراک 🔗» (only when a
 `subscriptionUrl` is stored), «کانفیگ‌ها 📄» (only when non-empty), «بازگشت
 به لیست», «بازگشت به منو». No renew/extra volume/extra time/location
-change/enable-disable/transfer/edit buttons — later phases.
+change/transfer/edit buttons — later phases. **Phase 18:** the detail page
+additionally shows ONE toggle button when eligible — «خاموش کردن سرویس ⏸»
+(ACTIVE/LIMITED + panel ACTIVE) or «روشن کردن سرویس ▶️» (DISABLED + panel
+ACTIVE + not expired) — see `docs/service-toggle-phase18.md`. Everything
+else on the page stays read-only.
 
 ## Link / config display
 
@@ -73,8 +79,10 @@ internal fields ever reach the user.
 
 ## Intentionally NOT implemented
 
-Renewal, extra volume/time, location change, enable/disable, change
-subscription link, change note, transfer, delete, rating, QR generation,
-service search by username, "username is not mine", admin service
-management, web panel, mini app. (Panel usage sync for the refresh button —
-DB-only in Phase 10 — arrived in Phase 11: `docs/service-sync-phase11.md`.)
+Renewal, extra volume/time, location change, change subscription link,
+change note, transfer, delete, rating, QR generation, service search by
+username, "username is not mine", admin service management, web panel, mini
+app. (Panel usage sync for the refresh button — DB-only in Phase 10 —
+arrived in Phase 11: `docs/service-sync-phase11.md`; the user
+enable/disable toggle arrived in Phase 18:
+`docs/service-toggle-phase18.md`.)

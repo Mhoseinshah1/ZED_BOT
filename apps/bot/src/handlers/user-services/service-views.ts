@@ -2,12 +2,14 @@ import type { Service, ServiceLocation, ServiceStatus } from "@zedbot/database";
 import { InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
+import type { ToggleAction } from "../../services/service-toggle.service.js";
 import { serviceShortId, type ServiceListPage } from "../../services/user-services.service.js";
 import { escapeHtml } from "../../utils/html.js";
 
 // =============================================================================
 // "My Services" rendering (Phase 10) - read-only views over stored Service
-// rows. No panel data, no actions beyond opening stored links.
+// rows. No panel data, no actions beyond opening stored links. Phase 18
+// added the enable/disable toggle button + confirmation keyboard.
 // =============================================================================
 
 export const svcCb = {
@@ -16,6 +18,10 @@ export const svcCb = {
   refresh: (sid: string): string => `user:svc:refresh:${sid}`,
   link: (sid: string): string => `user:svc:link:${sid}`,
   configs: (sid: string): string => `user:svc:configs:${sid}`,
+  disable: (sid: string): string => `user:svc:disable:${sid}`,
+  disableYes: (sid: string): string => `user:svc:disable:${sid}:yes`,
+  enable: (sid: string): string => `user:svc:enable:${sid}`,
+  enableYes: (sid: string): string => `user:svc:enable:${sid}:yes`,
 } as const;
 
 const STATUS_LABELS: Record<ServiceStatus, string> = {
@@ -135,7 +141,10 @@ export function serviceDetailText(service: Service): string {
   return lines.join("\n");
 }
 
-export function serviceDetailKeyboard(service: Service): InlineKeyboard {
+export function serviceDetailKeyboard(
+  service: Service,
+  toggleAction: ToggleAction | null = null,
+): InlineKeyboard {
   const sid = serviceShortId(service);
   const kb = new InlineKeyboard().text("بروزرسانی اطلاعات ♻️", svcCb.refresh(sid)).row();
   const hasLink = service.subscriptionUrl !== null && service.subscriptionUrl !== "";
@@ -149,6 +158,24 @@ export function serviceDetailKeyboard(service: Service): InlineKeyboard {
   if (hasLink || hasConfigs) {
     kb.row();
   }
+  // Phase 18: shown ONLY when the service/panel state actually allows it.
+  if (toggleAction === "DISABLE") {
+    kb.text("خاموش کردن سرویس ⏸", svcCb.disable(sid)).row();
+  } else if (toggleAction === "ENABLE") {
+    kb.text("روشن کردن سرویس ▶️", svcCb.enable(sid)).row();
+  }
   kb.text("بازگشت به لیست", svcCb.list(1)).row().text("بازگشت به منو", CB.USER_MENU);
   return kb;
+}
+
+/** Phase 18 confirmation keyboard - the panel is only called after «yes». */
+export function toggleConfirmKeyboard(sid: string, action: ToggleAction): InlineKeyboard {
+  const confirm =
+    action === "DISABLE"
+      ? { label: "بله، خاموش کن ⏸", cb: svcCb.disableYes(sid) }
+      : { label: "بله، روشن کن ▶️", cb: svcCb.enableYes(sid) };
+  return new InlineKeyboard()
+    .text(confirm.label, confirm.cb)
+    .row()
+    .text("انصراف", svcCb.view(sid));
 }

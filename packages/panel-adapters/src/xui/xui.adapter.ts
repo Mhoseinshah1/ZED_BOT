@@ -2,6 +2,8 @@ import type { PanelAdapter } from "../core/panel-adapter.interface.js";
 import type {
   AddServiceTimeInput,
   AddServiceTimeResult,
+  SetServiceStatusInput,
+  SetServiceStatusResult,
   AddServiceVolumeInput,
   AddServiceVolumeResult,
   CreateServiceAccountInput,
@@ -95,5 +97,16 @@ export class XuiAdapter implements PanelAdapter {
    */
   async addServiceTime(_input: AddServiceTimeInput): Promise<AddServiceTimeResult> {
     return { ok: false, errorMessage: "XUI extra time is not implemented yet." };
+  }
+
+  /**
+   * Phase 18: NOT implemented - same reason as the other XUI methods (the
+   * token-authenticated endpoint surface needs the Sanaei API reference).
+   * Never fakes success; the user sees a safe error and the DB is untouched.
+   *
+   * TODO(xui-toggle): implement per sanaei-api.txt once available.
+   */
+  async setServiceStatus(_input: SetServiceStatusInput): Promise<SetServiceStatusResult> {
+    return { ok: false, errorMessage: "XUI service status change is not implemented yet." };
   }
 }

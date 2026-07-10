@@ -1,6 +1,8 @@
 import type {
   AddServiceTimeInput,
   AddServiceTimeResult,
+  SetServiceStatusInput,
+  SetServiceStatusResult,
   AddServiceVolumeInput,
   AddServiceVolumeResult,
   CreateServiceAccountInput,
@@ -64,4 +66,11 @@ export interface PanelAdapter {
    * delete/recreate, never rename, never fake success.
    */
   addServiceTime(input: AddServiceTimeInput): Promise<AddServiceTimeResult>;
+
+  /**
+   * Enables/disables one EXISTING account, changing ONLY its status: quota,
+   * expiry, usage and username stay untouched. Same contract: never
+   * delete/recreate, never fake success.
+   */
+  setServiceStatus(input: SetServiceStatusInput): Promise<SetServiceStatusResult>;
 }
