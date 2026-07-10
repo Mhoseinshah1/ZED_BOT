@@ -7,6 +7,7 @@ import type { CheckoutDraft } from "../src/core/session.js";
 import {
   INSUFFICIENT_BALANCE_TEXT,
   payPurchaseDraftWithWallet,
+  WALLET_ORDER_PAYMENT_REASON,
 } from "../src/services/wallet-payment.service.js";
 
 // =============================================================================
@@ -131,7 +132,7 @@ describe.runIf(hasDb)("wallet payment balance race", () => {
     expect(finalUser.balanceToman).toBeGreaterThanOrEqual(0);
 
     const spends = await prisma.walletTransaction.findMany({
-      where: { userId: user.id, type: "SPEND" },
+      where: { userId: user.id, type: "SPEND", reason: WALLET_ORDER_PAYMENT_REASON },
     });
     expect(spends).toHaveLength(1);
     expect(spends[0].amountToman).toBe(PRICE);
@@ -169,6 +170,12 @@ describe.runIf(hasDb)("wallet payment balance race", () => {
       expect(r2.newBalanceToman).toBe(BALANCE - PRICE);
       // Depending on interleaving 0 or 1 of them reports alreadyPaid.
       expect([r1, r2].filter((r) => r.alreadyPaid).length).toBeLessThanOrEqual(1);
+      // Exactly one Payment carries this draft's idempotency key.
+      const key = r1.payment.idempotencyKey;
+      expect(key).not.toBeNull();
+      if (key !== null) {
+        expect(await prisma.payment.count({ where: { idempotencyKey: key } })).toBe(1);
+      }
     }
 
     // Exactly one of everything - the balance moved exactly once.
@@ -179,13 +186,15 @@ describe.runIf(hasDb)("wallet payment balance race", () => {
     ).toBe(1);
     expect(await prisma.order.count({ where: { userId: user.id } })).toBe(1);
     expect(
-      await prisma.walletTransaction.count({ where: { userId: user.id, type: "SPEND" } }),
+      await prisma.walletTransaction.count({
+        where: { userId: user.id, type: "SPEND", reason: WALLET_ORDER_PAYMENT_REASON },
+      }),
     ).toBe(1);
   });
 });
 
 describe.skipIf(hasDb)("wallet payment balance race (skipped)", () => {
-  it("skipped: DATABASE_URL not set - see file header for how to run", () => {
+  it("wallet payment integration tests require DATABASE_URL - see file header / docs/testing.md", () => {
     expect(hasDb).toBe(false);
   });
 });
