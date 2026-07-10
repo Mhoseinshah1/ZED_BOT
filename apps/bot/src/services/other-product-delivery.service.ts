@@ -6,6 +6,7 @@ import {
   type OtherProductOrder,
   type Prisma,
   type Product,
+  type ProductCategory,
   type User,
 } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
@@ -44,6 +45,13 @@ export type ManualOrderWithRelations = OtherProductOrder & {
   order: Order;
   user: User;
   product: Product;
+};
+
+/** Display-path variant (list/search/detail) with the product's category. */
+export type ManualOrderDetail = OtherProductOrder & {
+  order: Order;
+  user: User;
+  product: Product & { category: ProductCategory };
 };
 
 export function manualOrderShortId(record: Pick<OtherProductOrder, "id">): string {
@@ -215,8 +223,25 @@ export async function submitUserInfo(
 
 // --- admin list / detail ----------------------------------------------------------------
 
+/** Phase 24 list filters. "open" = both undelivered statuses. */
+export type ManualOrderFilter = "open" | "info" | "ready" | "delivered";
+
+const FILTER_WHERE: Record<ManualOrderFilter, Prisma.OtherProductOrderWhereInput> = {
+  open: { status: { in: ["WAITING_USER_INFO", "WAITING_ADMIN_DELIVERY"] } },
+  info: { status: "WAITING_USER_INFO" },
+  ready: { status: "WAITING_ADMIN_DELIVERY" },
+  delivered: { status: "DELIVERED" },
+};
+
+const DETAIL_INCLUDE = {
+  order: true,
+  user: true,
+  product: { include: { category: true } },
+} as const;
+
 export interface ManualOrdersPage {
-  records: ManualOrderWithRelations[];
+  filter: ManualOrderFilter;
+  records: ManualOrderDetail[];
   page: number;
   pages: number;
   total: number;
@@ -225,39 +250,93 @@ export interface ManualOrdersPage {
   deliveredCount: number;
 }
 
-/** Open (undelivered) manual orders, newest first, with status counters. */
-export async function listManualOrders(page: number): Promise<ManualOrdersPage> {
-  const where: Prisma.OtherProductOrderWhereInput = {
-    status: { in: ["WAITING_USER_INFO", "WAITING_ADMIN_DELIVERY"] },
-  };
+/**
+ * Manual orders by filter (Phase 24), 10/page, with global status counters.
+ * open/info/ready sort by createdAt desc; delivered sorts by deliveredAt
+ * desc (updatedAt/createdAt as tiebreak-fallbacks for legacy rows).
+ */
+export async function listManualOrders(
+  filter: ManualOrderFilter,
+  page: number,
+): Promise<ManualOrdersPage> {
+  const where = FILTER_WHERE[filter];
   const [total, waitingInfoCount, readyCount, deliveredCount] = await Promise.all([
     prisma.otherProductOrder.count({ where }),
-    prisma.otherProductOrder.count({ where: { status: "WAITING_USER_INFO" } }),
-    prisma.otherProductOrder.count({ where: { status: "WAITING_ADMIN_DELIVERY" } }),
-    prisma.otherProductOrder.count({ where: { status: "DELIVERED" } }),
+    prisma.otherProductOrder.count({ where: FILTER_WHERE.info }),
+    prisma.otherProductOrder.count({ where: FILTER_WHERE.ready }),
+    prisma.otherProductOrder.count({ where: FILTER_WHERE.delivered }),
   ]);
   const pages = Math.max(1, Math.ceil(total / MANUAL_ORDERS_PAGE_SIZE));
   const safePage = Math.min(Math.max(1, page), pages);
+  const orderBy: Prisma.OtherProductOrderOrderByWithRelationInput[] =
+    filter === "delivered"
+      ? [{ deliveredAt: "desc" }, { updatedAt: "desc" }, { createdAt: "desc" }]
+      : [{ createdAt: "desc" }];
   const records = await prisma.otherProductOrder.findMany({
     where,
-    include: { order: true, user: true, product: true },
-    orderBy: { createdAt: "desc" },
+    include: DETAIL_INCLUDE,
+    orderBy,
     skip: (safePage - 1) * MANUAL_ORDERS_PAGE_SIZE,
     take: MANUAL_ORDERS_PAGE_SIZE,
   });
-  return { records, page: safePage, pages, total, waitingInfoCount, readyCount, deliveredCount };
+  return {
+    filter,
+    records,
+    page: safePage,
+    pages,
+    total,
+    waitingInfoCount,
+    readyCount,
+    deliveredCount,
+  };
+}
+
+export const SEARCH_QUERY_MAX = 100;
+
+/**
+ * Admin manual-order search (Phase 24), up to 10 results newest first.
+ * A uuid-prefix-looking query matches the OtherProductOrder id OR the
+ * parent Order id (startsWith); a numeric query matches the exact user
+ * telegramId; free text matches username (without @) or product name,
+ * both case-insensitive contains.
+ */
+export async function searchManualOrders(rawQuery: string): Promise<ManualOrderDetail[]> {
+  const query = rawQuery.trim();
+  if (query === "" || query.length > SEARCH_QUERY_MAX) {
+    return [];
+  }
+  const or: Prisma.OtherProductOrderWhereInput[] = [];
+  if (/^[0-9a-f-]{4,32}$/i.test(query)) {
+    or.push({ id: { startsWith: query.toLowerCase() } });
+    or.push({ order: { is: { id: { startsWith: query.toLowerCase() } } } });
+  }
+  if (/^\d{1,19}$/.test(query) && BigInt(query) <= 9_223_372_036_854_775_807n) {
+    or.push({ user: { is: { telegramId: BigInt(query) } } });
+  }
+  const text = query.startsWith("@") ? query.slice(1) : query;
+  if (text !== "" && !/^\d+$/.test(text)) {
+    or.push({ user: { is: { username: { contains: text, mode: "insensitive" } } } });
+    or.push({ product: { is: { name: { contains: text, mode: "insensitive" } } } });
+  }
+  if (or.length === 0) {
+    return [];
+  }
+  return prisma.otherProductOrder.findMany({
+    where: { OR: or },
+    include: DETAIL_INCLUDE,
+    orderBy: { createdAt: "desc" },
+    take: 10,
+  });
 }
 
 /** Admin-context lookup by OtherProductOrder short id; ambiguity fails. */
-export async function getManualOrderByShortId(
-  shortId: string,
-): Promise<ManualOrderWithRelations | null> {
+export async function getManualOrderByShortId(shortId: string): Promise<ManualOrderDetail | null> {
   if (!/^[0-9a-f-]{4,32}$/i.test(shortId)) {
     return null;
   }
   const matches = await prisma.otherProductOrder.findMany({
     where: { id: { startsWith: shortId } },
-    include: { order: true, user: true, product: true },
+    include: DETAIL_INCLUDE,
     take: 2,
   });
   return matches.length === 1 ? matches[0] : null;

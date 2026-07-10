@@ -63,6 +63,14 @@ prompt + submitted info, and delivery text/time once delivered. Buttons:
 📝» (only when منتظر اطلاعات — re-sends the prompt+button and bumps the
 schema's reminder counters), «بازگشت».
 
+> **Phase 24 update:** the section became a landing hub with status
+> filters (open / waiting-info / ready / delivered history sorted by
+> deliveredAt), free-text search (order/manual short id, telegram id,
+> username, product name) and a richer detail page (both short ids, parent
+> Order status, category, delivering admin) — see
+> `docs/manual-order-management-phase24.md`. Delivery mutation semantics
+> here are unchanged.
+
 ## Delivery flow
 
 «تحویل سفارش 📦» → flow `admin_manual:deliver_text` asks «متن تحویل سفارش

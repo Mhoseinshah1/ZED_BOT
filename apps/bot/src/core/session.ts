@@ -199,6 +199,10 @@ export interface SessionData {
     otherProductInfoRecordId?: string;
     // Admin manual delivery draft (Phase 23, flow "admin_manual:deliver_text").
     adminDeliveryDraft?: { recordId: string; deliveryText?: string };
+    // Admin manual-order navigation (Phase 24).
+    adminManualOrderSearchQuery?: string;
+    adminManualOrderLastFilter?: "open" | "info" | "ready" | "delivered";
+    adminManualOrderLastPage?: number;
     [key: string]: unknown;
   };
 }

@@ -246,7 +246,7 @@ describe.runIf(hasDb)("OTHER_PRODUCT manual delivery (Phase 23)", () => {
     ).toBe("PAID");
 
     // Still listed as open, resolvable by short id...
-    const page = await listManualOrders(1);
+    const page = await listManualOrders("open", 1);
     expect(page.records.some((r) => r.id === init.record.id)).toBe(true);
     expect((await getManualOrderByShortId(init.record.id.slice(0, 8)))?.id).toBe(init.record.id);
 
