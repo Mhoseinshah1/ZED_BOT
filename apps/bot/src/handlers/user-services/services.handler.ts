@@ -1,8 +1,20 @@
+import type { Service } from "@zedbot/database";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { syncServiceFromPanel } from "../../services/service-sync.service.js";
+import {
+  buildTogglePreview,
+  getToggleableServiceByShortId,
+  resolveToggleAction,
+  toggleEligibility,
+  toggleServiceStatus,
+  TOGGLE_ALREADY_DONE_TEXT,
+  TOGGLE_DISABLED_OK_TEXT,
+  TOGGLE_ENABLED_OK_TEXT,
+  type ToggleAction,
+} from "../../services/service-toggle.service.js";
 import { getButtonText } from "../../services/text.service.js";
 import {
   getOwnedServiceByShortId,
@@ -15,13 +27,15 @@ import {
   serviceDetailKeyboard,
   serviceDetailText,
   serviceListKeyboard,
+  toggleConfirmKeyboard,
 } from "./service-views.js";
 
 // =============================================================================
-// "سرویس‌های من 🛍" (Phase 10) - strictly read-only over stored Service rows.
-// No panel API calls, no Service mutations, no renewal/actions (later
-// phases). Every route re-validates ownership; subscription links and
-// configs are shown only to their owner and never logged.
+// "سرویس‌های من 🛍" (Phase 10) - read-only over stored Service rows, plus the
+// Phase 18 enable/disable toggle (the ONLY user-driven mutation here: an
+// eligible service can be switched off/on after an explicit confirmation).
+// Every route re-validates ownership; subscription links and configs are
+// shown only to their owner and never logged.
 // =============================================================================
 
 const NOT_FOUND = "مورد یافت نشد.";
@@ -29,6 +43,17 @@ const MAX_CONFIGS_SHOWN = 10;
 const HTML = { parseMode: "HTML" as const };
 
 export const servicesHandler = new Composer<BotContext>();
+
+/** Detail view; the toggle button appears only when the state allows it. */
+async function renderDetail(ctx: BotContext, service: Service): Promise<void> {
+  const toggleAction = await resolveToggleAction(service);
+  await safeEditOrReply(
+    ctx,
+    serviceDetailText(service),
+    serviceDetailKeyboard(service, toggleAction),
+    HTML,
+  );
+}
 
 async function renderList(ctx: BotContext, page: number): Promise<void> {
   const user = ctx.dbUser;
@@ -66,7 +91,7 @@ servicesHandler.callbackQuery(/^user:svc:view:([0-9a-f-]+)$/, async (ctx) => {
     return;
   }
   await safeAnswerCallback(ctx);
-  await safeEditOrReply(ctx, serviceDetailText(service), serviceDetailKeyboard(service), HTML);
+  await renderDetail(ctx, service);
 });
 
 // Phase 11: refresh now syncs from the PANEL (read-only). A failed sync
@@ -84,7 +109,7 @@ servicesHandler.callbackQuery(/^user:svc:refresh:([0-9a-f-]+)$/, async (ctx) => 
   const sync = await syncServiceFromPanel(owned.id, user.id);
   if (sync.ok) {
     await safeAnswerCallback(ctx, "اطلاعات از پنل بروزرسانی شد.");
-    await safeEditOrReply(ctx, serviceDetailText(sync.service), serviceDetailKeyboard(sync.service), HTML);
+    await renderDetail(ctx, sync.service);
     return;
   }
   if (sync.service === null) {
@@ -92,7 +117,85 @@ servicesHandler.callbackQuery(/^user:svc:refresh:([0-9a-f-]+)$/, async (ctx) => 
     return;
   }
   await safeAnswerCallback(ctx, sync.safeUserMessage);
-  await safeEditOrReply(ctx, serviceDetailText(sync.service), serviceDetailKeyboard(sync.service), HTML);
+  await renderDetail(ctx, sync.service);
+});
+
+// --- Phase 18: enable/disable toggle ----------------------------------------
+// Ask -> explicit confirmation -> panel update -> DB update. The panel is
+// NEVER called before the «yes» step, and every step re-validates ownership
+// and eligibility (stale buttons answer with a safe toast, nothing changes).
+
+async function askToggle(ctx: BotContext, shortId: string, action: ToggleAction): Promise<void> {
+  const user = ctx.dbUser;
+  if (user === null) {
+    return;
+  }
+  const service = await getToggleableServiceByShortId(shortId, user.id);
+  if (service === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  const eligibility = toggleEligibility(service, service.panel.status, action);
+  if (!eligibility.eligible) {
+    await safeAnswerCallback(ctx, eligibility.safeUserMessage);
+    await renderDetail(ctx, service);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    buildTogglePreview(service, action),
+    toggleConfirmKeyboard(shortId, action),
+    HTML,
+  );
+}
+
+async function confirmToggle(
+  ctx: BotContext,
+  shortId: string,
+  action: ToggleAction,
+): Promise<void> {
+  const user = ctx.dbUser;
+  if (user === null) {
+    return;
+  }
+  const service = await getToggleableServiceByShortId(shortId, user.id);
+  if (service === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  const outcome = await toggleServiceStatus(user.id, service.id, action);
+  if (!outcome.ok) {
+    await safeAnswerCallback(ctx, outcome.safeUserMessage);
+    const current = await getOwnedServiceByShortId(shortId, user.id);
+    if (current !== null) {
+      await renderDetail(ctx, current);
+    }
+    return;
+  }
+  const notice = outcome.alreadyDone
+    ? TOGGLE_ALREADY_DONE_TEXT
+    : action === "DISABLE"
+      ? TOGGLE_DISABLED_OK_TEXT
+      : TOGGLE_ENABLED_OK_TEXT;
+  await safeAnswerCallback(ctx, notice);
+  await renderDetail(ctx, outcome.service);
+}
+
+servicesHandler.callbackQuery(/^user:svc:disable:([0-9a-f-]+)$/, async (ctx) => {
+  await askToggle(ctx, ctx.match[1], "DISABLE");
+});
+
+servicesHandler.callbackQuery(/^user:svc:disable:([0-9a-f-]+):yes$/, async (ctx) => {
+  await confirmToggle(ctx, ctx.match[1], "DISABLE");
+});
+
+servicesHandler.callbackQuery(/^user:svc:enable:([0-9a-f-]+)$/, async (ctx) => {
+  await askToggle(ctx, ctx.match[1], "ENABLE");
+});
+
+servicesHandler.callbackQuery(/^user:svc:enable:([0-9a-f-]+):yes$/, async (ctx) => {
+  await confirmToggle(ctx, ctx.match[1], "ENABLE");
 });
 
 servicesHandler.callbackQuery(/^user:svc:link:([0-9a-f-]+)$/, async (ctx) => {

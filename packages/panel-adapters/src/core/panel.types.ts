@@ -153,6 +153,19 @@ export interface AddServiceTimeInput {
 export type AddServiceTimeResult = RenewServiceAccountResult;
 
 /**
+ * Input for enabling/disabling ONE existing account (Phase 18). Nothing
+ * else changes: no quota, no expiry, no usage reset, no username change.
+ */
+export interface SetServiceStatusInput {
+  username: string;
+  enabled: boolean;
+  subscriptionBaseUrl?: string | null;
+}
+
+/** Result of setServiceStatus - identical shape/semantics to a renewal result. */
+export type SetServiceStatusResult = RenewServiceAccountResult;
+
+/**
  * Result of getServiceAccount. Optional fields are OMITTED (undefined) when
  * the panel did not report them - callers must not treat missing as zero.
  * `null` carries explicit meaning: totalBytes/remainingBytes null =
