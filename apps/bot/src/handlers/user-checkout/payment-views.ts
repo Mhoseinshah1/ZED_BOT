@@ -38,9 +38,17 @@ export function formatCardNumber(cardNumber: string): string {
 
 // --- Payment method selection ---------------------------------------------------
 
-export function paymentMethodsText(created: boolean, amountToman: number): string {
+export function paymentMethodsText(
+  created: boolean,
+  amountToman: number,
+  noticeText: string | null = null,
+): string {
   const head = created ? "پیش‌فاکتور ثبت شد ✅\n\n" : "";
-  return `${head}مبلغ قابل پرداخت: ${formatToman(amountToman)}\n\nروش پرداخت را انتخاب کنید:`;
+  const base = `${head}مبلغ قابل پرداخت: ${formatToman(amountToman)}\n\nروش پرداخت را انتخاب کنید:`;
+  // Phase 22 operator notice - HTML-escaped, appended below the method list.
+  return noticeText === null || noticeText === ""
+    ? base
+    : `${base}\n\n${escapeHtml(noticeText)}`;
 }
 
 export function paymentMethodsKeyboard(

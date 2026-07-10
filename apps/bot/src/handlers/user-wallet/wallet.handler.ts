@@ -5,6 +5,11 @@ import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
 import {
+  isWalletTopupEnabled,
+  WALLET_TOPUP_DISABLED_TEXT,
+  walletTopupInstruction,
+} from "../../services/payment-settings.service.js";
+import {
   createWalletTopupCheckout,
   parseTopupAmount,
   walletTopupLimits,
@@ -91,11 +96,22 @@ walletHandler.callbackQuery(WALLET_CB.TOPUP, async (ctx) => {
   if (ctx.dbUser === null) {
     return;
   }
+  // Phase 22: operator kill-switch - no draft, no amount prompt, no writes.
+  if (!(await isWalletTopupEnabled())) {
+    clearTopupState(ctx);
+    await safeAnswerCallback(ctx, WALLET_TOPUP_DISABLED_TEXT);
+    await safeEditOrReply(ctx, WALLET_TOPUP_DISABLED_TEXT, walletMainKeyboard());
+    return;
+  }
   clearCheckoutState(ctx);
   ctx.session.currentFlow = "wallet:topup:amount";
   ctx.session.temp.walletTopupDraft = {};
   await safeAnswerCallback(ctx);
-  await safeEditOrReply(ctx, TOPUP_AMOUNT_PROMPT, topupAmountKeyboard());
+  // Operator instruction text (Phase 22), when set, joins the prompt.
+  const instruction = await walletTopupInstruction();
+  const prompt =
+    instruction === null ? TOPUP_AMOUNT_PROMPT : `${TOPUP_AMOUNT_PROMPT}\n\n${instruction}`;
+  await safeEditOrReply(ctx, prompt, topupAmountKeyboard());
 });
 
 walletHandler.callbackQuery(WALLET_CB.TOPUP_CANCEL, async (ctx) => {
@@ -109,6 +125,14 @@ walletHandler.callbackQuery(WALLET_CB.TOPUP_CONTINUE, async (ctx) => {
   const amount = ctx.session.temp.walletTopupDraft?.amountToman;
   if (user === null || amount === undefined) {
     await safeAnswerCallback(ctx, "مبلغ در دسترس نیست؛ لطفاً دوباره شروع کنید.");
+    return;
+  }
+  // Phase 22: re-checked at ACTION time - a stale pre-invoice cannot create
+  // a checkout after the operator disabled top-up.
+  if (!(await isWalletTopupEnabled())) {
+    clearTopupState(ctx);
+    await safeAnswerCallback(ctx, WALLET_TOPUP_DISABLED_TEXT);
+    await safeEditOrReply(ctx, WALLET_TOPUP_DISABLED_TEXT, walletMainKeyboard());
     return;
   }
   const limits = await walletTopupLimits();

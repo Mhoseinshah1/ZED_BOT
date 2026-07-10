@@ -163,9 +163,17 @@ export function walletConfirmText(amountToman: number, balanceToman: number): st
   ].join("\n");
 }
 
-export function preInvoiceKeyboard(draft: CheckoutDraft, user: User): InlineKeyboard {
+export function preInvoiceKeyboard(
+  draft: CheckoutDraft,
+  user: User,
+  walletPaymentEnabled = true,
+): InlineKeyboard {
   const kb = new InlineKeyboard().text("ادامه و انتخاب روش پرداخت ✅", CO_CB.CONTINUE).row();
-  if (draft.flowType === "SERVICE_PRODUCT" && walletPayAvailable(user, draft.finalPriceToman)) {
+  if (
+    walletPaymentEnabled &&
+    draft.flowType === "SERVICE_PRODUCT" &&
+    walletPayAvailable(user, draft.finalPriceToman)
+  ) {
     kb.text("پرداخت با کیف پول 🏦", CO_CB.WALLET).row();
   }
   if (draft.discountCode === undefined) {

@@ -22,6 +22,10 @@ import { isProductVisible } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
 import { validateDiscountCode } from "./discount.service.js";
 import {
+  isWalletPaymentEnabled,
+  WALLET_PAYMENT_DISABLED_TEXT,
+} from "./payment-settings.service.js";
+import {
   buildExtraTimeSnapshot,
   getExtraTimeServiceByShortId,
   isExtraTimePackageValid,
@@ -153,6 +157,13 @@ async function executeWalletOrderPayment(
   const existing = await loadExistingWalletPayment(args.idempotencyKey);
   if (existing !== null) {
     return existing;
+  }
+  // Phase 22 operator kill-switch, enforced at the SERVICE level so stale
+  // buttons/old keyboards can never reach the transaction. Checked after
+  // the idempotent replay above: an already-settled payment still returns
+  // its result, but no NEW money moves while disabled.
+  if (!(await isWalletPaymentEnabled())) {
+    return { ok: false, error: WALLET_PAYMENT_DISABLED_TEXT };
   }
   const minutes = await checkoutExpiryMinutes();
   const now = new Date();

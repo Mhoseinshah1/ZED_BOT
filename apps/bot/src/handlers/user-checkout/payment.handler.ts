@@ -10,6 +10,7 @@ import {
   type ReceiptKind,
 } from "../../services/admin-receipt-notification.service.js";
 import { getCheckoutByShortId, getOwnedCheckout } from "../../services/checkout.service.js";
+import { paymentPageNotice } from "../../services/payment-settings.service.js";
 import {
   getAvailablePaymentMethods,
   getGatewayByShortId,
@@ -76,10 +77,13 @@ export async function showPaymentMethods(
     await safeEditOrReply(ctx, NO_METHODS_TEXT, paymentMethodsKeyboard(checkout, []));
     return;
   }
+  // Phase 22: operator notice under the method list (escaped inside the view).
+  const notice = await paymentPageNotice();
   await safeEditOrReply(
     ctx,
-    paymentMethodsText(options.created, checkout.finalPriceToman),
+    paymentMethodsText(options.created, checkout.finalPriceToman, notice),
     paymentMethodsKeyboard(checkout, gateways),
+    HTML,
   );
 }
 

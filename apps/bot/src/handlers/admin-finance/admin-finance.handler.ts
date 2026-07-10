@@ -25,6 +25,19 @@ import {
   toggleCardAccount,
   toggleGatewayEnabled,
 } from "../../services/admin-payment-method.service.js";
+import {
+  isWalletPaymentEnabled,
+  isWalletTopupEnabled,
+  paymentPageNotice,
+  setPaymentPageNotice,
+  setWalletPaymentEnabled,
+  setWalletTopupEnabled,
+  setWalletTopupInstruction,
+  setWalletTopupMaxToman,
+  setWalletTopupMinToman,
+  walletTopupInstruction,
+} from "../../services/payment-settings.service.js";
+import { walletTopupLimits } from "../../services/wallet-topup.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import {
   accountsKeyboard,
@@ -41,7 +54,10 @@ import {
   noGatewayKeyboard,
   paymentMethodsKeyboard,
   paymentMethodsText,
+  paymentSettingsKeyboard,
+  paymentSettingsText,
   shortId,
+  type PaymentSettingsView,
 } from "./admin-finance-views.js";
 
 // =============================================================================
@@ -62,6 +78,17 @@ const INSTRUCTION_FLOW = "admin_payment:instruction";
 const CARD_NUMBER_FLOW = "admin_payment:card_number";
 const OWNER_NAME_FLOW = "admin_payment:owner_name";
 const DISPLAY_ORDER_FLOW = "admin_payment:display_order";
+// Phase 22 global wallet/payment settings flows (no gateway draft needed).
+const SETTINGS_MIN_TOPUP_FLOW = "admin_payment_settings:min_topup";
+const SETTINGS_MAX_TOPUP_FLOW = "admin_payment_settings:max_topup";
+const SETTINGS_TOPUP_INSTRUCTION_FLOW = "admin_payment_settings:topup_instruction";
+const SETTINGS_PAYMENT_NOTICE_FLOW = "admin_payment_settings:payment_notice";
+const SETTINGS_FLOWS = [
+  SETTINGS_MIN_TOPUP_FLOW,
+  SETTINGS_MAX_TOPUP_FLOW,
+  SETTINGS_TOPUP_INSTRUCTION_FLOW,
+  SETTINGS_PAYMENT_NOTICE_FLOW,
+];
 const ALL_FLOWS = [
   MIN_FLOW,
   MAX_FLOW,
@@ -69,6 +96,7 @@ const ALL_FLOWS = [
   CARD_NUMBER_FLOW,
   OWNER_NAME_FLOW,
   DISPLAY_ORDER_FLOW,
+  ...SETTINGS_FLOWS,
 ];
 
 export const adminFinanceHandler = new Composer<BotContext>();
@@ -129,6 +157,110 @@ adminFinanceHandler.callbackQuery(FIN_CB.root, async (ctx) => {
   await safeEditOrReply(ctx, FINANCE_LANDING_TEXT, financeLandingKeyboard());
   ctx.session.lastMenu = FIN_CB.root;
 });
+
+// --- payment/wallet settings (Phase 22) -----------------------------------------------
+
+async function loadSettingsView(): Promise<PaymentSettingsView> {
+  const [topupEnabled, walletPaymentEnabled, limits, topupInstruction, paymentNotice] =
+    await Promise.all([
+      isWalletTopupEnabled(),
+      isWalletPaymentEnabled(),
+      walletTopupLimits(),
+      walletTopupInstruction(),
+      paymentPageNotice(),
+    ]);
+  return {
+    topupEnabled,
+    walletPaymentEnabled,
+    minTopupToman: limits.minToman,
+    maxTopupToman: limits.maxToman,
+    topupInstruction,
+    paymentNotice,
+  };
+}
+
+async function renderSettingsPage(ctx: BotContext): Promise<void> {
+  const view = await loadSettingsView();
+  await safeEditOrReply(ctx, paymentSettingsText(view), paymentSettingsKeyboard(view), HTML);
+}
+
+adminFinanceHandler.callbackQuery(FIN_CB.settings, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminPaymentState(ctx);
+  await safeAnswerCallback(ctx);
+  await renderSettingsPage(ctx);
+});
+
+adminFinanceHandler.callbackQuery(FIN_CB.settingsToggleTopup, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminPaymentState(ctx);
+  const enabled = !(await isWalletTopupEnabled());
+  await setWalletTopupEnabled(enabled);
+  await safeAnswerCallback(ctx, enabled ? "شارژ کیف پول روشن شد ✅" : "شارژ کیف پول خاموش شد ⏸");
+  await renderSettingsPage(ctx);
+});
+
+adminFinanceHandler.callbackQuery(FIN_CB.settingsToggleWalletPayment, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminPaymentState(ctx);
+  const enabled = !(await isWalletPaymentEnabled());
+  await setWalletPaymentEnabled(enabled);
+  await safeAnswerCallback(
+    ctx,
+    enabled ? "پرداخت با کیف پول روشن شد ✅" : "پرداخت با کیف پول خاموش شد ⏸",
+  );
+  await renderSettingsPage(ctx);
+});
+
+function startSettingsFlow(flow: string, prompt: string) {
+  return async (ctx: BotContext): Promise<void> => {
+    if (ctx.admin === null) {
+      return;
+    }
+    clearAdminPaymentState(ctx);
+    ctx.session.currentFlow = flow;
+    await safeAnswerCallback(ctx);
+    await safeEditOrReply(ctx, prompt, new InlineKeyboard().text("انصراف", FIN_CB.settings));
+  };
+}
+
+adminFinanceHandler.callbackQuery(
+  FIN_CB.settingsMinTopup,
+  startSettingsFlow(
+    SETTINGS_MIN_TOPUP_FLOW,
+    "حداقل شارژ کیف پول را به تومان وارد کنید. (0 = بازگشت به پیش‌فرض)",
+  ),
+);
+
+adminFinanceHandler.callbackQuery(
+  FIN_CB.settingsMaxTopup,
+  startSettingsFlow(
+    SETTINGS_MAX_TOPUP_FLOW,
+    "حداکثر شارژ کیف پول را به تومان وارد کنید. (0 = بازگشت به پیش‌فرض)",
+  ),
+);
+
+adminFinanceHandler.callbackQuery(
+  FIN_CB.settingsTopupInstruction,
+  startSettingsFlow(
+    SETTINGS_TOPUP_INSTRUCTION_FLOW,
+    "متن راهنمای شارژ کیف پول را وارد کنید. (برای حذف، «-» بفرستید)",
+  ),
+);
+
+adminFinanceHandler.callbackQuery(
+  FIN_CB.settingsPaymentNotice,
+  startSettingsFlow(
+    SETTINGS_PAYMENT_NOTICE_FLOW,
+    "پیام صفحه روش پرداخت را وارد کنید. (برای حذف، «-» بفرستید)",
+  ),
+);
 
 adminFinanceHandler.callbackQuery(FIN_CB.methods, async (ctx) => {
   if (ctx.admin === null) {
@@ -389,6 +521,48 @@ adminFinanceTextHandler.on("message:text", async (ctx, next) => {
     clearAdminPaymentState(ctx);
     return next();
   }
+
+  // Phase 22 global settings flows - no gateway draft involved.
+  if (SETTINGS_FLOWS.includes(flow)) {
+    const settingsCancelKb = new InlineKeyboard().text("انصراف", FIN_CB.settings);
+    if (flow === SETTINGS_MIN_TOPUP_FLOW || flow === SETTINGS_MAX_TOPUP_FLOW) {
+      const parsed = parseLimitInput(text);
+      if (!parsed.ok) {
+        await safeReply(ctx, INVALID_LIMIT_TEXT, settingsCancelKb);
+        return;
+      }
+      // parseLimitInput maps "0" to null = reset to the built-in default.
+      const value = parsed.value ?? 0;
+      const result =
+        flow === SETTINGS_MIN_TOPUP_FLOW
+          ? await setWalletTopupMinToman(value)
+          : await setWalletTopupMaxToman(value);
+      if (!result.ok) {
+        await safeReply(ctx, result.safeMessage, settingsCancelKb);
+        return;
+      }
+    } else {
+      const cleared = text.trim() === "-" || text.trim() === "حذف";
+      const result =
+        flow === SETTINGS_TOPUP_INSTRUCTION_FLOW
+          ? await setWalletTopupInstruction(cleared ? null : text)
+          : await setPaymentPageNotice(cleared ? null : text);
+      if (!result.ok) {
+        await safeReply(ctx, result.safeMessage, settingsCancelKb);
+        return;
+      }
+    }
+    clearAdminPaymentState(ctx);
+    const view = await loadSettingsView();
+    await safeReply(
+      ctx,
+      `ثبت شد ✅\n\n${paymentSettingsText(view)}`,
+      paymentSettingsKeyboard(view),
+      HTML,
+    );
+    return;
+  }
+
   const draft = ctx.session.temp.adminPaymentDraft;
   if (draft === undefined) {
     clearAdminPaymentState(ctx);

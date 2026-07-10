@@ -137,9 +137,13 @@ export function extraTimePreInvoiceText(
   return lines.join("\n");
 }
 
-export function extraTimePreInvoiceKeyboard(draft: ExtraTimeDraft, user: User): InlineKeyboard {
+export function extraTimePreInvoiceKeyboard(
+  draft: ExtraTimeDraft,
+  user: User,
+  walletPaymentEnabled = true,
+): InlineKeyboard {
   const kb = new InlineKeyboard().text("ادامه و انتخاب روش پرداخت ✅", etcb.continue).row();
-  if (draft.finalPriceToman > 0 && user.balanceToman >= draft.finalPriceToman) {
+  if (walletPaymentEnabled && draft.finalPriceToman > 0 && user.balanceToman >= draft.finalPriceToman) {
     kb.text("پرداخت با کیف پول 🏦", etcb.wallet).row();
   }
   if (draft.discountCode === undefined) {

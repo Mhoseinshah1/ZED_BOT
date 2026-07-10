@@ -149,9 +149,13 @@ export function renewalPreInvoiceText(
   return lines.join("\n");
 }
 
-export function renewalPreInvoiceKeyboard(draft: RenewalDraft, user: User): InlineKeyboard {
+export function renewalPreInvoiceKeyboard(
+  draft: RenewalDraft,
+  user: User,
+  walletPaymentEnabled = true,
+): InlineKeyboard {
   const kb = new InlineKeyboard().text("ادامه و انتخاب روش پرداخت ✅", rncb.continue).row();
-  if (draft.finalPriceToman > 0 && user.balanceToman >= draft.finalPriceToman) {
+  if (walletPaymentEnabled && draft.finalPriceToman > 0 && user.balanceToman >= draft.finalPriceToman) {
     kb.text("پرداخت با کیف پول 🏦", rncb.wallet).row();
   }
   if (draft.discountCode === undefined) {

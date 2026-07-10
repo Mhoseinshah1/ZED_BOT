@@ -6,6 +6,10 @@ import { Composer, InlineKeyboard } from "grammy";
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
+import {
+  isWalletPaymentEnabled,
+  WALLET_PAYMENT_DISABLED_TEXT,
+} from "../../services/payment-settings.service.js";
 import type { CheckoutDraft } from "../../core/session.js";
 import {
   categoriesOf,
@@ -81,7 +85,7 @@ async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {
     return;
   }
   const text = preInvoiceText(product, user, draft);
-  const keyboard = preInvoiceKeyboard(draft, user);
+  const keyboard = preInvoiceKeyboard(draft, user, await isWalletPaymentEnabled());
   if (edit) {
     await safeEditOrReply(ctx, text, keyboard, HTML);
   } else {
@@ -344,6 +348,12 @@ checkoutHandler.callbackQuery(CO_CB.WALLET, async (ctx) => {
   const user = ctx.dbUser;
   if (draft === undefined || user === null) {
     await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  // Phase 22: operator kill-switch, re-checked when the button is clicked.
+  if (!(await isWalletPaymentEnabled())) {
+    await safeAnswerCallback(ctx, WALLET_PAYMENT_DISABLED_TEXT);
+    await renderPreInvoice(ctx, true);
     return;
   }
   if (draft.flowType !== "SERVICE_PRODUCT" || !walletPayAvailable(user, draft.finalPriceToman)) {

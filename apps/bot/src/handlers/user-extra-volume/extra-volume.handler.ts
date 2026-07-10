@@ -6,6 +6,10 @@ import { Composer, InlineKeyboard } from "grammy";
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
+import {
+  isWalletPaymentEnabled,
+  WALLET_PAYMENT_DISABLED_TEXT,
+} from "../../services/payment-settings.service.js";
 import type { ExtraVolumeDraft } from "../../core/session.js";
 import { validateDiscountCode } from "../../services/discount.service.js";
 import {
@@ -132,7 +136,7 @@ async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {
     return;
   }
   const text = extraVolumePreInvoiceText(service, product, user, draft);
-  const keyboard = extraVolumePreInvoiceKeyboard(draft, user);
+  const keyboard = extraVolumePreInvoiceKeyboard(draft, user, await isWalletPaymentEnabled());
   if (edit) {
     await safeEditOrReply(ctx, text, keyboard, HTML);
   } else {
@@ -212,6 +216,11 @@ extraVolumeHandler.callbackQuery(evcb.wallet, async (ctx) => {
   const user = ctx.dbUser;
   if (draft === undefined || user === null) {
     await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  // Phase 22: operator kill-switch, re-checked when the button is clicked.
+  if (!(await isWalletPaymentEnabled())) {
+    await safeAnswerCallback(ctx, WALLET_PAYMENT_DISABLED_TEXT);
     return;
   }
   if (!walletPayAvailable(user, draft.finalPriceToman)) {

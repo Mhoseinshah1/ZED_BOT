@@ -18,7 +18,10 @@ never touches receipt approval, checkout, provisioning or wallet payment.
 پنل مدیریت 🛠 → «مالی 💎» (`admin:finance`, previously a placeholder) →
 «روش‌های پرداخت 💳» (`admin:finance:methods`) → «کارت‌به‌کارت 💳»
 (`admin:finance:card`). The landing also links «رسیدهای تایید نشده 💵» to
-the existing `admin:receipts` flow (nothing duplicated). Everything is
+the existing `admin:receipts` flow (nothing duplicated) and, since Phase
+22, «تنظیمات پرداخت و کیف پول ⚙️» — the global wallet/payment settings
+page (`docs/payment-wallet-settings-phase22.md`; the min/max there are the
+GLOBAL top-up limits, separate from this page's per-gateway amounts). Everything is
 behind `adminAuthMiddleware` + a `ctx.admin` re-check per route; short-id
 targets resolve with `startsWith` and **ambiguous prefixes fail**.
 
