@@ -56,6 +56,10 @@ AVAILABLE item (AVAILABLE → DISABLED, status-guarded), Phase 26
 release/disable buttons per RESERVED item (below), **no hard delete** —
 delivered items are never actionable.
 
+> **Phase 27:** «افزودن گروهی آیتم‌ها ➕➕» adds many items from one
+> multiline message (one per line, max 100, in-batch dedupe, masked
+> previews only) — see `docs/other-product-stock-bulk-phase27.md`.
+
 ## Auto-delivery lifecycle
 
 `autoDeliverStockOrder(api, orderId)` runs from the receipt-approval
@@ -145,8 +149,9 @@ stock. Stable across repeated runs.
 
 ## Intentionally NOT implemented
 
-File delivery, CSV/bulk import, hard delete, wallet payment for
+File delivery, CSV/file import (multiline bulk add arrived in Phase 27:
+`docs/other-product-stock-bulk-phase27.md`), hard delete, wallet payment for
 OTHER_PRODUCT, refunds/cancellation, auto-delivery after required-info
 submission (manual path instead — TODO), low-stock counter on the
 manual-orders landing (optional in spec), online gateways, Telegram Stars,
-reports/export, web panel, mini app, Phase 27+.
+reports/export, web panel, mini app, Phase 28+.

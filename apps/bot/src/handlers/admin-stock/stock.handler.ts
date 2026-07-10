@@ -5,6 +5,7 @@ import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import {
   addStockItem,
+  addStockItemsBulk,
   disableReservedStockItem,
   disableStockItem,
   getStockCounts,
@@ -15,7 +16,9 @@ import {
   isStockDeliveryProduct,
   listStockItems,
   listStockProducts,
+  parseBulkStockInput,
   releaseReservedStockItem,
+  STOCK_BULK_MAX_ITEMS,
   STOCK_CONTENT_MAX,
   STOCK_LABEL_MAX,
   stockContentPreview,
@@ -27,9 +30,10 @@ import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe
 // =============================================================================
 // «مدیریت موجودی محصولات 🎟» (Phase 25) - encrypted stock inventory for
 // OTHER_PRODUCT products, reached from the manual-orders landing. Admins add
-// single items (content shown back only as an 8-char masked preview), browse
-// item lists (never the raw content), disable AVAILABLE items (no hard
-// delete) and toggle per-product stock delivery. Pure configuration - no
+// single items or one-per-line batches (Phase 27; content shown back only as
+// an 8-char masked preview), browse item lists (never the raw content),
+// disable AVAILABLE items (no hard delete), recover stuck RESERVED items
+// (Phase 26) and toggle per-product stock delivery. Pure configuration - no
 // Payment/Order/CheckoutSession rows, nothing is sent to users from here.
 // =============================================================================
 
@@ -38,6 +42,7 @@ const DRAFT_EXPIRED_TEXT = "درخواست منقضی شده است. لطفاً 
 const HTML = { parseMode: "HTML" as const };
 const CONTENT_FLOW = "admin_stock:content";
 const LABEL_FLOW = "admin_stock:label";
+const BULK_FLOW = "admin_stock:bulk_content";
 
 const ST_CB = {
   products: "admin:stock:products",
@@ -46,6 +51,9 @@ const ST_CB = {
   add: (sid: string): string => `admin:stock:add:${sid}`,
   addConfirm: "admin:stock:add_confirm",
   addCancel: "admin:stock:add_cancel",
+  bulkAdd: (sid: string): string => `admin:stock:bulk_add:${sid}`,
+  bulkConfirm: "admin:stock:bulk_confirm",
+  bulkCancel: "admin:stock:bulk_cancel",
   items: (sid: string, page: number): string => `admin:stock:items:${sid}:${page}`,
   disableItem: (itemSid: string): string => `admin:stock:item_off:${itemSid}`,
   releaseReserved: (itemSid: string): string => `admin:stock:item_release:${itemSid}`,
@@ -54,9 +62,13 @@ const ST_CB = {
 
 export const stockHandler = new Composer<BotContext>();
 
-/** Full Phase 25 admin-stock state cleanup (flow + draft). */
+/** Full admin-stock state cleanup (Phase 25 wizard + Phase 27 bulk). */
 export function clearAdminStockState(ctx: BotContext): void {
-  if (ctx.session.currentFlow === CONTENT_FLOW || ctx.session.currentFlow === LABEL_FLOW) {
+  if (
+    ctx.session.currentFlow === CONTENT_FLOW ||
+    ctx.session.currentFlow === LABEL_FLOW ||
+    ctx.session.currentFlow === BULK_FLOW
+  ) {
     ctx.session.currentFlow = null;
   }
   delete ctx.session.temp.adminStockDraft;
@@ -104,6 +116,8 @@ async function renderProductPage(ctx: BotContext, product: Product): Promise<voi
   }
   const kb = new InlineKeyboard()
     .text("افزودن آیتم موجودی ➕", ST_CB.add(sid))
+    .row()
+    .text("افزودن گروهی آیتم‌ها ➕➕", ST_CB.bulkAdd(sid))
     .row()
     .text("مشاهده آیتم‌های موجودی", ST_CB.items(sid, 1))
     .row()
@@ -310,7 +324,7 @@ stockHandler.callbackQuery(/^admin:stock:add:([0-9a-f-]+)$/, async (ctx) => {
   );
 });
 
-stockHandler.callbackQuery(ST_CB.addCancel, async (ctx) => {
+stockHandler.callbackQuery([ST_CB.addCancel, ST_CB.bulkCancel], async (ctx) => {
   if (ctx.admin === null) {
     return;
   }
@@ -355,13 +369,68 @@ stockHandler.callbackQuery(ST_CB.addConfirm, async (ctx) => {
   }
 });
 
+// --- bulk-add wizard (Phase 27) --------------------------------------------------------------
+
+stockHandler.callbackQuery(/^admin:stock:bulk_add:([0-9a-f-]+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  const product = await getStockProductByShortId(ctx.match[1]);
+  if (product === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  ctx.session.temp.adminStockDraft = { productId: product.id };
+  ctx.session.currentFlow = BULK_FLOW;
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    [
+      "افزودن گروهی موجودی 🎟",
+      "",
+      "هر آیتم را در یک خط جدا وارد کنید.",
+      "خط‌های خالی نادیده گرفته می‌شوند.",
+      `(حداکثر ${STOCK_BULK_MAX_ITEMS} آیتم در هر بار)`,
+    ].join("\n"),
+    new InlineKeyboard().text("انصراف", ST_CB.bulkCancel),
+  );
+});
+
+stockHandler.callbackQuery(ST_CB.bulkConfirm, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null) {
+    return;
+  }
+  const draft = ctx.session.temp.adminStockDraft;
+  // Consumed BEFORE creating: a double-clicked confirm cannot store twice.
+  clearAdminStockState(ctx);
+  if (draft === undefined || draft.bulkItems === undefined || draft.bulkItems.length === 0) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  const outcome = await addStockItemsBulk({
+    productId: draft.productId,
+    contents: draft.bulkItems,
+    createdByAdminId: admin.id,
+  });
+  if (!outcome.ok) {
+    await safeAnswerCallback(ctx, outcome.safeMessage);
+    return;
+  }
+  await safeAnswerCallback(ctx, `${outcome.createdCount} آیتم موجودی ثبت شد ✅`);
+  const product = await getStockProductByShortId(draft.productId.slice(0, 8));
+  if (product !== null) {
+    await renderProductPage(ctx, product);
+  }
+});
+
 // --- text inputs (content / label) ----------------------------------------------------------
 
 export const stockTextHandler = new Composer<BotContext>();
 
 stockTextHandler.on("message:text", async (ctx, next) => {
   const flow = ctx.session.currentFlow;
-  if (ctx.admin === null || (flow !== CONTENT_FLOW && flow !== LABEL_FLOW)) {
+  if (ctx.admin === null || (flow !== CONTENT_FLOW && flow !== LABEL_FLOW && flow !== BULK_FLOW)) {
     return next();
   }
   const text = ctx.message.text;
@@ -377,6 +446,52 @@ stockTextHandler.on("message:text", async (ctx, next) => {
     return;
   }
   const cancelKb = new InlineKeyboard().text("انصراف", ST_CB.addCancel);
+
+  if (flow === BULK_FLOW) {
+    const bulkCancelKb = new InlineKeyboard().text("انصراف", ST_CB.bulkCancel);
+    const parsed = parseBulkStockInput(text);
+    if (!parsed.ok) {
+      // Flow stays active so the admin can resend a corrected list.
+      await safeReply(ctx, parsed.safeMessage, bulkCancelKb);
+      return;
+    }
+    const product = await getStockProductByShortId(draft.productId.slice(0, 8));
+    if (product === null) {
+      clearAdminStockState(ctx);
+      await safeReply(ctx, DRAFT_EXPIRED_TEXT);
+      return;
+    }
+    draft.bulkItems = parsed.items;
+    draft.invalidCount = parsed.invalidCount;
+    draft.duplicateCount = parsed.duplicateCount;
+    ctx.session.currentFlow = null;
+    await safeReply(
+      ctx,
+      [
+        "افزودن گروهی موجودی 🎟",
+        "",
+        `محصول: ${escapeHtml(product.name)}`,
+        `آیتم‌های معتبر برای ثبت: ${parsed.items.length}`,
+        `تکراری (نادیده گرفته‌شده): ${parsed.duplicateCount}`,
+        `نامعتبر (نادیده گرفته‌شده): ${parsed.invalidCount}`,
+        "",
+        "پیش‌نمایش:",
+        ...parsed.items
+          .slice(0, 5)
+          .map((item) => `• <code>${escapeHtml(stockContentPreview(item))}</code>`),
+        "",
+        "محتوای کامل بعد از ثبت نمایش داده نمی‌شود.",
+        "",
+        "آیا از افزودن این آیتم‌ها مطمئن هستید؟",
+      ].join("\n"),
+      new InlineKeyboard()
+        .text("تایید افزودن گروهی ✅", ST_CB.bulkConfirm)
+        .row()
+        .text("انصراف", ST_CB.bulkCancel),
+      HTML,
+    );
+    return;
+  }
 
   if (flow === CONTENT_FLOW) {
     const content = text.trim();

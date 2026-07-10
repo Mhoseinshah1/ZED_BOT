@@ -203,8 +203,16 @@ export interface SessionData {
     adminManualOrderSearchQuery?: string;
     adminManualOrderLastFilter?: "open" | "info" | "ready" | "delivered";
     adminManualOrderLastPage?: number;
-    // Admin stock add-item wizard (Phase 25; content NEVER logged).
-    adminStockDraft?: { productId: string; content?: string; label?: string | null };
+    // Admin stock add-item wizard (Phase 25) + bulk add (Phase 27);
+    // content NEVER logged.
+    adminStockDraft?: {
+      productId: string;
+      content?: string;
+      label?: string | null;
+      bulkItems?: string[];
+      invalidCount?: number;
+      duplicateCount?: number;
+    };
     [key: string]: unknown;
   };
 }
