@@ -77,7 +77,8 @@ services:
     env_file:
       - .env
     ports:
-      - "${API_PORT:-3000}:${API_PORT:-3000}"
+      # Loopback only (Phase 37): the public entrypoint is Nginx on 80/443.
+      - "127.0.0.1:${API_PORT:-3000}:${API_PORT:-3000}"
     depends_on:
       postgres:
         condition: service_healthy

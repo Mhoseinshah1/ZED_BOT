@@ -558,8 +558,10 @@ print_summary() {
     Logs        : ${LOGS_DIR}
     Config      : ${ENV_FILE} (chmod 600)
 
-  API health check (HTTPS arrives with the reverse-proxy phase)
-    http://${domain}:${port}/health
+  Public endpoint (after 'zedbot nginx' + 'zedbot ssl')
+    https://${domain}/health
+  Local API (loopback only)
+    http://127.0.0.1:${port}/health
 
   Useful commands
     zedbot status     - show service status
@@ -567,8 +569,39 @@ print_summary() {
     zedbot doctor     - run health checks
     zedbot backup     - create a database backup (zedbot-db-YYYYMMDD-HHMMSS.sql.gz)
     zedbot env-check  - validate the .env configuration (never prints values)
+    zedbot nginx      - set up the Nginx reverse proxy
+    zedbot ssl        - request the Let's Encrypt certificate (HTTPS)
 
 EOF
+}
+
+# Nginx + HTTPS (Phase 37). Never fails the installation: the app services
+# are already running; a failed certificate request just prints how to
+# finish later (typically once DNS points at this server).
+setup_https_if_requested() {
+  local wanted=""
+  if [ "${ZEDBOT_SETUP_SSL:-0}" = "1" ]; then
+    wanted=1
+  elif [ "${ZEDBOT_NONINTERACTIVE:-0}" = "1" ]; then
+    wanted=""
+  elif confirm "Set up Nginx and HTTPS (Let's Encrypt) now?" "n"; then
+    wanted=1
+  fi
+  if [ -z "$wanted" ]; then
+    log_info "Skipping HTTPS setup. When the domain's DNS points at this server, run:"
+    log_info "  zedbot nginx"
+    log_info "  zedbot ssl"
+    return 0
+  fi
+  if ! bash "${APP_DIR}/scripts/nginx-setup.sh"; then
+    log_warn "Nginx setup failed. The app keeps running; retry later with: zedbot nginx"
+    return 0
+  fi
+  if ! bash "${APP_DIR}/scripts/ssl-setup.sh"; then
+    log_warn "Certificate setup failed (DNS not pointing here yet?)."
+    log_warn "The app keeps running over HTTP; retry later with: zedbot ssl"
+  fi
+  return 0
 }
 
 main() {
@@ -590,6 +623,7 @@ main() {
     log_info "Running post-install health checks ..."
     bash "${APP_DIR}/scripts/doctor.sh" || log_warn "Doctor reported problems. Run 'zedbot doctor' for details."
   fi
+  setup_https_if_requested
   print_summary
 }
 

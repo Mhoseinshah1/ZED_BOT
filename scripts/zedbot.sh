@@ -33,6 +33,10 @@ Commands:
   doctor                  Run the full system health checks
   shell [service]         Open a shell inside a container (default: bot)
   env-check               Validate the .env configuration (never prints values)
+  nginx                   Set up / refresh the Nginx reverse proxy for APP_DOMAIN
+  ssl                     Request the Let's Encrypt certificate and enable HTTPS
+  renew-cert              Force a certificate renewal check and reload Nginx
+  https-status            Show Nginx/certificate status and probe https://APP_DOMAIN/health
   restore-help            Print MANUAL database restore instructions (nothing is executed)
   help                    Show this help
 
@@ -178,6 +182,42 @@ case "$CMD" in
     ;;
   env-check)
     exec bash "${SCRIPTS_DIR}/validate-env.sh" "$@"
+    ;;
+  nginx)
+    exec bash "${SCRIPTS_DIR}/nginx-setup.sh" "$@"
+    ;;
+  ssl)
+    exec bash "${SCRIPTS_DIR}/ssl-setup.sh" "$@"
+    ;;
+  renew-cert)
+    exec bash "${SCRIPTS_DIR}/ssl-renew.sh" "$@"
+    ;;
+  https-status)
+    require_root
+    load_env_if_exists
+    if has_command nginx; then
+      if has_command systemctl; then
+        systemctl is-active nginx >/dev/null 2>&1 \
+          && log_success "Nginx: active." \
+          || log_error "Nginx: not active."
+      fi
+      nginx -t 2>&1 | tail -n 1 || true
+    else
+      log_warn "Nginx is not installed. Run: zedbot nginx"
+    fi
+    if has_command certbot; then
+      certbot certificates 2>/dev/null || log_warn "No certificates found."
+    else
+      log_warn "certbot is not installed. Run: zedbot ssl"
+    fi
+    HTTPS_DOMAIN="$(printf '%s' "${APP_DOMAIN:-}" | tr '[:upper:]' '[:lower:]')"
+    if is_valid_domain "$HTTPS_DOMAIN"; then
+      log_info "Probing https://${HTTPS_DOMAIN}/health ..."
+      curl -sSI --max-time 10 "https://${HTTPS_DOMAIN}/health" 2>&1 | head -n 1 \
+        || log_warn "HTTPS probe failed (certificate missing or DNS not pointing here yet)."
+    else
+      log_warn "APP_DOMAIN is not set - skipping the HTTPS probe."
+    fi
     ;;
   *)
     echo "[FAIL] Unknown command: ${CMD}" >&2
