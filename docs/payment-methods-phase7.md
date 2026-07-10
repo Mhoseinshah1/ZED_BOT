@@ -59,9 +59,14 @@ the operator-defined `gateway.name`.
   no bank line is shown.
 - The screen shows the **exact** amount (not editable), owner name, the
   checkout deadline, and the gateway's `instructionText` when set.
-- «کپی شماره کارت / کپی مبلغ»: Telegram callbacks cannot write to the
-  clipboard, so the bot answers the callback with the value AND sends a
-  `<code>` (tap-to-copy) message.
+- «کپی شماره کارت / کپی مبلغ» (behavior changed in Phase 21.1): both are
+  Telegram `InlineKeyboardButton.copy_text` buttons — the client writes the
+  value straight to the clipboard. «کپی شماره کارت» copies the RAW 16-digit
+  card number (the visible message still shows it dashed), «کپی مبلغ» copies
+  the plain numeric amount (e.g. `5000000`). **No callback fires and no
+  extra chat message is sent.** The legacy `user:pay:copycard` /
+  `user:pay:copyamount` callbacks remain registered ONLY for old keyboards
+  and answer with a callback popup — never a chat message.
 
 ## Receipt upload
 
@@ -87,18 +92,22 @@ A payment is never created as APPROVED.
 `admin:receipts` («رسیدهای تایید نشده 💵») lists `PENDING_REVIEW` payments
 newest-first, paginated, labeled `مبلغ | کاربر | تاریخ`. The detail view
 shows payment short id, user (username/name/telegram id), amount, gateway
-name+type, checkout short id, product name from the snapshot, receipt kind
-(photo/file vs text — media is not forwarded yet, only noted as «فایل رسید
-ثبت شده است»), receipt text, and creation time. As of Phase 8 the detail view
-also carries approve/reject buttons (`docs/receipt-review-phase8.md`). The
+name+type, checkout short id, product name from the snapshot, receipt kind,
+receipt text, and creation time — and since Phase 21.1 it also forwards the
+actual receipt media (photo first, document fallback). As of Phase 8 the
+detail view also carries approve/reject buttons
+(`docs/receipt-review-phase8.md`), and since Phase 21.1 every ACTIVE admin
+is additionally notified with the receipt right when it is submitted. The
 section is behind admin auth like every admin route.
 
 ## Callbacks
 
-`user:pay:m:<coSid>`, `user:pay:g:<coSid>:<gwSid>`, `user:pay:copycard`,
-`user:pay:copyamount`, `user:pay:receipt` (copy/receipt work from the session
-draft to keep callback data tiny), `admin:receipts`, `admin:rec:list:<page>`,
-`admin:rec:view:<paymentSid>` — all 8-char short-id based.
+`user:pay:m:<coSid>`, `user:pay:g:<coSid>:<gwSid>`, `user:pay:receipt` (the
+receipt flow works from the session draft to keep callback data tiny),
+`admin:receipts`, `admin:rec:list:<page>`, `admin:rec:view:<paymentSid>` —
+all 8-char short-id based. `user:pay:copycard`/`user:pay:copyamount` are
+LEGACY-only (Phase 21.1): new keyboards use `copy_text` buttons that fire no
+callback at all.
 
 ## Intentionally NOT implemented (in Phase 7)
 
