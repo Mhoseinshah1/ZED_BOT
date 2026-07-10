@@ -130,6 +130,114 @@ export async function addStockItem(args: {
   return { ok: true, item };
 }
 
+// --- bulk add (Phase 27) --------------------------------------------------------------------
+//
+// One multiline message -> many items: each non-empty trimmed line becomes a
+// stock item. Duplicates are detected only WITHIN the submitted batch (exact
+// string after trim, first occurrence kept) - the DB is intentionally NOT
+// searched for existing duplicates, because content is stored with randomized
+// encryption and checking would require decrypting the whole inventory.
+// Batches with more than 100 valid unique items are rejected so the admin
+// splits them. Raw content is never logged and never echoed back.
+
+export const STOCK_BULK_MAX_ITEMS = 100;
+export const BULK_TOO_MANY_TEXT = "حداکثر ۱۰۰ آیتم در هر بار قابل ثبت است.";
+export const BULK_NO_VALID_ITEMS_TEXT = "هیچ آیتم معتبری در متن پیدا نشد.";
+export const BULK_CREATE_FAILED_TEXT = "ثبت گروهی آیتم‌ها ناموفق بود. دوباره تلاش کنید.";
+
+export type BulkParseResult =
+  | { ok: true; items: string[]; invalidCount: number; duplicateCount: number }
+  | { ok: false; safeMessage: string; invalidCount: number; duplicateCount: number };
+
+/**
+ * Normalizes one multiline bulk submission: trims every line, drops empty
+ * lines, counts over-length lines as invalid, dedupes exact strings within
+ * the batch (first occurrence wins). Zero valid unique items or more than
+ * STOCK_BULK_MAX_ITEMS fails with a safe message. Pure - no DB, no logging.
+ */
+export function parseBulkStockInput(text: string): BulkParseResult {
+  const seen = new Set<string>();
+  const items: string[] = [];
+  let invalidCount = 0;
+  let duplicateCount = 0;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0) {
+      continue;
+    }
+    if (line.length > STOCK_CONTENT_MAX) {
+      invalidCount += 1;
+      continue;
+    }
+    if (seen.has(line)) {
+      duplicateCount += 1;
+      continue;
+    }
+    seen.add(line);
+    items.push(line);
+  }
+  if (items.length === 0) {
+    return { ok: false, safeMessage: BULK_NO_VALID_ITEMS_TEXT, invalidCount, duplicateCount };
+  }
+  if (items.length > STOCK_BULK_MAX_ITEMS) {
+    return { ok: false, safeMessage: BULK_TOO_MANY_TEXT, invalidCount, duplicateCount };
+  }
+  return { ok: true, items, invalidCount, duplicateCount };
+}
+
+export type AddStockBulkOutcome =
+  | { ok: true; createdCount: number }
+  | { ok: false; safeMessage: string };
+
+/**
+ * Encrypts and stores MANY stock items (all AVAILABLE, label null) in one
+ * `createMany` - a single atomic INSERT, so a mid-batch DB failure creates
+ * nothing. Inputs are re-validated and re-deduped defensively; raw content
+ * never reaches the logs or the returned messages.
+ */
+export async function addStockItemsBulk(args: {
+  productId: string;
+  contents: string[];
+  createdByAdminId: string;
+}): Promise<AddStockBulkOutcome> {
+  const contents = [...new Set(args.contents.map((content) => content.trim()))].filter(
+    (content) => content.length > 0,
+  );
+  if (contents.length === 0) {
+    return { ok: false, safeMessage: BULK_NO_VALID_ITEMS_TEXT };
+  }
+  if (contents.length > STOCK_BULK_MAX_ITEMS) {
+    return { ok: false, safeMessage: BULK_TOO_MANY_TEXT };
+  }
+  if (contents.some((content) => content.length > STOCK_CONTENT_MAX)) {
+    return { ok: false, safeMessage: INVALID_STOCK_CONTENT_TEXT };
+  }
+  const product = await prisma.product.findUnique({ where: { id: args.productId } });
+  if (product === null || product.type !== "OTHER_PRODUCT") {
+    return { ok: false, safeMessage: "مورد یافت نشد." };
+  }
+  try {
+    const created = await prisma.otherProductStockItem.createMany({
+      data: contents.map((content) => ({
+        productId: product.id,
+        status: "AVAILABLE" as const,
+        contentEncrypted: encryptSecret(content),
+        label: null,
+        createdByAdminId: args.createdByAdminId,
+      })),
+    });
+    logger.info("stock items bulk added", { productId: product.id, count: created.count });
+    return { ok: true, createdCount: created.count };
+  } catch (error) {
+    logger.error("stock bulk add failed", {
+      productId: product.id,
+      requested: contents.length,
+      error: errorMessage(error),
+    });
+    return { ok: false, safeMessage: BULK_CREATE_FAILED_TEXT };
+  }
+}
+
 export interface StockItemsPage {
   items: OtherProductStockItem[];
   page: number;
