@@ -220,7 +220,7 @@ describe.runIf(hasDb)("OTHER_PRODUCT manual delivery (Phase 23)", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("failed send never marks delivered", async () => {
+  it("failed send rolls back the claim and the order stays deliverable", async () => {
     const user = await createUser();
     const order = await createPaidOrder(user, plainProduct);
     const init = await initManualDelivery(order.id);
@@ -237,16 +237,75 @@ describe.runIf(hasDb)("OTHER_PRODUCT manual delivery (Phase 23)", () => {
       where: { id: init.record.id },
     });
     expect(record.status).toBe("WAITING_ADMIN_DELIVERY");
+    // The claim fields were rolled back - nothing lingers.
     expect(record.adminDeliveryText).toBeNull();
+    expect(record.deliveredByAdminId).toBeNull();
     expect(record.deliveredAt).toBeNull();
     expect(
       (await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status,
     ).toBe("PAID");
 
-    // Still listed as open, resolvable by short id, and deliverable later.
+    // Still listed as open, resolvable by short id...
     const page = await listManualOrders(1);
     expect(page.records.some((r) => r.id === init.record.id)).toBe(true);
     expect((await getManualOrderByShortId(init.record.id.slice(0, 8)))?.id).toBe(init.record.id);
+
+    // ...and a later delivery succeeds normally after the rollback.
+    const { api, calls } = sendRecorder();
+    const retried = await deliverManualOrder(api, {
+      recordId: init.record.id,
+      adminId,
+      deliveryText: "این بار می‌رسد",
+    });
+    expect(retried.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(
+      (await prisma.otherProductOrder.findUniqueOrThrow({ where: { id: init.record.id } })).status,
+    ).toBe("DELIVERED");
+  });
+
+  it("concurrent deliveries send exactly ONE message (atomic claim)", async () => {
+    const user = await createUser();
+    const order = await createPaidOrder(user, plainProduct);
+    const init = await initManualDelivery(order.id);
+    expect(init.ok).toBe(true);
+    if (!init.ok) return;
+
+    const { api, calls } = sendRecorder();
+    const [r1, r2] = await Promise.all([
+      deliverManualOrder(api, {
+        recordId: init.record.id,
+        adminId,
+        deliveryText: "تحویل از ادمین اول",
+      }),
+      deliverManualOrder(api, {
+        recordId: init.record.id,
+        adminId,
+        deliveryText: "تحویل از ادمین دوم",
+      }),
+    ]);
+
+    // Exactly one winner, exactly one user message - never a double send.
+    const oks = [r1, r2].filter((r) => r.ok);
+    const fails = [r1, r2].filter(
+      (r): r is { ok: false; error: string; safeMessage: string } => !r.ok,
+    );
+    expect(oks).toHaveLength(1);
+    expect(fails).toHaveLength(1);
+    expect([ALREADY_DELIVERED_TEXT, NOT_READY_TEXT]).toContain(fails[0].safeMessage);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].chatId).toBe(user.telegramId.toString());
+
+    const record = await prisma.otherProductOrder.findUniqueOrThrow({
+      where: { id: init.record.id },
+    });
+    expect(record.status).toBe("DELIVERED");
+    expect(record.deliveredAt).not.toBeNull();
+    // The stored text belongs to the winning claim (matches the sent message).
+    expect(calls[0].text).toContain(record.adminDeliveryText ?? "");
+    expect(
+      (await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status,
+    ).toBe("COMPLETED");
   });
 });
 
