@@ -8,6 +8,7 @@ import { attachUserMiddleware } from "./middlewares/attach-user.middleware.js";
 import { rateLimitMiddleware } from "./middlewares/rate-limit.middleware.js";
 import { userAccessMiddleware } from "./middlewares/user-access.middleware.js";
 import { adminHandler } from "./handlers/admin.handler.js";
+import { financialReportsHandler } from "./handlers/admin-finance/financial-reports.handler.js";
 import {
   adminFinanceHandler,
   adminFinanceTextHandler,
@@ -105,6 +106,8 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(receiptsHandler);
   adminArea.use(adminUsersHandler);
   adminArea.use(adminFinanceHandler);
+  // Phase 31: read-only financial reports («گزارش مالی 📊»).
+  adminArea.use(financialReportsHandler);
   adminArea.use(manualOrdersHandler);
   adminArea.use(stockHandler);
   adminArea.use(adminPlaceholdersHandler);
