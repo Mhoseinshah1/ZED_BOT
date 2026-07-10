@@ -99,6 +99,10 @@ stored). Failure: «پرداخت حجم اضافه شما تایید شد ✅ / 
 با خطا مواجه شد. / مبلغ پرداختی به کیف پول شما برگشت داده شد.» The user is
 never left charged without applied volume or a refund.
 
+> **Phase 17 note:** extra TIME arrived in Phase 17 with its own
+> `addServiceTime` adapter method (`docs/extra-time-phase17.md`) — unlike
+> extra volume it never resets usage and never changes the quota.
+
 ## Intentionally NOT implemented
 
 Extra time, enable/disable, change link/note, transfer, rating, other

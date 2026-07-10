@@ -26,6 +26,10 @@ import {
 import { forceJoinHandler } from "./handlers/force-join.handler.js";
 import { menuHandler } from "./handlers/menu.handler.js";
 import {
+  extraTimeHandler,
+  extraTimeTextHandler,
+} from "./handlers/user-extra-time/extra-time.handler.js";
+import {
   extraVolumeHandler,
   extraVolumeTextHandler,
 } from "./handlers/user-extra-volume/extra-volume.handler.js";
@@ -122,6 +126,10 @@ export function createBot(token: string): Bot<BotContext> {
       await extraVolumeTextHandler.middleware()(ctx, next);
       return;
     }
+    if (flow === "extra_time:discount") {
+      await extraTimeTextHandler.middleware()(ctx, next);
+      return;
+    }
     if (flow === "wallet:topup:amount") {
       await walletTopupTextHandler.middleware()(ctx, next);
       return;
@@ -141,6 +149,7 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(servicesHandler);
   userArea.use(renewalHandler);
   userArea.use(extraVolumeHandler);
+  userArea.use(extraTimeHandler);
   userArea.use(walletHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());

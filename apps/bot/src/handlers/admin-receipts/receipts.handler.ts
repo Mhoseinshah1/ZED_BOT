@@ -17,6 +17,11 @@ import {
   provisionPaidOrder,
 } from "../../services/provisioning.service.js";
 import {
+  buildExtraTimeSuccessMessage,
+  executeExtraTimeOrder,
+  EXTRA_TIME_FAILED_USER_TEXT,
+} from "../../services/extra-time.service.js";
+import {
   buildExtraVolumeSuccessMessage,
   executeExtraVolumeOrder,
   EXTRA_VOLUME_FAILED_USER_TEXT,
@@ -107,6 +112,48 @@ async function notifyUserSafe(
       error: errorMessage(err),
     });
     return false;
+  }
+}
+
+/**
+ * Phase 17: synchronous extra-time application right after an EXTRA_TIME
+ * approval. The executor owns the FAILED + refund path.
+ */
+async function runExtraTimeAfterApproval(
+  ctx: BotContext,
+  orderId: string,
+  user: User,
+): Promise<void> {
+  try {
+    const outcome = await executeExtraTimeOrder(orderId);
+    if (outcome.ok) {
+      await notifyUserSafe(
+        ctx,
+        user,
+        buildExtraTimeSuccessMessage(outcome.service, outcome.addedDays),
+        "HTML",
+      );
+      await safeReply(ctx, "زمان سرویس افزایش یافت ✅", backKeyboard());
+      return;
+    }
+    if (outcome.refunded) {
+      await notifyUserSafe(ctx, user, EXTRA_TIME_FAILED_USER_TEXT);
+      await safeReply(
+        ctx,
+        "افزایش زمان ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
+        backKeyboard(),
+      );
+      return;
+    }
+    await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.EXTRA_TIME));
+    await safeReply(ctx, outcome.error, backKeyboard());
+  } catch (err) {
+    logger.error("extra time after approval crashed", { orderId, error: errorMessage(err) });
+    await safeReply(
+      ctx,
+      "خطایی در افزایش زمان سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
+      backKeyboard(),
+    );
   }
 }
 
@@ -429,6 +476,16 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
         backKeyboard(),
       );
       await runExtraVolumeAfterApproval(ctx, result.order.id, result.user);
+      return;
+    }
+    if (result.orderType === OrderType.EXTRA_TIME) {
+      // Phase 17: apply the purchased time right away.
+      await safeEditOrReply(
+        ctx,
+        "رسید تایید شد ✅\n\nOrder ساخته شد.\nافزایش زمان سرویس شروع شد.",
+        backKeyboard(),
+      );
+      await runExtraTimeAfterApproval(ctx, result.order.id, result.user);
       return;
     }
     if (result.orderType === OrderType.OTHER_PRODUCT) {

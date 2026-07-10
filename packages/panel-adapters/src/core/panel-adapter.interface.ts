@@ -1,4 +1,6 @@
 import type {
+  AddServiceTimeInput,
+  AddServiceTimeResult,
   AddServiceVolumeInput,
   AddServiceVolumeResult,
   CreateServiceAccountInput,
@@ -55,4 +57,11 @@ export interface PanelAdapter {
    * contract: never delete/recreate, never rename, never fake success.
    */
   addServiceVolume(input: AddServiceVolumeInput): Promise<AddServiceVolumeResult>;
+
+  /**
+   * Extends one EXISTING account's expiry while leaving quota and usage
+   * untouched (usage is NEVER reset for extra time). Same contract: never
+   * delete/recreate, never rename, never fake success.
+   */
+  addServiceTime(input: AddServiceTimeInput): Promise<AddServiceTimeResult>;
 }

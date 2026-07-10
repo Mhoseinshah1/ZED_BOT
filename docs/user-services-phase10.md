@@ -66,9 +66,10 @@ resolves the service with the userId-scoped lookup, so
 answers «مورد یافت نشد.». No panel credentials, raw panel responses or
 internal fields ever reach the user.
 
-> **Phase 16 note:** buying extra volume for a service lives under the main
-> menu's «خرید حجم اضافه ➕» (`docs/extra-volume-phase16.md`); the service
-> detail view itself stays read-only.
+> **Phase 16/17 note:** buying extra volume/«خرید زمان اضافه ⏳» for a
+> service lives under the main menu (`docs/extra-volume-phase16.md`,
+> `docs/extra-time-phase17.md`); the service detail view itself stays
+> read-only.
 
 ## Intentionally NOT implemented
 
