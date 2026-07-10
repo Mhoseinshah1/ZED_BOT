@@ -19,7 +19,7 @@ const ADMIN_SECTIONS: Array<{ callback: string; title: string }> = [
   // admin:panels is handled by the real panel management flow (panel.handler).
   { callback: CB.ADMIN_CUSTOM_SERVICE_PRICE, title: "قیمت سرویس دلخواه 🛰" },
   // admin:other_products is handled by the real manual-orders flow (manual-orders.handler).
-  { callback: CB.ADMIN_REPORTS_BACKUP, title: "گزارشات / بکاپ" },
+  // admin:reports_backup is handled by the real backup/health flow (Phase 35).
 ];
 
 /** Every admin menu button opens a placeholder page in this phase. */

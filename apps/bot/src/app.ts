@@ -73,6 +73,7 @@ import {
   adminTextSettingsHandler,
   adminTextSettingsTextHandler,
 } from "./handlers/admin-settings/text-settings.handler.js";
+import { reportsBackupHandler } from "./handlers/admin-reports-backup/reports-backup.handler.js";
 import {
   walletHandler,
   walletTopupTextHandler,
@@ -133,6 +134,8 @@ export function createBot(token: string): Bot<BotContext> {
   // Phase 34: general settings + text management («مدیریت متن‌ها ✍️») -
   // must run before the placeholder handler.
   adminArea.use(adminTextSettingsHandler);
+  // Phase 35: backup / health («گزارشات / بکاپ 🛡»).
+  adminArea.use(reportsBackupHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
