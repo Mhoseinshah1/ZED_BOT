@@ -4,6 +4,7 @@ import { CB } from "../core/callbacks.js";
 import type { BotContext } from "../core/context.js";
 import { buildAdminMainKeyboard } from "../keyboards/admin-main.keyboard.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../utils/safe-reply.js";
+import { clearAdminPaymentState } from "./admin-finance/admin-finance.handler.js";
 import { clearAdminUsersState } from "./admin-users/admin-users.handler.js";
 import { clearCheckoutState } from "./user-checkout/checkout-state.js";
 
@@ -18,10 +19,12 @@ export async function showAdminMenu(ctx: BotContext): Promise<void> {
   } else {
     await safeReply(ctx, ADMIN_MENU_TEXT, keyboard);
   }
-  // Entering admin mode abandons any user checkout draft (separate surface)
-  // and any Phase 20 admin-users state (wallet draft + stored search query).
+  // Entering admin mode abandons any user checkout draft (separate surface),
+  // any Phase 20 admin-users state (wallet draft + stored search query) and
+  // any Phase 21 payment-method configuration draft.
   clearCheckoutState(ctx);
   clearAdminUsersState(ctx);
+  clearAdminPaymentState(ctx);
   ctx.session.currentFlow = null;
   ctx.session.lastMenu = "admin_main";
 }

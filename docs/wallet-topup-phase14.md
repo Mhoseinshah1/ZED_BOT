@@ -94,6 +94,12 @@ wallet path above. The result union carries `kind: "ORDER_PAYMENT" |
 > WalletTransaction (`totalManualAddedToman`/`totalManualDeductedToman`) —
 > `totalChargedToman` remains reserved for real user top-ups.
 
+> **Phase 21 update:** the top-up's card-to-card step depends on the
+> admin-configured CARD_TO_CARD gateway + at least one ACTIVE card account
+> (`docs/admin-payment-methods-phase21.md`). Until an admin sets those up
+> under «مالی 💎 → روش‌های پرداخت 💳», the method list is empty and users
+> see the "no payment method" message.
+
 Online
 gateways, Telegram Stars, representative debt, negative-balance purchase,
 cashback, automatic receipt verification, gateway management UI.

@@ -136,6 +136,15 @@ export interface PaymentDraft {
   amountToman: number;
 }
 
+/** Admin card-to-card configuration draft (Phase 21). No DB rows until confirm. */
+export interface AdminPaymentDraft {
+  gatewayId: string;
+  /** Card-add wizard collected values (card number NEVER logged). */
+  cardNumber?: string;
+  ownerName?: string;
+  displayOrder?: number;
+}
+
 /** Admin manual wallet adjustment draft (Phase 20). No DB rows until confirm. */
 export interface AdminUserWalletDraft {
   targetUserId: string;
@@ -184,6 +193,8 @@ export interface SessionData {
     adminUserWalletDraft?: AdminUserWalletDraft;
     // Last admin user-search query ("بازگشت به نتایج" re-runs it).
     adminUserSearchQuery?: string;
+    // Admin card-to-card configuration (Phase 21).
+    adminPaymentDraft?: AdminPaymentDraft;
     [key: string]: unknown;
   };
 }

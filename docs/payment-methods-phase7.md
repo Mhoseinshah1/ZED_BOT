@@ -111,3 +111,11 @@ forwarding to admins/log groups, checkout/payment expiry worker, and admin
 management of gateways/card accounts. Nothing payment-related is seeded:
 gateway and card-account rows are configured separately by the operator
 (admin UI for them is a later phase).
+
+> **Phase 21 update:** the admin UI arrived — «پنل مدیریت 🛠 → مالی 💎 →
+> روش‌های پرداخت 💳 → کارت‌به‌کارت» creates/toggles the CARD_TO_CARD
+> gateway, edits its min/max/instruction text and manages encrypted card
+> accounts (`docs/admin-payment-methods-phase21.md`). One selection
+> refinement landed with it: a CARD_TO_CARD gateway is only offered when it
+> has at least one ACTIVE card account. Everything else in this phase
+> (rotation, receipt submission, review) is unchanged.

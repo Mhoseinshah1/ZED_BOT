@@ -7,7 +7,7 @@ import { safeAnswerCallback, safeEditOrReply } from "../utils/safe-reply.js";
 import { PLACEHOLDER_TEXT } from "./user-placeholders.handler.js";
 
 const ADMIN_SECTIONS: Array<{ callback: string; title: string }> = [
-  { callback: CB.ADMIN_FINANCE, title: "مالی 💎" },
+  // admin:finance is handled by the real finance flow (admin-finance.handler).
   { callback: CB.ADMIN_PANEL_FEATURES, title: "قابلیت‌های پنل 🛠" },
   { callback: CB.ADMIN_UPDATE_BOT, title: "آپدیت ربات 🆕" },
   // admin:receipts is handled by the real receipts list (receipts.handler).
