@@ -377,6 +377,25 @@ receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
   }
   kb.text("بازگشت به لیست", rcb.list(1)).row().text("بازگشت به ادمین", CB.ADMIN_MENU);
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
+
+  // Phase 21.1: forward the actual receipt media next to the detail text.
+  // ManualReceipt stores no media kind, so photo is tried first and
+  // document is the fallback; failures never break the review screen.
+  if (receipt?.fileId != null && ctx.chat !== undefined) {
+    const caption = `رسید ${paymentShortId(payment)} 🧾`;
+    try {
+      await ctx.api.sendPhoto(ctx.chat.id, receipt.fileId, { caption });
+    } catch {
+      try {
+        await ctx.api.sendDocument(ctx.chat.id, receipt.fileId, { caption });
+      } catch (err) {
+        logger.warn("receipt media forward failed", {
+          paymentId: payment.id,
+          error: errorMessage(err),
+        });
+      }
+    }
+  }
 });
 
 // --- approval (confirmation first, Phase 8.1) -----------------------------------

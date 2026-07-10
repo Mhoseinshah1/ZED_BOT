@@ -119,3 +119,16 @@ gateway and card-account rows are configured separately by the operator
 > refinement landed with it: a CARD_TO_CARD gateway is only offered when it
 > has at least one ACTIVE card account. Everything else in this phase
 > (rotation, receipt submission, review) is unchanged.
+
+> **Phase 21.1 update:**
+> - «کپی شماره کارت»/«کپی مبلغ» are now Telegram **`copy_text`** buttons:
+>   the client copies the RAW card digits / plain numeric amount straight
+>   to the clipboard — no callback, **no extra chat message**. The old
+>   `user:pay:copycard`/`user:pay:copyamount` callbacks stay registered
+>   ONLY for old keyboards and answer with a popup, never a message.
+> - Submitting a receipt now **notifies every ACTIVE admin** with the
+>   actual receipt (photo/document forwarded by file_id, or the text),
+>   full masked review context and a «بررسی رسید 🧾» button into the
+>   existing `admin:rec:view` detail (approve/reject unchanged). A failed
+>   notification never rolls back the submitted receipt. The admin detail
+>   page also forwards the receipt media when opened.
