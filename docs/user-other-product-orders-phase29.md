@@ -19,6 +19,13 @@ handler `apps/bot/src/handlers/user-orders/orders.handler.ts`, button in
 routes sit behind the normal user gates and are scoped to
 `ctx.dbUser.id`; ambiguous short ids fail (take-2 rule).
 
+> **Phase 30 update:** the main-menu entry (`user:orders`) now opens the
+> general history hub «سفارش‌ها و سوابق من 🧾»
+> (`docs/user-history-phase30.md`); this product-order list became its
+> «محصولات دیگر 🛍» sub-section. The deep callbacks above are unchanged and
+> old keyboards keep working, and this detail remains the only place that
+> shows delivered stock content / manual delivery text.
+
 ## Order sources
 
 One list covers all three OTHER_PRODUCT fulfilment shapes:
