@@ -58,6 +58,14 @@ import {
 import { userOrdersHandler } from "./handlers/user-orders/orders.handler.js";
 import { servicesHandler } from "./handlers/user-services/services.handler.js";
 import {
+  supportHandler,
+  supportTextHandler,
+} from "./handlers/user-support/support.handler.js";
+import {
+  adminSupportHandler,
+  adminSupportTextHandler,
+} from "./handlers/admin-support/support-admin.handler.js";
+import {
   walletHandler,
   walletTopupTextHandler,
 } from "./handlers/user-wallet/wallet.handler.js";
@@ -110,6 +118,8 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(financialReportsHandler);
   adminArea.use(manualOrdersHandler);
   adminArea.use(stockHandler);
+  // Phase 32: support tickets («تیکت‌های پشتیبانی 🎫»).
+  adminArea.use(adminSupportHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
@@ -125,6 +135,7 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(adminFinanceTextHandler);
   adminFlowText.use(manualOrdersTextHandler);
   adminFlowText.use(stockTextHandler);
+  adminFlowText.use(adminSupportTextHandler);
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {
@@ -167,6 +178,11 @@ export function createBot(token: string): Bot<BotContext> {
       await otherProductInfoTextHandler.middleware()(ctx, next);
       return;
     }
+    // Phase 32 user ticket flows (subject / first message / reply).
+    if (flow === "support:subject" || flow === "support:message" || flow === "support:reply") {
+      await supportTextHandler.middleware()(ctx, next);
+      return;
+    }
     if (ctx.admin === null) {
       return next();
     }
@@ -187,6 +203,9 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(otherProductInfoHandler);
   // Phase 29: read-only OTHER_PRODUCT order tracking («سفارش‌های من 🧾»).
   userArea.use(userOrdersHandler);
+  // Phase 32: support tickets - must run before the placeholder handler,
+  // which used to own CB.USER_SUPPORT.
+  userArea.use(supportHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());

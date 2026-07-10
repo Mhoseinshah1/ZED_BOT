@@ -203,6 +203,10 @@ export interface SessionData {
     adminManualOrderSearchQuery?: string;
     adminManualOrderLastFilter?: "open" | "info" | "ready" | "delivered";
     adminManualOrderLastPage?: number;
+    // Support tickets (Phase 32): user new-ticket/reply draft + the admin
+    // reply target.
+    supportDraft?: { subject?: string; ticketId?: string };
+    adminSupportReplyTicketId?: string;
     // Admin stock add-item wizard (Phase 25), bulk add (Phase 27) and
     // low-stock threshold editing (Phase 28); content NEVER logged.
     adminStockDraft?: {
