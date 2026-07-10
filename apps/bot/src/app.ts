@@ -8,6 +8,10 @@ import { attachUserMiddleware } from "./middlewares/attach-user.middleware.js";
 import { rateLimitMiddleware } from "./middlewares/rate-limit.middleware.js";
 import { userAccessMiddleware } from "./middlewares/user-access.middleware.js";
 import { adminHandler } from "./handlers/admin.handler.js";
+import {
+  adminFinanceHandler,
+  adminFinanceTextHandler,
+} from "./handlers/admin-finance/admin-finance.handler.js";
 import { adminPlaceholdersHandler } from "./handlers/admin-placeholders.handler.js";
 import {
   adminUsersHandler,
@@ -90,6 +94,7 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(productHandler);
   adminArea.use(receiptsHandler);
   adminArea.use(adminUsersHandler);
+  adminArea.use(adminFinanceHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
@@ -102,6 +107,7 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(panelTextHandler);
   adminFlowText.use(productTextHandler);
   adminFlowText.use(adminUsersTextHandler);
+  adminFlowText.use(adminFinanceTextHandler);
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {

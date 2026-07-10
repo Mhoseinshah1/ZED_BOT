@@ -32,7 +32,10 @@ function groupAllowed(allowedGroups: unknown, group: UserGroup): boolean {
  * Gateways this user may pay this checkout with:
  * isEnabled, not isHidden, not per-user hidden, amount within min/max,
  * group allowed, and the user's successful-payment count satisfies
- * activateAfterSuccessfulPaymentsCount. Sorted by displayOrder, createdAt.
+ * activateAfterSuccessfulPaymentsCount. Phase 21: a CARD_TO_CARD gateway is
+ * additionally only offered when it has at least one ACTIVE card account -
+ * an empty gateway would dead-end on the card screen. Sorted by
+ * displayOrder, createdAt.
  */
 export async function getAvailablePaymentMethods(
   user: User,
@@ -44,6 +47,7 @@ export async function getAvailablePaymentMethods(
       isHidden: false,
       hiddenForUsers: { none: { userId: user.id } },
     },
+    include: { _count: { select: { cardAccounts: { where: { isActive: true } } } } },
     orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }],
   });
   const amount = checkout.finalPriceToman;
@@ -52,7 +56,8 @@ export async function getAvailablePaymentMethods(
       (g.minAmountToman === null || amount >= g.minAmountToman) &&
       (g.maxAmountToman === null || amount <= g.maxAmountToman) &&
       groupAllowed(g.allowedGroups, user.group) &&
-      user.paidOrdersCount >= g.activateAfterSuccessfulPaymentsCount,
+      user.paidOrdersCount >= g.activateAfterSuccessfulPaymentsCount &&
+      (g.type !== "CARD_TO_CARD" || g._count.cardAccounts > 0),
   );
 }
 
