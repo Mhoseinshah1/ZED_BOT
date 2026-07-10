@@ -128,6 +128,14 @@ jobs:
           test "$template_count" -ge 4
           test "$button_count" -ge 16
 
+      # PostgreSQL-backed integration tests (wallet-payment race safety and
+      # anything future packages add via their own "test" script). Runs after
+      # the migrate step so the job-level DATABASE_URL points at a migrated
+      # database - without DATABASE_URL the DB suites would self-skip and
+      # prove nothing (see docs/testing.md).
+      - name: Run tests
+        run: pnpm test
+
       - name: Start Redis (password-protected)
         run: |
           # A plain service container cannot override the image command, and

@@ -34,9 +34,22 @@ DATABASE_URL="postgresql://postgres@127.0.0.1:5432/zedbot_test" pnpm test
 ```
 
 **Without `DATABASE_URL` set, the DB suites skip themselves** and `pnpm
-test` still exits 0 (a placeholder test documents the skip), so the command
-is safe in environments with no database — but a skipped run proves
-nothing; only a run against PostgreSQL verifies the race behavior.
+test` still exits 0 (a placeholder test states "wallet payment integration
+tests require DATABASE_URL"), so the command is safe in environments with
+no database — but a skipped run proves nothing; only a run against
+PostgreSQL verifies the race behavior.
+
+## CI
+
+`.github/workflows/ci.yml` runs `pnpm test` on every push/PR to `main`
+(step **"Run tests"**). The job already provides everything the DB suites
+need: a `postgres:16` service container on `localhost:5432`, a job-level
+`DATABASE_URL` (`postgresql://zedbot:…@localhost:5432/zedbot`), `pnpm
+db:generate` for the Prisma client, and `pnpm db:deploy` (the repo's
+standard `prisma migrate deploy`) + seed **before** the test step — so in
+CI the wallet race tests always execute for real; they never skip. The
+seeded rows don't interfere: every test run creates its own uniquely-tagged
+users/panels/products.
 
 ## What the wallet suite proves
 
