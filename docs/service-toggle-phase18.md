@@ -38,6 +38,14 @@ schema's per-panel `userCanDisableService`/`userCanEnableService` flags are
 NOT consulted in Phase 18 (they default to false and would hide the feature
 everywhere); wiring them up is a possible later refinement.
 
+> **Phase 18.1:** the detail page also gained «خرید حجم اضافه ➕»/«خرید
+> زمان اضافه ⏳» (moved off the main menu; they route into the existing
+> Phase 16/17 flows). All detail-page action visibility — the toggle plus
+> both purchase buttons — is now resolved with one panel read by
+> `resolveServiceDetailActions` in `user-services.service.ts`, which
+> replaced this module's single-purpose `resolveToggleAction` helper
+> (`availableToggleAction` is unchanged).
+
 ## Confirmation first — the panel is never called before «yes»
 
 Disable: «آیا از خاموش کردن این سرویس مطمئن هستید؟» plus the warning
@@ -102,8 +110,8 @@ subscription/config links in logs; no payment-side rows are ever touched
 
 ## Intentionally NOT implemented
 
-Change subscription link, change note, transfer, rating, extra volume/time
-from the detail page, admin service management, online gateways, Telegram
-Stars, XUI toggle (safe TODO), per-panel
-`userCanDisableService`/`userCanEnableService` gating, auto re-enable,
-Phase 19+.
+Change subscription link, change note, transfer, rating, admin service
+management, online gateways, Telegram Stars, XUI toggle (safe TODO),
+per-panel `userCanDisableService`/`userCanEnableService` gating, auto
+re-enable, Phase 19+. (Extra volume/time buttons — absent from the detail
+page in Phase 18 — were added there by Phase 18.1.)

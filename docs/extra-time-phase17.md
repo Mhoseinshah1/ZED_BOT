@@ -1,11 +1,19 @@
 # ZED_BOT extra time (Phase 17)
 
-Phase 17 wires «خرید زمان اضافه ⏳» (new main-menu button, ButtonText key
-`extra_time`, callback `user:extra_time`) end-to-end: purchased days extend
+Phase 17 wires «خرید زمان اضافه ⏳» end-to-end: purchased days extend
 the expiry of an EXISTING service — the existing panel account and existing
 `Service` row are updated in place, **never a new Service**. Payment goes
 through card-to-card (Phase 7/8 receipt review) or the wallet (Phase 15),
 both unchanged. `OrderType.EXTRA_TIME` already existed — **no migration**.
+
+> **Phase 18.1 entry-point change:** the button is **no longer on the main
+> menu**. It now lives on the selected-service detail page inside
+> «سرویس‌های من 🛍» and routes straight into this flow's existing
+> `user:et:svc:<serviceSid>` step (skipping the eligible-services list).
+> The old entry `CB.USER_EXTRA_TIME` (`user:extra_time`, ButtonText key
+> `extra_time`) and its eligible-list handler **remain registered** for old
+> Telegram messages that still show the removed main-menu button — the flow
+> itself is unchanged.
 
 Source: `apps/bot/src/services/extra-time.service.ts`, flow in
 `apps/bot/src/handlers/user-extra-time/`, wallet path in

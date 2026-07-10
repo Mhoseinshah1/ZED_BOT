@@ -1,4 +1,6 @@
-import { prisma, ServiceStatus, type Service } from "@zedbot/database";
+import { PanelStatus, prisma, ServiceStatus, type Service } from "@zedbot/database";
+
+import { availableToggleAction, type ToggleAction } from "./service-toggle.service.js";
 
 // =============================================================================
 // User "My Services" data access (Phase 10) - strictly read-only. Every
@@ -60,4 +62,48 @@ export async function getOwnedServiceByShortId(
 
 export function serviceShortId(service: Pick<Service, "id">): string {
   return service.id.slice(0, 8);
+}
+
+/** Action buttons the detail page may show for one service (Phase 18.1). */
+export interface ServiceDetailActions {
+  /** Phase 18 enable/disable toggle, or null for none. */
+  toggleAction: ToggleAction | null;
+  /** «خرید حجم اضافه ➕» - mirrors the Phase 16 eligibility rules. */
+  canBuyExtraVolume: boolean;
+  /** «خرید زمان اضافه ⏳» - mirrors the Phase 17 eligibility rules. */
+  canBuyExtraTime: boolean;
+}
+
+const EXTRA_VOLUME_STATUSES: ServiceStatus[] = [ServiceStatus.ACTIVE, ServiceStatus.LIMITED];
+const EXTRA_TIME_STATUSES: ServiceStatus[] = [
+  ServiceStatus.ACTIVE,
+  ServiceStatus.EXPIRED,
+  ServiceStatus.LIMITED,
+  ServiceStatus.DISABLED,
+];
+
+/**
+ * Resolves every detail-page action with ONE panel read. The routes clicking
+ * through (`user:ev:svc`/`user:et:svc`/toggle) re-validate on their own, so
+ * these flags only gate what renders - a stale button still fails safely.
+ * Unlimited-volume services never offer extra volume; never-expiring
+ * services never offer extra time; a non-ACTIVE (or missing) panel offers
+ * nothing.
+ */
+export async function resolveServiceDetailActions(service: Service): Promise<ServiceDetailActions> {
+  const panel = await prisma.panel.findUnique({
+    where: { id: service.panelId },
+    select: { status: true },
+  });
+  if (panel === null) {
+    return { toggleAction: null, canBuyExtraVolume: false, canBuyExtraTime: false };
+  }
+  const panelActive = panel.status === PanelStatus.ACTIVE;
+  return {
+    toggleAction: availableToggleAction(service, panel.status),
+    canBuyExtraVolume:
+      panelActive && EXTRA_VOLUME_STATUSES.includes(service.status) && service.volumeBytes > 0n,
+    canBuyExtraTime:
+      panelActive && EXTRA_TIME_STATUSES.includes(service.status) && service.expiresAt !== null,
+  };
 }

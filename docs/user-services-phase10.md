@@ -48,12 +48,18 @@ are **never** shown.
 
 Buttons: «بروزرسانی اطلاعات ♻️», «لینک اشتراک 🔗» (only when a
 `subscriptionUrl` is stored), «کانفیگ‌ها 📄» (only when non-empty), «بازگشت
-به لیست», «بازگشت به منو». No renew/extra volume/extra time/location
-change/transfer/edit buttons — later phases. **Phase 18:** the detail page
-additionally shows ONE toggle button when eligible — «خاموش کردن سرویس ⏸»
-(ACTIVE/LIMITED + panel ACTIVE) or «روشن کردن سرویس ▶️» (DISABLED + panel
-ACTIVE + not expired) — see `docs/service-toggle-phase18.md`. Everything
-else on the page stays read-only.
+به لیست», «بازگشت به منو». No renew/location change/transfer/edit buttons —
+later phases. **Phase 18:** the detail page additionally shows ONE toggle
+button when eligible — «خاموش کردن سرویس ⏸» (ACTIVE/LIMITED + panel ACTIVE)
+or «روشن کردن سرویس ▶️» (DISABLED + panel ACTIVE + not expired) — see
+`docs/service-toggle-phase18.md`. **Phase 18.1:** «خرید حجم اضافه ➕»
+(status ACTIVE/LIMITED + finite volume + panel ACTIVE) and «خرید زمان اضافه
+⏳» (status ACTIVE/EXPIRED/LIMITED/DISABLED + finite expiry + panel ACTIVE)
+moved here from the main menu — they jump straight into the existing Phase
+16/17 flows (`user:ev:svc:<sid>` / `user:et:svc:<sid>`), which re-validate
+eligibility on click. All button visibility comes from ONE panel read
+(`resolveServiceDetailActions`). Everything else on the page stays
+read-only.
 
 ## Link / config display
 
@@ -72,10 +78,11 @@ resolves the service with the userId-scoped lookup, so
 answers «مورد یافت نشد.». No panel credentials, raw panel responses or
 internal fields ever reach the user.
 
-> **Phase 16/17 note:** buying extra volume/«خرید زمان اضافه ⏳» for a
-> service lives under the main menu (`docs/extra-volume-phase16.md`,
-> `docs/extra-time-phase17.md`); the service detail view itself stays
-> read-only.
+> **Phase 16/17 note (updated in 18.1):** buying extra volume/«خرید زمان
+> اضافه ⏳» for a service originally lived under the main menu; since Phase
+> 18.1 both actions are offered on the service detail page instead
+> (`docs/extra-volume-phase16.md`, `docs/extra-time-phase17.md`). The old
+> main-menu callbacks stay handled for old Telegram keyboards.
 
 ## Intentionally NOT implemented
 
