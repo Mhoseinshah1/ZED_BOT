@@ -252,13 +252,16 @@ enum SupportMode {
 
 enum SupportTicketStatus {
   OPEN
-  ANSWERED
+  ANSWERED // legacy (pre-Phase 32) - the ticket flow uses WAITING_USER
+  WAITING_ADMIN
+  WAITING_USER
   CLOSED
 }
 
 enum SupportMessageSenderType {
   USER
   ADMIN
+  SYSTEM
 }
 
 enum TutorialMediaType {
@@ -325,6 +328,7 @@ model Admin {
   addedAdmins   Admin[]   @relation("AdminAddedBy")
   permissions   AdminPermission[]
   supportMessages SupportMessage[]
+  closedSupportTickets SupportTicket[] @relation("SupportTicketClosedBy")
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -1205,11 +1209,16 @@ model SupportTicket {
   createdAt DateTime            @default(now())
   updatedAt DateTime            @updatedAt
   closedAt  DateTime?
+  // Phase 32: which admin closed the ticket.
+  closedByAdminId String?
+  closedByAdmin   Admin?  @relation("SupportTicketClosedBy", fields: [closedByAdminId], references: [id])
 
   messages SupportMessage[]
 
   @@index([userId])
   @@index([status])
+  @@index([userId, updatedAt])
+  @@index([status, updatedAt])
 }
 
 model SupportMessage {

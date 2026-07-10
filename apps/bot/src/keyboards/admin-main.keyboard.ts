@@ -27,5 +27,8 @@ export function buildAdminMainKeyboard(): InlineKeyboard {
     .row()
     .text("محصولات دیگر / سفارش‌های محصولات دیگر", CB.ADMIN_OTHER_PRODUCTS)
     .row()
+    // Phase 32: support tickets.
+    .text("تیکت‌های پشتیبانی 🎫", CB.ADMIN_SUPPORT)
+    .row()
     .text("گزارشات / بکاپ", CB.ADMIN_REPORTS_BACKUP);
 }

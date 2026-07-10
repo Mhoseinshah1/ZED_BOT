@@ -7,8 +7,10 @@ import { safeAnswerCallback, safeEditOrReply, safeReply } from "../utils/safe-re
 import { clearAdminPaymentState } from "./admin-finance/admin-finance.handler.js";
 import { clearManualOrderState } from "./admin-manual-orders/manual-orders.handler.js";
 import { clearAdminStockState } from "./admin-stock/stock.handler.js";
+import { clearAdminSupportState } from "./admin-support/support-admin.handler.js";
 import { clearAdminUsersState } from "./admin-users/admin-users.handler.js";
 import { clearCheckoutState } from "./user-checkout/checkout-state.js";
+import { clearSupportState } from "./user-support/support.handler.js";
 
 const ADMIN_MENU_TEXT = "پنل مدیریت 🛠\n\nیک بخش را انتخاب کنید:";
 
@@ -30,6 +32,8 @@ export async function showAdminMenu(ctx: BotContext): Promise<void> {
   clearAdminPaymentState(ctx);
   clearManualOrderState(ctx);
   clearAdminStockState(ctx);
+  clearSupportState(ctx);
+  clearAdminSupportState(ctx);
   ctx.session.currentFlow = null;
   ctx.session.lastMenu = "admin_main";
 }
