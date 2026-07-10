@@ -4,6 +4,7 @@ import { CB } from "../core/callbacks.js";
 import type { BotContext } from "../core/context.js";
 import { buildAdminMainKeyboard } from "../keyboards/admin-main.keyboard.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../utils/safe-reply.js";
+import { clearAdminBroadcastState } from "./admin-broadcast/broadcast.handler.js";
 import { clearAdminPaymentState } from "./admin-finance/admin-finance.handler.js";
 import { clearManualOrderState } from "./admin-manual-orders/manual-orders.handler.js";
 import { clearAdminStockState } from "./admin-stock/stock.handler.js";
@@ -34,6 +35,7 @@ export async function showAdminMenu(ctx: BotContext): Promise<void> {
   clearAdminStockState(ctx);
   clearSupportState(ctx);
   clearAdminSupportState(ctx);
+  clearAdminBroadcastState(ctx);
   ctx.session.currentFlow = null;
   ctx.session.lastMenu = "admin_main";
 }

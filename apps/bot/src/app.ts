@@ -66,6 +66,10 @@ import {
   adminSupportTextHandler,
 } from "./handlers/admin-support/support-admin.handler.js";
 import {
+  adminBroadcastHandler,
+  adminBroadcastTextHandler,
+} from "./handlers/admin-broadcast/broadcast.handler.js";
+import {
   walletHandler,
   walletTopupTextHandler,
 } from "./handlers/user-wallet/wallet.handler.js";
@@ -120,6 +124,8 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(stockHandler);
   // Phase 32: support tickets («تیکت‌های پشتیبانی 🎫»).
   adminArea.use(adminSupportHandler);
+  // Phase 33: text broadcasts («پیام همگانی 📣»).
+  adminArea.use(adminBroadcastHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
@@ -136,6 +142,7 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(manualOrdersTextHandler);
   adminFlowText.use(stockTextHandler);
   adminFlowText.use(adminSupportTextHandler);
+  adminFlowText.use(adminBroadcastTextHandler);
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {
