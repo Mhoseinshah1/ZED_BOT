@@ -85,6 +85,10 @@ Created only on continue, using the existing Phase 2 model fields:
 `discountAmountToman`, `finalPriceToman`, `expiresAt`.
 
 - Expiry: now + `checkout_expiry_minutes` Setting (integer, fallback 30).
+- **Phase 23:** paid `OTHER_PRODUCT` checkouts now continue into the manual
+  admin-delivery lifecycle (required user info + «سفارش‌های دستی 📦») — see
+  `docs/other-products-manual-delivery-phase23.md`. The checkout itself is
+  unchanged.
 - Idempotency: before creating, all other PENDING sessions of the same
   user+product are marked CANCELLED — repeated continue clicks leave exactly
   one live pending checkout.

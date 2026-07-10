@@ -17,6 +17,14 @@ import {
   adminUsersHandler,
   adminUsersTextHandler,
 } from "./handlers/admin-users/admin-users.handler.js";
+import {
+  manualOrdersHandler,
+  manualOrdersTextHandler,
+} from "./handlers/admin-manual-orders/manual-orders.handler.js";
+import {
+  otherProductInfoHandler,
+  otherProductInfoTextHandler,
+} from "./handlers/user-other-products/other-product-info.handler.js";
 import { panelHandler, panelTextHandler } from "./handlers/panels/panel.handler.js";
 import { productHandler, productTextHandler } from "./handlers/products/product.handler.js";
 import {
@@ -95,6 +103,7 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(receiptsHandler);
   adminArea.use(adminUsersHandler);
   adminArea.use(adminFinanceHandler);
+  adminArea.use(manualOrdersHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
@@ -108,6 +117,7 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(productTextHandler);
   adminFlowText.use(adminUsersTextHandler);
   adminFlowText.use(adminFinanceTextHandler);
+  adminFlowText.use(manualOrdersTextHandler);
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {
@@ -146,6 +156,10 @@ export function createBot(token: string): Bot<BotContext> {
       await walletTopupTextHandler.middleware()(ctx, next);
       return;
     }
+    if (flow === "other_product:info") {
+      await otherProductInfoTextHandler.middleware()(ctx, next);
+      return;
+    }
     if (ctx.admin === null) {
       return next();
     }
@@ -163,6 +177,7 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(extraVolumeHandler);
   userArea.use(extraTimeHandler);
   userArea.use(walletHandler);
+  userArea.use(otherProductInfoHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());

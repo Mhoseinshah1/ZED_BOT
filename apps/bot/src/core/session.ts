@@ -195,6 +195,10 @@ export interface SessionData {
     adminUserSearchQuery?: string;
     // Admin card-to-card configuration (Phase 21).
     adminPaymentDraft?: AdminPaymentDraft;
+    // OTHER_PRODUCT required-info intake (Phase 23, flow "other_product:info").
+    otherProductInfoRecordId?: string;
+    // Admin manual delivery draft (Phase 23, flow "admin_manual:deliver_text").
+    adminDeliveryDraft?: { recordId: string; deliveryText?: string };
     [key: string]: unknown;
   };
 }
