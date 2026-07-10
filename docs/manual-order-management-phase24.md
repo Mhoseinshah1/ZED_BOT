@@ -84,17 +84,18 @@ short ids fail; `initManualDelivery` output feeds the filters. (A true
 ambiguous-uuid-prefix collision is impractical to fabricate; the
 `take 2`-based ambiguity guard is unchanged from Phase 23.)
 
-## Phase 25 note
+## Later phases
 
-Manual orders now also include the **stock fallback cases**: orders whose
-product has auto-delivery enabled but whose inventory was exhausted (or
-whose automatic send failed) arrive here as WAITING_ADMIN_DELIVERY with the
-usual admin notifications (`docs/other-product-stock-phase25.md`). The
-landing additionally links «مدیریت موجودی محصولات 🎟».
+Phase 25 added **stock auto-delivery** for eligible products; manual orders
+now also include its **fallback cases** — orders whose inventory was
+exhausted or whose automatic send failed arrive here as
+WAITING_ADMIN_DELIVERY with the usual admin notifications
+(`docs/other-product-stock-phase25.md`). The landing additionally links
+«مدیریت موجودی محصولات 🎟», where Phase 26 added safe cleanup of stuck
+RESERVED stock items (release back to inventory / disable).
 
 ## Intentionally NOT implemented
 
-Cancellation/refund/rejection, stock auto-delivery (arrived in Phase 25),
-file delivery, wallet
-payment for OTHER_PRODUCT, online gateways, Telegram Stars,
-reports/export, web panel, mini app, Phase 25+.
+Cancellation/refund/rejection, file delivery, wallet payment for
+OTHER_PRODUCT, online gateways, Telegram Stars, reports/export, web panel,
+mini app.

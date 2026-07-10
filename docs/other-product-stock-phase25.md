@@ -37,9 +37,9 @@ add-item confirmation; item lists show status/label/dates, never content.
 📦» → «مدیریت موجودی محصولات 🎟» (`admin:stock:products`; kept next to the
 manual orders since both manage OTHER_PRODUCT fulfilment). Product list:
 `🎟/📦 name | فعال/غیرفعال | موجود: N` (stock-eligible first). Product page:
-deliveryType, تحویل استاک روشن/خاموش, available/delivered/disabled
-(+reserved when non-zero) counters, and a ⚠️ warning when stock delivery is
-on with zero available items. Buttons: «افزودن آیتم موجودی ➕», «مشاهده
+deliveryType, تحویل استاک روشن/خاموش, available/delivered/disabled counters
+plus an always-visible «رزروشده/گیرکرده» counter (Phase 26), and a ⚠️
+warning when stock delivery is on with zero available items. Buttons: «افزودن آیتم موجودی ➕», «مشاهده
 آیتم‌های موجودی», the `stockEnabled` toggle, «بازگشت».
 
 ## Add / list / disable
@@ -50,9 +50,11 @@ product, label and the **masked preview only** → «تایید افزودن ✅
 and creates the item AVAILABLE with `createdByAdminId`. The draft is
 consumed before creating (double-click safe); nothing is sent to any user
 and no Payment/Order/CheckoutSession is written. Item list: 10/page,
-`status | label | createdAt` (+deliveredAt/order short id when delivered),
-a disable button per AVAILABLE item (AVAILABLE → DISABLED, status-guarded —
-delivered/reserved items are not actionable), **no hard delete**.
+`status | label | createdAt` (+deliveredAt/order short id when delivered;
+RESERVED rows show the claiming order/user short ids), a disable button per
+AVAILABLE item (AVAILABLE → DISABLED, status-guarded), Phase 26
+release/disable buttons per RESERVED item (below), **no hard delete** —
+delivered items are never actionable.
 
 ## Auto-delivery lifecycle
 
@@ -83,6 +85,24 @@ RESERVED with this order's id; the next attempt **resumes that same item**
 (never a second item, never another user's item) — the user could then
 receive the same content twice, which is harmless for single-use codes and
 documented here.
+
+## Stuck RESERVED cleanup (Phase 26)
+
+When no retry resolves a stuck claim, the item list offers two
+admin actions per RESERVED item: «آزادسازی رزرو» (RESERVED → AVAILABLE,
+claim fields cleared, content/label untouched — the item returns to
+inventory) and «غیرفعال کردن رزرو» (RESERVED → DISABLED + `disabledAt`,
+claim fields cleared). Both run a status-guarded `updateMany` and share a
+safety check (`releaseReservedStockItem` / `disableReservedStockItem` in
+the stock service): if `deliveredOrderId` points at a **COMPLETED** Order
+the item is refused («این سفارش تکمیل شده و آیتم قابل آزادسازی نیست.») —
+it was almost certainly delivered and only the finalize write was lost, so
+releasing it could hand the same content to a second buyer. A PAID order
+is actionable; a missing order is allowed with a warning log (ids only).
+DELIVERED items stay immutable, AVAILABLE items report «این آیتم رزرو
+نیست.», and content is never decrypted, logged or shown by these actions.
+No Payment/Order/CheckoutSession row is touched and no user is notified.
+Tests: `apps/bot/tests/other-product-stock-reserved.test.ts`.
 
 ## Fallback to manual delivery
 
@@ -129,4 +149,4 @@ File delivery, CSV/bulk import, hard delete, wallet payment for
 OTHER_PRODUCT, refunds/cancellation, auto-delivery after required-info
 submission (manual path instead — TODO), low-stock counter on the
 manual-orders landing (optional in spec), online gateways, Telegram Stars,
-reports/export, web panel, mini app, Phase 26+.
+reports/export, web panel, mini app, Phase 27+.

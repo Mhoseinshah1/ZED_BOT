@@ -5,6 +5,7 @@ import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import {
   addStockItem,
+  disableReservedStockItem,
   disableStockItem,
   getStockCounts,
   getStockItemByShortId,
@@ -14,6 +15,7 @@ import {
   isStockDeliveryProduct,
   listStockItems,
   listStockProducts,
+  releaseReservedStockItem,
   STOCK_CONTENT_MAX,
   STOCK_LABEL_MAX,
   stockContentPreview,
@@ -46,6 +48,8 @@ const ST_CB = {
   addCancel: "admin:stock:add_cancel",
   items: (sid: string, page: number): string => `admin:stock:items:${sid}:${page}`,
   disableItem: (itemSid: string): string => `admin:stock:item_off:${itemSid}`,
+  releaseReserved: (itemSid: string): string => `admin:stock:item_release:${itemSid}`,
+  disableReserved: (itemSid: string): string => `admin:stock:item_disable_reserved:${itemSid}`,
 } as const;
 
 export const stockHandler = new Composer<BotContext>();
@@ -93,10 +97,8 @@ async function renderProductPage(ctx: BotContext, product: Product): Promise<voi
     `نوع تحویل: ${product.deliveryType ?? "-"}`,
     `تحویل استاک: ${isStockDeliveryProduct(product) ? "روشن ✅" : "خاموش ⏸"}`,
     `موجود: ${counts.available} | تحویل‌شده: ${counts.delivered} | غیرفعال: ${counts.disabled}`,
+    `رزروشده/گیرکرده: ${counts.reserved}`,
   ];
-  if (counts.reserved > 0) {
-    lines.push(`رزروشده (در حال تحویل): ${counts.reserved}`);
-  }
   if (isStockDeliveryProduct(product) && counts.available === 0) {
     lines.push("", "⚠️ موجودی خودکار تمام شده است؛ سفارش‌های جدید به تحویل دستی می‌روند.");
   }
@@ -128,13 +130,21 @@ function itemLine(item: OtherProductStockItem): string {
     parts.push(escapeHtml(item.label));
   }
   parts.push(item.createdAt.toISOString().slice(0, 10));
-  if (item.status === "DELIVERED") {
-    if (item.deliveredAt !== null) {
-      parts.push(`تحویل: ${item.deliveredAt.toISOString().slice(0, 10)}`);
-    }
-    if (item.deliveredOrderId !== null) {
-      parts.push(`سفارش: ${item.deliveredOrderId.slice(0, 8)}`);
-    }
+  if (item.status === "DELIVERED" && item.deliveredAt !== null) {
+    parts.push(`تحویل: ${item.deliveredAt.toISOString().slice(0, 10)}`);
+  }
+  // Claim context for RESERVED (stuck) and DELIVERED items alike.
+  if (
+    (item.status === "DELIVERED" || item.status === "RESERVED") &&
+    item.deliveredOrderId !== null
+  ) {
+    parts.push(`سفارش: ${item.deliveredOrderId.slice(0, 8)}`);
+  }
+  if (
+    (item.status === "DELIVERED" || item.status === "RESERVED") &&
+    item.deliveredToUserId !== null
+  ) {
+    parts.push(`کاربر: ${item.deliveredToUserId.slice(0, 8)}`);
   }
   return parts.join(" | ");
 }
@@ -151,11 +161,15 @@ async function renderItems(ctx: BotContext, product: Product, page: number): Pro
   }
   const kb = new InlineKeyboard();
   for (const item of pageData.items) {
+    const name = item.label === null || item.label === "" ? item.id.slice(0, 8) : item.label;
     if (item.status === "AVAILABLE") {
-      kb.text(
-        `غیرفعال کردن ${item.label === null || item.label === "" ? item.id.slice(0, 8) : item.label}`,
-        ST_CB.disableItem(item.id.slice(0, 8)),
-      ).row();
+      kb.text(`غیرفعال کردن ${name}`, ST_CB.disableItem(item.id.slice(0, 8))).row();
+    }
+    // Phase 26: stuck-RESERVED recovery actions.
+    if (item.status === "RESERVED") {
+      kb.text(`آزادسازی رزرو ${name}`, ST_CB.releaseReserved(item.id.slice(0, 8)))
+        .text(`غیرفعال کردن رزرو ${name}`, ST_CB.disableReserved(item.id.slice(0, 8)))
+        .row();
     }
   }
   if (pageData.pages > 1) {
@@ -242,6 +256,37 @@ stockHandler.callbackQuery(/^admin:stock:item_off:([0-9a-f-]+)$/, async (ctx) =>
     disabled ? "آیتم غیرفعال شد ⏸" : "این آیتم قابل غیرفعال کردن نیست.",
   );
   await renderItems(ctx, item.product, 1);
+});
+
+// --- stuck-RESERVED recovery (Phase 26) ------------------------------------------------------
+
+async function handleReservedAction(
+  ctx: BotContext,
+  itemSid: string,
+  action: (itemId: string) => Promise<{ ok: boolean; safeMessage: string; productId?: string }>,
+): Promise<void> {
+  const item = await getStockItemByShortId(itemSid);
+  if (item === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  const result = await action(item.id);
+  await safeAnswerCallback(ctx, result.safeMessage);
+  await renderItems(ctx, item.product, 1);
+}
+
+stockHandler.callbackQuery(/^admin:stock:item_release:([0-9a-f-]+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  await handleReservedAction(ctx, ctx.match[1], releaseReservedStockItem);
+});
+
+stockHandler.callbackQuery(/^admin:stock:item_disable_reserved:([0-9a-f-]+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  await handleReservedAction(ctx, ctx.match[1], disableReservedStockItem);
 });
 
 // --- add-item wizard -----------------------------------------------------------------------

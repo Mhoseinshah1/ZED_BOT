@@ -181,6 +181,128 @@ export async function disableStockItem(itemId: string): Promise<boolean> {
   return false;
 }
 
+// --- stuck RESERVED items (Phase 26) --------------------------------------------------------
+//
+// A crash between the auto-delivery claim and its finalize/rollback leaves an
+// item RESERVED forever. These admin actions make that state manageable. The
+// safety rule: a RESERVED item whose related Order is COMPLETED is NOT
+// touchable (it was most likely delivered and only the finalize write was
+// lost - releasing it could hand the same content to a second buyer).
+// Content is never decrypted or logged here.
+
+export const RESERVED_RELEASED_TEXT = "رزرو آیتم آزاد شد و به موجودی برگشت ✅";
+export const RESERVED_DISABLED_TEXT = "آیتم رزروشده غیرفعال شد ⏸";
+export const ITEM_DELIVERED_IMMUTABLE_TEXT = "آیتم تحویل‌شده قابل تغییر نیست.";
+export const ORDER_COMPLETED_IMMUTABLE_TEXT = "این سفارش تکمیل شده و آیتم قابل آزادسازی نیست.";
+export const ITEM_NOT_RESERVED_TEXT = "این آیتم رزرو نیست.";
+
+export interface ReservedActionResult {
+  ok: boolean;
+  safeMessage: string;
+  productId?: string;
+}
+
+/**
+ * Shared guard: resolves the item, refuses DELIVERED / non-RESERVED states,
+ * and refuses RESERVED items whose related order already COMPLETED. A
+ * missing related order is allowed (logged with ids only).
+ */
+async function checkReservedActionable(
+  itemId: string,
+): Promise<{ ok: true; item: OtherProductStockItem } | { ok: false; result: ReservedActionResult }> {
+  const item = await prisma.otherProductStockItem.findUnique({ where: { id: itemId } });
+  if (item === null) {
+    return { ok: false, result: { ok: false, safeMessage: "مورد یافت نشد." } };
+  }
+  if (item.status === "DELIVERED") {
+    return {
+      ok: false,
+      result: { ok: false, safeMessage: ITEM_DELIVERED_IMMUTABLE_TEXT, productId: item.productId },
+    };
+  }
+  if (item.status !== "RESERVED") {
+    return {
+      ok: false,
+      result: { ok: false, safeMessage: ITEM_NOT_RESERVED_TEXT, productId: item.productId },
+    };
+  }
+  if (item.deliveredOrderId !== null) {
+    const order = await prisma.order.findUnique({
+      where: { id: item.deliveredOrderId },
+      select: { status: true },
+    });
+    if (order === null) {
+      logger.warn("reserved stock item points at a missing order - action allowed", {
+        itemId: item.id,
+        orderId: item.deliveredOrderId,
+      });
+    } else if (order.status === OrderStatus.COMPLETED) {
+      return {
+        ok: false,
+        result: {
+          ok: false,
+          safeMessage: ORDER_COMPLETED_IMMUTABLE_TEXT,
+          productId: item.productId,
+        },
+      };
+    }
+  }
+  return { ok: true, item };
+}
+
+/** RESERVED -> AVAILABLE (claim fields cleared; content/label untouched). */
+export async function releaseReservedStockItem(itemId: string): Promise<ReservedActionResult> {
+  const check = await checkReservedActionable(itemId);
+  if (!check.ok) {
+    return check.result;
+  }
+  const updated = await prisma.otherProductStockItem.updateMany({
+    where: { id: check.item.id, status: "RESERVED" },
+    data: {
+      status: "AVAILABLE",
+      deliveredOrderId: null,
+      deliveredToUserId: null,
+      deliveredAt: null,
+    },
+  });
+  if (updated.count !== 1) {
+    return {
+      ok: false,
+      safeMessage: "وضعیت آیتم تغییر کرده است.",
+      productId: check.item.productId,
+    };
+  }
+  logger.info("reserved stock item released", { itemId: check.item.id });
+  return { ok: true, safeMessage: RESERVED_RELEASED_TEXT, productId: check.item.productId };
+}
+
+/** RESERVED -> DISABLED (claim fields cleared, disabledAt stamped). */
+export async function disableReservedStockItem(itemId: string): Promise<ReservedActionResult> {
+  const check = await checkReservedActionable(itemId);
+  if (!check.ok) {
+    return check.result;
+  }
+  const updated = await prisma.otherProductStockItem.updateMany({
+    where: { id: check.item.id, status: "RESERVED" },
+    data: {
+      status: "DISABLED",
+      disabledAt: new Date(),
+      deliveredOrderId: null,
+      deliveredToUserId: null,
+      deliveredAt: null,
+    },
+  });
+  if (updated.count !== 1) {
+    return {
+      ok: false,
+      safeMessage: "وضعیت آیتم تغییر کرده است.",
+      productId: check.item.productId,
+    };
+  }
+  logger.info("reserved stock item disabled", { itemId: check.item.id });
+  return { ok: true, safeMessage: RESERVED_DISABLED_TEXT, productId: check.item.productId };
+}
+
 /** Toggles per-product stock delivery (Product.stockEnabled). */
 export async function toggleProductStockEnabled(productId: string): Promise<Product | null> {
   const product = await prisma.product.findUnique({ where: { id: productId } });
