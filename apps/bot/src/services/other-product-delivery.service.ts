@@ -286,11 +286,19 @@ export type DeliverOutcome =
   | { ok: false; error: string; safeMessage: string };
 
 /**
- * Delivers one manual order, per the required ordering: re-check status ->
- * send to the user -> ONLY on a successful send mark DELIVERED (status-
- * guarded updateMany; a concurrent delivery that marked first wins and this
- * one reports "already delivered") and complete the Order. A failed send
- * changes nothing.
+ * Delivers one manual order with an ATOMIC CLAIM so the user can never
+ * receive the same delivery twice:
+ *
+ *   1. CAS-claim the record BEFORE sending (status WAITING_ADMIN_DELIVERY
+ *      and all delivery fields still null -> write adminDeliveryText +
+ *      deliveredByAdminId). Exactly one concurrent admin wins; the loser
+ *      returns a safe message WITHOUT sending.
+ *   2. Send to the user.
+ *   3. Send succeeded -> finalize (status DELIVERED + deliveredAt, Order ->
+ *      COMPLETED). Send failed -> roll back ONLY our own claim (the where
+ *      matches our exact claimed values, so a newer claim after the
+ *      rollback window can never be cleared) and report failure - the
+ *      record stays deliverable.
  */
 export async function deliverManualOrder(
   api: DeliverySendApi,
@@ -314,6 +322,32 @@ export async function deliverManualOrder(
     return { ok: false, error: `record status is ${record.status}`, safeMessage: NOT_READY_TEXT };
   }
 
+  // Step 1 - atomic claim. The null-field conditions mean a record that is
+  // mid-delivery by another admin (claimed but not yet finalized) cannot be
+  // claimed again, so at most ONE send can ever happen.
+  const claimed = await prisma.otherProductOrder.updateMany({
+    where: {
+      id: record.id,
+      status: "WAITING_ADMIN_DELIVERY",
+      adminDeliveryText: null,
+      deliveredByAdminId: null,
+      deliveredAt: null,
+    },
+    data: { adminDeliveryText: deliveryText, deliveredByAdminId: args.adminId },
+  });
+  if (claimed.count !== 1) {
+    const current = await prisma.otherProductOrder.findUnique({
+      where: { id: record.id },
+      select: { status: true },
+    });
+    return {
+      ok: false,
+      error: "claim lost to a concurrent delivery",
+      safeMessage: current?.status === "DELIVERED" ? ALREADY_DELIVERED_TEXT : NOT_READY_TEXT,
+    };
+  }
+
+  // Step 2 - send. Only the claim winner ever reaches this line.
   try {
     await api.sendMessage(
       record.user.telegramId.toString(),
@@ -326,25 +360,40 @@ export async function deliverManualOrder(
       orderId: record.orderId,
       error: errorMessage(err),
     });
+    // Roll back OUR claim only: the where repeats the exact values we
+    // wrote, so a claim made by someone else after this window is safe.
+    try {
+      await prisma.otherProductOrder.updateMany({
+        where: {
+          id: record.id,
+          status: "WAITING_ADMIN_DELIVERY",
+          adminDeliveryText: deliveryText,
+          deliveredByAdminId: args.adminId,
+          deliveredAt: null,
+        },
+        data: { adminDeliveryText: null, deliveredByAdminId: null },
+      });
+    } catch (rollbackErr) {
+      // A stuck claim blocks future deliveries - log loudly for manual review.
+      logger.error("manual delivery claim rollback failed", {
+        recordId: record.id,
+        error: errorMessage(rollbackErr),
+      });
+    }
     return { ok: false, error: "user send failed", safeMessage: DELIVERY_SEND_FAILED_TEXT };
   }
 
+  // Step 3 - finalize our own claim.
   const now = new Date();
-  const marked = await prisma.otherProductOrder.updateMany({
-    where: { id: record.id, status: "WAITING_ADMIN_DELIVERY" },
-    data: {
-      status: "DELIVERED",
+  await prisma.otherProductOrder.updateMany({
+    where: {
+      id: record.id,
+      status: "WAITING_ADMIN_DELIVERY",
       adminDeliveryText: deliveryText,
       deliveredByAdminId: args.adminId,
-      deliveredAt: now,
     },
+    data: { status: "DELIVERED", deliveredAt: now },
   });
-  if (marked.count !== 1) {
-    // A concurrent delivery won between our check and mark. The user may
-    // have received two messages; the DB stays consistent (first wins).
-    logger.warn("manual delivery lost concurrency race after send", { recordId: record.id });
-    return { ok: false, error: "concurrent delivery", safeMessage: ALREADY_DELIVERED_TEXT };
-  }
   await prisma.order.updateMany({
     where: { id: record.orderId, status: OrderStatus.PAID },
     data: { status: OrderStatus.COMPLETED, completedAt: now },

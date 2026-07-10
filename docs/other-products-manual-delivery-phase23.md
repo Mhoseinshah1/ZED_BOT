@@ -69,15 +69,28 @@ schema's reminder counters), «بازگشت».
 را وارد کنید.» (1..4000 chars, `/`-commands cancel) → confirmation with
 order/product/user and a preview → «تایید و ارسال به کاربر ✅». On confirm
 (the draft is consumed FIRST, so a double-clicked confirm cannot deliver
-twice): re-read + status re-check → **send to the user** → only on a
-successful send, a status-guarded `updateMany`
-(`WAITING_ADMIN_DELIVERY → DELIVERED`) stores `adminDeliveryText`,
-`deliveredByAdminId`, `deliveredAt` and completes the Order. Already
-delivered → «این سفارش قبلاً تحویل شده است.» Failed send → «ارسال پیام به
-کاربر ناموفق بود؛ سفارش تحویل‌خورده نشد.» and NOTHING changes (test-
-verified). A concurrent delivery race after a successful send loses the
-mark CAS and reports already-delivered (first mark wins; DB stays
-consistent).
+twice), delivery runs as **claim → send → finalize**:
+
+1. **Atomic claim before sending**: a CAS `updateMany` requires status
+   `WAITING_ADMIN_DELIVERY` AND `adminDeliveryText`/`deliveredByAdminId`/
+   `deliveredAt` all still null, and writes the delivery text + admin id.
+   Two concurrent admins can never both claim — the loser returns a safe
+   message («این سفارش قبلاً تحویل شده است.» when delivered, otherwise the
+   not-ready notice) **without sending**, so the user can never receive the
+   same delivery twice (test: `Promise.all` double delivery → exactly one
+   message).
+2. **Send** «سفارش شما آماده شد ✅» + product + delivery text — only the
+   claim winner reaches this step.
+3. **Finalize**: status → `DELIVERED` + `deliveredAt`, Order → `COMPLETED`.
+   A failed send instead **rolls back only our own claim** (the rollback
+   `where` repeats the exact claimed values, so a newer claim made after
+   the rollback window can never be cleared) and reports «ارسال پیام به
+   کاربر ناموفق بود؛ سفارش تحویل‌خورده نشد.» — the record stays fully
+   deliverable (test-verified, including a successful redelivery).
+
+Known limitation: a process crash between claim and finalize/rollback
+leaves a stale claim that blocks delivery until resolved manually (logged
+loudly if rollback itself fails); the window is a single Telegram send.
 
 ## Wallet integration status
 
