@@ -52,6 +52,12 @@ import {
 // nonce is minted when the pre-invoice opens). A double click or concurrent
 // duplicate hits the unique key and gets the FIRST result back - the
 // balance can never be deducted twice for one pre-invoice.
+//
+// Overspend safety: DIFFERENT drafts (different nonces) don't share an
+// idempotency key, so they compete on the balance itself - deduction is an
+// atomic conditional update (WHERE balanceToman >= amount), never a
+// read-check-then-decrement. If funds only cover one of two racing drafts,
+// exactly one wins; the other rolls back with INSUFFICIENT_BALANCE_TEXT.
 // =============================================================================
 
 export const WALLET_ORDER_PAYMENT_REASON = "WALLET_ORDER_PAYMENT";
@@ -133,8 +139,12 @@ async function loadExistingWalletPayment(
 
 /**
  * The atomic wallet-payment transaction shared by purchase and renewal.
- * Balance is re-checked on a fresh row INSIDE the transaction; a negative
- * balance is impossible.
+ * Balance enforcement is a CONDITIONAL update (`updateMany` filtered on
+ * `balanceToman >= finalPriceToman`), not a read-then-check: the database
+ * re-evaluates the condition against the current committed row under the
+ * row lock, so two DIFFERENT drafts racing on one wallet can never both
+ * spend a balance that only covers one - the loser matches 0 rows and the
+ * whole transaction rolls back. A negative balance is impossible.
  */
 async function executeWalletOrderPayment(
   user: User,
@@ -150,11 +160,6 @@ async function executeWalletOrderPayment(
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const freshUser = await tx.user.findUniqueOrThrow({ where: { id: user.id } });
-      if (freshUser.balanceToman < args.finalPriceToman) {
-        throw new WalletPaymentAbort(INSUFFICIENT_BALANCE_TEXT);
-      }
-
       const checkout = await tx.checkoutSession.create({
         data: {
           userId: user.id,
@@ -219,10 +224,16 @@ async function executeWalletOrderPayment(
         data: { orderId: order.id },
       });
 
-      const balanceBefore = freshUser.balanceToman;
-      const balanceAfter = balanceBefore - args.finalPriceToman;
-      await tx.user.update({
-        where: { id: user.id },
+      // SECURITY-CRITICAL: atomic check-and-deduct. The WHERE condition is
+      // re-evaluated by PostgreSQL against the committed row while holding
+      // its lock, so a concurrent spend from a DIFFERENT draft can never
+      // sneak past a stale balance read. 0 rows matched = insufficient
+      // funds = the whole transaction (checkout/payment/order above) rolls
+      // back. Deliberately placed AFTER payment.create: a concurrent
+      // SAME-draft duplicate blocks on the unique idempotencyKey first and
+      // resolves via the P2002 path without ever touching the balance.
+      const deducted = await tx.user.updateMany({
+        where: { id: user.id, balanceToman: { gte: args.finalPriceToman } },
         data: {
           balanceToman: { decrement: args.finalPriceToman },
           totalSpentToman: { increment: args.finalPriceToman },
@@ -234,6 +245,17 @@ async function executeWalletOrderPayment(
           totalPurchaseAmountToman: { increment: args.finalPriceToman },
         },
       });
+      if (deducted.count !== 1) {
+        throw new WalletPaymentAbort(INSUFFICIENT_BALANCE_TEXT);
+      }
+      // Exact ledger values from the row we just updated (still locked by
+      // this transaction, so no other spend can interleave).
+      const updatedUser = await tx.user.findUniqueOrThrow({
+        where: { id: user.id },
+        select: { balanceToman: true },
+      });
+      const balanceAfter = updatedUser.balanceToman;
+      const balanceBefore = balanceAfter + args.finalPriceToman;
       const walletTransaction = await tx.walletTransaction.create({
         data: {
           userId: user.id,
