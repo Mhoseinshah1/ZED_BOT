@@ -10,6 +10,8 @@ import type {
   GetServiceAccountResult,
   NormalizedAccountStatus,
   PanelHealthResult,
+  RegenerateSubscriptionInput,
+  RegenerateSubscriptionResult,
   RenewServiceAccountInput,
   RenewServiceAccountResult,
   SetServiceStatusInput,
@@ -369,6 +371,72 @@ export class MarzbanAdapter implements PanelAdapter {
         : this.client.credentials.baseUrl;
     const user = modified.user;
     const result: SetServiceStatusResult = {
+      ok: true,
+      username: user.username,
+      status: normalizeStatus(user.status),
+    };
+    if (typeof user.used_traffic === "number") {
+      result.usedBytes = nonNegativeBigInt(user.used_traffic);
+    }
+    if (user.data_limit !== undefined) {
+      result.totalBytes =
+        typeof user.data_limit === "number" && user.data_limit > 0
+          ? nonNegativeBigInt(user.data_limit)
+          : null;
+      if (result.totalBytes === null) {
+        result.remainingBytes = null;
+      } else {
+        const used = result.usedBytes ?? 0n;
+        result.remainingBytes = result.totalBytes > used ? result.totalBytes - used : 0n;
+      }
+    }
+    if (user.expire !== undefined) {
+      result.expiresAt =
+        typeof user.expire === "number" && user.expire > 0 ? new Date(user.expire * 1000) : null;
+    }
+    const subscriptionUrl = resolveSubscriptionUrl(user.subscription_url, subscriptionBase);
+    if (subscriptionUrl !== undefined) {
+      result.subscriptionUrl = subscriptionUrl;
+    }
+    if (Array.isArray(user.links)) {
+      const links = user.links.filter((l): l is string => typeof l === "string" && l !== "");
+      if (links.length > 0) {
+        result.configLinks = links;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Subscription regeneration (Phase 19) via the documented
+   * POST /api/user/{username}/revoke_sub endpoint: Marzban revokes the
+   * subscription (old link/tokens stop working) and returns the user with
+   * the NEW subscription_url/links. Nothing else is sent - no PUT, no
+   * reset, no rename - so quota, expiry and usage stay untouched.
+   */
+  async regenerateSubscription(
+    input: RegenerateSubscriptionInput,
+  ): Promise<RegenerateSubscriptionResult> {
+    const auth = await this.client.getToken();
+    if (!auth.ok || auth.token === undefined) {
+      return { ok: false, errorMessage: `Marzban authentication failed: ${auth.message}` };
+    }
+    const revoked = await this.client.revokeUserSubscription(auth.token, input.username);
+    if (!revoked.ok || revoked.user === undefined) {
+      if (revoked.status === 404) {
+        return { ok: false, errorMessage: "Panel account not found." };
+      }
+      return { ok: false, errorMessage: `Marzban revoke subscription failed: ${revoked.message}` };
+    }
+
+    const subscriptionBase =
+      input.subscriptionBaseUrl !== null &&
+      input.subscriptionBaseUrl !== undefined &&
+      input.subscriptionBaseUrl !== ""
+        ? input.subscriptionBaseUrl
+        : this.client.credentials.baseUrl;
+    const user = revoked.user;
+    const result: RegenerateSubscriptionResult = {
       ok: true,
       username: user.username,
       status: normalizeStatus(user.status),

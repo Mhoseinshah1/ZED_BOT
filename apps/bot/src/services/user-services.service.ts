@@ -1,5 +1,6 @@
 import { PanelStatus, prisma, ServiceStatus, type Service } from "@zedbot/database";
 
+import { linkRegenerationEligibility } from "./service-link.service.js";
 import { availableToggleAction, type ToggleAction } from "./service-toggle.service.js";
 
 // =============================================================================
@@ -64,7 +65,7 @@ export function serviceShortId(service: Pick<Service, "id">): string {
   return service.id.slice(0, 8);
 }
 
-/** Action buttons the detail page may show for one service (Phase 18.1). */
+/** Action buttons the detail page may show for one service (Phase 18.1/19). */
 export interface ServiceDetailActions {
   /** Phase 18 enable/disable toggle, or null for none. */
   toggleAction: ToggleAction | null;
@@ -72,6 +73,8 @@ export interface ServiceDetailActions {
   canBuyExtraVolume: boolean;
   /** «خرید زمان اضافه ⏳» - mirrors the Phase 17 eligibility rules. */
   canBuyExtraTime: boolean;
+  /** «تغییر لینک اشتراک 🔄» - Phase 19 link regeneration eligibility. */
+  canRegenerateLink: boolean;
 }
 
 const EXTRA_VOLUME_STATUSES: ServiceStatus[] = [ServiceStatus.ACTIVE, ServiceStatus.LIMITED];
@@ -96,7 +99,12 @@ export async function resolveServiceDetailActions(service: Service): Promise<Ser
     select: { status: true },
   });
   if (panel === null) {
-    return { toggleAction: null, canBuyExtraVolume: false, canBuyExtraTime: false };
+    return {
+      toggleAction: null,
+      canBuyExtraVolume: false,
+      canBuyExtraTime: false,
+      canRegenerateLink: false,
+    };
   }
   const panelActive = panel.status === PanelStatus.ACTIVE;
   return {
@@ -105,5 +113,6 @@ export async function resolveServiceDetailActions(service: Service): Promise<Ser
       panelActive && EXTRA_VOLUME_STATUSES.includes(service.status) && service.volumeBytes > 0n,
     canBuyExtraTime:
       panelActive && EXTRA_TIME_STATUSES.includes(service.status) && service.expiresAt !== null,
+    canRegenerateLink: linkRegenerationEligibility(service, panel.status).eligible,
   };
 }

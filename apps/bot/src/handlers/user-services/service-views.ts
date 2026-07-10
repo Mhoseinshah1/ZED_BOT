@@ -30,6 +30,8 @@ export const svcCb = {
   disableYes: (sid: string): string => `user:svc:disable:${sid}:yes`,
   enable: (sid: string): string => `user:svc:enable:${sid}`,
   enableYes: (sid: string): string => `user:svc:enable:${sid}:yes`,
+  regenLink: (sid: string): string => `user:svc:regen_link:${sid}`,
+  regenLinkYes: (sid: string): string => `user:svc:regen_link:${sid}:yes`,
 } as const;
 
 const STATUS_LABELS: Record<ServiceStatus, string> = {
@@ -153,6 +155,7 @@ const NO_DETAIL_ACTIONS: ServiceDetailActions = {
   toggleAction: null,
   canBuyExtraVolume: false,
   canBuyExtraTime: false,
+  canRegenerateLink: false,
 };
 
 export function serviceDetailKeyboard(
@@ -171,6 +174,10 @@ export function serviceDetailKeyboard(
   }
   if (hasLink || hasConfigs) {
     kb.row();
+  }
+  // Phase 19: regenerate the subscription link (confirmation follows).
+  if (actions.canRegenerateLink) {
+    kb.text("تغییر لینک اشتراک 🔄", svcCb.regenLink(sid)).row();
   }
   // Phase 18.1: straight into the existing Phase 16/17 selected-service
   // flows - those routes re-validate eligibility on click.
@@ -201,6 +208,14 @@ export function toggleConfirmKeyboard(sid: string, action: ToggleAction): Inline
       : { label: "بله، روشن کن ▶️", cb: svcCb.enableYes(sid) };
   return new InlineKeyboard()
     .text(confirm.label, confirm.cb)
+    .row()
+    .text("انصراف", svcCb.view(sid));
+}
+
+/** Phase 19 confirmation keyboard - the panel is only called after «yes». */
+export function regenLinkConfirmKeyboard(sid: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("تایید تغییر لینک ✅", svcCb.regenLinkYes(sid))
     .row()
     .text("انصراف", svcCb.view(sid));
 }

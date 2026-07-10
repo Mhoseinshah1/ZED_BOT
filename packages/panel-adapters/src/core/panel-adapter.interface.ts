@@ -11,6 +11,8 @@ import type {
   GetServiceAccountResult,
   PanelHealthResult,
   PanelType,
+  RegenerateSubscriptionInput,
+  RegenerateSubscriptionResult,
   RenewServiceAccountInput,
   RenewServiceAccountResult,
 } from "./panel.types.js";
@@ -73,4 +75,13 @@ export interface PanelAdapter {
    * delete/recreate, never fake success.
    */
   setServiceStatus(input: SetServiceStatusInput): Promise<SetServiceStatusResult>;
+
+  /**
+   * Regenerates/revokes one EXISTING account's subscription link (and token
+   * where the panel has one) so the OLD link stops working. The account is
+   * otherwise untouched: no rename, no quota/expiry change, no usage reset.
+   * Same contract: never delete/recreate, never fake success - returning
+   * the old link as if it were new is forbidden.
+   */
+  regenerateSubscription(input: RegenerateSubscriptionInput): Promise<RegenerateSubscriptionResult>;
 }

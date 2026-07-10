@@ -11,6 +11,8 @@ import type {
   GetServiceAccountInput,
   GetServiceAccountResult,
   PanelHealthResult,
+  RegenerateSubscriptionInput,
+  RegenerateSubscriptionResult,
   RenewServiceAccountInput,
   RenewServiceAccountResult,
 } from "../core/panel.types.js";
@@ -108,5 +110,19 @@ export class XuiAdapter implements PanelAdapter {
    */
   async setServiceStatus(_input: SetServiceStatusInput): Promise<SetServiceStatusResult> {
     return { ok: false, errorMessage: "XUI service status change is not implemented yet." };
+  }
+
+  /**
+   * Phase 19: NOT implemented - sanaei-api.txt gives no clear documented
+   * endpoint for revoking/regenerating a client's subscription link, and
+   * returning the OLD link as if it were new would be a fake success.
+   * The user sees a safe error and the DB is untouched.
+   *
+   * TODO(xui-regen-sub): implement per sanaei-api.txt once available.
+   */
+  async regenerateSubscription(
+    _input: RegenerateSubscriptionInput,
+  ): Promise<RegenerateSubscriptionResult> {
+    return { ok: false, errorMessage: "XUI subscription regeneration is not implemented yet." };
   }
 }
