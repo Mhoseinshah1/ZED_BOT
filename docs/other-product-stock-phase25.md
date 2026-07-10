@@ -92,6 +92,12 @@ RESERVED with this order's id; the next attempt **resumes that same item**
 receive the same content twice, which is harmless for single-use codes and
 documented here.
 
+> **Phase 29:** buyers can re-open their completed stock orders under
+> «سفارش‌های من 🧾» and view the delivered content again — decrypted only
+> for the exact owner (`deliveredToUserId` + `deliveredOrderId` checks) —
+> see `docs/user-other-product-orders-phase29.md`. Admin pages still never
+> show content.
+
 ## Stuck RESERVED cleanup (Phase 26)
 
 When no retry resolves a stuck claim, the item list offers two
@@ -157,4 +163,4 @@ OTHER_PRODUCT, refunds/cancellation, auto-delivery after required-info
 submission (manual path instead — TODO), low-stock counter on the
 manual-orders landing (per-product alerts arrived in Phase 28 instead:
 `docs/other-product-stock-alerts-phase28.md`), online gateways, Telegram
-Stars, reports/export, web panel, mini app, Phase 29+.
+Stars, reports/export, web panel, mini app, Phase 30+.
