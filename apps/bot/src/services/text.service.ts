@@ -11,10 +11,6 @@ const TEMPLATE_FALLBACKS: Record<string, string> = {
   bot_off_text: "ربات در حال حاضر در دسترس نیست. لطفا بعدا مراجعه کنید.",
   support_text: "برای ارتباط با پشتیبانی پیام خود را ارسال کنید.",
   faq_text: "سوالات متداول به زودی تکمیل می‌شود.",
-  // Empty states (Phase 39 UI alignment).
-  no_services_text: "شما هنوز سرویسی ندارید.",
-  no_orders_text: "شما هنوز سفارشی ندارید.",
-  no_tickets_text: "هنوز تیکتی ثبت نکرده‌اید.",
 };
 
 const BUTTON_FALLBACKS: Record<string, string> = {
@@ -37,8 +33,6 @@ const BUTTON_FALLBACKS: Record<string, string> = {
   main_menu: "منوی اصلی",
   cancel: "لغو ❌",
   confirm: "تایید ✅",
-  next: "بعدی »",
-  previous: "« قبلی",
 };
 
 const CACHE_TTL_MS = 30_000;

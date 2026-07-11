@@ -6,10 +6,6 @@ import { buildBackToAdminMenuKeyboard } from "../keyboards/common.keyboard.js";
 import { safeAnswerCallback, safeEditOrReply } from "../utils/safe-reply.js";
 import { PLACEHOLDER_TEXT } from "./user-placeholders.handler.js";
 
-// UI alignment (Phase 39): these sections are HIDDEN from the admin main
-// menu (keyboards/admin-main.keyboard.ts) until their real flows land. The
-// callbacks stay registered here ONLY so buttons on old Telegram messages
-// keep answering instead of dead-ending.
 const ADMIN_SECTIONS: Array<{ callback: string; title: string }> = [
   // admin:finance is handled by the real finance flow (admin-finance.handler).
   { callback: CB.ADMIN_PANEL_FEATURES, title: "قابلیت‌های پنل 🛠" },
