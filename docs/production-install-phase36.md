@@ -33,7 +33,10 @@ bash -n scripts/backup-db.sh
 
 `help`, `status`, `ps` (alias), `logs [service]`, `restart`, `start`,
 `stop`, `update`, `backup`, `health`, `doctor`, `shell [service]`,
-`env-check`, `restore-help`. `help` and `restore-help` work even before
+`env-check`, `restore-help` — plus, from later phases, the Phase 37 HTTPS
+commands (`nginx`, `ssl`, `renew-cert`, `https-status`) and the Phase 38
+hardening commands (`firewall`, `security`; run `zedbot security` after
+enabling HTTPS — see `docs/production-security-phase38.md`). `help` and `restore-help` work even before
 installation (they print and exit); everything else requires the installed
 app directory and root.
 

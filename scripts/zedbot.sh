@@ -37,6 +37,8 @@ Commands:
   ssl                     Request the Let's Encrypt certificate and enable HTTPS
   renew-cert              Force a certificate renewal check and reload Nginx
   https-status            Show Nginx/certificate status and probe https://APP_DOMAIN/health
+  firewall                Safe ufw setup (SSH is allowed BEFORE the firewall is enabled)
+  security                Run the read-only security audit (alias: security-check)
   restore-help            Print MANUAL database restore instructions (nothing is executed)
   help                    Show this help
 
@@ -191,6 +193,12 @@ case "$CMD" in
     ;;
   renew-cert)
     exec bash "${SCRIPTS_DIR}/ssl-renew.sh" "$@"
+    ;;
+  firewall)
+    exec bash "${SCRIPTS_DIR}/firewall-setup.sh" "$@"
+    ;;
+  security | security-check)
+    exec bash "${SCRIPTS_DIR}/security-check.sh" "$@"
     ;;
   https-status)
     require_root
