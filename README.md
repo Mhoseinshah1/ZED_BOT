@@ -211,10 +211,20 @@ ZED_BOT requires a **domain name** — the installer asks for it and stores
 `SSL_EMAIL` (default `admin@<domain>`) for future certificates. IP-only mode
 is intentionally not supported.
 
-**SSL/reverse-proxy is not wired up yet in this phase.** The API currently
-listens on plain HTTP at `http://<domain>:<API_PORT>`. A reverse proxy with
-automatic certificates (using the stored domain and email) lands in a later
-phase; all the configuration it needs is already collected.
+**HTTPS (Phase 37):** once the domain's DNS A record points at the server,
+enable the reverse proxy and certificate with:
+
+```bash
+zedbot nginx          # Nginx reverse proxy for APP_DOMAIN -> 127.0.0.1:API_PORT
+zedbot ssl            # Let's Encrypt certificate (webroot) + HTTPS config
+zedbot https-status   # Nginx/cert status + probe https://<domain>/health
+zedbot renew-cert     # force a renewal check (certbot's systemd timer renews automatically)
+```
+
+The API container binds to `127.0.0.1:<API_PORT>` only — the public
+entrypoint is Nginx on ports 80/443 (80 redirects to HTTPS except the ACME
+path). PostgreSQL and Redis remain unexposed. See
+`docs/production-https-phase37.md`.
 
 ## Phase 1 limitations
 
@@ -227,7 +237,6 @@ implemented yet, by design:
 - Marzban / XUI (Sanaei) panel integrations — only placeholder
   interfaces/classes exist in `packages/panel-adapters`
 - Admin panel, reseller system, mini app
-- Reverse proxy / SSL termination (see above)
 
 ## Development foundation
 
