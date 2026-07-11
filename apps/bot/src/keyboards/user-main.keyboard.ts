@@ -4,42 +4,31 @@ import { CB } from "../core/callbacks.js";
 import { getButtonText } from "../services/text.service.js";
 
 /**
- * Main user menu - button texts come from the database (operator-editable).
- * Phase 18.1: «خرید حجم اضافه ➕»/«خرید زمان اضافه ⏳» moved OFF the main
- * menu into the service detail page («سرویس‌های من 🛍» → select a service) -
- * they act on one existing service, so they live next to it. The old
- * CB.USER_EXTRA_VOLUME / CB.USER_EXTRA_TIME handlers stay registered for
- * old Telegram messages that still show the removed buttons.
+ * Main user menu - button texts come from the database (operator-editable
+ * ButtonText rows; Phase 34 admin editing).
+ *
+ * UI alignment (Phase 39): only IMPLEMENTED sections are visible. The
+ * unfinished placeholder sections (referral, free_test, lucky_wheel,
+ * tutorials, pricing, representative_request) are HIDDEN from the menu until
+ * their real flows land - their callbacks stay registered in
+ * user-placeholders.handler.ts so buttons on old Telegram messages keep
+ * answering instead of dead-ending.
+ *
+ * LOCKED layout decisions:
+ *  - «خرید اشتراک» opens the existing subscription purchase flow
+ *    (CB.USER_BUY) - unchanged.
+ *  - «محصولات دیگر» stays a SEPARATE section (CB.USER_OTHER_PRODUCTS) -
+ *    never merged into the subscription purchase.
  */
 export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
-  const [
-    buy,
-    renew,
-    services,
-    wallet,
-    referral,
-    freeTest,
-    wheel,
-    tutorials,
-    support,
-    pricing,
-    representative,
-    otherProducts,
-    myOrders,
-  ] = await Promise.all([
+  const [buy, renew, services, wallet, otherProducts, myOrders, support] = await Promise.all([
     getButtonText("buy_subscription"),
     getButtonText("renew_service"),
     getButtonText("my_services"),
     getButtonText("wallet"),
-    getButtonText("referral"),
-    getButtonText("free_test"),
-    getButtonText("lucky_wheel"),
-    getButtonText("tutorials"),
-    getButtonText("support"),
-    getButtonText("pricing"),
-    getButtonText("representative_request"),
     getButtonText("other_products"),
     getButtonText("my_orders"),
+    getButtonText("support"),
   ]);
 
   return new InlineKeyboard()
@@ -49,18 +38,8 @@ export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
     .text(services, CB.USER_SERVICES)
     .text(wallet, CB.USER_WALLET)
     .row()
-    .text(referral, CB.USER_REFERRAL)
-    .text(freeTest, CB.USER_FREE_TEST)
-    .row()
-    .text(wheel, CB.USER_WHEEL)
-    .text(tutorials, CB.USER_TUTORIALS)
-    .row()
-    .text(support, CB.USER_SUPPORT)
-    .text(pricing, CB.USER_PRICING)
-    .row()
-    .text(representative, CB.USER_REPRESENTATIVE)
     .text(otherProducts, CB.USER_OTHER_PRODUCTS)
+    .text(myOrders, CB.USER_ORDERS)
     .row()
-    // Phase 29: OTHER_PRODUCT order tracking.
-    .text(myOrders, CB.USER_ORDERS);
+    .text(support, CB.USER_SUPPORT);
 }

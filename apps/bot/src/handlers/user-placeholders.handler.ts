@@ -16,6 +16,10 @@ export const PLACEHOLDER_TEXT = "این بخش در فاز بعدی تکمیل �
 // placeholder in this phase.
 // user:support left this list in Phase 32 - the real ticket system
 // (handlers/user-support) owns CB.USER_SUPPORT now.
+// UI alignment (Phase 39): these sections are HIDDEN from the main menu
+// (keyboards/user-main.keyboard.ts) until their real flows land. The
+// callbacks stay registered here ONLY so buttons on old Telegram messages
+// keep answering instead of dead-ending.
 const USER_SECTIONS: Array<{ callback: string; buttonKey: string }> = [
   { callback: CB.USER_REFERRAL, buttonKey: "referral" },
   { callback: CB.USER_FREE_TEST, buttonKey: "free_test" },
