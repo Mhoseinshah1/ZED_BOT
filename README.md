@@ -219,6 +219,8 @@ zedbot nginx          # Nginx reverse proxy for APP_DOMAIN -> 127.0.0.1:API_PORT
 zedbot ssl            # Let's Encrypt certificate (webroot) + HTTPS config
 zedbot https-status   # Nginx/cert status + probe https://<domain>/health
 zedbot renew-cert     # force a renewal check (certbot's systemd timer renews automatically)
+zedbot firewall       # safe ufw setup - SSH is allowed BEFORE enabling (Phase 38)
+zedbot security       # read-only security audit (run it after HTTPS is up)
 ```
 
 The API container binds to `127.0.0.1:<API_PORT>` only — the public

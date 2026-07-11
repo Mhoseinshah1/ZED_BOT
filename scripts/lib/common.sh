@@ -270,6 +270,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${domain};
+    server_tokens off;
 
     location /.well-known/acme-challenge/ {
         root ${ZEDBOT_ACME_WEBROOT};
@@ -301,6 +302,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${domain};
+    server_tokens off;
 
     location /.well-known/acme-challenge/ {
         root ${ZEDBOT_ACME_WEBROOT};
@@ -316,6 +318,7 @@ server {
     listen [::]:443 ssl;
     http2 on;
     server_name ${domain};
+    server_tokens off;
 
     ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;

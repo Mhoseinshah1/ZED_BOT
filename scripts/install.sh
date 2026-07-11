@@ -571,8 +571,31 @@ print_summary() {
     zedbot env-check  - validate the .env configuration (never prints values)
     zedbot nginx      - set up the Nginx reverse proxy
     zedbot ssl        - request the Let's Encrypt certificate (HTTPS)
+    zedbot firewall   - safe ufw setup (SSH stays allowed)
+    zedbot security   - read-only security audit
 
 EOF
+}
+
+# Safe firewall (Phase 38). Never enabled automatically and never fails the
+# installation - the SSH rule is added before ufw can ever be enabled.
+setup_firewall_if_requested() {
+  local wanted=""
+  if [ "${ZEDBOT_ENABLE_FIREWALL:-0}" = "1" ]; then
+    wanted=1
+  elif [ "${ZEDBOT_NONINTERACTIVE:-0}" = "1" ]; then
+    wanted=""
+  elif confirm "Configure safe firewall rules now (ufw: allow SSH/80/443, deny other incoming)?" "n"; then
+    wanted=1
+  fi
+  if [ -z "$wanted" ]; then
+    log_info "Skipping the firewall. Configure it later with: zedbot firewall (audit: zedbot security)"
+    return 0
+  fi
+  if ! bash "${APP_DIR}/scripts/firewall-setup.sh"; then
+    log_warn "Firewall setup failed. The app keeps running; retry later with: zedbot firewall"
+  fi
+  return 0
 }
 
 # Nginx + HTTPS (Phase 37). Never fails the installation: the app services
@@ -624,6 +647,7 @@ main() {
     bash "${APP_DIR}/scripts/doctor.sh" || log_warn "Doctor reported problems. Run 'zedbot doctor' for details."
   fi
   setup_https_if_requested
+  setup_firewall_if_requested
   print_summary
 }
 

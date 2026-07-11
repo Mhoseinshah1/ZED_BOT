@@ -76,6 +76,10 @@ services:
     command: ["node", "apps/api/dist/index.js"]
     env_file:
       - .env
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
     ports:
       # Loopback only (Phase 37): the public entrypoint is Nginx on 80/443.
       - "127.0.0.1:${API_PORT:-3000}:${API_PORT:-3000}"
@@ -103,6 +107,10 @@ services:
     command: ["node", "apps/bot/dist/index.js"]
     env_file:
       - .env
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
     depends_on:
       api:
         condition: service_healthy
@@ -123,6 +131,10 @@ services:
     command: ["node", "apps/worker/dist/index.js"]
     env_file:
       - .env
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
     depends_on:
       postgres:
         condition: service_healthy

@@ -77,7 +77,8 @@ describe("HTTPS deploy scripts (Phase 37)", () => {
     expect(conf).toContain("proxy_pass http://127.0.0.1:3000;");
     expect(conf).toContain("location /.well-known/acme-challenge/");
     // No secrets ever appear - the config carries only domain + port.
-    expect(conf).not.toMatch(/APP_SECRET|TOKEN|PASSWORD|postgres(ql)?:\/\//i);
+    // (server_tokens off; is an nginx directive, not a secret - hence BOT_TOKEN.)
+    expect(conf).not.toMatch(/APP_SECRET|BOT_TOKEN|PASSWORD|postgres(ql)?:\/\//i);
   });
 
   it("rejects unsafe or invalid domains", () => {
