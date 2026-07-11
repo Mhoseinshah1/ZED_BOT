@@ -21,7 +21,7 @@ import {
   TOGGLE_ENABLED_OK_TEXT,
   type ToggleAction,
 } from "../../services/service-toggle.service.js";
-import { getButtonText } from "../../services/text.service.js";
+import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
 import {
   getOwnedServiceByShortId,
   listUserServices,
@@ -75,7 +75,7 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
   if (pageData.total === 0) {
     const buy = await getButtonText("buy_subscription");
     const kb = new InlineKeyboard().text(buy, CB.USER_BUY).row().text("بازگشت به منو", CB.USER_MENU);
-    await safeEditOrReply(ctx, "شما هنوز سرویسی ندارید.", kb);
+    await safeEditOrReply(ctx, await getMessageTemplate("no_services_text"), kb);
     return;
   }
   await safeEditOrReply(ctx, "سرویس‌های من 🛍", serviceListKeyboard(pageData));

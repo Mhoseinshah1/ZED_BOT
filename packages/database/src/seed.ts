@@ -98,6 +98,25 @@ const INITIAL_MESSAGE_TEMPLATES: Array<{
     category: "general",
     defaultContent: "سوالات متداول به زودی تکمیل می‌شود.",
   },
+  // Empty states (Phase 39 UI alignment) - no variables.
+  {
+    key: "no_services_text",
+    title: "پیام نبود سرویس",
+    category: "empty_state",
+    defaultContent: "شما هنوز سرویسی ندارید.",
+  },
+  {
+    key: "no_orders_text",
+    title: "پیام نبود سفارش",
+    category: "empty_state",
+    defaultContent: "شما هنوز سفارشی ندارید.",
+  },
+  {
+    key: "no_tickets_text",
+    title: "پیام نبود تیکت",
+    category: "empty_state",
+    defaultContent: "هنوز تیکتی ثبت نکرده‌اید.",
+  },
 ];
 
 async function seedAdmins(): Promise<number> {
@@ -158,6 +177,8 @@ const INITIAL_BUTTON_TEXTS: Array<{ key: string; title: string; text: string }> 
   { key: "main_menu", title: "منوی اصلی", text: "منوی اصلی" },
   { key: "cancel", title: "لغو", text: "لغو ❌" },
   { key: "confirm", title: "تایید", text: "تایید ✅" },
+  { key: "next", title: "بعدی", text: "بعدی »" },
+  { key: "previous", title: "قبلی", text: "« قبلی" },
 ];
 
 async function seedButtonTexts(): Promise<number> {
