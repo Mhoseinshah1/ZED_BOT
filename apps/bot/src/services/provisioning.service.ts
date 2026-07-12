@@ -114,16 +114,20 @@ export async function failOrderWithRefund(
       // Fully-discounted order: nothing to move, FAILED is enough.
       return true;
     }
-    const freshUser = await tx.user.findUniqueOrThrow({ where: { id: order.userId } });
-    const balanceBefore = freshUser.balanceToman;
-    const balanceAfter = balanceBefore + order.finalPriceToman;
-    await tx.user.update({
+    // LEDGER-CRITICAL: the increment UPDATE takes the row lock and returns
+    // the post-update row, so balanceBefore/balanceAfter always describe
+    // the real transition. A plain pre-read here would race a concurrent
+    // wallet operation and record a before/after pair that never existed.
+    const credited = await tx.user.update({
       where: { id: order.userId },
       data: {
         balanceToman: { increment: order.finalPriceToman },
         totalRefundedToman: { increment: order.finalPriceToman },
       },
+      select: { balanceToman: true },
     });
+    const balanceAfter = credited.balanceToman;
+    const balanceBefore = balanceAfter - order.finalPriceToman;
     await tx.walletTransaction.create({
       data: {
         userId: order.userId,

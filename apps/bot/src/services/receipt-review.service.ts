@@ -416,16 +416,20 @@ async function approveWalletTopup(
         return { walletTransaction: existing, newBalanceToman: existing.balanceAfterToman };
       }
 
-      const freshUser = await tx.user.findUniqueOrThrow({ where: { id: payment.userId } });
-      const balanceBefore = freshUser.balanceToman;
-      const balanceAfter = balanceBefore + payment.amountToman;
-      await tx.user.update({
+      // LEDGER-CRITICAL: the increment UPDATE takes the row lock and returns
+      // the post-update row, so balanceBefore/balanceAfter always describe
+      // the real transition. A plain pre-read here would race a concurrent
+      // spend and record a before/after pair that never existed.
+      const credited = await tx.user.update({
         where: { id: payment.userId },
         data: {
           balanceToman: { increment: payment.amountToman },
           totalChargedToman: { increment: payment.amountToman },
         },
+        select: { balanceToman: true },
       });
+      const balanceAfter = credited.balanceToman;
+      const balanceBefore = balanceAfter - payment.amountToman;
       const created = await tx.walletTransaction.create({
         data: {
           userId: payment.userId,
