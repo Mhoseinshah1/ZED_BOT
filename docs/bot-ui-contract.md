@@ -14,17 +14,19 @@ Changes to any layout below need an explicit new decision; tests in
 - Payment / order / provisioning / stock-delivery / wallet-mutation /
   renewal-mutation / receipt approval-rejection business logic.
 
-## User main menu (13 visible buttons, unchanged by Fix A)
+## User main menu (4 rows, implemented sections only)
 
 | row | buttons (ButtonText-backed) |
 | --- | --- |
-| 1 | خرید اشتراک 🔐 · تمدید سرویس ♻️ |
-| 2 | سرویس‌های من 🛍 · کیف پول + شارژ 🏦 |
-| 3 | زیرمجموعه گیری 👥 · اشتراک رایگان {تست} |
-| 4 | گردونه شانس 🎲 · آموزش 📚 |
-| 5 | پشتیبانی ☎️ · تعرفه اشتراک‌ها 💵 |
-| 6 | درخواست نمایندگی 👨‍💼 · محصولات دیگر 🛍 |
-| 7 | سفارش‌های من 🧾 |
+| 1 | خرید اشتراک 🔐 → `user:buy` · تمدید سرویس ♻️ → `user:renew` |
+| 2 | سرویس‌های من 🛍 → `user:services` · کیف پول + شارژ 🏦 → `user:wallet` |
+| 3 | محصولات دیگر 🛍 → `user:other_products` · سفارش‌های من 🧾 → `user:orders` |
+| 4 | پشتیبانی ☎️ → `user:support` |
+
+The six unfinished placeholder sections (referral, free_test, lucky_wheel,
+tutorials, pricing, representative_request) are HIDDEN until their real
+flows land; their callbacks stay registered in
+`user-placeholders.handler.ts` so old Telegram keyboards keep answering.
 
 ## User wallet landing (Fix A)
 
