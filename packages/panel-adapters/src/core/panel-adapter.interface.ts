@@ -9,8 +9,11 @@ import type {
   CreateServiceAccountResult,
   GetServiceAccountInput,
   GetServiceAccountResult,
+  PanelCapability,
   PanelHealthResult,
   PanelType,
+  ProvisioningReadinessInput,
+  ProvisioningReadinessResult,
   RegenerateSubscriptionInput,
   RegenerateSubscriptionResult,
   RenewServiceAccountInput,
@@ -28,11 +31,30 @@ export interface PanelAdapter {
   readonly name: PanelType;
 
   /**
-   * Verifies the panel is reachable and (when implemented) that the stored
-   * credentials authenticate. Never throws - failures come back as
-   * { ok: false }. Never include credentials in the result.
+   * Operations this adapter actually implements and has tested. Anything
+   * absent must be blocked by callers BEFORE payment - the adapter methods
+   * for unsupported operations still fail safely, but discovering that
+   * after money moved is a bug.
+   */
+  readonly capabilities: readonly PanelCapability[];
+
+  /**
+   * Verifies the panel is reachable and that the stored credentials
+   * authenticate. Never throws - failures come back as { ok: false }.
+   * Never include credentials in the result. Authentication success alone
+   * is NOT provisioning readiness - see checkProvisioningReadiness.
    */
   testConnection(): Promise<PanelHealthResult>;
+
+  /**
+   * Full authenticated readiness check for createService: authentication,
+   * read-endpoint access and the panel-specific provisioning configuration
+   * (Marzban template/explicit proxies; XUI inbound ids/protocols). Read-only
+   * - never mutates panel state, never throws, never returns credentials.
+   */
+  checkProvisioningReadiness(
+    input: ProvisioningReadinessInput,
+  ): Promise<ProvisioningReadinessResult>;
 
   /**
    * Creates one service account on the panel. Never throws and NEVER fakes

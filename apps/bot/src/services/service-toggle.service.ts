@@ -12,6 +12,10 @@ import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import {
+  PANEL_OPERATION_UNSUPPORTED_TEXT,
+  panelOperationAvailable,
+} from "./panel-readiness.service.js";
+import {
   acquireServiceLock,
   SERVICE_LOCK_BUSY_TEXT,
   SERVICE_LOCK_UNAVAILABLE_TEXT,
@@ -231,6 +235,16 @@ async function toggleServiceStatusUnlocked(
     return { ok: false, error: "service not found", safeUserMessage: TOGGLE_NOT_FOUND_TEXT };
   }
   const { panel, ...service } = found;
+
+  // Capability model: the panel's adapter must actually implement toggling
+  // (XUI does not) - blocked with a clear message, never a fake success.
+  if (!panelOperationAvailable(panel, "toggleService")) {
+    return {
+      ok: false,
+      error: "panel does not support toggleService",
+      safeUserMessage: PANEL_OPERATION_UNSUPPORTED_TEXT,
+    };
+  }
 
   // Stale button / double click: nothing to do, no event log.
   if (isAlreadyInDesiredState(service.status, action)) {

@@ -63,6 +63,10 @@ beforeAll(async () => {
       name: `wallet-ledger-panel-${runTag}`,
       baseUrl: "http://127.0.0.1:1",
       status: "ACTIVE",
+      // Sellability gate: complete provisioning config (never decrypted here).
+      username: "admin",
+      passwordEncrypted: "enc",
+      templateUsername: "tpl",
     },
   });
   panelId = panel.id;

@@ -13,6 +13,7 @@ import {
 import type { RenewalDraft } from "../core/session.js";
 import { groupMatches } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
+import { panelOperationAvailable, panelTypesSupporting } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 
 // =============================================================================
@@ -42,7 +43,9 @@ function renewableWhere(userId: string) {
     userId,
     deletedAt: null,
     status: { in: RENEWABLE_STATUSES },
-    panel: { status: PanelStatus.ACTIVE },
+    // Only panels whose adapter implements renewal (capability model):
+    // services on renew-incapable panels never appear as renewable.
+    panel: { status: PanelStatus.ACTIVE, type: { in: panelTypesSupporting("renewService") } },
   } as const;
 }
 
@@ -130,7 +133,9 @@ export function isRenewalPlanValid(
     product.category.isActive &&
     product.panelId === service.panelId &&
     product.panel !== null &&
-    product.panel.status === PanelStatus.ACTIVE &&
+    // Capability gate: a panel whose adapter cannot renew (XUI) must be
+    // blocked HERE, before payment - never discovered post-payment.
+    panelOperationAvailable(product.panel, "renewService") &&
     groupMatches(product.displayGroups, group)
   );
 }

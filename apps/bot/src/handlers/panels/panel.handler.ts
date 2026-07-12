@@ -14,6 +14,10 @@ import {
   updatePanel,
 } from "../../services/panel.service.js";
 import { testPanelConnection } from "../../services/panel-test.service.js";
+import {
+  READINESS_RELEVANT_COLUMNS,
+  readinessResetData,
+} from "../../services/panel-readiness.service.js";
 import { normalizePanelBaseUrl } from "../../utils/url.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { cb, PANEL_CB } from "./panel-cb.js";
@@ -43,6 +47,7 @@ function clearFlow(ctx: BotContext): void {
   ctx.session.temp.editingPanelId = undefined;
   ctx.session.temp.editingField = undefined;
   ctx.session.temp.editingCredential = undefined;
+  ctx.session.temp.editingCredentialUsername = undefined;
 }
 
 async function resolvePanel(ctx: BotContext, sid: string): Promise<Panel | null> {
@@ -177,10 +182,22 @@ panelHandler.callbackQuery(/^admin:panel:test:(.+)$/, async (ctx) => {
     return;
   }
   await safeAnswerCallback(ctx, "در حال تست اتصال ...");
-  const result = await testPanelConnection(panel);
-  const emoji = result.ok ? "✅" : "⚠️";
+  const report = await testPanelConnection(panel);
+  const emoji = report.ready ? "✅" : "⚠️";
   const kb = new InlineKeyboard().text("بازگشت", cb.view(panelShortId(panel)));
-  await safeEditOrReply(ctx, `تست اتصال ${emoji}\n\n${result.message}`, kb);
+  const lines = [
+    `تست پنل ${emoji}`,
+    "",
+    `وضعیت: ${report.statusText}`,
+    ...(report.diagnosticText === null ? [] : [report.diagnosticText]),
+    "",
+    "مراحل بررسی:",
+    ...report.checkLines,
+    "",
+    "قابلیت‌های پنل:",
+    ...report.capabilityLines,
+  ];
+  await safeEditOrReply(ctx, lines.join("\n"), kb);
 });
 
 // --- detail + status + visibility + delete -----------------------------------
@@ -353,10 +370,8 @@ panelHandler.callbackQuery(/^admin:panel:fe:([^:]+):(.+)$/, async (ctx) => {
   }
   if (fieldKey === "cred") {
     ctx.session.currentFlow = "panel:edit:credential";
-    ctx.session.temp.editingCredential = panel.type === "MARZBAN" ? "password" : "token";
-    const prompt =
-      panel.type === "MARZBAN" ? "رمز عبور جدید را وارد کنید." : "توکن جدید را وارد کنید.";
-    await safeEditOrReply(ctx, prompt, cancelKeyboard());
+    ctx.session.temp.editingCredential = "cred-username";
+    await safeEditOrReply(ctx, "نام کاربری پنل را وارد کنید.", cancelKeyboard());
     return;
   }
 
@@ -443,13 +458,10 @@ async function handleAddStep(ctx: BotContext, text: string): Promise<void> {
       return;
     }
     state.baseUrl = result.value;
-    if (state.type === "MARZBAN") {
-      state.step = "username";
-      await safeReply(ctx, "نام کاربری مرزبان را وارد کنید.", cancelKeyboard());
-    } else {
-      state.step = "token";
-      await safeReply(ctx, "توکن پنل را وارد کنید.", cancelKeyboard());
-    }
+    // Both panel families authenticate with username + password now
+    // (Marzban: token endpoint; XUI/Sanaei: session-cookie login).
+    state.step = "username";
+    await safeReply(ctx, "نام کاربری پنل را وارد کنید.", cancelKeyboard());
     return;
   }
 
@@ -460,11 +472,11 @@ async function handleAddStep(ctx: BotContext, text: string): Promise<void> {
     }
     state.username = value;
     state.step = "password";
-    await safeReply(ctx, "رمز عبور مرزبان را وارد کنید.", cancelKeyboard());
+    await safeReply(ctx, "رمز عبور پنل را وارد کنید.", cancelKeyboard());
     return;
   }
 
-  if (state.step === "password" || state.step === "token") {
+  if (state.step === "password") {
     if (value.length === 0) {
       await safeReply(ctx, "مقدار نمی‌تواند خالی باشد. دوباره وارد کنید.");
       return;
@@ -474,16 +486,16 @@ async function handleAddStep(ctx: BotContext, text: string): Promise<void> {
       type: state.type,
       name: state.name ?? "پنل",
       baseUrl: state.baseUrl ?? "",
-      username: state.type === "MARZBAN" ? (state.username ?? null) : null,
-      passwordEncrypted: state.type === "MARZBAN" ? encrypted : null,
-      tokenEncrypted: state.type === "XUI" ? encrypted : null,
+      username: state.username ?? null,
+      passwordEncrypted: encrypted,
+      tokenEncrypted: null,
     });
     clearFlow(ctx);
     await safeReply(ctx, "پنل با موفقیت ذخیره شد ✅");
     const warning =
       panel.type === "MARZBAN"
-        ? "بعداً باید تنظیمات پروتکل/اینباند/اکانت نمونه/دامنه ساب را از مدیریت پنل تکمیل کنید."
-        : "بعداً باید inbound/domain/protocol settings را از مدیریت پنل تکمیل کنید.";
+        ? "بعداً باید اکانت نمونه (یا تنظیمات پروتکل) و دامنه ساب را از مدیریت پنل تکمیل کنید و «تست اتصال» را اجرا کنید."
+        : "بعداً باید شناسه‌های inbound و دامنه ساب را از مدیریت پنل تکمیل کنید و «تست اتصال» را اجرا کنید.";
     await safeReply(ctx, warning);
     await safeReply(ctx, panelDetailText(panel), panelDetailKeyboard(panel), HTML);
   }
@@ -500,7 +512,7 @@ async function handleEditUrl(ctx: BotContext, text: string): Promise<void> {
     await safeReply(ctx, `${result.error}\nدوباره وارد کنید.`);
     return;
   }
-  const updated = await updatePanel(panelId, { baseUrl: result.value });
+  const updated = await updatePanel(panelId, { baseUrl: result.value, ...readinessResetData() });
   clearFlow(ctx);
   await safeReply(ctx, "آدرس بروزرسانی شد ✅");
   await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated), HTML);
@@ -518,12 +530,22 @@ async function handleEditCredential(ctx: BotContext, text: string): Promise<void
     await safeReply(ctx, "مقدار نمی‌تواند خالی باشد. دوباره وارد کنید.");
     return;
   }
+  if (kind === "cred-username") {
+    ctx.session.temp.editingCredentialUsername = value;
+    ctx.session.temp.editingCredential = "cred-password";
+    await safeReply(ctx, "رمز عبور پنل را وارد کنید.", cancelKeyboard());
+    return;
+  }
+  const username = ctx.session.temp.editingCredentialUsername ?? null;
   const encrypted = encryptSecret(value); // may throw SecretConfigError
-  const data: Prisma.PanelUpdateInput =
-    kind === "password" ? { passwordEncrypted: encrypted } : { tokenEncrypted: encrypted };
-  const updated = await updatePanel(panelId, data);
+  // A credential change invalidates the persisted readiness result.
+  const updated = await updatePanel(panelId, {
+    ...(username !== null ? { username } : {}),
+    passwordEncrypted: encrypted,
+    ...readinessResetData(),
+  });
   clearFlow(ctx);
-  await safeReply(ctx, `${kind === "password" ? "رمز" : "توکن"} بروزرسانی شد ✅ (${maskSecretEdges(value)})`);
+  await safeReply(ctx, `اطلاعات ورود بروزرسانی شد ✅ (${maskSecretEdges(value)})`);
   await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated), HTML);
 }
 
@@ -546,6 +568,7 @@ async function handleEditField(ctx: BotContext, text: string): Promise<void> {
   }
   const updated = await updatePanel(panelId, {
     [field.column]: validation.value,
+    ...(READINESS_RELEVANT_COLUMNS.has(field.column) ? readinessResetData() : {}),
   } as Prisma.PanelUpdateInput);
   clearFlow(ctx);
   await safeReply(ctx, `«${field.label}» بروزرسانی شد ✅`);

@@ -12,6 +12,10 @@ import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import {
+  PANEL_OPERATION_UNSUPPORTED_TEXT,
+  panelOperationAvailable,
+} from "./panel-readiness.service.js";
+import {
   acquireServiceLock,
   SERVICE_LOCK_BUSY_TEXT,
   SERVICE_LOCK_UNAVAILABLE_TEXT,
@@ -204,6 +208,18 @@ async function regenerateServiceSubscriptionUnlocked(
     return { ok: false, error: "service not found", safeUserMessage: REGEN_NOT_FOUND_TEXT };
   }
   const { panel, ...service } = found;
+
+  // Capability model: subscription regeneration must be implemented by the
+  // panel's adapter (XUI has no revoke endpoint) - returning the old link
+  // as "new" would be a fake success, so this is blocked with a clear
+  // message instead.
+  if (!panelOperationAvailable(panel, "regenerateSubscription")) {
+    return {
+      ok: false,
+      error: "panel does not support regenerateSubscription",
+      safeUserMessage: PANEL_OPERATION_UNSUPPORTED_TEXT,
+    };
+  }
 
   const eligibility = linkRegenerationEligibility(service, panel.status);
   if (!eligibility.eligible) {

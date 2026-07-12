@@ -41,6 +41,9 @@ export interface MarzbanCreateUserPayload {
 export interface MarzbanTokenResult {
   ok: boolean;
   token?: string;
+  status?: number;
+  /** true when the request timed out (the panel may have processed it). */
+  timedOut?: boolean;
   message: string;
 }
 
@@ -48,5 +51,11 @@ export interface MarzbanUserResult {
   ok: boolean;
   user?: MarzbanUser;
   status?: number;
+  /** true when no HTTP response arrived (DNS/conn/TLS failure or timeout). */
+  transportError?: boolean;
+  /** true when the request timed out (the panel may have processed it). */
+  timedOut?: boolean;
+  /** true when the panel answered 2xx with a non-JSON body. */
+  malformedBody?: boolean;
   message: string;
 }

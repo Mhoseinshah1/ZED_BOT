@@ -505,9 +505,9 @@ model Panel {
   type              PanelType
   name              String
   baseUrl           String
-  username          String? // Marzban
-  passwordEncrypted String? // Marzban
-  tokenEncrypted    String? // XUI
+  username          String? // Marzban + XUI (Sanaei 3X-UI login)
+  passwordEncrypted String? // Marzban + XUI (Sanaei 3X-UI login)
+  tokenEncrypted    String? // reserved for token-based panel variants (unused by SANAEI)
   status            PanelStatus   @default(ACTIVE)
   panelColor        String?
   isVisible         Boolean       @default(true)
@@ -569,7 +569,20 @@ model Panel {
   inboundTemplateName              String? // Marzban
   resetStrategy                    String? // Marzban
   inboundIds                       Json? // XUI
-  protocolSettings                 Json? // XUI
+  protocolSettings                 Json? // XUI + Marzban explicit (template-free) proxy config
+
+  // Provisioning readiness + API variant.
+  // apiVariant: XUI panels only - "SANAEI" (3X-UI /panel/api family) is the
+  //   only supported variant and the default when null. Marzban ignores it.
+  // provisioningReady: result of the last authenticated readiness check
+  //   (null = never checked or stale after a config edit; false blocks
+  //   selling). Set by the admin panel test, never by reachability alone.
+  // capabilitySnapshot: sanitized readiness breakdown + capability list for
+  //   the admin UI. Never contains credentials, cookies or tokens.
+  apiVariant            String?
+  provisioningReady     Boolean?
+  lastCapabilityCheckAt DateTime?
+  capabilitySnapshot    Json?
 
   // Capacity
   accountLimitEnabled  Boolean @default(false)
@@ -995,6 +1008,16 @@ model Service {
   deletedAt                 DateTime?
   panelDeletedAt            DateTime?
   failureReason             String?
+
+  // Remote client identifiers for panels that address clients rather than
+  // usernames (XUI). remoteClientId is the primary client identifier (UUID
+  // for VLESS/VMess, password for Trojan) - sensitive like
+  // subscriptionToken, stored but never logged. remoteInboundIds = inbound
+  // ids the client was added to. remoteMetadata = non-secret structured
+  // identifiers (client emails, subscription id).
+  remoteClientId   String?
+  remoteInboundIds Json?
+  remoteMetadata   Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

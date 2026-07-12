@@ -6,6 +6,7 @@ import {
   type UserGroup,
 } from "@zedbot/database";
 
+import { isPanelSellable } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 
 // =============================================================================
@@ -110,10 +111,13 @@ export function isProductVisible(product: ProductWithRelations, group: UserGroup
     return false;
   }
   if (product.type === "SERVICE_PRODUCT") {
+    // Sellability includes provisioning readiness: a panel with incomplete
+    // provisioning config (or an explicitly failed readiness test) must be
+    // caught HERE - before checkout/payment - never after the money moved.
     if (
       product.panel === null ||
-      product.panel.status !== PanelStatus.ACTIVE ||
-      !product.panel.isVisible
+      !product.panel.isVisible ||
+      !isPanelSellable(product.panel)
     ) {
       return false;
     }

@@ -70,6 +70,10 @@ describe.runIf(hasDb)("wallet payment balance race", () => {
         name: `race-test-panel-${runTag}`,
         baseUrl: "http://127.0.0.1:1",
         status: "ACTIVE",
+        // Sellability gate: complete provisioning config (never decrypted here).
+        username: "admin",
+        passwordEncrypted: "enc",
+        templateUsername: "tpl",
       },
     });
     panelId = panel.id;

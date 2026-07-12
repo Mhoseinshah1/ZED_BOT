@@ -18,6 +18,7 @@ import { errorMessage } from "@zedbot/shared";
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
+import { assessPanelConfig, parsePanelInboundIds } from "./panel-readiness.service.js";
 import {
   acquireServiceLock,
   SERVICE_LOCK_BUSY_TEXT,
@@ -61,6 +62,14 @@ export const PROVISION_FAILED_USER_TEXT =
   "اما ساخت سرویس با خطا مواجه شد.\n" +
   "مبلغ پرداختی به کیف پول شما برگشت داده شد.";
 
+/**
+ * Returned when the panel outcome is UNKNOWN/partial (e.g. timeout after the
+ * request may have landed). The order stays PROVISIONING - never refunded on
+ * uncertainty - and startup reconciliation settles it from panel truth.
+ */
+export const PROVISION_UNKNOWN_OUTCOME_TEXT =
+  "نتیجه ساخت سرویس نامشخص ماند؛ وضعیت سفارش به‌صورت خودکار بررسی و اصلاح می‌شود.";
+
 export type ProvisionOutcome =
   | { ok: true; service: Service; alreadyExisted: boolean }
   | { ok: false; refunded: boolean; error: string };
@@ -83,13 +92,6 @@ export function generatePanelUsername(telegramId: bigint, orderId: string): stri
     username = `zed_${tg.slice(-8)}_${orderShort}`;
   }
   return username.toLowerCase().replace(/[^a-z0-9_]/g, "_");
-}
-
-function parseInboundIds(raw: unknown): number[] {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-  return raw.filter((v): v is number => typeof v === "number" && Number.isInteger(v));
 }
 
 /**
@@ -257,7 +259,9 @@ async function provisionPaidOrderUnlocked(
           ? "product has no panel"
           : panel.status !== "ACTIVE"
             ? `panel status is ${panel.status}`
-            : null;
+            : !assessPanelConfig(panel).ok
+              ? `panel provisioning config incomplete: ${assessPanelConfig(panel).reason ?? "unknown"}`
+              : null;
   if (preflightError !== null || product === null || panel === null) {
     const refunded = await failOrderWithRefund(order, preflightError ?? "invalid configuration");
     return { ok: false, refunded, error: "ساخت سرویس ناموفق بود." };
@@ -299,7 +303,7 @@ async function provisionPaidOrderUnlocked(
       dataLimitResetStrategy: panel.resetStrategy,
       trafficResetCycle: product.trafficResetCycle,
       subscriptionBaseUrl: normalizeSubscriptionBase(panel),
-      inboundIds: parseInboundIds(panel.inboundIds),
+      inboundIds: parsePanelInboundIds(panel.inboundIds),
       protocolSettings:
         panel.protocolSettings !== null && typeof panel.protocolSettings === "object"
           ? (panel.protocolSettings as Record<string, unknown>)
@@ -311,6 +315,25 @@ async function provisionPaidOrderUnlocked(
   }
 
   if (!created.ok) {
+    // Structured sanitized diagnostic (never credentials/cookies/tokens).
+    logger.warn("panel create-service failed", {
+      orderId: order.id,
+      panelId: panel.id,
+      panelType: panel.type,
+      code: created.diagnostic?.code ?? null,
+      httpStatus: created.diagnostic?.httpStatus ?? null,
+      endpointPath: created.diagnostic?.endpointPath ?? null,
+      uncertain: created.uncertain === true,
+      error: created.errorMessage ?? "unknown adapter error",
+    });
+    if (created.uncertain === true) {
+      // UNKNOWN/partial remote state (e.g. timeout after the request may
+      // have landed, or a multi-inbound cleanup that could not be
+      // confirmed). NEVER refund on uncertainty: the order stays
+      // PROVISIONING and startup reconciliation - which probes the panel
+      // under the same lock - completes or refunds it on positive proof.
+      return { ok: false, refunded: false, error: PROVISION_UNKNOWN_OUTCOME_TEXT };
+    }
     const refunded = await failOrderWithRefund(order, created.errorMessage ?? "unknown adapter error");
     return { ok: false, refunded, error: "ساخت سرویس ناموفق بود." };
   }
@@ -357,6 +380,14 @@ async function provisionPaidOrderUnlocked(
           subscriptionUrl: created.subscriptionUrl ?? null,
           subscriptionToken: created.subscriptionToken ?? null,
           ...(created.configLinks !== undefined ? { configLinks: created.configLinks } : {}),
+          // Remote client identifiers (XUI): needed for later sync/cleanup.
+          remoteClientId: created.remoteClientId ?? null,
+          ...(created.remoteInboundIds !== undefined
+            ? { remoteInboundIds: created.remoteInboundIds }
+            : {}),
+          ...(created.remoteMetadata !== undefined
+            ? { remoteMetadata: created.remoteMetadata as object }
+            : {}),
         },
       });
       await tx.order.updateMany({

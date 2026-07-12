@@ -19,6 +19,7 @@ import type { ExtraVolumeDraft } from "../core/session.js";
 import { groupMatches } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
+import { panelOperationAvailable, panelTypesSupporting } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 import { failOrderWithRefund, type OrderForProvisioning } from "./provisioning.service.js";
 import {
@@ -71,7 +72,9 @@ function eligibleWhere(userId: string): Prisma.ServiceWhereInput {
     deletedAt: null,
     status: { in: [ServiceStatus.ACTIVE, ServiceStatus.LIMITED] },
     volumeBytes: { gt: 0n },
-    panel: { status: PanelStatus.ACTIVE },
+    // Capability model: services on panels whose adapter cannot add volume
+    // (XUI) are never offered extra volume - blocked before payment.
+    panel: { status: PanelStatus.ACTIVE, type: { in: panelTypesSupporting("addVolume") } },
   };
 }
 
@@ -153,7 +156,7 @@ export function isExtraVolumePackageValid(
     product.category.isActive &&
     product.panelId === service.panelId &&
     product.panel !== null &&
-    product.panel.status === PanelStatus.ACTIVE &&
+    panelOperationAvailable(product.panel, "addVolume") &&
     (product.volumeGb ?? 0) > 0 &&
     product.priceToman > 0 &&
     groupMatches(product.displayGroups, group)

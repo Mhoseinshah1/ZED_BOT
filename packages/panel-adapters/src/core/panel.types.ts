@@ -2,6 +2,122 @@
 
 export type PanelType = "marzban" | "xui";
 
+// =============================================================================
+// Capabilities
+// =============================================================================
+
+/**
+ * Explicit operation support per adapter. Anything NOT listed by an adapter
+ * is blocked BEFORE payment - a paid order must never discover an
+ * unimplemented operation after the money moved.
+ */
+export type PanelCapability =
+  | "authenticatedHealth"
+  | "createService"
+  | "readService"
+  | "renewService"
+  | "addVolume"
+  | "addTime"
+  | "toggleService"
+  | "regenerateSubscription"
+  | "deleteService"
+  | "reconciliation";
+
+// =============================================================================
+// Sanitized diagnostics
+// =============================================================================
+
+/**
+ * How certain the adapter is that the remote mutation did NOT happen.
+ * "definite" = the panel state is untouched by this call (refund-safe).
+ * "unknown"  = the mutation may have (partially) landed - callers must NOT
+ *              refund and must defer to reconciliation.
+ */
+export type PanelOutcomeCertainty = "definite" | "unknown";
+
+/** Stable machine-readable failure codes (mapped to Persian admin texts upstream). */
+export type PanelDiagnosticCode =
+  | "unreachable"
+  | "timeout"
+  | "auth-failed"
+  | "not-found"
+  | "template-not-found"
+  | "template-invalid"
+  | "config-incomplete"
+  | "config-invalid"
+  | "unsafe-volume"
+  | "unsupported-variant"
+  | "unsupported-protocol"
+  | "unsupported-operation"
+  | "inbound-missing"
+  | "inbound-disabled"
+  | "inbound-malformed"
+  | "malformed-response"
+  | "conflict"
+  | "panel-rejected"
+  | "partial-state";
+
+/**
+ * Centralized sanitized panel error/diagnostic. Carries ONLY safe fields:
+ * never passwords, tokens, cookies, session ids, authorization headers,
+ * subscription URLs, client UUIDs/passwords or raw response bodies.
+ * endpointPath is a path TEMPLATE (e.g. "/api/user/{username}") - no host,
+ * no query string, no secrets.
+ */
+export interface PanelDiagnostic {
+  operation: string;
+  panelType: PanelType;
+  code: PanelDiagnosticCode;
+  endpointPath?: string;
+  httpStatus?: number;
+  /** Short sanitized panel message (length-capped, secret-free). */
+  detail?: string;
+  /** true when retrying the identical call later may succeed. */
+  retryable: boolean;
+  certainty: PanelOutcomeCertainty;
+}
+
+// =============================================================================
+// Provisioning readiness
+// =============================================================================
+
+/** Ordered readiness steps; keys are stable for UI mapping. */
+export type ReadinessCheckKey =
+  | "reachable"
+  | "auth"
+  | "read-endpoint"
+  | "template"
+  | "inbounds"
+  | "config";
+
+/** One readiness step result. ok=null means the step was skipped/not reached. */
+export interface ReadinessCheck {
+  key: ReadinessCheckKey;
+  ok: boolean | null;
+  /** Safe short detail for the admin (English, mapped to Persian upstream). */
+  detail?: string;
+}
+
+/** Panel-row configuration relevant to provisioning readiness. */
+export interface ProvisioningReadinessInput {
+  templateUsername?: string | null;
+  inboundIds?: number[] | null;
+  protocolSettings?: Record<string, unknown> | null;
+  subscriptionBaseUrl?: string | null;
+}
+
+/**
+ * Result of the authenticated provisioning-readiness check. `ready` is true
+ * ONLY when every required step for createService passed - a reachable
+ * login page or a successful authentication alone is NOT readiness.
+ */
+export interface ProvisioningReadinessResult {
+  ready: boolean;
+  checks: ReadinessCheck[];
+  capabilities: readonly PanelCapability[];
+  diagnostic?: PanelDiagnostic;
+}
+
 /** Connection settings every panel needs. */
 export interface PanelCredentials {
   /** Panel base URL, e.g. https://panel.example.com:8443 */
@@ -17,10 +133,21 @@ export interface MarzbanCredentials {
   password: string;
 }
 
-/** XUI / Sanaei / 3X-UI connects with an API token. */
+/** Supported XUI API families. SANAEI = MHSanaei 3X-UI (/panel/api routes). */
+export type XuiApiVariant = "SANAEI";
+
+/**
+ * XUI / Sanaei / 3X-UI connects with the panel login (username + password)
+ * and a session cookie - there is no permanent bearer token in the SANAEI
+ * family. The base URL may carry a secret web base path
+ * (https://host:port/secretpath); it is used verbatim after normalization.
+ */
 export interface XuiCredentials {
   baseUrl: string;
-  token: string;
+  username: string;
+  password: string;
+  /** Defaults to "SANAEI" - the only variant implemented and tested. */
+  apiVariant?: XuiApiVariant;
 }
 
 /** Result of a panel connectivity/authentication test. */
@@ -65,13 +192,33 @@ export interface CreateServiceAccountInput {
 /** Result of createServiceAccount. Internal-only fields must never reach end users. */
 export interface CreateServiceAccountResult {
   ok: boolean;
+  /**
+   * Set ONLY with ok=false: the remote outcome is UNKNOWN or PARTIAL (e.g.
+   * timeout after the request may have landed, or a multi-inbound cleanup
+   * that could not be confirmed). Callers must NOT refund and must leave the
+   * order for reconciliation. Unset/false with ok=false = definite failure,
+   * the panel state is untouched.
+   */
+  uncertain?: boolean;
   /** Username as the panel stored it. */
   username?: string;
   subscriptionUrl?: string;
   subscriptionToken?: string;
   configLinks?: string[];
+  /**
+   * Primary remote client identifier for client-addressed panels (XUI:
+   * VLESS/VMess UUID or Trojan password). Sensitive like subscriptionToken -
+   * persisted, never logged.
+   */
+  remoteClientId?: string;
+  /** Inbound ids the client was actually added to (XUI). */
+  remoteInboundIds?: number[];
+  /** Non-secret structured identifiers (client emails, subscription id). */
+  remoteMetadata?: Record<string, unknown>;
   /** Safe internal diagnostic (no credentials); for logs/admin only. */
   errorMessage?: string;
+  /** Structured sanitized diagnostic for admin display and logs. */
+  diagnostic?: PanelDiagnostic;
   /** Credential-free raw payload for debugging; never shown to users. */
   raw?: Record<string, unknown>;
 }
@@ -205,8 +352,12 @@ export interface GetServiceAccountResult {
   configLinks?: string[];
   firstConnectedAt?: Date | null;
   lastConnectedAt?: Date | null;
+  /** Non-secret structured identifiers (XUI: client emails, inbound ids). */
+  remoteMetadata?: Record<string, unknown>;
   /** Credential-free raw payload for debugging; never shown to users. */
   raw?: Record<string, unknown>;
   /** Safe internal diagnostic (no credentials); for logs/admin only. */
   errorMessage?: string;
+  /** Structured sanitized diagnostic for admin display and logs. */
+  diagnostic?: PanelDiagnostic;
 }
