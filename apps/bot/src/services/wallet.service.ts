@@ -7,24 +7,28 @@ import {
 } from "@zedbot/database";
 
 // =============================================================================
-// Wallet/profile summary (Phase 13) - strictly READ-ONLY. Nothing here (or
-// anywhere in this phase) creates/updates Payments, CheckoutSessions,
+// Wallet/profile summary (Phase 13, trimmed by Corrective Fix A) - strictly
+// READ-ONLY. Nothing here creates/updates Payments, CheckoutSessions,
 // Orders, WalletTransactions or User balances. All queries are scoped to
-// one userId.
+// one userId. The summary carries exactly what the wallet landing renders;
+// transaction details live behind «تاریخچه تراکنش‌ها 📋».
 // =============================================================================
 
 export const WALLET_TX_PAGE_SIZE = 10;
-export const WALLET_LATEST_TX_COUNT = 5;
+
+/** Order states counted as "unpaid/pending" on the wallet landing. */
+export const PENDING_ORDER_STATUSES: OrderStatus[] = [
+  OrderStatus.PENDING_PAYMENT,
+  OrderStatus.WAITING_RECEIPT,
+  OrderStatus.PENDING_REVIEW,
+];
 
 export interface WalletSummary {
   user: User;
   totalServices: number;
-  activeServices: number;
-  totalOrders: number;
-  paidOrders: number;
+  /** Orders still in PENDING_PAYMENT / WAITING_RECEIPT / PENDING_REVIEW. */
+  pendingOrders: number;
   referralCount: number;
-  latestTransactions: WalletTransaction[];
-  now: Date;
 }
 
 export interface WalletTransactionPage {
@@ -37,38 +41,16 @@ export interface WalletTransactionPage {
 /** Fresh, read-only snapshot of the user's wallet/profile numbers. */
 export async function getWalletSummary(userId: string): Promise<WalletSummary> {
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
-  const [totalServices, activeServices, totalOrders, paidOrders, referralCount, latestTransactions] =
-    await Promise.all([
-      prisma.service.count({
-        where: { userId, deletedAt: null, status: { not: ServiceStatus.DELETED } },
-      }),
-      prisma.service.count({
-        where: { userId, deletedAt: null, status: ServiceStatus.ACTIVE },
-      }),
-      prisma.order.count({ where: { userId } }),
-      prisma.order.count({
-        where: {
-          userId,
-          status: { in: [OrderStatus.PAID, OrderStatus.PROVISIONING, OrderStatus.COMPLETED] },
-        },
-      }),
-      prisma.user.count({ where: { referrerId: userId } }),
-      prisma.walletTransaction.findMany({
-        where: { userId },
-        orderBy: { createdAt: "desc" },
-        take: WALLET_LATEST_TX_COUNT,
-      }),
-    ]);
-  return {
-    user,
-    totalServices,
-    activeServices,
-    totalOrders,
-    paidOrders,
-    referralCount,
-    latestTransactions,
-    now: new Date(),
-  };
+  const [totalServices, pendingOrders, referralCount] = await Promise.all([
+    prisma.service.count({
+      where: { userId, deletedAt: null, status: { not: ServiceStatus.DELETED } },
+    }),
+    prisma.order.count({
+      where: { userId, status: { in: PENDING_ORDER_STATUSES } },
+    }),
+    prisma.user.count({ where: { referrerId: userId } }),
+  ]);
+  return { user, totalServices, pendingOrders, referralCount };
 }
 
 /** Newest-first page of the user's wallet transactions (10 per page). */

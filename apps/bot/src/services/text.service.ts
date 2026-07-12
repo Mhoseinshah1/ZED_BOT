@@ -11,6 +11,11 @@ const TEMPLATE_FALLBACKS: Record<string, string> = {
   bot_off_text: "ربات در حال حاضر در دسترس نیست. لطفا بعدا مراجعه کنید.",
   support_text: "برای ارتباط با پشتیبانی پیام خود را ارسال کنید.",
   faq_text: "سوالات متداول به زودی تکمیل می‌شود.",
+  // Corrective Fix A: wallet headings/prompts/notes (dynamic amounts stay in code).
+  wallet_header_text: "کیف پول و حساب کاربری 🏦",
+  wallet_topup_amount_prompt: "مبلغ شارژ کیف پول را به تومان وارد کنید.",
+  wallet_topup_preview_note: "پس از تایید رسید توسط ادمین، موجودی کیف پول شما افزایش می‌یابد.",
+  wallet_empty_transactions_text: "تراکنشی ثبت نشده است.",
 };
 
 const BUTTON_FALLBACKS: Record<string, string> = {

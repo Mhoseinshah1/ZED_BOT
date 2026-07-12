@@ -9,6 +9,7 @@ import {
   WALLET_TOPUP_DISABLED_TEXT,
   walletTopupInstruction,
 } from "../../services/payment-settings.service.js";
+import { getMessageTemplate } from "../../services/text.service.js";
 import {
   createWalletTopupCheckout,
   parseTopupAmount,
@@ -24,7 +25,6 @@ import { showPaymentMethods } from "../user-checkout/payment.handler.js";
 import {
   formatToman,
   topupAmountKeyboard,
-  TOPUP_AMOUNT_PROMPT,
   topupPreInvoiceKeyboard,
   topupPreInvoiceText,
   transactionHistoryKeyboard,
@@ -60,9 +60,12 @@ async function renderWallet(ctx: BotContext, answer?: string): Promise<void> {
     return;
   }
   clearTopupState(ctx);
-  const summary = await getWalletSummary(user.id);
+  const [summary, header] = await Promise.all([
+    getWalletSummary(user.id),
+    getMessageTemplate("wallet_header_text"),
+  ]);
   await safeAnswerCallback(ctx, answer);
-  await safeEditOrReply(ctx, walletSummaryText(summary), walletMainKeyboard(), HTML);
+  await safeEditOrReply(ctx, walletSummaryText(summary, header), walletMainKeyboard(), HTML);
 }
 
 walletHandler.callbackQuery(CB.USER_WALLET, async (ctx) => {
@@ -80,11 +83,14 @@ walletHandler.callbackQuery(/^user:wallet:tx:(\d+)$/, async (ctx) => {
   if (user === null) {
     return;
   }
-  const pageData = await listWalletTransactions(user.id, Number.parseInt(ctx.match[1], 10));
+  const [pageData, emptyText] = await Promise.all([
+    listWalletTransactions(user.id, Number.parseInt(ctx.match[1], 10)),
+    getMessageTemplate("wallet_empty_transactions_text"),
+  ]);
   await safeAnswerCallback(ctx);
   await safeEditOrReply(
     ctx,
-    transactionHistoryText(pageData),
+    transactionHistoryText(pageData, emptyText),
     transactionHistoryKeyboard(pageData),
     HTML,
   );
@@ -107,10 +113,14 @@ walletHandler.callbackQuery(WALLET_CB.TOPUP, async (ctx) => {
   ctx.session.currentFlow = "wallet:topup:amount";
   ctx.session.temp.walletTopupDraft = {};
   await safeAnswerCallback(ctx);
-  // Operator instruction text (Phase 22), when set, joins the prompt.
-  const instruction = await walletTopupInstruction();
-  const prompt =
-    instruction === null ? TOPUP_AMOUNT_PROMPT : `${TOPUP_AMOUNT_PROMPT}\n\n${instruction}`;
+  // Operator-editable amount prompt (MessageTemplate) + the Phase 22
+  // Setting-backed instruction text, when set (deliberately NOT duplicated
+  // into a template).
+  const [amountPrompt, instruction] = await Promise.all([
+    getMessageTemplate("wallet_topup_amount_prompt"),
+    walletTopupInstruction(),
+  ]);
+  const prompt = instruction === null ? amountPrompt : `${amountPrompt}\n\n${instruction}`;
   await safeEditOrReply(ctx, prompt, topupAmountKeyboard());
 });
 
@@ -197,9 +207,10 @@ walletTopupTextHandler.on("message:text", async (ctx, next) => {
   }
   draft.amountToman = amount;
   ctx.session.currentFlow = null;
+  const previewNote = await getMessageTemplate("wallet_topup_preview_note");
   await safeReply(
     ctx,
-    topupPreInvoiceText(amount, user.balanceToman),
+    topupPreInvoiceText(amount, user.balanceToman, previewNote),
     topupPreInvoiceKeyboard(),
     HTML,
   );

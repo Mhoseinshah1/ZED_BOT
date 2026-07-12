@@ -1,5 +1,6 @@
 import { PanelStatus, prisma, ServiceStatus, type Service } from "@zedbot/database";
 
+import { RENEWABLE_STATUSES } from "./renewal-checkout.service.js";
 import { linkRegenerationEligibility } from "./service-link.service.js";
 import { availableToggleAction, type ToggleAction } from "./service-toggle.service.js";
 
@@ -75,6 +76,8 @@ export interface ServiceDetailActions {
   canBuyExtraTime: boolean;
   /** «تغییر لینک اشتراک 🔄» - Phase 19 link regeneration eligibility. */
   canRegenerateLink: boolean;
+  /** «تمدید سرویس ♻️» - mirrors the Phase 12 renewal eligibility rules. */
+  canRenew: boolean;
 }
 
 const EXTRA_VOLUME_STATUSES: ServiceStatus[] = [ServiceStatus.ACTIVE, ServiceStatus.LIMITED];
@@ -104,6 +107,7 @@ export async function resolveServiceDetailActions(service: Service): Promise<Ser
       canBuyExtraVolume: false,
       canBuyExtraTime: false,
       canRegenerateLink: false,
+      canRenew: false,
     };
   }
   const panelActive = panel.status === PanelStatus.ACTIVE;
@@ -114,5 +118,8 @@ export async function resolveServiceDetailActions(service: Service): Promise<Ser
     canBuyExtraTime:
       panelActive && EXTRA_TIME_STATUSES.includes(service.status) && service.expiresAt !== null,
     canRegenerateLink: linkRegenerationEligibility(service, panel.status).eligible,
+    // Same conditions as renewableWhere (deletedAt is already excluded by
+    // every detail-page lookup); rncb.service re-validates on click.
+    canRenew: panelActive && RENEWABLE_STATUSES.includes(service.status),
   };
 }

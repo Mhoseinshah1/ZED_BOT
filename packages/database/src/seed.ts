@@ -98,6 +98,33 @@ const INITIAL_MESSAGE_TEMPLATES: Array<{
     category: "general",
     defaultContent: "سوالات متداول به زودی تکمیل می‌شود.",
   },
+  // Corrective Fix A: wallet landing/top-up texts. The Phase 22
+  // Setting-backed top-up instruction and payment-page notice are NOT
+  // duplicated here.
+  {
+    key: "wallet_header_text",
+    title: "عنوان صفحه کیف پول",
+    category: "wallet",
+    defaultContent: "کیف پول و حساب کاربری 🏦",
+  },
+  {
+    key: "wallet_topup_amount_prompt",
+    title: "درخواست مبلغ شارژ کیف پول",
+    category: "wallet",
+    defaultContent: "مبلغ شارژ کیف پول را به تومان وارد کنید.",
+  },
+  {
+    key: "wallet_topup_preview_note",
+    title: "توضیح پیش‌فاکتور شارژ کیف پول",
+    category: "wallet",
+    defaultContent: "پس از تایید رسید توسط ادمین، موجودی کیف پول شما افزایش می‌یابد.",
+  },
+  {
+    key: "wallet_empty_transactions_text",
+    title: "پیام نبود تراکنش",
+    category: "wallet",
+    defaultContent: "تراکنشی ثبت نشده است.",
+  },
 ];
 
 async function seedAdmins(): Promise<number> {
