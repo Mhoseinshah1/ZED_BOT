@@ -131,6 +131,19 @@ masked-preview-only.
   panel change affects future purchases only (warning shown, Services
   never migrated). Details in `docs/corrective-ui-fix-c.md`.
 
+## User support & history (Fix D)
+
+- **پشتیبانی 🎫**: ایجاد تیکت جدید ➕ / تیکت‌های من 📋 / بازگشت به منوی
+  اصلی; `support_landing_text` + template-backed prompts (`{min}`/`{max}`
+  rendered in code); ticket detail offers reply+refresh while open, never
+  a reply when CLOSED; list returns keep the same page.
+- **سفارش‌های من 🧾**: همه سفارش‌ها 📋 / خرید اشتراک‌ها 🔐 · محصولات
+  دیگر 🛍 / پرداخت‌ها 💳 · تراکنش‌های کیف پول 🏦 / بازگشت به منوی اصلی;
+  read-only, 10/page, dedup rule intact (order payments never duplicate,
+  top-ups once); details return to the same list/page; wallet history from
+  history returns to history, from the wallet returns to the wallet.
+  Details in `docs/corrective-ui-fix-d.md`.
+
 ## Back navigation
 
 - Finance children (methods, settings, reports, receipts) → `FIN_CB.root`;

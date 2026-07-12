@@ -2,7 +2,7 @@ import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
-import { getMessageTemplate } from "../../services/text.service.js";
+import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
 import {
   addUserTicketReply,
   createSupportTicket,
@@ -59,17 +59,27 @@ export function clearSupportState(ctx: BotContext): void {
   delete ctx.session.temp.supportDraft;
 }
 
+/** Fix D landing rows - exported for tests (labels are ButtonText-backed). */
+export async function buildSupportLandingKeyboard(): Promise<InlineKeyboard> {
+  const [newTicket, myTickets] = await Promise.all([
+    getButtonText("new_ticket"),
+    getButtonText("my_tickets"),
+  ]);
+  return new InlineKeyboard()
+    .text(newTicket, SUP_CB.new)
+    .row()
+    .text(myTickets, SUP_CB.list(1))
+    .row()
+    .text("بازگشت به منوی اصلی", CB.USER_MENU);
+}
+
 async function renderLanding(ctx: BotContext): Promise<void> {
   clearSupportState(ctx);
+  delete ctx.session.temp.userTicketListPage;
   await safeAnswerCallback(ctx);
-  const notice = await getMessageTemplate("support_text");
-  const kb = new InlineKeyboard()
-    .text("تیکت جدید ➕", SUP_CB.new)
-    .row()
-    .text("تیکت‌های من 🧾", SUP_CB.list(1))
-    .row()
-    .text("بازگشت به منو", CB.USER_MENU);
-  await safeEditOrReply(ctx, `پشتیبانی 🎫\n\n${notice}`, kb);
+  // Fix D: operator-editable landing text.
+  const notice = await getMessageTemplate("support_landing_text");
+  await safeEditOrReply(ctx, `پشتیبانی 🎫\n\n${notice}`, await buildSupportLandingKeyboard());
 }
 
 function ticketDetailText(ticket: TicketWithMessages): string {
@@ -92,14 +102,44 @@ function ticketDetailText(ticket: TicketWithMessages): string {
   return lines.join("\n");
 }
 
-async function renderDetail(ctx: BotContext, ticket: TicketWithMessages): Promise<void> {
+/**
+ * Fix D ticket-detail keyboard - exported for tests. Open tickets: reply +
+ * refresh + backs; CLOSED tickets never offer a reply. «بازگشت به
+ * تیکت‌های من» returns to the SAME list page.
+ */
+export async function buildTicketDetailKeyboard(
+  ticket: Pick<TicketWithMessages, "id" | "status">,
+  listPage: number,
+): Promise<InlineKeyboard> {
   const sid = ticket.id.slice(0, 8);
+  const [replyLabel, refreshLabel, myTickets, backSupport] = await Promise.all([
+    getButtonText("reply_ticket"),
+    getButtonText("refresh"),
+    getButtonText("my_tickets"),
+    getButtonText("back_to_support"),
+  ]);
   const kb = new InlineKeyboard();
   if (ticket.status !== "CLOSED") {
-    kb.text("پاسخ دادن ✍️", SUP_CB.reply(sid)).row();
+    kb.text(replyLabel, SUP_CB.reply(sid)).row();
   }
-  kb.text("تیکت‌های من 🧾", SUP_CB.list(1)).row().text("بازگشت به پشتیبانی", CB.USER_SUPPORT);
-  await safeEditOrReply(ctx, ticketDetailText(ticket), kb, HTML);
+  // Refresh re-opens the same detail (re-reads messages/status).
+  kb.text(refreshLabel, SUP_CB.view(sid)).row();
+  kb.text(myTickets, SUP_CB.list(listPage)).row().text(backSupport, CB.USER_SUPPORT);
+  return kb;
+}
+
+function ticketListPage(ctx: BotContext): number {
+  const page = ctx.session.temp.userTicketListPage;
+  return typeof page === "number" && page >= 1 ? page : 1;
+}
+
+async function renderDetail(ctx: BotContext, ticket: TicketWithMessages): Promise<void> {
+  await safeEditOrReply(
+    ctx,
+    ticketDetailText(ticket),
+    await buildTicketDetailKeyboard(ticket, ticketListPage(ctx)),
+    HTML,
+  );
 }
 
 async function renderList(ctx: BotContext, page: number): Promise<void> {
@@ -109,15 +149,18 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
   }
   clearSupportState(ctx);
   const pageData = await listUserTickets(user.id, page);
+  // Fix D: detail pages return to this exact list page.
+  ctx.session.temp.userTicketListPage = pageData.page;
   await safeAnswerCallback(ctx);
+  const backSupport = await getButtonText("back_to_support");
   if (pageData.total === 0) {
     const kb = new InlineKeyboard()
-      .text("تیکت جدید ➕", SUP_CB.new)
+      .text(await getButtonText("new_ticket"), SUP_CB.new)
       .row()
-      .text("بازگشت به پشتیبانی", CB.USER_SUPPORT);
+      .text(backSupport, CB.USER_SUPPORT);
     await safeEditOrReply(
       ctx,
-      `تیکت‌های من 🧾\n\n${await getMessageTemplate("no_tickets_text")}`,
+      `تیکت‌های من 📋\n\n${await getMessageTemplate("support_empty_tickets_text")}`,
       kb,
     );
     return;
@@ -135,16 +178,16 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
   }
   if (pageData.pages > 1) {
     if (pageData.page > 1) {
-      kb.text("« قبلی", SUP_CB.list(pageData.page - 1));
+      kb.text(await getButtonText("previous"), SUP_CB.list(pageData.page - 1));
     }
     kb.text(`${pageData.page}/${pageData.pages}`, SUP_CB.list(pageData.page));
     if (pageData.page < pageData.pages) {
-      kb.text("بعدی »", SUP_CB.list(pageData.page + 1));
+      kb.text(await getButtonText("next"), SUP_CB.list(pageData.page + 1));
     }
     kb.row();
   }
-  kb.text("بازگشت به پشتیبانی", CB.USER_SUPPORT);
-  await safeEditOrReply(ctx, `تیکت‌های من 🧾 — ${pageData.total} تیکت`, kb);
+  kb.text(backSupport, CB.USER_SUPPORT);
+  await safeEditOrReply(ctx, `تیکت‌های من 📋 — ${pageData.total} تیکت`, kb);
 }
 
 supportHandler.callbackQuery(CB.USER_SUPPORT, async (ctx) => {
@@ -164,9 +207,13 @@ supportHandler.callbackQuery(SUP_CB.new, async (ctx) => {
   ctx.session.temp.supportDraft = {};
   ctx.session.currentFlow = SUBJECT_FLOW;
   await safeAnswerCallback(ctx);
+  const prompt = await getMessageTemplate("support_subject_prompt", undefined, {
+    min: TICKET_SUBJECT_MIN,
+    max: TICKET_SUBJECT_MAX,
+  });
   await safeEditOrReply(
     ctx,
-    `تیکت جدید ➕\n\nموضوع تیکت را وارد کنید. (${TICKET_SUBJECT_MIN} تا ${TICKET_SUBJECT_MAX} کاراکتر)`,
+    `ایجاد تیکت جدید ➕\n\n${prompt}`,
     new InlineKeyboard().text("انصراف", SUP_CB.cancel),
   );
 });
@@ -209,7 +256,7 @@ supportHandler.callbackQuery(/^user:sup:reply:([0-9a-f-]+)$/, async (ctx) => {
   await safeAnswerCallback(ctx);
   await safeEditOrReply(
     ctx,
-    `پاسخ شما (حداکثر ${TICKET_MESSAGE_MAX} کاراکتر):`,
+    await getMessageTemplate("support_reply_prompt", undefined, { max: TICKET_MESSAGE_MAX }),
     new InlineKeyboard().text("انصراف", SUP_CB.view(ticket.id.slice(0, 8))),
   );
 });
@@ -253,7 +300,13 @@ supportTextHandler.on("message:text", async (ctx, next) => {
     }
     draft.subject = subject;
     ctx.session.currentFlow = MESSAGE_FLOW;
-    await safeReply(ctx, `متن پیام را بنویسید. (حداکثر ${TICKET_MESSAGE_MAX} کاراکتر)`, cancelKb);
+    await safeReply(
+      ctx,
+      await getMessageTemplate("support_message_prompt", undefined, {
+        max: TICKET_MESSAGE_MAX,
+      }),
+      cancelKb,
+    );
     return;
   }
 
@@ -270,7 +323,7 @@ supportTextHandler.on("message:text", async (ctx, next) => {
     }
     clearSupportState(ctx);
     await notifyAdminsAboutNewTicket(ctx.api, outcome.ticket.id);
-    await safeReply(ctx, "تیکت شما ثبت شد ✅");
+    await safeReply(ctx, await getMessageTemplate("support_ticket_created_text"));
     const ticket = await getUserTicketDetail(user.id, outcome.ticket.id.slice(0, 8));
     if (ticket !== null) {
       await renderDetail(ctx, ticket);

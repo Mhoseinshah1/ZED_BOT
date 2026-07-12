@@ -145,6 +145,64 @@ const INITIAL_MESSAGE_TEMPLATES: Array<{
     category: "empty_state",
     defaultContent: "هنوز تیکتی ثبت نکرده‌اید.",
   },
+  // Corrective Fix D: support + history texts ({min}/{max} are rendered by
+  // the code with the real validation limits).
+  {
+    key: "support_landing_text",
+    title: "متن صفحه پشتیبانی",
+    category: "support",
+    defaultContent:
+      "از این بخش می‌توانید با پشتیبانی در ارتباط باشید و پاسخ تیکت‌های قبلی را پیگیری کنید.",
+  },
+  {
+    key: "support_subject_prompt",
+    title: "درخواست موضوع تیکت",
+    category: "support",
+    defaultContent: "موضوع تیکت را وارد کنید. ({min} تا {max} کاراکتر)",
+  },
+  {
+    key: "support_message_prompt",
+    title: "درخواست متن تیکت",
+    category: "support",
+    defaultContent: "متن پیام را بنویسید. (حداکثر {max} کاراکتر)",
+  },
+  {
+    key: "support_reply_prompt",
+    title: "درخواست پاسخ تیکت",
+    category: "support",
+    defaultContent: "پاسخ شما را بنویسید. (حداکثر {max} کاراکتر)",
+  },
+  {
+    key: "support_empty_tickets_text",
+    title: "پیام نبود تیکت (پشتیبانی)",
+    category: "support",
+    defaultContent: "هنوز تیکتی ثبت نکرده‌اید.",
+  },
+  {
+    key: "support_ticket_created_text",
+    title: "پیام ثبت تیکت",
+    category: "support",
+    defaultContent: "تیکت شما ثبت شد ✅",
+  },
+  {
+    key: "history_landing_text",
+    title: "متن صفحه سوابق",
+    category: "history",
+    defaultContent:
+      "سوابق سفارش‌ها، پرداخت‌ها و تراکنش‌های کیف پول شما در این بخش قابل مشاهده است.",
+  },
+  {
+    key: "no_payments_text",
+    title: "پیام نبود پرداخت",
+    category: "empty_state",
+    defaultContent: "هنوز پرداختی ثبت نشده است.",
+  },
+  {
+    key: "no_other_product_orders_text",
+    title: "پیام نبود سفارش محصولات دیگر",
+    category: "empty_state",
+    defaultContent: "شما هنوز سفارشی ندارید.",
+  },
 ];
 
 async function seedAdmins(): Promise<number> {
@@ -207,6 +265,18 @@ const INITIAL_BUTTON_TEXTS: Array<{ key: string; title: string; text: string }> 
   { key: "confirm", title: "تایید", text: "تایید ✅" },
   { key: "next", title: "بعدی", text: "بعدی »" },
   { key: "previous", title: "قبلی", text: "« قبلی" },
+  // Corrective Fix D: support + history buttons.
+  { key: "new_ticket", title: "ایجاد تیکت جدید", text: "ایجاد تیکت جدید ➕" },
+  { key: "my_tickets", title: "تیکت‌های من", text: "تیکت‌های من 📋" },
+  { key: "reply_ticket", title: "پاسخ به تیکت", text: "پاسخ به تیکت ✍️" },
+  { key: "refresh", title: "بروزرسانی", text: "بروزرسانی ♻️" },
+  { key: "all_orders", title: "همه سفارش‌ها", text: "همه سفارش‌ها 📋" },
+  { key: "subscription_orders", title: "خرید اشتراک‌ها", text: "خرید اشتراک‌ها 🔐" },
+  { key: "other_product_orders", title: "سفارش‌های محصولات دیگر", text: "محصولات دیگر 🛍" },
+  { key: "payments", title: "پرداخت‌ها", text: "پرداخت‌ها 💳" },
+  { key: "wallet_transactions", title: "تراکنش‌های کیف پول", text: "تراکنش‌های کیف پول 🏦" },
+  { key: "back_to_support", title: "بازگشت به پشتیبانی", text: "بازگشت به پشتیبانی" },
+  { key: "back_to_history", title: "بازگشت به سوابق", text: "بازگشت به سوابق" },
 ];
 
 async function seedButtonTexts(): Promise<number> {

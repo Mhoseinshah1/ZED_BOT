@@ -7,6 +7,7 @@ import {
   getUserPaymentDetail,
   listUserHistory,
   listUserPayments,
+  listUserSubscriptionOrders,
   ORDER_TYPE_LABEL,
   orderStatusInfo,
   paymentMethodLabel,
@@ -15,6 +16,8 @@ import {
   type UserHistoryOrderDetail,
   type UserPaymentRow,
 } from "../../services/user-history.service.js";
+import { listWalletTransactions } from "../../services/wallet.service.js";
+import { transactionHistoryText } from "../user-wallet/wallet-views.js";
 import {
   deriveUserOrderStatus,
   getDeliveredStockContentForUser,
@@ -26,7 +29,7 @@ import {
   visibleManualDeliveryText,
   type UserOtherProductOrderRow,
 } from "../../services/user-other-product-orders.service.js";
-import { getMessageTemplate } from "../../services/text.service.js";
+import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
 
@@ -50,6 +53,9 @@ const OD_CB = {
 
 const HIST_CB = {
   list: (page: number): string => `user:hist:list:${page}`,
+  // Fix D: subscription-orders filter + wallet transactions from history.
+  sub: (page: number): string => `user:hist:sub:${page}`,
+  wtx: (page: number): string => `user:hist:wtx:${page}`,
   viewOrder: (sid: string): string => `user:hist:view:o:${sid}`,
   viewPayment: (sid: string): string => `user:hist:view:p:${sid}`,
 } as const;
@@ -91,7 +97,7 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
       .text("بازگشت به منو", CB.USER_MENU);
     await safeEditOrReply(
       ctx,
-      `سفارش‌های محصولات دیگر 🛍\n\n${await getMessageTemplate("no_orders_text")}`,
+      `سفارش‌های محصولات دیگر 🛍\n\n${await getMessageTemplate("no_other_product_orders_text")}`,
       kb,
     );
     return;
@@ -175,24 +181,37 @@ async function renderDetail(ctx: BotContext, row: UserOtherProductOrderRow): Pro
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
 }
 
-// --- hub (Phase 30: CB.USER_ORDERS opens the hub, not the Phase 29 list) --------------------
+// --- history landing (Fix D layout; CB.USER_ORDERS opens it) --------------------------------
+
+/** Fix D landing rows - exported for tests (labels are ButtonText-backed). */
+export async function buildHistoryLandingKeyboard(): Promise<InlineKeyboard> {
+  const [allOrders, subOrders, otherOrders, payments, walletTx] = await Promise.all([
+    getButtonText("all_orders"),
+    getButtonText("subscription_orders"),
+    getButtonText("other_product_orders"),
+    getButtonText("payments"),
+    getButtonText("wallet_transactions"),
+  ]);
+  return new InlineKeyboard()
+    .text(allOrders, HIST_CB.list(1))
+    .row()
+    .text(subOrders, HIST_CB.sub(1))
+    .text(otherOrders, OD_CB.list(1))
+    .row()
+    .text(payments, PAY_CB.list(1))
+    .text(walletTx, HIST_CB.wtx(1))
+    .row()
+    .text("بازگشت به منوی اصلی", CB.USER_MENU);
+}
 
 async function renderHub(ctx: BotContext): Promise<void> {
   await safeAnswerCallback(ctx);
-  const kb = new InlineKeyboard()
-    .text("همه سوابق 🧾", HIST_CB.list(1))
-    .row()
-    .text("محصولات دیگر 🛍", OD_CB.list(1))
-    .row()
-    .text("پرداخت‌ها 💳", PAY_CB.list(1))
-    .row()
-    .text("کیف پول 🏦", CB.USER_WALLET)
-    .row()
-    .text("بازگشت به منو", CB.USER_MENU);
+  // Fix D: operator-editable landing text.
+  const notice = await getMessageTemplate("history_landing_text");
   await safeEditOrReply(
     ctx,
-    "سفارش‌ها و سوابق من 🧾\n\nسوابق خرید سرویس، تمدید، حجم/زمان اضافه، محصولات دیگر و پرداخت‌ها و شارژهای کیف پول شما.",
-    kb,
+    `سفارش‌های من 🧾\n\n${notice}`,
+    await buildHistoryLandingKeyboard(),
   );
 }
 
@@ -227,43 +246,88 @@ userOrdersHandler.callbackQuery(/^user:orders:view:([0-9a-f-]+)$/, async (ctx) =
 
 // --- unified history (Phase 30) ---------------------------------------------------------------
 
-async function renderHistoryList(ctx: BotContext, page: number): Promise<void> {
+/** Shared pagination + back rows for the Fix D history lists. */
+async function appendHistoryListFooter(
+  kb: InlineKeyboard,
+  build: (page: number) => string,
+  pageData: { page: number; pages: number },
+): Promise<InlineKeyboard> {
+  if (pageData.pages > 1) {
+    if (pageData.page > 1) {
+      kb.text(await getButtonText("previous"), build(pageData.page - 1));
+    }
+    kb.text(`${pageData.page}/${pageData.pages}`, build(pageData.page));
+    if (pageData.page < pageData.pages) {
+      kb.text(await getButtonText("next"), build(pageData.page + 1));
+    }
+    kb.row();
+  }
+  kb.text(await getButtonText("back_to_history"), CB.USER_ORDERS).text(
+    "بازگشت به منوی اصلی",
+    CB.USER_MENU,
+  );
+  return kb;
+}
+
+async function renderHistoryList(
+  ctx: BotContext,
+  page: number,
+  kind: "all" | "sub",
+): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     return;
   }
-  const pageData = await listUserHistory(user.id, page);
+  const build = kind === "all" ? HIST_CB.list : HIST_CB.sub;
+  const title = kind === "all" ? "همه سفارش‌ها 📋" : "خرید اشتراک‌ها 🔐";
+
+  const kb = new InlineKeyboard();
+  let pageInfo: { page: number; pages: number; total: number };
+  if (kind === "all") {
+    const pageData = await listUserHistory(user.id, page);
+    pageInfo = pageData;
+    for (const item of pageData.items) {
+      const icon =
+        item.kind === "order" ? orderStatusInfo(item.status).icon : paymentStatusInfo(item.status).icon;
+      const itemTitle = item.title.length > 24 ? `${item.title.slice(0, 24)}…` : item.title;
+      const date = item.sortAt.toISOString().slice(5, 10);
+      kb.text(
+        `${icon} ${itemTitle} | ${formatToman(item.amountToman)} | ${date}`,
+        item.kind === "order"
+          ? HIST_CB.viewOrder(item.id.slice(0, 8))
+          : HIST_CB.viewPayment(item.id.slice(0, 8)),
+      ).row();
+    }
+  } else {
+    const pageData = await listUserSubscriptionOrders(user.id, page);
+    pageInfo = pageData;
+    for (const order of pageData.orders) {
+      const status = orderStatusInfo(order.status);
+      const name = order.productNameSnapshot ?? ORDER_TYPE_LABEL[order.type];
+      const shortName = name.length > 24 ? `${name.slice(0, 24)}…` : name;
+      const date = (order.paidAt ?? order.createdAt).toISOString().slice(5, 10);
+      kb.text(
+        `${status.icon} ${shortName} | ${formatToman(order.finalPriceToman)} | ${date}`,
+        HIST_CB.viewOrder(order.id.slice(0, 8)),
+      ).row();
+    }
+  }
+  // Fix D: order details return to this exact list/page.
+  ctx.session.temp.userHistListKind = kind;
+  ctx.session.temp.userHistListPage = pageInfo.page;
   await safeAnswerCallback(ctx);
-  if (pageData.total === 0) {
-    const kb = new InlineKeyboard().text("بازگشت", CB.USER_ORDERS).row().text("بازگشت به منو", CB.USER_MENU);
-    await safeEditOrReply(ctx, "همه سوابق 🧾\n\nهنوز سابقه‌ای ثبت نشده است.", kb);
+  if (pageInfo.total === 0) {
+    const kbEmpty = new InlineKeyboard();
+    await appendHistoryListFooter(kbEmpty, build, pageInfo);
+    await safeEditOrReply(
+      ctx,
+      `${title}\n\n${await getMessageTemplate("no_orders_text")}`,
+      kbEmpty,
+    );
     return;
   }
-  const kb = new InlineKeyboard();
-  for (const item of pageData.items) {
-    const icon =
-      item.kind === "order" ? orderStatusInfo(item.status).icon : paymentStatusInfo(item.status).icon;
-    const title = item.title.length > 24 ? `${item.title.slice(0, 24)}…` : item.title;
-    const date = item.sortAt.toISOString().slice(5, 10);
-    kb.text(
-      `${icon} ${title} | ${formatToman(item.amountToman)} | ${date}`,
-      item.kind === "order"
-        ? HIST_CB.viewOrder(item.id.slice(0, 8))
-        : HIST_CB.viewPayment(item.id.slice(0, 8)),
-    ).row();
-  }
-  if (pageData.pages > 1) {
-    if (pageData.page > 1) {
-      kb.text("« قبلی", HIST_CB.list(pageData.page - 1));
-    }
-    kb.text(`${pageData.page}/${pageData.pages}`, HIST_CB.list(pageData.page));
-    if (pageData.page < pageData.pages) {
-      kb.text("بعدی »", HIST_CB.list(pageData.page + 1));
-    }
-    kb.row();
-  }
-  kb.text("بازگشت", CB.USER_ORDERS).text("بازگشت به منو", CB.USER_MENU);
-  await safeEditOrReply(ctx, `همه سوابق 🧾 — ${pageData.total} مورد`, kb);
+  await appendHistoryListFooter(kb, build, pageInfo);
+  await safeEditOrReply(ctx, `${title} — ${pageInfo.total} مورد`, kb);
 }
 
 async function renderHistoryOrderDetail(
@@ -313,12 +377,40 @@ async function renderHistoryOrderDetail(
   if (order.payment !== null) {
     kb.text("مشاهده پرداخت 💳", PAY_CB.view(order.payment.id.slice(0, 8))).row();
   }
-  kb.text("بازگشت به سوابق", HIST_CB.list(1)).row().text("بازگشت", CB.USER_ORDERS);
+  // Fix D: back to the SAME list (all/subscription) and page.
+  const kind = ctx.session.temp.userHistListKind ?? "all";
+  const backPage = ctx.session.temp.userHistListPage ?? 1;
+  kb.text("بازگشت به لیست", kind === "sub" ? HIST_CB.sub(backPage) : HIST_CB.list(backPage))
+    .row()
+    .text(await getButtonText("back_to_history"), CB.USER_ORDERS);
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
 }
 
 userOrdersHandler.callbackQuery(/^user:hist:list:(\d+)$/, async (ctx) => {
-  await renderHistoryList(ctx, Number.parseInt(ctx.match[1], 10));
+  await renderHistoryList(ctx, Number.parseInt(ctx.match[1], 10), "all");
+});
+
+// Fix D: subscription-related orders only (OTHER_PRODUCT stays separate).
+userOrdersHandler.callbackQuery(/^user:hist:sub:(\d+)$/, async (ctx) => {
+  await renderHistoryList(ctx, Number.parseInt(ctx.match[1], 10), "sub");
+});
+
+// Fix D: wallet transactions entered FROM history - same read-only data as
+// the wallet page, but backs return to the history landing (the wallet's
+// own user:wallet:tx route keeps returning to the wallet landing).
+userOrdersHandler.callbackQuery(/^user:hist:wtx:(\d+)$/, async (ctx) => {
+  const user = ctx.dbUser;
+  if (user === null) {
+    return;
+  }
+  const [pageData, emptyText] = await Promise.all([
+    listWalletTransactions(user.id, Number.parseInt(ctx.match[1], 10)),
+    getMessageTemplate("wallet_empty_transactions_text"),
+  ]);
+  await safeAnswerCallback(ctx);
+  const kb = new InlineKeyboard();
+  await appendHistoryListFooter(kb, HIST_CB.wtx, pageData);
+  await safeEditOrReply(ctx, transactionHistoryText(pageData, emptyText), kb, HTML);
 });
 
 userOrdersHandler.callbackQuery(/^user:hist:view:o:([0-9a-f-]+)$/, async (ctx) => {
@@ -369,7 +461,10 @@ async function renderPaymentDetail(ctx: BotContext, payment: UserPaymentRow): Pr
   if (payment.purpose === "WALLET_CHARGE" && payment.status === "APPROVED") {
     kb.text("مشاهده کیف پول 🏦", CB.USER_WALLET).row();
   }
-  kb.text("بازگشت به پرداخت‌ها", PAY_CB.list(1)).row().text("بازگشت", CB.USER_ORDERS);
+  // Fix D: back to the SAME payment-list page.
+  kb.text("بازگشت به پرداخت‌ها", PAY_CB.list(ctx.session.temp.userPayListPage ?? 1))
+    .row()
+    .text(await getButtonText("back_to_history"), CB.USER_ORDERS);
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
 }
 
@@ -379,10 +474,17 @@ userOrdersHandler.callbackQuery(/^user:payhist:list:(\d+)$/, async (ctx) => {
     return;
   }
   const pageData = await listUserPayments(user.id, Number.parseInt(ctx.match[1], 10));
+  // Fix D: payment details return to this exact page.
+  ctx.session.temp.userPayListPage = pageData.page;
   await safeAnswerCallback(ctx);
   if (pageData.total === 0) {
-    const kb = new InlineKeyboard().text("بازگشت", CB.USER_ORDERS).row().text("بازگشت به منو", CB.USER_MENU);
-    await safeEditOrReply(ctx, "پرداخت‌ها 💳\n\nهنوز پرداختی ثبت نشده است.", kb);
+    const kb = new InlineKeyboard();
+    await appendHistoryListFooter(kb, PAY_CB.list, pageData);
+    await safeEditOrReply(
+      ctx,
+      `پرداخت‌ها 💳\n\n${await getMessageTemplate("no_payments_text")}`,
+      kb,
+    );
     return;
   }
   const kb = new InlineKeyboard();
@@ -394,17 +496,7 @@ userOrdersHandler.callbackQuery(/^user:payhist:list:(\d+)$/, async (ctx) => {
       PAY_CB.view(payment.id.slice(0, 8)),
     ).row();
   }
-  if (pageData.pages > 1) {
-    if (pageData.page > 1) {
-      kb.text("« قبلی", PAY_CB.list(pageData.page - 1));
-    }
-    kb.text(`${pageData.page}/${pageData.pages}`, PAY_CB.list(pageData.page));
-    if (pageData.page < pageData.pages) {
-      kb.text("بعدی »", PAY_CB.list(pageData.page + 1));
-    }
-    kb.row();
-  }
-  kb.text("بازگشت", CB.USER_ORDERS).text("بازگشت به منو", CB.USER_MENU);
+  await appendHistoryListFooter(kb, PAY_CB.list, pageData);
   await safeEditOrReply(ctx, `پرداخت‌ها 💳 — ${pageData.total} مورد`, kb);
 });
 

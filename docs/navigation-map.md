@@ -1,15 +1,16 @@
 # ZED_BOT navigation map
 
-The Telegram navigation tree as of **Corrective UI/UX Fix A** — every page,
-its keyboard and every button destination. Use this document to diff the
-implemented tree against the intended design and mark corrections per page.
+The Telegram navigation tree as of **Corrective UI/UX Fixes A–D** — every
+page, its keyboard and every button destination. Use this document to diff
+the implemented tree against the intended design and mark corrections per
+page.
 
 **LOCKED flows (approved as-is):** the «خرید اشتراک» subscription purchase
 (`user:buy`, panel-first → category → product → pre-invoice → payment),
 the OTHER_PRODUCT checkout, and their separation.
 
-Audit status (final production audit): **277 emitted button callbacks
-cross-checked against all 204 registered routes — zero dead buttons, zero
+Audit status (final production audit, re-run after Fix D): **279
+emitted button callbacks cross-checked against all 206 registered routes — zero dead buttons, zero
 orphan routes, zero dead-end pages, all callbacks < 64 bytes, every admin
 route behind admin auth** (locked by
 `apps/bot/tests/navigation-integrity.test.ts`; see
@@ -84,16 +85,24 @@ three counters (services, pending orders, referrals) only.
 payment. After approval: stock auto-delivery or the manual path;
 «تکمیل اطلاعات سفارش 📝» (`user:op:info:<sid>`) resumes required info.
 
-### سفارش‌های من
+### سفارش‌های من 🧾 (Fix D landing)
 
-`user:orders` » history hub (همه سوابق 🧾 / محصولات دیگر 🛍 / پرداخت‌ها 💳 /
-کیف پول 🏦) with paged lists, order/payment details and the Phase 29
-OTHER_PRODUCT detail (delivered content for the owner only).
+| page | buttons |
+| --- | --- |
+| landing (`user:orders`, text = `history_landing_text`) | همه سفارش‌ها 📋 » `user:hist:list:1` / خرید اشتراک‌ها 🔐 » `user:hist:sub:1` · محصولات دیگر 🛍 » `user:orders:list:1` / پرداخت‌ها 💳 » `user:payhist:list:1` · تراکنش‌های کیف پول 🏦 » `user:hist:wtx:1` / بازگشت به منوی اصلی |
+| همه/اشتراک lists (paged, empty = `no_orders_text`) | rows » order/payment detail · pagination · بازگشت به سوابق · منوی اصلی |
+| order detail | مشاهده سرویس/محصول دیگر/پرداخت links · بازگشت به لیست (same list+page) · بازگشت به سوابق |
+| پرداخت‌ها (paged, empty = `no_payments_text`) | rows » payment detail (returns to same page) |
+| تراکنش‌های کیف پول (from history) | paged, empty = `wallet_empty_transactions_text`; backs » history landing (the wallet's own tx page keeps its wallet backs) |
+| محصولات دیگر list (empty = `no_other_product_orders_text`) | Phase 29 list/detail unchanged (delivered content for the owner only) |
 
-### پشتیبانی
+### پشتیبانی 🎫 (Fix D)
 
-`user:support` landing » تیکت جدید ➕ *(flows subject » message)* ·
-تیکت‌های من 🧾 (paged » detail » پاسخ دادن ✍️ *(flow)*) · بازگشت به منو.
+| page | buttons |
+| --- | --- |
+| landing (`user:support`, text = `support_landing_text`) | ایجاد تیکت جدید ➕ *(flows subject » message, template prompts)* / تیکت‌های من 📋 / بازگشت به منوی اصلی |
+| تیکت‌های من (paged, empty = `support_empty_tickets_text`) | rows » detail · pagination · بازگشت به پشتیبانی |
+| ticket detail | (open) پاسخ به تیکت ✍️ *(flow)* / بروزرسانی ♻️ / بازگشت به تیکت‌های من (same page) / بازگشت به پشتیبانی — closed tickets hide the reply button |
 
 ---
 

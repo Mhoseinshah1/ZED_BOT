@@ -2,11 +2,12 @@
 
 Every visible button was cross-checked against its handler (see
 `docs/callback-audit.md` — 0 dead buttons, 0 orphans) and against the tree
-in `docs/navigation-map.md`. 203 keyboard constructions render across 242
+in `docs/navigation-map.md`. 204 keyboard constructions render across 243
 pages; structural locks live in `navigation-integrity.test.ts` and the
 per-fix suites (exact rows for the user menu, admin root, finance landing,
 wallet, service detail, receipt detail, OTHER_PRODUCT landing, users
-landing, product root, panel root).
+landing, product root, panel root, and the Fix D support/history landings
+and ticket-detail keyboards).
 
 ## Fallbacks
 

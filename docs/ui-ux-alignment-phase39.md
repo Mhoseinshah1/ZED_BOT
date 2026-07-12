@@ -35,6 +35,11 @@ a blanket alignment pass:
   OTHER_PRODUCT panel guard, panels root/filters/secret-free detail with
   linked products — direct-parent backs via minimal session context. See
   `docs/corrective-ui-fix-c.md`.
+- **Corrective Fix D** (delivered, before the final audit) — support
+  landing/ticket navigation with template-backed prompts and same-page
+  returns, the «سفارش‌های من 🧾» landing (all/subscription/other/payments/
+  wallet-transactions), source-correct wallet-history backs and 9 new
+  MessageTemplates + 11 new ButtonTexts. See `docs/corrective-ui-fix-d.md`.
 - **Fix A regression fix** — the pre-Fix-A revert had made the
   six unfinished user placeholder buttons visible again; the accepted
   4-row user menu (placeholders hidden, callbacks still answered) and the

@@ -200,6 +200,11 @@ export interface SessionData {
     adminUserWalletDraft?: AdminUserWalletDraft;
     // Last admin user-search query ("بازگشت به نتایج" re-runs it).
     adminUserSearchQuery?: string;
+    // Fix D user-side list contexts - details return to the same page.
+    userTicketListPage?: number;
+    userHistListKind?: "all" | "sub";
+    userHistListPage?: number;
+    userPayListPage?: number;
     // Fix C list contexts - details return to the same filter/page.
     adminUserListFilter?: "r" | "a" | "b" | "d";
     adminUserListPage?: number;

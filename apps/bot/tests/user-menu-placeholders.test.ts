@@ -133,7 +133,9 @@ describe("restored text fallbacks, seeds and wiring", () => {
     const wiring: Array<[string, string]> = [
       ["apps/bot/src/handlers/user-services/services.handler.ts", "no_services_text"],
       ["apps/bot/src/handlers/user-orders/orders.handler.ts", "no_orders_text"],
-      ["apps/bot/src/handlers/user-support/support.handler.ts", "no_tickets_text"],
+      // Fix D superseded no_tickets_text with the support_empty_tickets_text
+      // key on the tickets list (both stay seeded with code fallbacks).
+      ["apps/bot/src/handlers/user-support/support.handler.ts", "support_empty_tickets_text"],
     ];
     for (const [file, key] of wiring) {
       const src = readFileSync(path.join(repoRoot, file), "utf8");

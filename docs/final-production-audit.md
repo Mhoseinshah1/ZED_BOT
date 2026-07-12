@@ -1,8 +1,8 @@
 # Final production readiness & UI audit
 
-Whole-bot audit over the approved baseline (Corrective Fixes A, B, C —
-note: no "Fix D" was ever specified or delivered; A–C are the actual
-baseline). Companion reports: `docs/callback-audit.md`,
+Whole-bot audit over the approved baseline (Corrective Fixes A, B, C
+and D — **Fix D was implemented before this final audit**, and the audit
+was re-run over the complete A–D baseline). Companion reports: `docs/callback-audit.md`,
 `docs/text-audit.md`, `docs/button-audit.md`, `docs/navigation-map.md`.
 
 ## Statistics
@@ -10,16 +10,16 @@ baseline). Companion reports: `docs/callback-audit.md`,
 | metric | value |
 | --- | --- |
 | source files scanned | 106 |
-| rendered pages (`safeEditOrReply` sites) | 242 |
-| keyboard constructions | 203 |
-| callback registration sites | 276 (41 exact + 163 regex routes) |
-| emitted callback shapes | 277 |
+| rendered pages (`safeEditOrReply` sites) | 243 |
+| keyboard constructions | 204 |
+| callback registration sites | 278 (41 exact + 165 regex routes) |
+| emitted callback shapes | 279 |
 | handler composers | 51 |
-| MessageTemplates (seeded, editable) | 11 |
-| ButtonTexts (seeded, editable) | 21 |
+| MessageTemplates (seeded, editable) | 20 |
+| ButtonTexts (seeded, editable) | 32 |
 | dead buttons / orphan routes / dead-end pages | **0 / 0 / 0** |
 | max callback length (worst case) | 49 bytes (< 64) |
-| test files / tests | 29 files, 229 passed + 18 skipped |
+| test files / tests | 30 files, 241 passed + 18 skipped |
 
 ## Audit outcomes per dimension
 
@@ -74,7 +74,7 @@ reports.
 
 ## Remaining production issues
 
-None known. The suite (29 files) is green on a fresh database; deploy per
+None known. The suite (30 files) is green on a fresh database; deploy per
 `docs/production-install-phase36.md` (+ HTTPS Phase 37, hardening
 Phase 38).
 
