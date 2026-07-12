@@ -16,6 +16,7 @@ import {
   type WalletTransaction,
 } from "@zedbot/database";
 
+import { claimDiscountUsage } from "./discount.service.js";
 import { WALLET_TOPUP_REASON } from "./wallet-topup.service.js";
 
 // =============================================================================
@@ -45,6 +46,8 @@ const NO_CHECKOUT = "پیش‌فاکتور این پرداخت یافت نشد؛
 const CHECKOUT_NOT_PENDING = "وضعیت پیش‌فاکتور برای تایید معتبر نیست.";
 const AMOUNT_MISMATCH = "مبلغ رسید با پیش‌فاکتور هم‌خوانی ندارد.";
 const NO_PENDING_RECEIPT = "رسید در انتظار بررسی برای این پرداخت وجود ندارد.";
+const DISCOUNT_CLAIM_FAILED_ADMIN =
+  "کد تخفیف این پرداخت دیگر معتبر نیست (سقف استفاده تکمیل یا منقضی شده است). تایید انجام نشد؛ در صورت نیاز رسید را رد کنید.";
 const SUBMITTED_AFTER_EXPIRY = "رسید بعد از انقضای پیش‌فاکتور ثبت شده و قابل تایید نیست.";
 export const REASON_LENGTH_ERROR = "دلیل رد باید بین ۱ تا ۱۰۰۰ کاراکتر باشد.";
 
@@ -313,25 +316,23 @@ export async function approveReceiptPayment(
         });
       }
 
-      // Discount finalization: at most one usage row per checkout.
+      // SECURITY-CRITICAL discount finalization: claimDiscountUsage locks
+      // the DiscountCode row and re-validates active/window/total/per-user
+      // limits against the committed state (the checkout-time validation is
+      // UX only). Still at most one usage row per checkout. A failed claim
+      // aborts the WHOLE approval - the payment stays PENDING_REVIEW so the
+      // admin can reject it with a reason instead of settling a discounted
+      // price whose usage could not be claimed.
       if (checkout.discountCodeId !== null && checkout.discountAmountToman > 0) {
-        const usage = await tx.discountCodeUsage.findFirst({
-          where: { checkoutSessionId: checkout.id },
+        const claim = await claimDiscountUsage(tx, {
+          discountCodeId: checkout.discountCodeId,
+          userId: checkout.userId,
+          orderId: order.id,
+          checkoutSessionId: checkout.id,
+          amountToman: checkout.discountAmountToman,
         });
-        if (usage === null) {
-          await tx.discountCodeUsage.create({
-            data: {
-              discountCodeId: checkout.discountCodeId,
-              userId: checkout.userId,
-              orderId: order.id,
-              checkoutSessionId: checkout.id,
-              amountToman: checkout.discountAmountToman,
-            },
-          });
-          await tx.discountCode.update({
-            where: { id: checkout.discountCodeId },
-            data: { totalUsedCount: { increment: 1 } },
-          });
+        if (!claim.ok) {
+          throw new ReviewAbortError(DISCOUNT_CLAIM_FAILED_ADMIN);
         }
       }
 
