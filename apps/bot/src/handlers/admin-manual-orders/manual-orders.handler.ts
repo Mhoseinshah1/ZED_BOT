@@ -140,7 +140,28 @@ function formatDateTime(date: Date | null): string {
   return date === null ? "-" : `${date.toISOString().replace("T", " ").slice(0, 16)} (UTC)`;
 }
 
-// --- landing hub -------------------------------------------------------------------------
+// --- OTHER_PRODUCT admin landing (Corrective Fix B) ----------------------------------------
+// «محصولات دیگر 🛍» - the single logical parent for product management,
+// the manual-order filters and the stock inventory. Every destination is an
+// EXISTING implementation (no duplicated services): the filters are the
+// Phase 24 lists, «مدیریت محصولات دیگر» opens the existing product
+// management flow and «مدیریت موجودی استاک» the existing stock root.
+
+/** Exported for tests - the exact Fix B landing rows. */
+export function otherProductsLandingKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("مدیریت محصولات دیگر 🛍", CB.ADMIN_PRODUCTS)
+    .row()
+    .text("سفارش‌های دستی 📦", MO_CB.list("open", 1))
+    .text("سفارش‌های در انتظار اطلاعات 📝", MO_CB.list("info", 1))
+    .row()
+    .text("سفارش‌های آماده تحویل 🚚", MO_CB.list("ready", 1))
+    .text("تاریخچه تحویل ✅", MO_CB.list("delivered", 1))
+    .row()
+    .text("مدیریت موجودی استاک 🎟", "admin:stock:products")
+    .row()
+    .text("بازگشت به پنل ادمین", CB.ADMIN_MENU);
+}
 
 async function renderLanding(ctx: BotContext): Promise<void> {
   clearManualOrderState(ctx);
@@ -149,26 +170,14 @@ async function renderLanding(ctx: BotContext): Promise<void> {
   await safeEditOrReply(
     ctx,
     [
-      "سفارش‌های دستی 📦",
+      "محصولات دیگر 🛍",
       "",
       `در انتظار اطلاعات کاربر: ${counts.waitingInfoCount}`,
       `آماده تحویل: ${counts.readyCount}`,
       `تحویل‌شده: ${counts.deliveredCount}`,
       `کل بازها: ${counts.waitingInfoCount + counts.readyCount}`,
     ].join("\n"),
-    new InlineKeyboard()
-      .text("همه سفارش‌های باز", MO_CB.list("open", 1))
-      .row()
-      .text("در انتظار اطلاعات کاربر 📝", MO_CB.list("info", 1))
-      .text("آماده تحویل 📦", MO_CB.list("ready", 1))
-      .row()
-      .text("تحویل‌شده ✅", MO_CB.list("delivered", 1))
-      .row()
-      .text("جستجوی سفارش 🔎", MO_CB.search)
-      .row()
-      .text("مدیریت موجودی محصولات 🎟", "admin:stock:products")
-      .row()
-      .text("بازگشت به ادمین", CB.ADMIN_MENU),
+    otherProductsLandingKeyboard(),
   );
 }
 
@@ -189,7 +198,9 @@ function listKeyboard(pageData: ManualOrdersPage): InlineKeyboard {
     }
     kb.row();
   }
-  kb.text("بازگشت", MO_CB.landing);
+  // Fix B: search moved off the landing onto the lists it searches.
+  kb.text("جستجوی سفارش 🔎", MO_CB.search).row();
+  kb.text("بازگشت به محصولات دیگر", MO_CB.landing);
   return kb;
 }
 
@@ -328,7 +339,11 @@ function detailText(record: ManualOrderDetail): string {
   return lines.join("\n");
 }
 
-function detailKeyboard(ctx: BotContext, record: ManualOrderDetail): InlineKeyboard {
+/** Exported for tests - back goes to the SAME filter/page (session context). */
+export function manualOrderDetailKeyboard(
+  ctx: BotContext,
+  record: ManualOrderDetail,
+): InlineKeyboard {
   const sid = manualOrderShortId(record);
   const kb = new InlineKeyboard();
   if (record.status === "WAITING_ADMIN_DELIVERY") {
@@ -347,12 +362,12 @@ function detailKeyboard(ctx: BotContext, record: ManualOrderDetail): InlineKeybo
     const page = ctx.session.temp.adminManualOrderLastPage ?? 1;
     kb.text("بازگشت به لیست", MO_CB.list(filter, page)).row();
   }
-  kb.text("بازگشت به سفارش‌های دستی", MO_CB.landing);
+  kb.text("بازگشت به محصولات دیگر", MO_CB.landing);
   return kb;
 }
 
 async function renderDetail(ctx: BotContext, record: ManualOrderDetail): Promise<void> {
-  await safeEditOrReply(ctx, detailText(record), detailKeyboard(ctx, record), HTML);
+  await safeEditOrReply(ctx, detailText(record), manualOrderDetailKeyboard(ctx, record), HTML);
 }
 
 manualOrdersHandler.callbackQuery(/^admin:mo:view:([0-9a-f-]+)$/, async (ctx) => {

@@ -76,13 +76,24 @@ function clearAdminWalletFlowState(ctx: BotContext): void {
 }
 
 /**
- * Full Phase 20 state cleanup (flow + wallet draft + search query). Called
- * on the «مدیریت کاربران» landing and from showAdminMenu, so returning to
- * the admin main menu never leaves a stale draft or query behind.
+ * Full Phase 20 state cleanup (flow + wallet draft + search query + the
+ * Fix B return-to-receipt context). Called on the «مدیریت کاربران» landing
+ * and from showAdminMenu, so returning to the admin main menu never leaves
+ * a stale draft, query or receipt context behind.
  */
 export function clearAdminUsersState(ctx: BotContext): void {
   clearAdminWalletFlowState(ctx);
   delete ctx.session.temp.adminUserSearchQuery;
+  delete ctx.session.temp.adminUserReturnContext;
+}
+
+/**
+ * Fix B: receipt short-id for «بازگشت به رسید 🧾» while the admin navigates
+ * the user pages after jumping in from a receipt detail.
+ */
+function receiptReturnSid(ctx: BotContext): string | undefined {
+  const context = ctx.session.temp.adminUserReturnContext;
+  return context?.kind === "receipt" ? context.receiptId.slice(0, 8) : undefined;
 }
 
 async function renderLanding(ctx: BotContext): Promise<void> {
@@ -97,14 +108,19 @@ async function renderProfile(ctx: BotContext, user: User): Promise<void> {
   await safeEditOrReply(
     ctx,
     userProfileText(user),
-    userProfileKeyboard(userShortId(user), hasResults),
+    userProfileKeyboard(userShortId(user), hasResults, receiptReturnSid(ctx)),
     HTML,
   );
 }
 
 async function renderWallet(ctx: BotContext, user: User): Promise<void> {
   const transactions = await listUserWalletTransactionsForAdmin(user.id, 5);
-  await safeEditOrReply(ctx, userWalletText(user, transactions), userWalletKeyboard(userShortId(user)), HTML);
+  await safeEditOrReply(
+    ctx,
+    userWalletText(user, transactions),
+    userWalletKeyboard(userShortId(user), receiptReturnSid(ctx)),
+    HTML,
+  );
 }
 
 adminUsersHandler.callbackQuery(AU_CB.root, renderLanding);
@@ -303,7 +319,12 @@ adminUsersHandler.callbackQuery(AU_CB.walletConfirm, async (ctx) => {
     `موجودی جدید کاربر: ${formatToman(outcome.user.balanceToman)}`,
     notified ? "کاربر مطلع شد ✅" : "ارسال پیام به کاربر ناموفق بود ⚠️",
   ].join("\n");
-  await safeEditOrReply(ctx, summary, userWalletKeyboard(userShortId(outcome.user)), HTML);
+  await safeEditOrReply(
+    ctx,
+    summary,
+    userWalletKeyboard(userShortId(outcome.user), receiptReturnSid(ctx)),
+    HTML,
+  );
 });
 
 // --- text inputs (search / amount / reason) -----------------------------------------

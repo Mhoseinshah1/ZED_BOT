@@ -189,6 +189,13 @@ export interface SessionData {
     paymentDraft?: PaymentDraft;
     // Admin receipt review: payment awaiting a rejection reason ("receipt:reject").
     rejectingPaymentId?: string;
+    // Admin receipt list position (Corrective Fix B) - detail pages return
+    // to this page; fallback 1.
+    adminReceiptListPage?: number;
+    // Where to return after jumping from a receipt detail into the admin
+    // user pages (Corrective Fix B). Cleared on the users landing and the
+    // admin main menu.
+    adminUserReturnContext?: { kind: "receipt"; receiptId: string; receiptPage?: number };
     // Admin manual wallet adjustment (Phase 20).
     adminUserWalletDraft?: AdminUserWalletDraft;
     // Last admin user-search query ("بازگشت به نتایج" re-runs it).

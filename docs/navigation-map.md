@@ -116,20 +116,33 @@ receipts list — reachable via مالی), plus the placeholders
 | تنظیمات کیف پول و پرداخت | toggles · min/max/instruction/notice *(flows)* · بازگشت » `admin:finance` |
 | گزارش مالی 📊 | ranges » dashboard · آخرین پرداخت‌ها 💳 / آخرین سفارش‌ها 🧾 (paged » details » receipt review / manual order) · بازگشت به مالی |
 
-### رسیدهای تایید نشده 💵
+### رسیدهای تاییدنشده 💵 (Fix B)
 
-`admin:receipts` list (paged) » receipt detail (media + masked card) »
-تایید ✅ (confirm) · رد ❌ *(flow — reason sent to the user)*. Internal
-backs keep their existing `admin:menu` destination (receipt submenus are
-locked; extra receipt-detail actions are deferred to Fix B).
+| page | buttons |
+| --- | --- |
+| list (`admin:receipts` / `admin:rec:list:<page>`) | one per receipt » `admin:rec:view:<sid>` · pagination · بازگشت به مالی |
+| جزئیات رسید 🧾 (`admin:rec:view:<sid>`) | (pending only) تایید رسید ✅ · رد رسید ❌ / ارسال/مشاهده رسید و مشخصات 🧾 » `admin:rec:media:<sid>` (on-demand media) / افزایش موجودی کاربر 💰 » existing user wallet page · مدیریت/مسدودسازی کاربر 👤 » existing user profile / بازگشت به لیست (same page) · بازگشت به مالی |
+| approve confirm / reject *(flow)* | result » بازگشت به لیست رسیدها · بازگشت به مالی; reject cancel » same detail |
 
-### Other admin sections (unchanged by Fix A)
+User pages opened from a receipt gain «بازگشت به رسید 🧾» (context cleared
+on the users landing / admin menu).
+
+### محصولات دیگر 🛍 (Fix B landing)
+
+| page | buttons |
+| --- | --- |
+| landing (`admin:other_products`, with counters) | مدیریت محصولات دیگر 🛍 » `admin:products` / سفارش‌های دستی 📦 » open list · در انتظار اطلاعات 📝 » info list / آماده تحویل 🚚 » ready list · تاریخچه تحویل ✅ » delivered list / مدیریت موجودی استاک 🎟 » `admin:stock:products` / بازگشت به پنل ادمین |
+| filtered lists (paged) | rows » `admin:mo:view:<sid>` · جستجوی سفارش 🔎 *(flow)* · بازگشت به محصولات دیگر |
+| manual-order detail | تحویل سفارش 📦 *(flow + confirm)* · پیام تکمیل اطلاعات 📝 · بازگشت به لیست (same filter/page) · بازگشت به محصولات دیگر |
+| مدیریت موجودی استاک 🎟 | product rows (🚨/⚠️/🎟/📦 badges) » product page · بازگشت به محصولات دیگر |
+| stock product page | افزودن آیتم تکی ➕ · افزودن گروهی ➕➕ *(flows)* / آیتم‌های موجود ✅ · رزروشده ⏳ / غیرفعال ⏸ · تاریخچه تحویل 📦 (status lists `admin:stock:items:<sid>:<a|r|x|d>:<page>`) / تنظیم حد هشدار 🔔 *(flow)* / پاک کردن حد هشدار (when set) / toggle استاک / بازگشت به لیست محصولات استاک / بازگشت به محصولات دیگر |
+| status item lists | release/disable actions (AVAILABLE/RESERVED only; DELIVERED/DISABLED read-only) returning to the same status/page · pagination · بازگشت » product page |
+
+### Other admin sections (unchanged by Fix A/B)
 
 - **مدیریت کاربران 👤** — search *(flow)* / recent users » user page »
   wallet adjustments (افزایش ➕ / کسر ➖ with confirm).
 - **مدیریت محصولات/پلن‌ها، مدیریت پنل‌ها** — pre-existing CRUD wizards.
-- **محصولات دیگر / سفارش‌ها** — manual-order landing, filtered lists,
-  delivery *(flow + confirm)*, stock inventory (add/bulk/threshold/items).
 - **تیکت‌های پشتیبانی 🎫** — filters » detail » پاسخ ✍️ *(flow)* / بستن ✅.
 - **پیام همگانی 📣** — draft *(flow)* » audience » preview » test/start.
 - **تنظیمات عمومی ⚙️** — مدیریت متن‌ها ✍️ (templates/buttons list » edit
