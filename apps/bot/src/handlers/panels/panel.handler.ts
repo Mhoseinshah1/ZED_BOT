@@ -1,10 +1,11 @@
-import { PanelStatus, type Panel, type Prisma } from "@zedbot/database";
+import { PanelStatus, prisma, type Panel, type Prisma } from "@zedbot/database";
 import { encryptSecret, errorMessage, maskSecretEdges, SecretConfigError } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
 import {
+  countPanelProducts,
   createPanel,
   getPanelByShortId,
   listPanels,
@@ -53,7 +54,18 @@ async function resolvePanel(ctx: BotContext, sid: string): Promise<Panel | null>
 }
 
 async function showDetail(ctx: BotContext, panel: Panel): Promise<void> {
-  await safeEditOrReply(ctx, panelDetailText(panel), panelDetailKeyboard(panel), HTML);
+  // Fix C: linked-product count + back to the same list/filter/page.
+  const count = await countPanelProducts(panel.id);
+  const backList = {
+    filter: ctx.session.temp.adminPanelListFilter,
+    page: ctx.session.temp.adminPanelListPage ?? 1,
+  };
+  await safeEditOrReply(
+    ctx,
+    panelDetailText(panel, count),
+    panelDetailKeyboard(panel, backList),
+    HTML,
+  );
 }
 
 // --- root menu + list --------------------------------------------------------
@@ -71,8 +83,57 @@ panelHandler.callbackQuery("admin:panels:noop", async (ctx) => {
 panelHandler.callbackQuery(/^admin:panels:list(?::(\d+))?$/, async (ctx) => {
   const page = Number.parseInt(ctx.match[1] ?? "1", 10);
   const { panels, page: current, pages, total } = await listPanels(page);
+  delete ctx.session.temp.adminPanelListFilter;
+  ctx.session.temp.adminPanelListPage = current;
   await safeAnswerCallback(ctx);
   await safeEditOrReply(ctx, panelListText(total), panelListKeyboard(panels, current, pages));
+});
+
+// Fix C: status-filtered lists (a = ACTIVE, i = everything else).
+panelHandler.callbackQuery(/^admin:panels:ls:(a|i):(\d+)$/, async (ctx) => {
+  const filter = ctx.match[1] as "a" | "i";
+  const { panels, page, pages, total } = await listPanels(
+    Number.parseInt(ctx.match[2], 10),
+    filter,
+  );
+  ctx.session.temp.adminPanelListFilter = filter;
+  ctx.session.temp.adminPanelListPage = page;
+  await safeAnswerCallback(ctx);
+  const title = filter === "a" ? `پنل‌های فعال ✅ (${total})` : `پنل‌های غیرفعال ⏸ (${total})`;
+  await safeEditOrReply(
+    ctx,
+    total === 0 ? `${title}\n\nموردی وجود ندارد.` : title,
+    panelListKeyboard(panels, page, pages, filter),
+  );
+});
+
+// Fix C: read-only linked products of one panel (opens the existing product detail).
+panelHandler.callbackQuery(/^admin:panel:prods:([0-9a-f-]+)$/, async (ctx) => {
+  const panel = await resolvePanel(ctx, ctx.match[1]);
+  if (panel === null) {
+    return;
+  }
+  const products = await prisma.product.findMany({
+    where: { panelId: panel.id },
+    orderBy: [{ isActive: "desc" }, { name: "asc" }],
+    take: 30,
+  });
+  await safeAnswerCallback(ctx);
+  const kb = new InlineKeyboard();
+  for (const product of products) {
+    kb.text(
+      `${product.isActive ? "🟢" : "⚪️"} ${product.name} | ${product.priceToman} تومان`,
+      `admin:prod:view:${product.id.slice(0, 8)}`,
+    ).row();
+  }
+  kb.text("بازگشت به پنل", cb.view(panelShortId(panel)));
+  await safeEditOrReply(
+    ctx,
+    products.length === 0
+      ? `محصولات متصل 🛍 (${panel.name})\n\nمحصولی به این پنل متصل نیست.`
+      : `محصولات متصل 🛍 (${panel.name}) — ${products.length} محصول`,
+    kb,
+  );
 });
 
 // --- add flow ----------------------------------------------------------------

@@ -28,7 +28,14 @@ a blanket alignment pass:
   landing, the «محصولات دیگر 🛍» admin landing over the existing
   manual-order filters and stock root, and status-filtered stock item
   lists. See `docs/corrective-ui-fix-b.md`.
-- **Fix A regression fix** (current) — the pre-Fix-A revert had made the
+- **Corrective Fix C** (delivered) — admin user-management tree (landing
+  filters over existing UserStatus values, escaped detail with read-only
+  wallet/services/orders/payments sub-pages, confirmed block/unblock),
+  products root/filters/type-specific detail with the stock link and
+  OTHER_PRODUCT panel guard, panels root/filters/secret-free detail with
+  linked products — direct-parent backs via minimal session context. See
+  `docs/corrective-ui-fix-c.md`.
+- **Fix A regression fix** — the pre-Fix-A revert had made the
   six unfinished user placeholder buttons visible again; the accepted
   4-row user menu (placeholders hidden, callbacks still answered) and the
   accepted non-business texts (`no_services_text` / `no_orders_text` /

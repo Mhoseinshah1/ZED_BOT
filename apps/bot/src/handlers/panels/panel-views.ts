@@ -27,41 +27,63 @@ function yesNo(value: boolean): string {
 // --- Panel management root menu ----------------------------------------------
 
 export function panelMenuText(): string {
-  return "مدیریت پنل‌ها 🛠\n\nیک گزینه را انتخاب کنید:";
+  return "مدیریت پنل‌ها 🖥\n\nیک گزینه را انتخاب کنید:";
 }
 
+/**
+ * Fix C root. «تست همه پنل‌های فعال» is deliberately NOT offered - no
+ * existing bulk-test helper exists and inventing one is out of scope
+ * (documented deferral; per-panel «تست اتصال 🩺» covers the need).
+ */
 export function panelMenuKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
+    .text("لیست پنل‌ها 🧾", cb.list(1))
     .text("افزودن پنل ➕", PANEL_CB.ADD)
-    .text("لیست پنل‌ها 📋", cb.list(1))
     .row()
-    .text("بازگشت", "admin:menu");
+    .text("پنل‌های فعال ✅", cb.listFiltered("a", 1))
+    .text("پنل‌های غیرفعال ⏸", cb.listFiltered("i", 1))
+    .row()
+    .text("بازگشت به پنل ادمین", "admin:menu");
 }
 
 // --- Panel list --------------------------------------------------------------
+
+/** Hostname only - the full URL (and never credentials) stays off the list. */
+export function panelHostname(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return "-";
+  }
+}
 
 export function panelListKeyboard(
   panels: Panel[],
   page: number,
   pages: number,
+  filter?: "a" | "i",
 ): InlineKeyboard {
+  const pageCb = (p: number): string => (filter === undefined ? cb.list(p) : cb.listFiltered(filter, p));
   const kb = new InlineKeyboard();
   for (const panel of panels) {
     const emoji = STATUS_EMOJI[panel.status];
     const hidden = panel.isVisible ? "" : " 🙈";
-    kb.text(`${emoji} ${panel.name} | ${panel.type}${hidden}`, cb.view(panelShortId(panel))).row();
+    kb.text(
+      `${emoji} ${panel.name} | ${panel.type} | ${panelHostname(panel.baseUrl)}${hidden}`,
+      cb.view(panelShortId(panel)),
+    ).row();
   }
   if (pages > 1) {
     if (page > 1) {
-      kb.text("« قبلی", cb.list(page - 1));
+      kb.text("« قبلی", pageCb(page - 1));
     }
     kb.text(`${page}/${pages}`, "admin:panels:noop");
     if (page < pages) {
-      kb.text("بعدی »", cb.list(page + 1));
+      kb.text("بعدی »", pageCb(page + 1));
     }
     kb.row();
   }
-  kb.text("بازگشت", PANEL_CB.MENU);
+  kb.text("بازگشت به مدیریت پنل‌ها", PANEL_CB.MENU);
   return kb;
 }
 
@@ -82,12 +104,21 @@ function groupsText(value: unknown): string {
 }
 
 // HTML parse mode: every dynamic (operator-entered) value must be escaped.
-export function panelDetailText(panel: Panel): string {
+// Credentials NEVER render - only a set/not-set marker (Fix C).
+export function panelDetailText(panel: Panel, linkedProductCount?: number): string {
+  const credentialSet =
+    panel.type === "MARZBAN"
+      ? panel.passwordEncrypted !== null && panel.passwordEncrypted !== ""
+      : panel.tokenEncrypted !== null && panel.tokenEncrypted !== "";
   const lines = [
     `📋 <b>${escapeHtml(panel.name)}</b>`,
     "",
+    `شناسه: <code>${panelShortId(panel)}</code>`,
     `نوع پنل: ${panel.type}`,
-    `آدرس: ${escapeHtml(panel.baseUrl)}`,
+    `هاست: ${escapeHtml(panelHostname(panel.baseUrl))}`,
+    `اطلاعات ورود: ${credentialSet ? "تنظیم شده ✅" : "تنظیم نشده ❌"}`,
+    ...(linkedProductCount === undefined ? [] : [`محصولات متصل: ${linkedProductCount}`]),
+    `ایجاد: ${panel.createdAt.toISOString().slice(0, 10)}`,
     `وضعیت: ${STATUS_EMOJI[panel.status]} ${STATUS_LABEL[panel.status]}`,
     `نمایش: ${panel.isVisible ? "قابل نمایش 👁" : "مخفی 🙈"}`,
     `گروه‌های قابل نمایش: ${escapeHtml(groupsText(panel.visibleForGroups))}`,
@@ -108,17 +139,24 @@ export function panelDetailText(panel: Panel): string {
   return lines.join("\n");
 }
 
-export function panelDetailKeyboard(panel: Panel): InlineKeyboard {
+/** Fix C: `backList` returns to the same list/filter/page (session context). */
+export function panelDetailKeyboard(
+  panel: Panel,
+  backList?: { filter?: "a" | "i"; page: number },
+): InlineKeyboard {
   const sid = panelShortId(panel);
   const credentialLabel = panel.type === "MARZBAN" ? "ویرایش رمز 🔑" : "ویرایش توکن 🔑";
+  const listBack =
+    backList?.filter === undefined ? cb.list(backList?.page ?? 1) : cb.listFiltered(backList.filter, backList.page);
   return new InlineKeyboard()
-    .text("تست اتصال 🔌", cb.test(sid))
+    .text("تست اتصال 🩺", cb.test(sid))
+    .text("تغییر وضعیت", cb.statusMenu(sid))
     .row()
     .text("ویرایش نام", cb.fieldEdit(sid, "nm"))
     .text("ویرایش آدرس", cb.fieldEdit(sid, "url"))
     .row()
     .text(credentialLabel, cb.fieldEdit(sid, "cred"))
-    .text("تغییر وضعیت", cb.statusMenu(sid))
+    .text("محصولات متصل 🛍", cb.products(sid))
     .row()
     .text(panel.isVisible ? "مخفی کردن 🙈" : "نمایش 👁", cb.visibility(sid))
     .text("قابلیت‌ها", cb.features(sid))
@@ -131,7 +169,9 @@ export function panelDetailKeyboard(panel: Panel): InlineKeyboard {
     .row()
     .text("حذف پنل 🗑", cb.deleteAsk(sid))
     .row()
-    .text("بازگشت به لیست", cb.list(1));
+    .text("بازگشت به لیست پنل‌ها", listBack)
+    .row()
+    .text("بازگشت به مدیریت پنل‌ها", PANEL_CB.MENU);
 }
 
 // --- Status menu -------------------------------------------------------------

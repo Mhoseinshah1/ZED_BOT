@@ -49,6 +49,7 @@ import {
   groupsKeyboard,
   locationKeyboard,
   panelPickerKeyboard,
+  productAddTypeKeyboard,
   productDetailKeyboard,
   productDetailText,
   productListKeyboard,
@@ -84,7 +85,18 @@ async function showProductMenu(ctx: BotContext): Promise<void> {
 }
 
 async function showProductDetail(ctx: BotContext, product: ProductWithRelations): Promise<void> {
-  await safeEditOrReply(ctx, productDetailText(product), productDetailKeyboard(product), HTML);
+  // Fix C: back to the same filtered list/page the admin came from.
+  const filter = ctx.session.temp.adminProductListFilter;
+  const backList =
+    filter === undefined
+      ? undefined
+      : { filter, page: ctx.session.temp.adminProductListPage ?? 1 };
+  await safeEditOrReply(
+    ctx,
+    productDetailText(product),
+    productDetailKeyboard(product, backList),
+    HTML,
+  );
 }
 
 async function showCategoryDetail(ctx: BotContext, category: ProductCategory): Promise<void> {
@@ -278,12 +290,22 @@ productHandler.callbackQuery(PROD_CB.LIST_MENU, async (ctx) => {
   await safeEditOrReply(ctx, "لیست محصولات 📋\n\nکدام دسته؟", productListMenuKeyboard());
 });
 
-productHandler.callbackQuery(/^admin:prod:ls:(S|O|A):(\d+)$/, async (ctx) => {
-  const filter = ctx.match[1] as "S" | "O" | "A";
+// Fix C: the type chooser in front of the existing add wizards (step 1).
+productHandler.callbackQuery(PROD_CB.ADD, async (ctx) => {
+  clearProductFlows(ctx);
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(ctx, "نوع محصول را انتخاب کنید:", productAddTypeKeyboard());
+});
+
+productHandler.callbackQuery(/^admin:prod:ls:(S|O|A|V|X):(\d+)$/, async (ctx) => {
+  const filter = ctx.match[1] as "S" | "O" | "A" | "V" | "X";
   const { products, page, pages, total } = await listProducts(
     filter,
     Number.parseInt(ctx.match[2], 10),
   );
+  // Fix C: details return to this exact filter/page.
+  ctx.session.temp.adminProductListFilter = filter;
+  ctx.session.temp.adminProductListPage = page;
   await safeAnswerCallback(ctx);
   const title = total === 0 ? "محصولی ثبت نشده است." : `محصولات (${total})`;
   await safeEditOrReply(ctx, title, productListKeyboard(products, filter, page, pages));
@@ -410,14 +432,26 @@ productHandler.callbackQuery(/^admin:prod:pnl:(.+)$/, async (ctx) => {
   if (product === null) {
     return;
   }
+  // Fix C guard: OTHER_PRODUCT is never provisioned through a VPN panel.
+  if (product.type !== "SERVICE_PRODUCT") {
+    await safeAnswerCallback(ctx, "محصولات دیگر به پنل متصل نمی‌شوند.");
+    return;
+  }
   const panels = await prisma.panel.findMany({
+    where: { status: "ACTIVE" },
     orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }],
   });
   await safeAnswerCallback(ctx);
   const sid = productShortId(product);
   await safeEditOrReply(
     ctx,
-    "پنل جدید را انتخاب کنید:",
+    [
+      `پنل فعلی: ${product.panel === null ? "-" : product.panel.name}`,
+      "",
+      "پنل جدید را انتخاب کنید:",
+      "",
+      "⚠️ تغییر پنل محصول فقط روی خریدهای بعدی اثر می‌گذارد.",
+    ].join("\n"),
     panelPickerKeyboard(panels, (panelSid) => pcb.setPanel(sid, panelSid), pcb.view(sid)),
   );
 });
@@ -425,6 +459,11 @@ productHandler.callbackQuery(/^admin:prod:pnl:(.+)$/, async (ctx) => {
 productHandler.callbackQuery(/^admin:prod:setpnl:([^:]+):([^:]+)$/, async (ctx) => {
   const product = await resolveProduct(ctx, ctx.match[1]);
   if (product === null) {
+    return;
+  }
+  // Fix C guard: OTHER_PRODUCT is never provisioned through a VPN panel.
+  if (product.type !== "SERVICE_PRODUCT") {
+    await safeAnswerCallback(ctx, "محصولات دیگر به پنل متصل نمی‌شوند.");
     return;
   }
   const panel = await getPanelByShortId(ctx.match[2]);
@@ -830,6 +869,9 @@ productHandler.callbackQuery("admin:prod:f:save", async (ctx) => {
     await showProductMenu(ctx);
     return;
   }
+  // Fix C: the wizard state is consumed BEFORE the create - a double-clicked
+  // «ذخیره ✅» finds no state and cannot create the product twice.
+  clearProductFlows(ctx);
   try {
     const product = await createProductAtOrder(
       {

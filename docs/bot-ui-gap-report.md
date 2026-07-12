@@ -88,8 +88,10 @@ failing the Telegram send.
   OTHER_PRODUCT landing tree and the stock status filters).
 - **Service transfer / user note / QR code** — not added, deferred.
 - Detail-aware back from the renewal plan page.
-- User block/unblock and an OTHER_PRODUCT-filtered product list (Fix B
-  deferrals).
+- ~~User block/unblock~~ — delivered in Fix C (confirmed, guarded
+  status-only flip on the user detail page). OTHER_PRODUCT-filtered
+  product configuration lives on the Fix C product root. Fix C
+  before/after: `docs/corrective-ui-fix-c.md`.
 
 ## Verification
 

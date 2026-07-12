@@ -48,20 +48,32 @@ function activeEmoji(isActive: boolean): string {
 // --- Root menu -----------------------------------------------------------------
 
 export function productMenuText(): string {
-  return "مدیریت محصولات/پلن‌ها 🛍\n\nیک گزینه را انتخاب کنید:";
+  return "مدیریت محصولات و پلن‌ها 🛍\n\nیک گزینه را انتخاب کنید:";
 }
 
+/** Fix C root layout. Every destination is an existing flow. */
 export function productMenuKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text("مدیریت دسته‌بندی‌ها 📂", PROD_CB.CAT_MENU)
+    .text("لیست محصولات 🧾", pcb.list("A", 1))
+    .text("افزودن محصول ➕", PROD_CB.ADD)
     .row()
-    .text("افزودن محصول سرویس VPN ➕", PROD_CB.ADD_SERVICE)
+    .text("دسته‌بندی‌ها 🗂", PROD_CB.CAT_MENU)
+    .text("افزودن دسته‌بندی ➕", PROD_CB.CAT_ADD)
     .row()
-    .text("افزودن محصول دیگر ➕", PROD_CB.ADD_OTHER)
+    .text("محصولات اشتراک VPN 🔐", pcb.list("S", 1))
+    .text("محصولات دیگر 🛍", pcb.list("O", 1))
     .row()
-    .text("لیست محصولات 📋", PROD_CB.LIST_MENU)
+    .text("بازگشت به پنل ادمین", "admin:menu");
+}
+
+/** «افزودن محصول ➕» type chooser (wizard step 1). */
+export function productAddTypeKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("محصول اشتراک VPN 🔐", PROD_CB.ADD_SERVICE)
     .row()
-    .text("بازگشت", "admin:menu");
+    .text("محصول دیگر 🛍", PROD_CB.ADD_OTHER)
+    .row()
+    .text("بازگشت", PROD_CB.MENU);
 }
 
 // --- Categories ------------------------------------------------------------------
@@ -135,21 +147,37 @@ export function productListMenuKeyboard(): InlineKeyboard {
     .row()
     .text("همه", pcb.list("A", 1))
     .row()
+    // Fix C: status filters over the same list.
+    .text("فعال‌ها ✅", pcb.list("V", 1))
+    .text("غیرفعال‌ها ⏸", pcb.list("X", 1))
+    .row()
     .text("بازگشت", PROD_CB.MENU);
+}
+
+export type ProductListFilterKey = "S" | "O" | "A" | "V" | "X";
+
+function productTypeSuffix(product: ProductWithRelations, filter: ProductListFilterKey): string {
+  return filter === "S" || filter === "O"
+    ? ""
+    : product.type === "SERVICE_PRODUCT"
+      ? " | سرویس"
+      : " | دیگر";
 }
 
 export function productListKeyboard(
   products: ProductWithRelations[],
-  filter: "S" | "O" | "A",
+  filter: ProductListFilterKey,
   page: number,
   pages: number,
 ): InlineKeyboard {
   const kb = new InlineKeyboard();
   for (const product of products) {
-    const typeSuffix =
-      filter === "A" ? (product.type === "SERVICE_PRODUCT" ? " | سرویس" : " | دیگر") : "";
+    const category =
+      product.category.name.length > 14
+        ? `${product.category.name.slice(0, 14)}…`
+        : product.category.name;
     kb.text(
-      `${activeEmoji(product.isActive)} ${product.name} | ${product.priceToman} تومان${typeSuffix}`,
+      `${activeEmoji(product.isActive)} ${product.name} | ${product.priceToman} تومان | ${category}${productTypeSuffix(product, filter)}`,
       pcb.view(productShortId(product)),
     ).row();
   }
@@ -163,7 +191,8 @@ export function productListKeyboard(
     }
     kb.row();
   }
-  kb.text("بازگشت", PROD_CB.LIST_MENU);
+  kb.text("افزودن محصول ➕", PROD_CB.ADD).text("دسته‌بندی‌ها 🗂", PROD_CB.CAT_MENU).row();
+  kb.text("بازگشت به مدیریت محصولات", PROD_CB.MENU);
   return kb;
 }
 
@@ -210,7 +239,15 @@ export function productDetailText(product: ProductWithRelations): string {
   return lines.join("\n");
 }
 
-export function productDetailKeyboard(product: ProductWithRelations): InlineKeyboard {
+/**
+ * Fix C: `backList` returns to the SAME filter/page the admin came from
+ * (session context); OTHER_PRODUCT links straight to its Fix B stock page.
+ * «حذف محصول 🗑» stays a soft-deactivate (no hard delete exists).
+ */
+export function productDetailKeyboard(
+  product: ProductWithRelations,
+  backList?: { filter: ProductListFilterKey; page: number },
+): InlineKeyboard {
   const sid = productShortId(product);
   const kb = new InlineKeyboard()
     .text("ویرایش نام", pcb.fieldEdit(sid, "nm"))
@@ -242,13 +279,23 @@ export function productDetailKeyboard(product: ProductWithRelations): InlineKeyb
       .text("متن درخواست اطلاعات", pcb.fieldEdit(sid, "ruip"))
       .row()
       .text("نوع تحویل", pcb.pickDelivery(sid))
+      // Existing Fix B stock page - resolved by the same product short id.
+      .text("مدیریت موجودی استاک 🎟", `admin:stock:p:${sid}`)
       .row();
   }
 
   kb.text(product.isActive ? "غیرفعال کردن ⚪️" : "فعال کردن 🟢", pcb.toggle(sid))
     .text("حذف محصول 🗑", pcb.deleteAsk(sid))
     .row()
-    .text("بازگشت", pcb.list(product.type === "SERVICE_PRODUCT" ? "S" : "O", 1));
+    .text(
+      "بازگشت به لیست محصولات",
+      pcb.list(
+        backList?.filter ?? (product.type === "SERVICE_PRODUCT" ? "S" : "O"),
+        backList?.page ?? 1,
+      ),
+    )
+    .row()
+    .text("بازگشت به مدیریت محصولات", PROD_CB.MENU);
   return kb;
 }
 

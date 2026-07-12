@@ -200,6 +200,13 @@ export interface SessionData {
     adminUserWalletDraft?: AdminUserWalletDraft;
     // Last admin user-search query ("بازگشت به نتایج" re-runs it).
     adminUserSearchQuery?: string;
+    // Fix C list contexts - details return to the same filter/page.
+    adminUserListFilter?: "r" | "a" | "b" | "d";
+    adminUserListPage?: number;
+    adminProductListFilter?: "S" | "O" | "A" | "V" | "X";
+    adminProductListPage?: number;
+    adminPanelListFilter?: "a" | "i";
+    adminPanelListPage?: number;
     // Admin card-to-card configuration (Phase 21).
     adminPaymentDraft?: AdminPaymentDraft;
     // OTHER_PRODUCT required-info intake (Phase 23, flow "other_product:info").
