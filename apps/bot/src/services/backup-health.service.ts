@@ -113,6 +113,39 @@ async function freeBackupStamp(): Promise<string> {
   throw new Error("no free backup filename");
 }
 
+// Prisma connection strings may carry Prisma-only query parameters that
+// libpq does not know - pg_dump then fails with
+// `invalid URI query parameter: "schema"`. Strip exactly those before
+// spawning pg_dump; libpq-valid parameters (sslmode, connect_timeout,
+// application_name, ...) pass through untouched.
+const PRISMA_ONLY_URL_PARAMS = [
+  "schema",
+  "connection_limit",
+  "pool_timeout",
+  "socket_timeout",
+  "pgbouncer",
+  "statement_cache_size",
+  "sslaccept",
+  "sslidentity",
+];
+
+/**
+ * DATABASE_URL -> a URL libpq/pg_dump accepts. Never throws and never logs
+ * the URL; unparseable input passes through unchanged so pg_dump reports
+ * its own (scrubbed) error.
+ */
+export function pgDumpSafeUrl(databaseUrl: string): string {
+  try {
+    const url = new URL(databaseUrl);
+    for (const param of PRISMA_ONLY_URL_PARAMS) {
+      url.searchParams.delete(param);
+    }
+    return url.toString();
+  } catch {
+    return databaseUrl;
+  }
+}
+
 /** pg_dump (URL as argv, no shell) -> gzip -> file; partial files removed. */
 export async function createDatabaseBackup(): Promise<CreateBackupOutcome> {
   const databaseUrl = process.env.DATABASE_URL;
@@ -131,7 +164,9 @@ export async function createDatabaseBackup(): Promise<CreateBackupOutcome> {
   const filePath = path.join(backupDir(), name);
   try {
     await ensureBackupDir();
-    const dump = spawn("pg_dump", [databaseUrl], { stdio: ["ignore", "pipe", "pipe"] });
+    const dump = spawn("pg_dump", [pgDumpSafeUrl(databaseUrl)], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let stderr = "";
     dump.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
