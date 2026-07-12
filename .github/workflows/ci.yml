@@ -133,9 +133,9 @@ jobs:
       # the migrate step so the job-level DATABASE_URL points at a migrated
       # database - without DATABASE_URL the DB suites would self-skip and
       # prove nothing (see docs/testing.md).
-      - name: Run tests
-        run: pnpm test
-
+      # Redis must be up BEFORE the tests: the service-operation lock suite
+      # exercises the real distributed lock (password-authenticated), and
+      # the API smoke test below reuses the same instance.
       - name: Start Redis (password-protected)
         run: |
           # A plain service container cannot override the image command, and
@@ -152,6 +152,9 @@ jobs:
           echo "Redis did not become ready in time." >&2
           docker logs ci-redis >&2 || true
           exit 1
+
+      - name: Run tests
+        run: pnpm test
 
       - name: API health smoke test
         run: |

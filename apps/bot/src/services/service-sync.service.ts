@@ -9,6 +9,12 @@ import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
+import {
+  acquireServiceLock,
+  SERVICE_LOCK_BUSY_TEXT,
+  SERVICE_LOCK_UNAVAILABLE_TEXT,
+  serviceOperationLockKey,
+} from "./service-lock.service.js";
 
 // =============================================================================
 // Service sync (Phase 11): read-only refresh of one Service row from its
@@ -93,6 +99,33 @@ function buildUpdateData(service: Service, result: GetServiceAccountResult): Pri
  * user may see.
  */
 export async function syncServiceFromPanel(
+  serviceId: string,
+  userId: string,
+): Promise<SyncServiceResult> {
+  // CONCURRENCY: sync WRITES local Service state from a panel read - racing
+  // a mutation could overwrite freshly-persisted values with a stale panel
+  // snapshot. It therefore takes the same per-service lock as mutations;
+  // contention/unavailability fails closed with a retryable message.
+  const acquisition = await acquireServiceLock(serviceOperationLockKey(serviceId));
+  if (!acquisition.ok) {
+    return {
+      ok: false,
+      service: null,
+      error: `service lock ${acquisition.reason}`,
+      safeUserMessage:
+        acquisition.reason === "contended"
+          ? SERVICE_LOCK_BUSY_TEXT
+          : SERVICE_LOCK_UNAVAILABLE_TEXT,
+    };
+  }
+  try {
+    return await syncServiceFromPanelUnlocked(serviceId, userId);
+  } finally {
+    await acquisition.lock.release();
+  }
+}
+
+async function syncServiceFromPanelUnlocked(
   serviceId: string,
   userId: string,
 ): Promise<SyncServiceResult> {

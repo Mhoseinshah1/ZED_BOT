@@ -9,7 +9,7 @@ import {
 import { encryptSecret } from "@zedbot/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-process.env.APP_SECRET ??= "startup-recovery-secret-startup-rec-1";
+process.env.APP_SECRET ??= "zedbot-panel-tests-shared-secret-00001";
 
 import { EXTRA_TIME_EVENT_TYPE } from "../src/services/extra-time.service.js";
 import { EXTRA_VOLUME_EVENT_TYPE } from "../src/services/extra-volume.service.js";
@@ -19,7 +19,7 @@ import {
 } from "../src/services/provisioning.service.js";
 import { RENEWAL_EVENT_TYPE } from "../src/services/service-renewal.service.js";
 import {
-  compareMutationState,
+  classifyMutationState,
   failStaleRunningBroadcasts,
   recoverStaleProvisioningOrders,
   runStartupRecovery,
@@ -45,6 +45,11 @@ import {
 
 const hasDb =
   typeof process.env.DATABASE_URL === "string" && process.env.DATABASE_URL !== "";
+// Reconciliation now runs under the distributed per-service lock, so these
+// integration tests additionally require a reachable Redis.
+const hasRedis =
+  (process.env.REDIS_URL ?? "") !== "" || (process.env.REDIS_HOST ?? "") !== "";
+const hasDeps = hasDb && hasRedis;
 
 const PRICE = 40_000;
 const GIB = 1024n * 1024n * 1024n;
@@ -113,7 +118,7 @@ let deadProductId: string;
 let xuiProductId: string;
 
 beforeAll(async () => {
-  if (!hasDb) return;
+  if (!hasDeps) return;
   await startMockPanel();
   [mockPanel, deadPanel, xuiPanel] = await Promise.all([
     prisma.panel.create({
@@ -253,7 +258,7 @@ function secondsDate(msFromNow: number): { date: Date; unix: number } {
   return { date: new Date(unix * 1000), unix };
 }
 
-describe.runIf(hasDb)("startup crash recovery with panel reconciliation", () => {
+describe.runIf(hasDeps)("startup crash recovery with panel reconciliation", () => {
   it("completes a stale purchase whose Service row exists (no refund, no panel call)", async () => {
     const user = await createUser();
     const order = await createProvisioningOrder(user, "SERVICE_PURCHASE");
@@ -607,43 +612,132 @@ describe.runIf(hasDb)("startup crash recovery with panel reconciliation", () => 
   });
 });
 
-describe("mutation state comparator (pure)", () => {
-  const service = { volumeBytes: 10n * GIB, expiresAt: new Date("2026-08-01T00:00:00Z") };
+describe("mutation state classifier (pure, exact attribution)", () => {
+  const now = new Date("2026-07-01T00:00:00Z");
+  const expiry = new Date("2026-08-01T00:00:00Z"); // future relative to `now`
+  const service = { volumeBytes: 10n * GIB, remainingBytes: 8n * GIB, expiresAt: expiry };
 
   it("treats missing panel fields as unknown, never as a decision", () => {
-    expect(compareMutationState("EXTRA_VOLUME", service, { ok: true })).toBe("unknown");
-    expect(compareMutationState("EXTRA_TIME", service, { ok: true })).toBe("unknown");
-    expect(compareMutationState("SERVICE_RENEWAL", service, { ok: true })).toBe("unknown");
-    // Renewal with only ONE comparable-and-equal field stays unknown.
+    const plan = { volumeGb: 10, durationDays: 30 };
+    expect(classifyMutationState("EXTRA_VOLUME", plan, service, { ok: true }, now)).toBe("unknown");
+    expect(classifyMutationState("EXTRA_TIME", plan, service, { ok: true }, now)).toBe("unknown");
     expect(
-      compareMutationState("SERVICE_RENEWAL", service, { ok: true, totalBytes: 10n * GIB }),
+      classifyMutationState("SERVICE_RENEWAL", plan, service, { ok: true, totalBytes: 10n * GIB }, now),
     ).toBe("unknown");
   });
 
-  it("tolerates sub-second expiry truncation (Marzban stores seconds)", () => {
-    const truncated = new Date(Math.floor(service.expiresAt.getTime() / 1000) * 1000);
+  it("extra volume: APPLIED only on the exact expected quota with expiry untouched", () => {
+    const plan = { volumeGb: 10, durationDays: 0 };
+    const expected = 18n * GIB; // remaining 8 + purchased 10
     expect(
-      compareMutationState("EXTRA_TIME", service, { ok: true, expiresAt: truncated }),
-    ).toBe("not_applied");
-    const dayLater = new Date(service.expiresAt.getTime() + 86_400_000);
-    expect(
-      compareMutationState("EXTRA_TIME", service, { ok: true, expiresAt: dayLater }),
+      classifyMutationState(
+        "EXTRA_VOLUME", plan, service,
+        { ok: true, totalBytes: expected, expiresAt: expiry }, now,
+      ),
     ).toBe("applied");
+    // Pre-state match -> proven unapplied.
+    expect(
+      classifyMutationState(
+        "EXTRA_VOLUME", plan, service,
+        { ok: true, totalBytes: 10n * GIB, expiresAt: expiry }, now,
+      ),
+    ).toBe("not_applied");
+    // A DIFFERENT larger quota is another operation's work - unknown.
+    expect(
+      classifyMutationState(
+        "EXTRA_VOLUME", plan, service,
+        { ok: true, totalBytes: 25n * GIB, expiresAt: expiry }, now,
+      ),
+    ).toBe("unknown");
+    // Expected quota reached but expiry ALSO moved - not uniquely ours.
+    expect(
+      classifyMutationState(
+        "EXTRA_VOLUME", plan, service,
+        { ok: true, totalBytes: expected, expiresAt: new Date(expiry.getTime() + 86_400_000) }, now,
+      ),
+    ).toBe("unknown");
+  });
+
+  it("extra time: APPLIED only on the exact expected expiry (with tolerance) and limit untouched", () => {
+    const plan = { volumeGb: 0, durationDays: 10 };
+    const expected = new Date(expiry.getTime() + 10 * 86_400_000);
+    const truncated = new Date(Math.floor(expected.getTime() / 1000) * 1000);
+    expect(
+      classifyMutationState(
+        "EXTRA_TIME", plan, service,
+        { ok: true, totalBytes: 10n * GIB, expiresAt: truncated }, now,
+      ),
+    ).toBe("applied");
+    expect(
+      classifyMutationState(
+        "EXTRA_TIME", plan, service,
+        { ok: true, totalBytes: 10n * GIB, expiresAt: expiry }, now,
+      ),
+    ).toBe("not_applied");
+    // A later expiry that could include another order -> unknown.
+    expect(
+      classifyMutationState(
+        "EXTRA_TIME", plan, service,
+        { ok: true, totalBytes: 10n * GIB, expiresAt: new Date(expected.getTime() + 20 * 86_400_000) }, now,
+      ),
+    ).toBe("unknown");
+    // Expired stored base cannot be reconstructed -> unknown unless pre-match.
+    const expired = { ...service, expiresAt: new Date(now.getTime() - 86_400_000) };
+    expect(
+      classifyMutationState(
+        "EXTRA_TIME", plan, expired,
+        { ok: true, totalBytes: 10n * GIB, expiresAt: expected }, now,
+      ),
+    ).toBe("unknown");
+  });
+
+  it("renewal: compares the exact computed renewal result, never any-field-changed", () => {
+    const plan = { volumeGb: 10, durationDays: 30 };
+    // calculateRenewal: total = remaining(8) + purchased(10); expiry + 30d.
+    const expectedLimit = 18n * GIB;
+    const expectedExpiry = new Date(expiry.getTime() + 30 * 86_400_000);
+    expect(
+      classifyMutationState(
+        "SERVICE_RENEWAL", plan, service,
+        { ok: true, totalBytes: expectedLimit, expiresAt: expectedExpiry }, now,
+      ),
+    ).toBe("applied");
+    expect(
+      classifyMutationState(
+        "SERVICE_RENEWAL", plan, service,
+        { ok: true, totalBytes: 10n * GIB, expiresAt: expiry }, now,
+      ),
+    ).toBe("not_applied");
+    // Changed - but NOT the expected signature (e.g. another order's mix).
+    expect(
+      classifyMutationState(
+        "SERVICE_RENEWAL", plan, service,
+        { ok: true, totalBytes: expectedLimit, expiresAt: expiry }, now,
+      ),
+    ).toBe("unknown");
   });
 
   it("maps unlimited (null) panel limits to the stored 0n convention", () => {
-    const unlimited = { volumeBytes: 0n, expiresAt: null };
+    const unlimited = { volumeBytes: 0n, remainingBytes: 0n, expiresAt: null };
+    const plan = { volumeGb: 10, durationDays: 0 };
+    // expected = remaining(0) + 10 GIB
     expect(
-      compareMutationState("EXTRA_VOLUME", unlimited, { ok: true, totalBytes: null }),
-    ).toBe("not_applied");
-    expect(
-      compareMutationState("EXTRA_VOLUME", unlimited, { ok: true, totalBytes: 10n * GIB }),
+      classifyMutationState(
+        "EXTRA_VOLUME", plan, unlimited,
+        { ok: true, totalBytes: 10n * GIB, expiresAt: null }, now,
+      ),
     ).toBe("applied");
+    expect(
+      classifyMutationState(
+        "EXTRA_VOLUME", plan, unlimited,
+        { ok: true, totalBytes: null, expiresAt: null }, now,
+      ),
+    ).toBe("not_applied");
   });
 });
 
-describe.runIf(!hasDb)("startup crash recovery (skipped)", () => {
-  it("integration tests require DATABASE_URL - see docs/testing.md", () => {
-    expect(hasDb).toBe(false);
+describe.runIf(!hasDeps)("startup crash recovery (skipped)", () => {
+  it("integration tests require DATABASE_URL and REDIS_URL - see docs/testing.md", () => {
+    expect(hasDeps).toBe(false);
   });
 });

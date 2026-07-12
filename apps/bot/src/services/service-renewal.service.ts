@@ -13,6 +13,14 @@ import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import { failOrderWithRefund, type OrderForProvisioning } from "./provisioning.service.js";
+import {
+  acquireServiceLock,
+  SERVICE_LOCK_BUSY_TEXT,
+  SERVICE_LOCK_LOST_TEXT,
+  SERVICE_LOCK_UNAVAILABLE_TEXT,
+  serviceOperationLockKey,
+  type ServiceLock,
+} from "./service-lock.service.js";
 
 // =============================================================================
 // Service renewal execution (Phase 12): turns a PAID SERVICE_RENEWAL Order
@@ -138,8 +146,53 @@ function serviceUpdateData(
  * Executes one PAID SERVICE_RENEWAL order. Safe to call repeatedly. All
  * returned error strings are admin-safe Persian; adapter internals only go
  * to logs.
+ *
+ * CONCURRENCY: the whole critical sequence (fresh reads -> renewal
+ * calculation -> panel write -> persistence) runs under the per-service
+ * distributed lock, so a renewal can never race another mutation on the
+ * same service and lose either paid effect. Contention or an unavailable
+ * lock backend leaves the order PAID and retryable - no panel call, no
+ * refund, no event log.
  */
 export async function executeRenewalOrder(orderId: string): Promise<RenewalOutcome> {
+  // Pre-lock reads touch only immutable order fields (type, serviceId).
+  const head = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { type: true, serviceId: true },
+  });
+  if (head === null) {
+    return { ok: false, refunded: false, error: "سفارش یافت نشد." };
+  }
+  if (head.type !== OrderType.SERVICE_RENEWAL) {
+    return { ok: false, refunded: false, error: "این سفارش از نوع تمدید نیست." };
+  }
+  if (head.serviceId === null) {
+    // No shared service state to protect - the body refunds via its
+    // existing service-missing dead end.
+    return executeRenewalOrderUnlocked(orderId, null);
+  }
+  const acquisition = await acquireServiceLock(serviceOperationLockKey(head.serviceId));
+  if (!acquisition.ok) {
+    return {
+      ok: false,
+      refunded: false,
+      error:
+        acquisition.reason === "contended"
+          ? SERVICE_LOCK_BUSY_TEXT
+          : SERVICE_LOCK_UNAVAILABLE_TEXT,
+    };
+  }
+  try {
+    return await executeRenewalOrderUnlocked(orderId, acquisition.lock);
+  } finally {
+    await acquisition.lock.release();
+  }
+}
+
+async function executeRenewalOrderUnlocked(
+  orderId: string,
+  lock: ServiceLock | null,
+): Promise<RenewalOutcome> {
   const order = (await prisma.order.findUnique({
     where: { id: orderId },
     include: { user: true, product: { include: { panel: true } } },
@@ -246,6 +299,17 @@ export async function executeRenewalOrder(orderId: string): Promise<RenewalOutco
       panelResult.errorMessage ?? "unknown adapter error",
     );
     return { ok: false, refunded, error: "تمدید سرویس ناموفق بود." };
+  }
+
+  // Confirmed lock loss after the panel write: persisting could interleave
+  // with a new lock owner. Leave the order PROVISIONING - startup
+  // reconciliation resolves it from panel truth under the lock.
+  if (lock !== null && lock.isLost()) {
+    logger.error("renewal: lock ownership lost after panel call - deferring to reconciliation", {
+      orderId: order.id,
+      serviceId: service.id,
+    });
+    return { ok: false, refunded: false, error: SERVICE_LOCK_LOST_TEXT };
   }
 
   // Panel account is renewed. Persist with one retry; the user must end up

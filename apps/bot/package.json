@@ -16,7 +16,8 @@
     "@zedbot/database": "workspace:*",
     "@zedbot/panel-adapters": "workspace:*",
     "@zedbot/shared": "workspace:*",
-    "grammy": "^1.34.0"
+    "grammy": "^1.34.0",
+    "ioredis": "^5.10.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

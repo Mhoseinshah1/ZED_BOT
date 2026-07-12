@@ -11,15 +11,22 @@ import type { GetServiceAccountResult } from "@zedbot/panel-adapters";
 import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
-import { EXTRA_TIME_EVENT_TYPE } from "./extra-time.service.js";
-import { EXTRA_VOLUME_EVENT_TYPE } from "./extra-volume.service.js";
+import { calculateExtraTime, EXTRA_TIME_EVENT_TYPE } from "./extra-time.service.js";
+import { calculateExtraVolume, EXTRA_VOLUME_EVENT_TYPE } from "./extra-volume.service.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import {
   failOrderWithRefund,
   generatePanelUsername,
   type OrderForProvisioning,
 } from "./provisioning.service.js";
-import { RENEWAL_EVENT_TYPE } from "./service-renewal.service.js";
+import {
+  acquireServiceLock,
+  isLockBackendAvailable,
+  RECONCILE_LOCK_WAIT_MS,
+  serviceOperationLockKey,
+  serviceProvisioningLockKey,
+} from "./service-lock.service.js";
+import { calculateRenewal, RENEWAL_EVENT_TYPE } from "./service-renewal.service.js";
 
 // =============================================================================
 // Startup crash recovery for in-request pipelines, with SAFE panel/database
@@ -105,7 +112,7 @@ export interface StartupRecoveryReport {
   failedBroadcasts: number;
 }
 
-type OrderOutcome = "completed" | "refunded" | "deferred" | "unresolved";
+type OrderOutcome = "completed" | "refunded" | "deferred" | "unresolved" | "skipped";
 
 /** CAS finish: only flips the order we still see as PROVISIONING. */
 async function completeRecoveredOrder(orderId: string): Promise<boolean> {
@@ -275,14 +282,41 @@ async function reconcilePurchase(order: OrderForProvisioning): Promise<OrderOutc
     return deferOrder(order, "product/panel no longer resolvable - cannot verify panel state");
   }
   const username = generatePanelUsername(order.user.telegramId, order.id);
-  const fetched = await fetchPanelAccount(panel, username);
-  if (fetched.ok) {
-    return adoptPanelAccount(order, product, panel, username, fetched);
+  // The SAME key the live provisioning pipeline holds: reconciliation can
+  // never probe/adopt while the account is being created, and vice versa.
+  // Contention means live work - defer immediately, never wait.
+  const acquisition = await acquireServiceLock(
+    serviceProvisioningLockKey(panel.id, username),
+    RECONCILE_LOCK_WAIT_MS,
+  );
+  if (!acquisition.ok) {
+    return deferOrder(order, `service lock ${acquisition.reason}`);
   }
-  if (fetched.notFound === true) {
-    return refundUnappliedOrder(order, "panel confirmed the account was never created");
+  try {
+    // The world may have moved while we waited for the sweep to reach this
+    // order: re-check the order and the database anchors UNDER the lock
+    // before touching the panel.
+    const fresh = await prisma.order.findUnique({
+      where: { id: order.id },
+      select: { status: true },
+    });
+    if (fresh === null || fresh.status !== OrderStatus.PROVISIONING) {
+      return "skipped"; // settled by another actor
+    }
+    if (await findPurchaseAnchor(order)) {
+      return (await completeRecoveredOrder(order.id)) ? "completed" : "skipped";
+    }
+    const fetched = await fetchPanelAccount(panel, username);
+    if (fetched.ok) {
+      return adoptPanelAccount(order, product, panel, username, fetched);
+    }
+    if (fetched.notFound === true) {
+      return refundUnappliedOrder(order, "panel confirmed the account was never created");
+    }
+    return deferOrder(order, fetched.errorMessage ?? "panel state could not be read");
+  } finally {
+    await acquisition.lock.release();
   }
-  return deferOrder(order, fetched.errorMessage ?? "panel state could not be read");
 }
 
 type MutationVerdict = "applied" | "not_applied" | "unknown";
@@ -295,38 +329,100 @@ function expiryEquals(a: Date | null, b: Date | null): boolean {
 }
 
 /**
- * Compares the mutation-owned panel fields against the service row's stored
- * PRE-mutation state. Only fields the bot itself mutates are compared
- * (data limit, expiry) - usage grows on its own and must never decide.
- * A field the panel did not report yields "unknown", never a guess.
+ * EXACT expected-state attribution: classifies the panel's current state as
+ * APPLIED / NOT_APPLIED / UNKNOWN for ONE specific order.
+ *
+ * A remote value that merely DIFFERS from the stored pre-state proves
+ * nothing about WHICH operation changed it - under concurrency it could be
+ * another order's effect. APPLIED therefore requires the panel to match the
+ * order's exact expected post-state (recomputed with the pipelines' own
+ * calculation functions from the stored pre-state and the order's immutable
+ * plan snapshot), with the field the operation does NOT own unchanged.
+ * NOT_APPLIED requires the panel to match the pre-state exactly. Anything
+ * else - unreported fields, values explainable only by other operations,
+ * expected states that cannot be reconstructed (expiry bases that depended
+ * on the crashed attempt's wall clock), or a degenerate expected==pre
+ * signature - is UNKNOWN and defers. Usage grows on its own and never
+ * decides.
  */
-export function compareMutationState(
+export function classifyMutationState(
   orderType: OrderType,
-  service: Pick<Service, "volumeBytes" | "expiresAt">,
+  plan: { volumeGb: number; durationDays: number },
+  service: Pick<Service, "volumeBytes" | "remainingBytes" | "expiresAt">,
   fetched: GetServiceAccountResult,
+  now: Date = new Date(),
 ): MutationVerdict {
   // Service rows store 0n for unlimited; the adapter reports null.
-  const panelLimit =
-    fetched.totalBytes === undefined ? undefined : (fetched.totalBytes ?? 0n);
-  const limitKnown = panelLimit !== undefined;
-  const limitChanged = limitKnown && panelLimit !== service.volumeBytes;
-  const expiryKnown = fetched.expiresAt !== undefined;
-  const expiryChanged =
-    expiryKnown && !expiryEquals(fetched.expiresAt ?? null, service.expiresAt);
-
-  switch (orderType) {
-    case OrderType.EXTRA_VOLUME:
-      return limitKnown ? (limitChanged ? "applied" : "not_applied") : "unknown";
-    case OrderType.EXTRA_TIME:
-      return expiryKnown ? (expiryChanged ? "applied" : "not_applied") : "unknown";
-    case OrderType.SERVICE_RENEWAL:
-      if (limitChanged || expiryChanged) {
-        return "applied";
-      }
-      return limitKnown && expiryKnown ? "not_applied" : "unknown";
-    default:
-      return "unknown";
+  const panelLimit = fetched.totalBytes === undefined ? undefined : (fetched.totalBytes ?? 0n);
+  const panelExpiry = fetched.expiresAt;
+  if (panelLimit === undefined || panelExpiry === undefined) {
+    return "unknown";
   }
+  const preLimit = service.volumeBytes;
+  const preExpiry = service.expiresAt;
+  const limitIsPre = panelLimit === preLimit;
+  const expiryIsPre = expiryEquals(panelExpiry, preExpiry);
+  const matchesPre = limitIsPre && expiryIsPre;
+
+  if (orderType === OrderType.EXTRA_VOLUME) {
+    const expected = calculateExtraVolume(
+      { remainingBytes: service.remainingBytes },
+      plan.volumeGb,
+    ).totalBytes;
+    if (expected === preLimit) {
+      return "unknown"; // degenerate: applied and not-applied look identical
+    }
+    // Extra volume passes the expiry through unchanged - a moved expiry
+    // means another operation is involved.
+    if (panelLimit === expected && expiryIsPre) {
+      return "applied";
+    }
+    return matchesPre ? "not_applied" : "unknown";
+  }
+
+  if (orderType === OrderType.EXTRA_TIME) {
+    // The pipeline's base is the stored expiry only while it is in the
+    // future; an expired/never base depended on the crashed attempt's wall
+    // clock and cannot be reconstructed.
+    if (preExpiry === null || preExpiry.getTime() <= now.getTime()) {
+      return matchesPre ? "not_applied" : "unknown";
+    }
+    const expected = calculateExtraTime({ expiresAt: preExpiry }, plan.durationDays, now);
+    // Extra time never touches the data limit - a moved limit means
+    // another operation is involved.
+    if (expiryEquals(panelExpiry, expected) && limitIsPre) {
+      return "applied";
+    }
+    return matchesPre ? "not_applied" : "unknown";
+  }
+
+  if (orderType === OrderType.SERVICE_RENEWAL) {
+    const expiryDerivable =
+      plan.durationDays === 0 ||
+      (preExpiry !== null && preExpiry.getTime() > now.getTime());
+    if (!expiryDerivable) {
+      return matchesPre ? "not_applied" : "unknown";
+    }
+    const computed = calculateRenewal(
+      {
+        expiresAt: preExpiry,
+        volumeBytes: service.volumeBytes,
+        remainingBytes: service.remainingBytes,
+      },
+      plan,
+      now,
+    );
+    const expectedLimit = computed.totalBytes ?? 0n;
+    if (expectedLimit === preLimit && expiryEquals(computed.expiresAt, preExpiry)) {
+      return "unknown"; // degenerate signature
+    }
+    if (panelLimit === expectedLimit && expiryEquals(panelExpiry, computed.expiresAt)) {
+      return "applied";
+    }
+    return matchesPre ? "not_applied" : "unknown";
+  }
+
+  return "unknown";
 }
 
 /**
@@ -399,32 +495,62 @@ async function reconcileServiceMutation(
   order: OrderForProvisioning,
   eventType: string,
 ): Promise<OrderOutcome> {
-  const service =
-    order.serviceId === null
-      ? null
-      : await prisma.service.findFirst({
-          where: { id: order.serviceId },
-          include: { panel: true },
-        });
-  if (service === null) {
-    return deferOrder(order, "target service row missing - cannot verify panel state");
+  if (order.serviceId === null) {
+    return deferOrder(order, "order has no target service id");
   }
-  const fetched = await fetchPanelAccount(service.panel, service.username);
-  if (fetched.notFound === true) {
-    // The panel PUT would have failed with the same 404 in-process.
-    return refundUnappliedOrder(order, "panel confirmed the target account no longer exists");
+  // The SAME lock every live mutation holds: reconciliation can never
+  // observe (and misattribute) a remote change another operation is making
+  // mid-flight. Contention means live work - defer immediately, never wait.
+  const acquisition = await acquireServiceLock(
+    serviceOperationLockKey(order.serviceId),
+    RECONCILE_LOCK_WAIT_MS,
+  );
+  if (!acquisition.ok) {
+    return deferOrder(order, `service lock ${acquisition.reason}`);
   }
-  if (!fetched.ok) {
-    return deferOrder(order, fetched.errorMessage ?? "panel state could not be read");
+  try {
+    // Re-check UNDER the lock: another operation may have settled this
+    // order or written its anchor while the sweep was iterating.
+    const fresh = await prisma.order.findUnique({
+      where: { id: order.id },
+      select: { status: true },
+    });
+    if (fresh === null || fresh.status !== OrderStatus.PROVISIONING) {
+      return "skipped"; // settled by another actor
+    }
+    if (await findEventAnchor(order.id, eventType)) {
+      return (await completeRecoveredOrder(order.id)) ? "completed" : "skipped";
+    }
+    const service = await prisma.service.findFirst({
+      where: { id: order.serviceId },
+      include: { panel: true },
+    });
+    if (service === null) {
+      return deferOrder(order, "target service row missing - cannot verify panel state");
+    }
+    const fetched = await fetchPanelAccount(service.panel, service.username);
+    if (fetched.notFound === true) {
+      // The panel PUT would have failed with the same 404 in-process.
+      return refundUnappliedOrder(order, "panel confirmed the target account no longer exists");
+    }
+    if (!fetched.ok) {
+      return deferOrder(order, fetched.errorMessage ?? "panel state could not be read");
+    }
+    const plan = {
+      volumeGb: order.volumeGbSnapshot ?? order.product?.volumeGb ?? 0,
+      durationDays: order.durationDaysSnapshot ?? order.product?.durationDays ?? 0,
+    };
+    const verdict = classifyMutationState(order.type, plan, service, fetched);
+    if (verdict === "applied") {
+      return completeReconciledMutation(order, service, eventType, fetched);
+    }
+    if (verdict === "not_applied") {
+      return refundUnappliedOrder(order, "panel state matches the pre-mutation service state");
+    }
+    return deferOrder(order, "panel state not uniquely attributable to this order");
+  } finally {
+    await acquisition.lock.release();
   }
-  const verdict = compareMutationState(order.type, service, fetched);
-  if (verdict === "applied") {
-    return completeReconciledMutation(order, service, eventType, fetched);
-  }
-  if (verdict === "not_applied") {
-    return refundUnappliedOrder(order, "panel state matches the pre-mutation service state");
-  }
-  return deferOrder(order, "panel report incomplete - mutation state undecidable");
 }
 
 /**
@@ -449,6 +575,21 @@ export async function recoverStaleProvisioningOrders(
   let refundedOrders = 0;
   let deferredOrders = 0;
   let unresolvedOrders = 0;
+  // Fail closed ONCE for the whole sweep: with the lock backend down no
+  // order can be reconciled anyway, and probing per order would stall
+  // startup by the command timeout times the backlog size.
+  if (stale.length > 0 && !(await isLockBackendAvailable())) {
+    logger.warn("startup recovery: lock backend unavailable - deferring the whole sweep", {
+      staleOrders: stale.length,
+    });
+    return {
+      checkedOrders: stale.length,
+      completedOrders: 0,
+      refundedOrders: 0,
+      deferredOrders: stale.length,
+      unresolvedOrders: 0,
+    };
+  }
   for (const order of stale) {
     try {
       const eventType = EVENT_TYPE_BY_ORDER_TYPE[order.type];
@@ -480,7 +621,8 @@ export async function recoverStaleProvisioningOrders(
       if (outcome === "completed") completedOrders += 1;
       else if (outcome === "refunded") refundedOrders += 1;
       else if (outcome === "deferred") deferredOrders += 1;
-      else unresolvedOrders += 1;
+      else if (outcome === "unresolved") unresolvedOrders += 1;
+      // "skipped" = settled by another actor while we held/waited - no count.
     } catch (err) {
       unresolvedOrders += 1;
       logger.error("startup recovery: order recovery failed", {

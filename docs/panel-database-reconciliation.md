@@ -76,6 +76,30 @@ Only fields the bot itself mutates are compared. Usage (`used_traffic`)
 grows on its own and never decides. Expiry comparison tolerates 1.5s
 (Marzban stores unix seconds; stored values are millisecond dates).
 
+## Serialization and exact attribution (service-operation concurrency phase)
+
+Reconciliation now additionally runs under the SAME distributed
+per-service lock as every live mutation (see
+docs/service-operation-concurrency.md):
+
+- `reconcileServiceMutation` acquires `zedbot:service-operation:<serviceId>`
+  and `reconcilePurchase` acquires
+  `zedbot:service-provisioning:<panelId>:<username>` with a zero wait -
+  contention means live work, so the stale order defers immediately. One
+  Order can therefore never observe (and claim) a remote change another
+  concurrent operation is making mid-flight.
+- Under the lock, the order status and completion anchors are re-checked
+  before the panel is queried.
+- The comparison itself was upgraded from "any owned field changed" to
+  EXACT expected-state attribution (`classifyMutationState`): APPLIED only
+  when the panel matches the order's exact recomputed post-state
+  (pipeline-owned calculation from the stored pre-state + the order's
+  immutable plan snapshot), NOT_APPLIED only on an exact pre-state match,
+  and everything else - including values explainable only by another
+  operation - is UNKNOWN and defers.
+- With Redis unavailable the whole sweep defers (fail closed); nothing is
+  completed or refunded without the lock.
+
 ## Why this cannot double-settle
 
 - Every completion is a CAS on `PROVISIONING`; the refund path is the

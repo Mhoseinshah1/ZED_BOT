@@ -11,6 +11,12 @@ import { errorMessage } from "@zedbot/shared";
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
+import {
+  acquireServiceLock,
+  SERVICE_LOCK_BUSY_TEXT,
+  SERVICE_LOCK_UNAVAILABLE_TEXT,
+  serviceOperationLockKey,
+} from "./service-lock.service.js";
 
 // =============================================================================
 // Subscription link regeneration (Phase 19): the user invalidates their OWN
@@ -157,6 +163,31 @@ function hasText(value: string | undefined): value is string {
  * never left half-written.
  */
 export async function regenerateServiceSubscription(
+  userId: string,
+  serviceId: string,
+): Promise<RegenerateLinkOutcome> {
+  // CONCURRENCY: regeneration revokes/rewrites remote subscription state
+  // and persists it - serialized per service with the shared distributed
+  // lock; contention/unavailability fails closed with a retryable message.
+  const acquisition = await acquireServiceLock(serviceOperationLockKey(serviceId));
+  if (!acquisition.ok) {
+    return {
+      ok: false,
+      error: `service lock ${acquisition.reason}`,
+      safeUserMessage:
+        acquisition.reason === "contended"
+          ? SERVICE_LOCK_BUSY_TEXT
+          : SERVICE_LOCK_UNAVAILABLE_TEXT,
+    };
+  }
+  try {
+    return await regenerateServiceSubscriptionUnlocked(userId, serviceId);
+  } finally {
+    await acquisition.lock.release();
+  }
+}
+
+async function regenerateServiceSubscriptionUnlocked(
   userId: string,
   serviceId: string,
 ): Promise<RegenerateLinkOutcome> {

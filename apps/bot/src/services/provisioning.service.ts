@@ -18,6 +18,14 @@ import { errorMessage } from "@zedbot/shared";
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
+import {
+  acquireServiceLock,
+  SERVICE_LOCK_BUSY_TEXT,
+  SERVICE_LOCK_LOST_TEXT,
+  SERVICE_LOCK_UNAVAILABLE_TEXT,
+  serviceProvisioningLockKey,
+  type ServiceLock,
+} from "./service-lock.service.js";
 
 // =============================================================================
 // Provisioning (Phase 9): turns a PAID SERVICE_PURCHASE Order into a panel
@@ -155,8 +163,53 @@ export async function failOrderWithRefund(
  * Provisions one PAID SERVICE_PURCHASE order. Safe to call repeatedly:
  * every path is guarded (see module header). All returned error strings are
  * admin-safe Persian; adapter internals only go to logs.
+ *
+ * CONCURRENCY: no Service row exists yet, so the distributed lock keys on
+ * the panel + the order's deterministic username - the same key startup
+ * reconciliation uses, so a stale-order sweep can never probe/adopt while
+ * this pipeline is creating the account. Contention or an unavailable lock
+ * backend leaves the order PAID and retryable - no panel call, no refund.
  */
 export async function provisionPaidOrder(orderId: string): Promise<ProvisionOutcome> {
+  // Pre-lock reads only feed the lock key (deterministic username + panel).
+  const head = (await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { user: true, product: { include: { panel: true } } },
+  })) as OrderForProvisioning | null;
+  if (head === null) {
+    return { ok: false, refunded: false, error: "سفارش یافت نشد." };
+  }
+  const headPanel = head.product?.panel ?? null;
+  if (head.type !== OrderType.SERVICE_PURCHASE || headPanel === null) {
+    // Type mismatch errors and the missing-panel preflight refund need no
+    // shared-state protection - delegate to the unguarded body.
+    return provisionPaidOrderUnlocked(orderId, null);
+  }
+  const username = generatePanelUsername(head.user.telegramId, head.id);
+  const acquisition = await acquireServiceLock(
+    serviceProvisioningLockKey(headPanel.id, username),
+  );
+  if (!acquisition.ok) {
+    return {
+      ok: false,
+      refunded: false,
+      error:
+        acquisition.reason === "contended"
+          ? SERVICE_LOCK_BUSY_TEXT
+          : SERVICE_LOCK_UNAVAILABLE_TEXT,
+    };
+  }
+  try {
+    return await provisionPaidOrderUnlocked(orderId, acquisition.lock);
+  } finally {
+    await acquisition.lock.release();
+  }
+}
+
+async function provisionPaidOrderUnlocked(
+  orderId: string,
+  lock: ServiceLock | null,
+): Promise<ProvisionOutcome> {
   const order = (await prisma.order.findUnique({
     where: { id: orderId },
     include: { user: true, product: { include: { panel: true } } },
@@ -260,6 +313,17 @@ export async function provisionPaidOrder(orderId: string): Promise<ProvisionOutc
   if (!created.ok) {
     const refunded = await failOrderWithRefund(order, created.errorMessage ?? "unknown adapter error");
     return { ok: false, refunded, error: "ساخت سرویس ناموفق بود." };
+  }
+
+  // Confirmed lock loss after the panel write: persisting could interleave
+  // with a new lock owner. Leave the order PROVISIONING - startup
+  // reconciliation adopts/refunds it from panel truth under the same lock.
+  if (lock !== null && lock.isLost()) {
+    logger.error("provisioning: lock ownership lost after panel call - deferring to reconciliation", {
+      orderId: order.id,
+      panelId: panel.id,
+    });
+    return { ok: false, refunded: false, error: SERVICE_LOCK_LOST_TEXT };
   }
 
   // The panel account now exists (or was recovered). From here on the user
