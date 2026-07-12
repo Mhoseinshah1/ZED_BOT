@@ -1,8 +1,14 @@
 import {
+  OrderStatus,
   prisma,
+  ServiceStatus,
+  UserStatus,
   WalletTransactionSource,
   WalletTransactionType,
+  type Order,
+  type Payment,
   type Prisma,
+  type Service,
   type User,
   type WalletTransaction,
 } from "@zedbot/database";
@@ -74,6 +80,13 @@ export async function searchUsersForAdmin(rawQuery: string): Promise<User[]> {
     }
     return prisma.user.findMany({ where: { OR: or }, orderBy: { createdAt: "desc" }, take: SEARCH_LIMIT });
   }
+  // Fix C: internal short id (uuid prefix) - exact prefix, ambiguity-safe.
+  if (/^[0-9a-f]{4,32}$/i.test(query) || /^[0-9a-f-]{9,36}$/i.test(query)) {
+    const byShortId = await getAdminTargetUserByShortId(query.toLowerCase());
+    if (byShortId !== null) {
+      return [byShortId];
+    }
+  }
   if (query.startsWith("@")) {
     const username = query.slice(1);
     if (username === "") {
@@ -132,6 +145,203 @@ export async function listUserWalletTransactionsForAdmin(
     orderBy: { createdAt: "desc" },
     take: limit,
   });
+}
+
+// --- Fix C: user landing filters, overview and read-only sub-lists ------------------
+
+export const ADMIN_USERS_PAGE_SIZE = 10;
+
+/**
+ * Landing filter -> UserStatus mapping (documented; no new statuses):
+ *   کاربران فعال ✅  -> ACTIVE
+ *   کاربران مسدود 🚫 -> BLOCKED
+ *   کاربران غیرفعال ⏸ -> DISABLED (DELETED stays out of every list)
+ */
+export const USER_LIST_FILTER_STATUS: Record<"a" | "b" | "d", UserStatus> = {
+  a: UserStatus.ACTIVE,
+  b: UserStatus.BLOCKED,
+  d: UserStatus.DISABLED,
+};
+
+export interface AdminUserListPage {
+  users: User[];
+  page: number;
+  pages: number;
+  total: number;
+}
+
+/** Paged user list for the landing filters ("r" = recent, any status but DELETED). */
+export async function listUsersForAdmin(
+  filter: "r" | "a" | "b" | "d",
+  page: number,
+): Promise<AdminUserListPage> {
+  const where: Prisma.UserWhereInput =
+    filter === "r"
+      ? { status: { not: UserStatus.DELETED } }
+      : { status: USER_LIST_FILTER_STATUS[filter] };
+  const total = await prisma.user.count({ where });
+  const pages = Math.max(1, Math.ceil(total / ADMIN_USERS_PAGE_SIZE));
+  const safePage = Math.min(Math.max(1, page), pages);
+  const users = await prisma.user.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    skip: (safePage - 1) * ADMIN_USERS_PAGE_SIZE,
+    take: ADMIN_USERS_PAGE_SIZE,
+  });
+  return { users, page: safePage, pages, total };
+}
+
+export interface AdminUserOverview {
+  services: number;
+  activeServices: number;
+  orders: number;
+  pendingOrders: number;
+  paidOrders: number;
+  payments: number;
+  tickets: number;
+  referralCount: number;
+  referrer: Pick<User, "telegramId" | "username"> | null;
+}
+
+/** Read-only counters for the Fix C user detail page. */
+export async function getAdminUserOverview(user: User): Promise<AdminUserOverview> {
+  const [services, activeServices, orders, pendingOrders, paidOrders, payments, tickets, referralCount, referrer] =
+    await Promise.all([
+      prisma.service.count({
+        where: { userId: user.id, deletedAt: null, status: { not: ServiceStatus.DELETED } },
+      }),
+      prisma.service.count({
+        where: { userId: user.id, deletedAt: null, status: ServiceStatus.ACTIVE },
+      }),
+      prisma.order.count({ where: { userId: user.id } }),
+      prisma.order.count({
+        where: {
+          userId: user.id,
+          status: {
+            in: [OrderStatus.PENDING_PAYMENT, OrderStatus.WAITING_RECEIPT, OrderStatus.PENDING_REVIEW],
+          },
+        },
+      }),
+      prisma.order.count({
+        where: {
+          userId: user.id,
+          status: { in: [OrderStatus.PAID, OrderStatus.PROVISIONING, OrderStatus.COMPLETED] },
+        },
+      }),
+      prisma.payment.count({ where: { userId: user.id } }),
+      prisma.supportTicket.count({ where: { userId: user.id } }),
+      prisma.user.count({ where: { referrerId: user.id } }),
+      user.referrerId === null
+        ? Promise.resolve(null)
+        : prisma.user.findUnique({
+            where: { id: user.referrerId },
+            select: { telegramId: true, username: true },
+          }),
+    ]);
+  return {
+    services,
+    activeServices,
+    orders,
+    pendingOrders,
+    paidOrders,
+    payments,
+    tickets,
+    referralCount,
+    referrer,
+  };
+}
+
+export interface AdminSubListPage<T> {
+  rows: T[];
+  page: number;
+  pages: number;
+  total: number;
+}
+
+async function pagedFor<T>(
+  count: () => Promise<number>,
+  rows: (skip: number, take: number) => Promise<T[]>,
+  page: number,
+): Promise<AdminSubListPage<T>> {
+  const total = await count();
+  const pages = Math.max(1, Math.ceil(total / ADMIN_USERS_PAGE_SIZE));
+  const safePage = Math.min(Math.max(1, page), pages);
+  return {
+    rows: await rows((safePage - 1) * ADMIN_USERS_PAGE_SIZE, ADMIN_USERS_PAGE_SIZE),
+    page: safePage,
+    pages,
+    total,
+  };
+}
+
+/** Read-only: one user's services, newest first (never secrets/links). */
+export async function listUserServicesForAdmin(
+  userId: string,
+  page: number,
+): Promise<AdminSubListPage<Service>> {
+  const where = { userId, deletedAt: null, status: { not: ServiceStatus.DELETED } } as const;
+  return pagedFor(
+    () => prisma.service.count({ where }),
+    (skip, take) =>
+      prisma.service.findMany({ where, orderBy: { createdAt: "desc" }, skip, take }),
+    page,
+  );
+}
+
+/** Read-only: one user's orders, newest first. */
+export async function listUserOrdersForAdmin(
+  userId: string,
+  page: number,
+): Promise<AdminSubListPage<Order>> {
+  return pagedFor(
+    () => prisma.order.count({ where: { userId } }),
+    (skip, take) =>
+      prisma.order.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, skip, take }),
+    page,
+  );
+}
+
+/** Read-only: one user's payments, newest first. */
+export async function listUserPaymentsForAdmin(
+  userId: string,
+  page: number,
+): Promise<AdminSubListPage<Payment>> {
+  return pagedFor(
+    () => prisma.payment.count({ where: { userId } }),
+    (skip, take) =>
+      prisma.payment.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, skip, take }),
+    page,
+  );
+}
+
+// --- Fix C: block / unblock ----------------------------------------------------------
+
+export type SetUserBlockedOutcome =
+  | { ok: true; user: User }
+  | { ok: false; safeMessage: string };
+
+/**
+ * Guarded status flip: block only ACTIVE -> BLOCKED, unblock only
+ * BLOCKED -> ACTIVE (updateMany status guard - a stale confirmation cannot
+ * overwrite DISABLED/DELETED). No other user field, no wallet, no orders.
+ */
+export async function setUserBlocked(
+  userId: string,
+  blocked: boolean,
+): Promise<SetUserBlockedOutcome> {
+  const applied = await prisma.user.updateMany({
+    where: {
+      id: userId,
+      status: blocked ? UserStatus.ACTIVE : UserStatus.BLOCKED,
+    },
+    data: { status: blocked ? UserStatus.BLOCKED : UserStatus.ACTIVE },
+  });
+  if (applied.count !== 1) {
+    return { ok: false, safeMessage: "وضعیت کاربر تغییر کرده است؛ صفحه را دوباره باز کنید." };
+  }
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  logger.info("admin user block state changed", { userId, blocked });
+  return { ok: true, user };
 }
 
 // --- the adjustment itself ---------------------------------------------------------

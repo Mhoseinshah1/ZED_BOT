@@ -116,6 +116,21 @@ landing. Stock product pages expose status-filtered item lists
 same list, DELIVERED/DISABLED items are read-only, content stays
 masked-preview-only.
 
+## Admin users / products / panels (Fix C)
+
+- **مدیریت کاربران 👤**: search + recent/blocked/active/disabled filters
+  (existing UserStatus mapping), focused escaped detail with wallet/
+  services/orders/payments sub-pages, confirmed block/unblock (guarded
+  status-only flip), Fix B receipt-return preserved.
+- **مدیریت محصولات و پلن‌ها 🛍**: list+add / categories+add / VPN+other
+  rows; V/X status filters; type-specific detail actions (OTHER_PRODUCT
+  links to its Fix B stock page and can never pick a VPN panel);
+  soft-deactivate only; wizard consumes state before the single create.
+- **مدیریت پنل‌ها 🖥**: list+add / active+inactive rows; hostname-only
+  rendering; credentials shown only as set/not-set; «محصولات متصل 🛍»;
+  panel change affects future purchases only (warning shown, Services
+  never migrated). Details in `docs/corrective-ui-fix-c.md`.
+
 ## Back navigation
 
 - Finance children (methods, settings, reports, receipts) → `FIN_CB.root`;

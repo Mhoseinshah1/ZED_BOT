@@ -13,6 +13,10 @@ export const PANEL_CB = {
 
 export const cb = {
   list: (page: number): string => `admin:panels:list:${page}`,
+  // Fix C: status-filtered lists (a=active, i=not active).
+  listFiltered: (filter: "a" | "i", page: number): string => `admin:panels:ls:${filter}:${page}`,
+  // Fix C: read-only linked-products page.
+  products: (sid: string): string => `admin:panel:prods:${sid}`,
   view: (sid: string): string => `admin:panel:view:${sid}`,
   test: (sid: string): string => `admin:panel:test:${sid}`,
   statusMenu: (sid: string): string => `admin:panel:st:${sid}`,

@@ -23,10 +23,22 @@ export const AU_CB = {
   walletSubtract: (sid: string): string => `admin:user_wallet:subtract:${sid}`,
   walletConfirm: "admin:user_wallet:confirm",
   walletCancel: "admin:user_wallet:cancel",
+  // Fix C: landing filters, per-user read-only sub-lists, block/unblock.
+  list: (filter: "r" | "a" | "b" | "d", page: number): string =>
+    `admin:users:ls:${filter}:${page}`,
+  services: (sid: string, page: number): string => `admin:users:svc:${sid}:${page}`,
+  orders: (sid: string, page: number): string => `admin:users:ord:${sid}:${page}`,
+  payments: (sid: string, page: number): string => `admin:users:pay:${sid}:${page}`,
+  walletTx: (sid: string, page: number): string => `admin:user_wallet:tx:${sid}:${page}`,
+  blockAsk: (sid: string): string => `admin:users:blk:${sid}`,
+  blockConfirm: (sid: string): string => `admin:users:blk:${sid}:yes`,
+  unblockAsk: (sid: string): string => `admin:users:ublk:${sid}`,
+  unblockConfirm: (sid: string): string => `admin:users:ublk:${sid}:yes`,
 } as const;
 
-export const USERS_LANDING_TEXT = "مدیریت کاربران 👥";
-export const SEARCH_PROMPT_TEXT = "آیدی عددی تلگرام، یوزرنیم یا شماره موبایل کاربر را وارد کنید.";
+export const USERS_LANDING_TEXT = "مدیریت کاربران 👤";
+export const SEARCH_PROMPT_TEXT =
+  "آیدی عددی تلگرام، یوزرنیم (با یا بدون @)، شناسه داخلی، نام یا شماره موبایل کاربر را وارد کنید.";
 export const NO_USER_FOUND_TEXT = "کاربری پیدا نشد.";
 
 const GROUP_LABELS: Record<UserGroup, string> = {
@@ -55,13 +67,22 @@ export function userButtonLabel(user: User): string {
   return `${user.telegramId} | ${name}`;
 }
 
+/**
+ * Fix C landing. Filters map to EXISTING UserStatus values (documented in
+ * admin-user-wallet.service): active -> ACTIVE, blocked -> BLOCKED,
+ * inactive -> DISABLED; recent -> newest of every status except DELETED.
+ */
 export function usersLandingKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("جستجوی کاربر 🔎", AU_CB.search)
     .row()
-    .text("کاربران اخیر 👤", AU_CB.recent)
+    .text("کاربران اخیر 🕘", AU_CB.list("r", 1))
+    .text("کاربران مسدود 🚫", AU_CB.list("b", 1))
     .row()
-    .text("بازگشت", CB.ADMIN_MENU);
+    .text("کاربران فعال ✅", AU_CB.list("a", 1))
+    .text("کاربران غیرفعال ⏸", AU_CB.list("d", 1))
+    .row()
+    .text("بازگشت به پنل ادمین", CB.ADMIN_MENU);
 }
 
 export function userListKeyboard(users: User[], backCb: string = AU_CB.root): InlineKeyboard {
@@ -77,49 +98,108 @@ export function searchCancelKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("انصراف", AU_CB.root);
 }
 
-/** «پروفایل کاربر 👤» - admin-facing summary of one user. */
-export function userProfileText(user: User): string {
+/** Counters shown on the Fix C profile (computed read-only by the service). */
+export interface UserOverviewView {
+  services: number;
+  activeServices: number;
+  orders: number;
+  pendingOrders: number;
+  paidOrders: number;
+  payments: number;
+  tickets: number;
+  referralCount: number;
+  referrer: { telegramId: bigint; username: string | null } | null;
+}
+
+/** «پروفایل کاربر 👤» - admin-facing summary of one user (Fix C fields). */
+export function userProfileText(user: User, overview?: UserOverviewView): string {
   const fullName = [user.firstName, user.lastName].filter(Boolean).join(" ");
-  return [
+  const lines = [
     "پروفایل کاربر 👤",
     "",
     `شناسه: <code>${userShortId(user)}</code>`,
     `آیدی عددی: <code>${user.telegramId}</code>`,
-    `نام کاربری: ${user.username === null || user.username === "" ? "-" : `@${escapeHtml(user.username)}`}`,
     `نام: ${fullName === "" ? "-" : escapeHtml(fullName)}`,
-    `گروه: ${GROUP_LABELS[user.group] ?? user.group}`,
-    `وضعیت: ${STATUS_LABELS[user.status] ?? user.status}`,
+    `نام کاربری: ${user.username === null || user.username === "" ? "-" : `@${escapeHtml(user.username)}`}`,
+    `شماره تماس: ${user.phoneNumber === null || user.phoneNumber === "" ? "ثبت نشده" : escapeHtml(user.phoneNumber)}`,
     `تاریخ عضویت: ${formatDate(user.createdAt)}`,
+    `آخرین بازدید: ${formatDate(user.lastSeenAt)}`,
+    `وضعیت: ${STATUS_LABELS[user.status] ?? user.status}`,
+    `گروه: ${GROUP_LABELS[user.group] ?? user.group}`,
     "",
     `موجودی کیف پول: ${formatToman(user.balanceToman)}`,
-    `مجموع شارژ: ${formatToman(user.totalChargedToman)}`,
-    `مجموع خرید: ${formatToman(user.totalSpentToman)}`,
-    `تعداد سفارش‌ها: ${user.ordersCount} (پرداخت‌شده: ${user.paidOrdersCount})`,
-  ].join("\n");
+    `مجموع شارژ (بستانکار): ${formatToman(user.totalChargedToman + user.totalManualAddedToman)}`,
+    `مجموع خرید/کسر (بدهکار): ${formatToman(user.totalSpentToman + user.totalManualDeductedToman)}`,
+  ];
+  if (overview !== undefined) {
+    lines.push(
+      `سفارش‌های در انتظار: ${overview.pendingOrders} | موفق: ${overview.paidOrders}`,
+      "",
+      `سرویس‌ها: ${overview.services} (فعال: ${overview.activeServices})`,
+      `سفارش‌ها: ${overview.orders} | پرداخت‌ها: ${overview.payments} | تیکت‌ها: ${overview.tickets}`,
+      "",
+      `معرف: ${
+        overview.referrer === null
+          ? "-"
+          : overview.referrer.username === null || overview.referrer.username === ""
+            ? `<code>${overview.referrer.telegramId}</code>`
+            : `@${escapeHtml(overview.referrer.username)}`
+      }`,
+      `تعداد زیرمجموعه‌ها: ${overview.referralCount}`,
+    );
+  }
+  return lines.join("\n");
 }
 
 /**
- * Fix B: when the page was reached from a receipt detail,
- * `returnReceiptSid` adds «بازگشت به رسید 🧾» (the literal callback shape of
- * the receipts handler's admin:rec:view route - not imported to avoid a
- * module cycle).
+ * Fix C profile keyboard: wallet/services/orders/payments sub-pages, a
+ * confirmed block (ACTIVE) or unblock (BLOCKED), the Fix B receipt return
+ * and the direct-parent backs. Per-user ticket and referral-member lists
+ * have no page yet, so no button renders for them (documented deferral -
+ * the counters render in the text instead).
  */
 export function userProfileKeyboard(
   sid: string,
   hasResults: boolean,
   returnReceiptSid?: string,
+  status?: User["status"],
+  backToList?: { filter: "r" | "a" | "b" | "d"; page: number },
 ): InlineKeyboard {
-  const kb = new InlineKeyboard().text("کیف پول کاربر 🏦", AU_CB.wallet(sid)).row();
+  const kb = new InlineKeyboard()
+    .text("کیف پول کاربر 💰", AU_CB.wallet(sid))
+    .text("سرویس‌های کاربر 🛍", AU_CB.services(sid, 1))
+    .row()
+    .text("سفارش‌های کاربر 🧾", AU_CB.orders(sid, 1))
+    .text("پرداخت‌های کاربر 💳", AU_CB.payments(sid, 1))
+    .row();
+  if (status === "ACTIVE") {
+    kb.text("مسدود کردن کاربر 🚫", AU_CB.blockAsk(sid)).row();
+  } else if (status === "BLOCKED") {
+    kb.text("رفع مسدودی کاربر ✅", AU_CB.unblockAsk(sid)).row();
+  }
   if (returnReceiptSid !== undefined) {
     kb.text("بازگشت به رسید 🧾", `admin:rec:view:${returnReceiptSid}`).row();
   }
   if (hasResults) {
     kb.text("بازگشت به نتایج", AU_CB.results).row();
+  } else if (backToList !== undefined) {
+    kb.text("بازگشت به لیست", AU_CB.list(backToList.filter, backToList.page)).row();
   }
   return kb
     .text("بازگشت به مدیریت کاربران", AU_CB.root)
     .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
+}
+
+/** Confirmed block/unblock - nothing changes before «بله». */
+export function blockConfirmKeyboard(sid: string, block: boolean): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(
+      block ? "بله، مسدود کن 🚫" : "بله، رفع مسدودی ✅",
+      block ? AU_CB.blockConfirm(sid) : AU_CB.unblockConfirm(sid),
+    )
+    .row()
+    .text("انصراف", AU_CB.view(sid));
 }
 
 /** «کیف پول کاربر 🏦» - balance, counters and the latest transactions. */
@@ -149,13 +229,41 @@ export function userWalletText(user: User, transactions: WalletTransaction[]): s
 export function userWalletKeyboard(sid: string, returnReceiptSid?: string): InlineKeyboard {
   const kb = new InlineKeyboard()
     .text("افزایش موجودی ➕", AU_CB.walletAdd(sid))
-    .text("کسر موجودی ➖", AU_CB.walletSubtract(sid))
+    .text("کاهش موجودی ➖", AU_CB.walletSubtract(sid))
+    .row()
+    .text("تاریخچه تراکنش‌ها 📋", AU_CB.walletTx(sid, 1))
     .row();
   if (returnReceiptSid !== undefined) {
     kb.text("بازگشت به رسید 🧾", `admin:rec:view:${returnReceiptSid}`).row();
   }
   return kb
-    .text("بازگشت به پروفایل کاربر", AU_CB.view(sid))
+    .text("بازگشت به کاربر", AU_CB.view(sid))
+    .text("بازگشت به مدیریت کاربران", AU_CB.root);
+}
+
+/** Shared pagination + back rows for the Fix C read-only sub-lists. */
+export function subListKeyboard(
+  sid: string,
+  build: (page: number) => string,
+  pageData: { page: number; pages: number },
+  rows?: Array<{ label: string; callback: string }>,
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  for (const row of rows ?? []) {
+    kb.text(row.label, row.callback).row();
+  }
+  if (pageData.pages > 1) {
+    if (pageData.page > 1) {
+      kb.text("« قبلی", build(pageData.page - 1));
+    }
+    kb.text(`${pageData.page}/${pageData.pages}`, build(pageData.page));
+    if (pageData.page < pageData.pages) {
+      kb.text("بعدی »", build(pageData.page + 1));
+    }
+    kb.row();
+  }
+  return kb
+    .text("بازگشت به کاربر", AU_CB.view(sid))
     .row()
     .text("بازگشت به مدیریت کاربران", AU_CB.root);
 }

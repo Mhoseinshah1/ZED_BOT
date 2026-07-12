@@ -7,6 +7,8 @@ export const PROD_CB = {
   CANCEL: "admin:prod:cancel",
   CAT_MENU: "admin:prod:cat",
   CAT_ADD: "admin:prod:cat:add",
+  // Fix C: type chooser in front of the existing add wizards.
+  ADD: "admin:prod:add",
   ADD_SERVICE: "admin:prod:adds",
   ADD_OTHER: "admin:prod:addo",
   LIST_MENU: "admin:prod:ls",
@@ -24,8 +26,8 @@ export const pcb = {
   catDeleteAsk: (sid: string): string => `admin:prod:cat:del:${sid}`,
   catDeleteConfirm: (sid: string): string => `admin:prod:cat:del:${sid}:yes`,
 
-  // Product list / detail
-  list: (f: "S" | "O" | "A", page: number): string => `admin:prod:ls:${f}:${page}`,
+  // Product list / detail (Fix C added V=active / X=inactive filters)
+  list: (f: "S" | "O" | "A" | "V" | "X", page: number): string => `admin:prod:ls:${f}:${page}`,
   view: (sid: string): string => `admin:prod:view:${sid}`,
   toggle: (sid: string): string => `admin:prod:tgl:${sid}`,
   deleteAsk: (sid: string): string => `admin:prod:del:${sid}`,

@@ -14,7 +14,8 @@ export type ProductWithRelations = Product & {
   panel: Panel | null;
 };
 
-export type ProductListFilter = "S" | "O" | "A";
+/** S/O/A by type; V (active) / X (inactive) by status (Fix C). */
+export type ProductListFilter = "S" | "O" | "A" | "V" | "X";
 
 export interface ProductListPage {
   products: ProductWithRelations[];
@@ -29,6 +30,12 @@ function filterWhere(filter: ProductListFilter): Prisma.ProductWhereInput {
   }
   if (filter === "O") {
     return { type: "OTHER_PRODUCT" };
+  }
+  if (filter === "V") {
+    return { isActive: true };
+  }
+  if (filter === "X") {
+    return { isActive: false };
   }
   return {};
 }

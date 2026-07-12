@@ -39,16 +39,31 @@ export interface PanelListPage {
   total: number;
 }
 
-export async function listPanels(page: number): Promise<PanelListPage> {
-  const total = await prisma.panel.count();
+/** Fix C: optional status filter - "a" ACTIVE panels, "i" everything else. */
+export type PanelListFilter = "a" | "i";
+
+export async function listPanels(page: number, filter?: PanelListFilter): Promise<PanelListPage> {
+  const where: Prisma.PanelWhereInput =
+    filter === "a"
+      ? { status: PanelStatus.ACTIVE }
+      : filter === "i"
+        ? { status: { not: PanelStatus.ACTIVE } }
+        : {};
+  const total = await prisma.panel.count({ where });
   const pages = Math.max(1, Math.ceil(total / PANELS_PAGE_SIZE));
   const safePage = Math.min(Math.max(1, page), pages);
   const panels = await prisma.panel.findMany({
+    where,
     orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }],
     skip: (safePage - 1) * PANELS_PAGE_SIZE,
     take: PANELS_PAGE_SIZE,
   });
   return { panels, page: safePage, pages, total };
+}
+
+/** Linked-product count for the panel list/detail (read-only). */
+export async function countPanelProducts(panelId: string): Promise<number> {
+  return prisma.product.count({ where: { panelId } });
 }
 
 export async function getPanelById(id: string): Promise<Panel | null> {

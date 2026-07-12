@@ -237,13 +237,16 @@ describe("admin user pages return-to-receipt context (Fix B)", () => {
   });
 
   it("normal user-detail navigation is unchanged without the context", () => {
+    // Fix C widened the profile keyboard (services/orders/payments rows);
+    // the Fix B invariant stays: no receipt button without a context, and
+    // the normal results/users/admin backs are intact.
     const kb = userProfileKeyboard("aabbccdd", true);
-    expect(rows(kb).map((row) => row.map((b) => b.callback_data))).toEqual([
-      ["admin:user_wallet:open:aabbccdd"],
-      ["admin:users:results"],
-      [CB.ADMIN_USERS],
-      [CB.ADMIN_MENU],
-    ]);
+    const flat = rows(kb).map((row) => row.map((b) => b.callback_data));
+    expect(flat[0]).toEqual(["admin:user_wallet:open:aabbccdd", "admin:users:svc:aabbccdd:1"]);
+    expect(flat).toContainEqual(["admin:users:results"]);
+    expect(flat).toContainEqual([CB.ADMIN_USERS]);
+    expect(flat).toContainEqual([CB.ADMIN_MENU]);
+    expect(callbacks(kb).some((c) => c.startsWith("admin:rec:view:"))).toBe(false);
   });
 
   it("the context is cleared on the users landing / admin main menu", () => {

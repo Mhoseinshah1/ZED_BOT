@@ -138,11 +138,36 @@ on the users landing / admin menu).
 | stock product page | افزودن آیتم تکی ➕ · افزودن گروهی ➕➕ *(flows)* / آیتم‌های موجود ✅ · رزروشده ⏳ / غیرفعال ⏸ · تاریخچه تحویل 📦 (status lists `admin:stock:items:<sid>:<a|r|x|d>:<page>`) / تنظیم حد هشدار 🔔 *(flow)* / پاک کردن حد هشدار (when set) / toggle استاک / بازگشت به لیست محصولات استاک / بازگشت به محصولات دیگر |
 | status item lists | release/disable actions (AVAILABLE/RESERVED only; DELIVERED/DISABLED read-only) returning to the same status/page · pagination · بازگشت » product page |
 
-### Other admin sections (unchanged by Fix A/B)
+### مدیریت کاربران 👤 (Fix C)
 
-- **مدیریت کاربران 👤** — search *(flow)* / recent users » user page »
-  wallet adjustments (افزایش ➕ / کسر ➖ with confirm).
-- **مدیریت محصولات/پلن‌ها، مدیریت پنل‌ها** — pre-existing CRUD wizards.
+| page | buttons |
+| --- | --- |
+| landing (`admin:users`) | جستجوی کاربر 🔎 *(flow)* / کاربران اخیر 🕘 · مسدود 🚫 / فعال ✅ · غیرفعال ⏸ (`admin:users:ls:<r|b|a|d>:<page>`) / بازگشت به پنل ادمین |
+| filtered lists (paged) | rows » `admin:users:view:<sid>` · pagination · بازگشت |
+| user detail | کیف پول 💰 · سرویس‌ها 🛍 / سفارش‌ها 🧾 · پرداخت‌ها 💳 / مسدود 🚫 یا رفع مسدودی ✅ (»confirm) / بازگشت به رسید 🧾 (Fix B context) / بازگشت به نتایج یا لیست (same filter/page) / بازگشت به مدیریت کاربران / منوی ادمین |
+| wallet page | افزایش ➕ · کاهش ➖ *(Phase 20 confirmed flow)* / تاریخچه تراکنش‌ها 📋 (paged) / backs |
+| services/orders sub-pages (paged, read-only) | text rows · pagination · بازگشت به کاربر |
+| payments sub-page (paged) | rows » `admin:rec:view:<sid>` (Fix B detail) · بازگشت به کاربر |
+
+### مدیریت محصولات و پلن‌ها 🛍 (Fix C)
+
+| page | buttons |
+| --- | --- |
+| root (`admin:products`) | لیست محصولات 🧾 · افزودن محصول ➕ (type chooser) / دسته‌بندی‌ها 🗂 · افزودن دسته‌بندی ➕ / محصولات اشتراک VPN 🔐 · محصولات دیگر 🛍 / بازگشت به پنل ادمین |
+| product lists (`admin:prod:ls:<S|O|A|V|X>:<page>`) | rows » detail · pagination · افزودن ➕ · دسته‌بندی‌ها 🗂 · بازگشت به مدیریت محصولات |
+| product detail | field edits · category/groups · (SERVICE) پنل/حجم/موقعیت · (OTHER) تحویل/اطلاعات/استاک 🎟 » `admin:stock:p:<sid>` · toggle · غیرفعال‌سازی (soft) · بازگشت به لیست (same filter/page) · بازگشت به مدیریت محصولات |
+| categories | pre-existing lists/detail/wizard; delete = soft-deactivate only |
+
+### مدیریت پنل‌ها 🖥 (Fix C)
+
+| page | buttons |
+| --- | --- |
+| root (`admin:panels`) | لیست پنل‌ها 🧾 · افزودن پنل ➕ / پنل‌های فعال ✅ · غیرفعال ⏸ (`admin:panels:ls:<a|i>:<page>`) / بازگشت به پنل ادمین |
+| lists (paged) | rows (icon, name, type, hostname) » detail · بازگشت به مدیریت پنل‌ها |
+| panel detail | تست اتصال 🩺 · وضعیت / ویرایش نام/آدرس / اطلاعات ورود 🔑 (set/not-set only) · محصولات متصل 🛍 » `admin:panel:prods:<sid>` / feature/pricing/test/username/cfg pages / حذف (soft) / بازگشت به لیست پنل‌ها (same filter/page) / بازگشت به مدیریت پنل‌ها |
+
+### Other admin sections (unchanged)
+
 - **تیکت‌های پشتیبانی 🎫** — filters » detail » پاسخ ✍️ *(flow)* / بستن ✅.
 - **پیام همگانی 📣** — draft *(flow)* » audience » preview » test/start.
 - **تنظیمات عمومی ⚙️** — مدیریت متن‌ها ✍️ (templates/buttons list » edit
