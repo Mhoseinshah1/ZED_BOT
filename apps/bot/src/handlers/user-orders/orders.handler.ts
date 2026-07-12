@@ -26,7 +26,6 @@ import {
   visibleManualDeliveryText,
   type UserOtherProductOrderRow,
 } from "../../services/user-other-product-orders.service.js";
-import { getMessageTemplate } from "../../services/text.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
 
@@ -89,11 +88,7 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
       .row()
       .text("بازگشت", CB.USER_ORDERS)
       .text("بازگشت به منو", CB.USER_MENU);
-    await safeEditOrReply(
-      ctx,
-      `سفارش‌های محصولات دیگر 🛍\n\n${await getMessageTemplate("no_orders_text")}`,
-      kb,
-    );
+    await safeEditOrReply(ctx, "سفارش‌های محصولات دیگر 🛍\n\nشما هنوز سفارشی ندارید.", kb);
     return;
   }
   const kb = new InlineKeyboard();

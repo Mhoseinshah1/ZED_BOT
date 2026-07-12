@@ -1,21 +1,16 @@
-# ZED_BOT complete navigation map
+# ZED_BOT navigation map
 
-The full Telegram navigation tree — every page, its keyboard and every
-button destination — produced by the corrective UI/UX audit. Use this
-document to diff the implemented tree against the intended design and mark
-corrections per page.
+The Telegram navigation tree as of **Corrective UI/UX Fix A** — every page,
+its keyboard and every button destination. Use this document to diff the
+implemented tree against the intended design and mark corrections per page.
 
-Audit status: **263 emitted button callbacks were cross-checked against all
-189 registered handlers — zero dead buttons; every rendered page carries a
-keyboard — zero dead-end pages** (locked by
-`apps/bot/tests/navigation-integrity.test.ts`).
+**LOCKED flows (approved as-is):** the «خرید اشتراک» subscription purchase
+(`user:buy`, panel-first → category → product → pre-invoice → payment),
+the OTHER_PRODUCT checkout, and their separation. Zero dead buttons: every
+emitted callback has a registered handler (structural locks in
+`apps/bot/tests/corrective-fix-a.test.ts`).
 
-**LOCKED flows (approved as-is, documented but not changed):** the
-«خرید اشتراک» subscription purchase (panel-first → category → product →
-pre-invoice → payment), OTHER_PRODUCT checkout, and their separation.
-
-Legend: `»` opens page · *(flow)* switches to a text-input flow ·
-labels in ButtonText are operator-editable.
+Legend: `»` opens page · *(flow)* switches to a text-input flow.
 
 ---
 
@@ -29,163 +24,114 @@ labels in ButtonText are operator-editable.
 
 `user:menu` and `common:back` both re-render the main menu.
 
-## User main menu (7 buttons)
+## User main menu (13 buttons, ButtonText-backed)
 
-| button (ButtonText key) | callback | destination |
-| --- | --- | --- |
-| خرید اشتراک 🔐 (`buy_subscription`) | `user:buy` | subscription purchase — **LOCKED** |
-| تمدید سرویس ♻️ (`renew_service`) | `user:renew` | renewal flow |
-| سرویس‌های من 🛍 (`my_services`) | `user:services` | services list |
-| کیف پول + شارژ 🏦 (`wallet`) | `user:wallet` | wallet page |
-| محصولات دیگر 🛍 (`other_products`) | `user:other_products` | OTHER_PRODUCT purchase — separate section, **LOCKED** |
-| سفارش‌های من 🧾 (`my_orders`) | `user:orders` | orders & history hub |
-| پشتیبانی ☎️ (`support`) | `user:support` | ticket landing |
+| row | button → callback |
+| --- | --- |
+| 1 | خرید اشتراک 🔐 → `user:buy` (**LOCKED**) · تمدید سرویس ♻️ → `user:renew` |
+| 2 | سرویس‌های من 🛍 → `user:services` · کیف پول + شارژ 🏦 → `user:wallet` |
+| 3 | زیرمجموعه گیری 👥 → `user:referral` (placeholder) · اشتراک رایگان {تست} → `user:free_test` (placeholder) |
+| 4 | گردونه شانس 🎲 → `user:lucky_wheel` (placeholder) · آموزش 📚 → `user:tutorials` (placeholder) |
+| 5 | پشتیبانی ☎️ → `user:support` · تعرفه اشتراک‌ها 💵 → `user:pricing` (placeholder) |
+| 6 | درخواست نمایندگی 👨‍💼 → `user:representative_request` (placeholder) · محصولات دیگر 🛍 → `user:other_products` (**LOCKED**, separate) |
+| 7 | سفارش‌های من 🧾 → `user:orders` |
 
-Hidden (unfinished; callbacks still answered for old keyboards): referral,
-free_test, lucky_wheel, tutorials, pricing, representative_request.
+Placeholder sections answer with their placeholder page + back button.
 
 ### خرید اشتراک — LOCKED flow (documented only)
 
-`user:buy` » panel list (`user:buy:panel:<sid>`) » categories
-(`user:buy:cat:…`) » products (`user:buy:prod:…`) » **pre-invoice**
-(product, category, panel/location/volume/duration, optional discount code
-*(flow `checkout:discount`)*, price/discount/total, wallet balance) with:
-پرداخت با کیف پول (when balance suffices, confirm screen) · پرداخت
-کارت‌به‌کارت » payment page (tap-to-copy card + amount, receipt upload
-*(flow `payment:receipt`)*) · انصراف. OTHER_PRODUCT rides the same engine
-from its own entry (below) and keeps its post-payment required-info notice.
+`user:buy` » panel list » categories » products » pre-invoice (discount
+*(flow `checkout:discount`)*, wallet payment when balance suffices,
+card-to-card payment page with receipt upload *(flow `payment:receipt`)*).
+OTHER_PRODUCT rides the same engine from its own entry and keeps its
+post-payment required-info notice.
 
 ### تمدید سرویس
 
-`user:renew` » renewable services list » renewal pre-invoice (discount
-*(flow `renew:discount`)* / wallet / card-to-card, same payment page).
+`user:renew` » renewable services list » `user:renew:svc:<sid>` service
+summary + plans » renewal pre-invoice (discount / wallet / card-to-card).
+The plans page's back returns to the renewal list (`user:renew:list:1`)
+even when entered from a service detail (kept deliberately — documented in
+`docs/bot-ui-contract.md`).
 
 ### سرویس‌های من
 
 | page | buttons |
 | --- | --- |
 | list (`user:svc:list:<page>`) | one per service » `user:svc:view:<sid>` · pagination · بازگشت به منو |
-| detail (`user:svc:view:<sid>`) | بروزرسانی اطلاعات ♻️ · لینک اشتراک 🔗 · کانفیگ‌ها 📄 · تغییر لینک اشتراک 🔄 (»confirm) · خرید حجم اضافه ➕ » `user:ev:svc:<sid>` · خرید زمان اضافه ⏳ » `user:et:svc:<sid>` · خاموش/روشن کردن سرویس (»confirm) · بازگشت به لیست · بازگشت به منو |
+| detail (`user:svc:view:<sid>`) | بروزرسانی اطلاعات ♻️ · لینک اشتراک 🔗 · کانفیگ‌ها 📄 · تغییر لینک اشتراک 🔄 (»confirm) · **تمدید سرویس ♻️ » `user:renew:svc:<sid>` (Fix A, when renewable)** · خرید حجم اضافه ➕ » `user:ev:svc:<sid>` · خرید زمان اضافه ⏳ » `user:et:svc:<sid>` · خاموش/روشن کردن سرویس (»confirm) · بازگشت به لیست · بازگشت به منوی اصلی |
 | toggle / regen confirms | تایید ✅ · انصراف » detail |
-| extra volume / extra time | plan pick » pre-invoice (discount *(flows `extra_volume:discount` / `extra_time:discount`)* / wallet / card) |
 
-Empty state: `no_services_text` template + خرید اشتراک + بازگشت به منو.
-
-### کیف پول + شارژ
+### کیف پول + شارژ (Fix A layout)
 
 | page | buttons |
 | --- | --- |
-| wallet page (`user:wallet`) | افزایش موجودی 💰 *(flow `wallet:topup:amount`)* · تاریخچه تراکنش‌ها 📋 · بروزرسانی ♻️ · بازگشت به منو |
-| transactions (paged) | pagination · بازگشت به کیف پول · بازگشت به منو |
-| top-up | amount *(flow)* » payment page (card-to-card + receipt upload) |
+| landing (`user:wallet`, header = `wallet_header_text`) | افزایش موجودی 💰 *(flow `wallet:topup:amount`, prompt = `wallet_topup_amount_prompt`)* / تاریخچه تراکنش‌ها 📋 · بروزرسانی ♻️ / بازگشت به منوی اصلی |
+| transactions (paged, empty = `wallet_empty_transactions_text`) | pagination · بازگشت به کیف پول · بازگشت به منو |
+| top-up pre-invoice (note = `wallet_topup_preview_note`) | ادامه و انتخاب روش پرداخت ✅ · تغییر مبلغ · لغو · بازگشت به کیف پول |
 
-Top-up limits/instruction text are the operator-editable Phase 22 Settings.
+Landing shows identity (id/name/username/phone/joined), balance, and the
+three counters (services, pending orders, referrals) only.
 
 ### محصولات دیگر (separate from خرید اشتراک — LOCKED)
 
-`user:other_products` » categories » products » pre-invoice (incl. delivery
-type + required-info notice) » card-to-card payment. After approval:
-auto-delivery from stock or the manual path; «تکمیل اطلاعات سفارش 📝»
-(`user:op:info:<sid>`, *(flow `other_product:info`)*) resumes required info.
+`user:other_products` » categories » products » pre-invoice » card-to-card
+payment. After approval: stock auto-delivery or the manual path;
+«تکمیل اطلاعات سفارش 📝» (`user:op:info:<sid>`) resumes required info.
 
-### سفارش‌های من (hub)
+### سفارش‌های من
 
-| page | buttons |
-| --- | --- |
-| hub (`user:orders`) | همه سوابق 🧾 » `user:hist:list:1` · محصولات دیگر 🛍 » `user:orders:list:1` · پرداخت‌ها 💳 » `user:payhist:list:1` · کیف پول 🏦 » `user:wallet` · بازگشت به منو |
-| همه سوابق (paged) | one row per order/payment » `user:hist:view:o|p:<sid>` · pagination · بازگشت » hub · بازگشت به منو |
-| order detail | مشاهده سرویس 🛍 (when linked) · مشاهده جزئیات محصول دیگر 🛍 (OTHER_PRODUCT » Phase 29 detail) · مشاهده پرداخت 💳 · بازگشت به سوابق · بازگشت » hub |
-| محصولات دیگر list (paged) | rows » `user:orders:view:<sid>` · pagination · بازگشت » hub · بازگشت به منو (empty: `no_orders_text`) |
-| OP order detail | تکمیل اطلاعات سفارش 📝 (waiting-info) · بازگشت به سفارش‌ها · بازگشت به منو — shows delivered manual text / stock content for the owner only |
-| پرداخت‌ها (paged) | rows » `user:payhist:view:<sid>` · pagination · بازگشت » hub · بازگشت به منو |
-| payment detail | مشاهده سفارش 🧾 (when linked) · مشاهده کیف پول 🏦 (approved top-ups) · بازگشت به پرداخت‌ها · بازگشت » hub |
+`user:orders` » history hub (همه سوابق 🧾 / محصولات دیگر 🛍 / پرداخت‌ها 💳 /
+کیف پول 🏦) with paged lists, order/payment details and the Phase 29
+OTHER_PRODUCT detail (delivered content for the owner only).
 
 ### پشتیبانی
 
-| page | buttons |
-| --- | --- |
-| landing (`user:support`, `support_text` template) | تیکت جدید ➕ *(flows `support:subject` » `support:message`)* · تیکت‌های من 🧾 » list · بازگشت به منو |
-| list (paged) | rows » `user:sup:view:<sid>` · pagination · بازگشت به پشتیبانی (empty: `no_tickets_text` + تیکت جدید) |
-| detail | پاسخ دادن ✍️ *(flow `support:reply`, open tickets)* · تیکت‌های من 🧾 · بازگشت به پشتیبانی |
+`user:support` landing » تیکت جدید ➕ *(flows subject » message)* ·
+تیکت‌های من 🧾 (paged » detail » پاسخ دادن ✍️ *(flow)*) · بازگشت به منو.
 
 ---
 
-## Admin main menu (`/admin`, 11 buttons)
+## Admin main menu (`/admin`, Fix A — 5 rows)
 
-| button | callback | destination |
-| --- | --- | --- |
-| مالی 💎 | `admin:finance` | finance hub |
-| رسیدهای تایید نشده 💵 | `admin:receipts` | receipt review |
-| مدیریت کاربران 👤 | `admin:users` | user management |
-| تنظیمات عمومی ⚙️ | `admin:general_settings` | settings hub (text management) |
-| مدیریت محصولات/پلن‌ها | `admin:products` | product management |
-| مدیریت پنل‌ها | `admin:panels` | panel management |
-| محصولات دیگر / سفارش‌های محصولات دیگر | `admin:other_products` | manual orders + stock |
-| تیکت‌های پشتیبانی 🎫 | `admin:support` | ticket admin |
-| پیام همگانی 📣 | `admin:broadcast` | broadcast |
-| گزارشات / بکاپ | `admin:reports_backup` | health/backup tools |
+| row | button → callback |
+| --- | --- |
+| 1 | مالی 💎 → `admin:finance` · مدیریت کاربران 👤 → `admin:users` |
+| 2 | مدیریت محصولات/پلن‌ها → `admin:products` · مدیریت پنل‌ها → `admin:panels` |
+| 3 | محصولات دیگر / سفارش‌های محصولات دیگر → `admin:other_products` |
+| 4 | تیکت‌های پشتیبانی 🎫 → `admin:support` · پیام همگانی 📣 → `admin:broadcast` |
+| 5 | تنظیمات عمومی ⚙️ → `admin:general_settings` · گزارشات / بکاپ → `admin:reports_backup` |
 
-Hidden (callbacks still answered): panel features, bot update, tutorials,
-mini-app settings, custom service price.
+Not rendered but still answered (old keyboards): `admin:receipts` (real
+receipts list — reachable via مالی), plus the placeholders
+`admin:panel_features`, `admin:update_bot`, `admin:tutorials`,
+`admin:mini_app_settings`, `admin:custom_service_price`.
 
-### مالی 💎
+### مالی 💎 (Fix A landing)
 
 | page | buttons |
 | --- | --- |
-| hub | روش‌های پرداخت 💳 · تنظیمات پرداخت و کیف پول ⚙️ · رسیدهای تایید نشده 💵 · گزارش مالی 📊 » `admin:fin:reports` · بازگشت به منوی ادمین |
-| روش‌های پرداخت » کارت‌به‌کارت | gateway list » gateway page (toggle, min/max *(flows)*, instruction, کارت‌ها » accounts list » add *(flow)* / toggle w/ confirm) |
-| تنظیمات پرداخت و کیف پول | toggles (top-up / wallet payment) · min/max/instruction/notice *(flows)* · بازگشت |
-| گزارش مالی 📊 | ranges امروز/۷روز/۳۰روز/همه » dashboard · آخرین پرداخت‌ها 💳 (paged » detail » بررسی رسید/مشاهده سفارش) · آخرین سفارش‌ها 🧾 (paged » detail » سفارش دستی/پرداخت) · بازگشت به مالی |
+| landing (`admin:finance`) | رسیدهای تاییدنشده 💵 » `admin:receipts` / روش‌های پرداخت 💳 · تنظیمات کیف پول و پرداخت 🏦 / مدیریت کیف پول کاربران 👤 » `admin:users` · گزارش مالی 📊 » `admin:fin:reports` / بازگشت به پنل ادمین |
+| روش‌های پرداخت » کارت‌به‌کارت | gateway list » gateway page (toggle, min/max *(flows)*, instruction, کارت‌ها » accounts » add *(flow)* / toggle w/ confirm) — backs » `admin:finance` |
+| تنظیمات کیف پول و پرداخت | toggles · min/max/instruction/notice *(flows)* · بازگشت » `admin:finance` |
+| گزارش مالی 📊 | ranges » dashboard · آخرین پرداخت‌ها 💳 / آخرین سفارش‌ها 🧾 (paged » details » receipt review / manual order) · بازگشت به مالی |
 
 ### رسیدهای تایید نشده 💵
 
-list (paged) » receipt detail (media + masked card) » تایید ✅ (confirm;
-OTHER_PRODUCT branches to auto-stock or manual init) · رد ❌ *(flow
-`receipt:reject` — reason sent to the user)* · back.
+`admin:receipts` list (paged) » receipt detail (media + masked card) »
+تایید ✅ (confirm) · رد ❌ *(flow — reason sent to the user)*. Internal
+backs keep their existing `admin:menu` destination (receipt submenus are
+locked; extra receipt-detail actions are deferred to Fix B).
 
-### مدیریت کاربران 👤
+### Other admin sections (unchanged by Fix A)
 
-hub (جستجوی کاربر 🔎 *(flow)* · کاربران اخیر 👤) » results » user page
-(کیف پول کاربر 🏦 » افزایش ➕ / کسر ➖ *(amount+reason flows, confirm)*,
-بازگشت‌ها) — Phase 20 wallet adjustments.
-
-### تنظیمات عمومی ⚙️ » مدیریت متن‌ها ✍️
-
-پیام‌ها/قالب‌ها 📝 and متن دکمه‌ها 🔘 (paged lists, 🔒 for non-editable) »
-detail (escaped current/default previews) » ویرایش ✏️ *(flows
-`admin_texts:template|button`)* · بازنشانی به پیش‌فرض ♻️ (confirm) · backs.
-
-### مدیریت محصولات/پلن‌ها and مدیریت پنل‌ها
-
-Category/product CRUD wizards and panel list » panel detail » edit/test
-wizards (pre-existing flows; paged lists, back buttons throughout).
-
-### محصولات دیگر / سفارش‌های محصولات دیگر
-
-| page | buttons |
-| --- | --- |
-| landing | counters + همه سفارش‌های باز · در انتظار اطلاعات 📝 · آماده تحویل 📦 · تحویل‌شده ✅ · جستجوی سفارش 🔎 *(flow)* · مدیریت موجودی محصولات 🎟 · بازگشت |
-| filtered lists (paged) | rows » `admin:mo:view:<sid>` |
-| manual-order detail | تحویل سفارش 📦 *(flow + confirm — claim→send→finalize)* · پیام تکمیل اطلاعات 📝 (reminder) · backs (list/search/landing) |
-| مدیریت موجودی 🎟 | product rows (🚨/⚠️/🎟/📦 badges) » product page |
-| stock product page | افزودن آیتم ➕ *(flows)* · افزودن گروهی ➕➕ *(flow)* · مشاهده آیتم‌ها (paged; release/disable reserved w/ guards) · تنظیم/حذف هشدار کمبود 🔔 *(flow)* · toggle استاک · بازگشت |
-
-### تیکت‌های پشتیبانی 🎫 / پیام همگانی 📣 / گزارشات و بکاپ
-
-Tickets: counters landing » filters (paged) » detail » پاسخ ✍️ *(flow)* /
-بستن ✅ (confirm). Broadcast: landing » ساخت پیام ➕ *(flow » audience with
-live estimates » preview » تست 🧪 / شروع 🚀 confirm)* · لیست ارسال‌ها
-(paged » detail w/ refresh). Reports/backup: وضعیت سیستم 🩺 (refresh) ·
-ساخت بکاپ 💾 (confirm, OWNER) · لیست بکاپ‌ها (paged, download) · پاکسازی 🧹
-(confirm, OWNER) · راهنمای Restore ♻️ (instructions only).
-
----
-
-## Known intentional behaviors
-
-- Old-keyboard compatibility: every legacy callback of hidden sections and
-  renamed lists keeps answering.
-- «سفارش‌های من» hub title is «سفارش‌ها و سوابق من 🧾» (broader content).
-- Delivered stock content is visible only in the Phase 29 OP order detail;
-  admin pages never show it.
-- Admin labels are hardcoded; user main-menu labels are ButtonText-backed.
+- **مدیریت کاربران 👤** — search *(flow)* / recent users » user page »
+  wallet adjustments (افزایش ➕ / کسر ➖ with confirm).
+- **مدیریت محصولات/پلن‌ها، مدیریت پنل‌ها** — pre-existing CRUD wizards.
+- **محصولات دیگر / سفارش‌ها** — manual-order landing, filtered lists,
+  delivery *(flow + confirm)*, stock inventory (add/bulk/threshold/items).
+- **تیکت‌های پشتیبانی 🎫** — filters » detail » پاسخ ✍️ *(flow)* / بستن ✅.
+- **پیام همگانی 📣** — draft *(flow)* » audience » preview » test/start.
+- **تنظیمات عمومی ⚙️** — مدیریت متن‌ها ✍️ (templates/buttons list » edit
+  *(flows)* / reset). The four wallet template keys are editable here.
+- **گزارشات / بکاپ 🛡** — health, backups (OWNER), restore help.

@@ -24,8 +24,13 @@ import type { ProductWithRelations } from "./product.service.js";
 
 export const RENEWABLE_PAGE_SIZE = 5;
 
-/** Statuses a user may renew from. CREATING/FAILED/DELETED are never renewable. */
-const RENEWABLE_STATUSES = [
+/**
+ * Statuses a user may renew from. CREATING/FAILED/DELETED are never
+ * renewable. Exported as the single source of truth - the service-detail
+ * «تمدید سرویس ♻️» button (Corrective Fix A) gates on the same list instead
+ * of duplicating it.
+ */
+export const RENEWABLE_STATUSES: ServiceStatus[] = [
   ServiceStatus.ACTIVE,
   ServiceStatus.EXPIRED,
   ServiceStatus.LIMITED,

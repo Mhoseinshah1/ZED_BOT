@@ -11,6 +11,7 @@ import {
 import { escapeHtml } from "../../utils/html.js";
 import { etcb } from "../user-extra-time/extra-time-views.js";
 import { evcb } from "../user-extra-volume/extra-volume-views.js";
+import { rncb } from "../user-renewal/renewal-views.js";
 
 // =============================================================================
 // "My Services" rendering (Phase 10) - read-only views over stored Service
@@ -156,6 +157,7 @@ const NO_DETAIL_ACTIONS: ServiceDetailActions = {
   canBuyExtraVolume: false,
   canBuyExtraTime: false,
   canRegenerateLink: false,
+  canRenew: false,
 };
 
 export function serviceDetailKeyboard(
@@ -179,6 +181,11 @@ export function serviceDetailKeyboard(
   if (actions.canRegenerateLink) {
     kb.text("تغییر لینک اشتراک 🔄", svcCb.regenLink(sid)).row();
   }
+  // Corrective Fix A: straight into the existing Phase 12 renewal flow for
+  // THIS service - the rncb.service route re-validates eligibility on click.
+  if (actions.canRenew) {
+    kb.text("تمدید سرویس ♻️", rncb.service(sid)).row();
+  }
   // Phase 18.1: straight into the existing Phase 16/17 selected-service
   // flows - those routes re-validate eligibility on click.
   if (actions.canBuyExtraVolume) {
@@ -196,7 +203,7 @@ export function serviceDetailKeyboard(
   } else if (actions.toggleAction === "ENABLE") {
     kb.text("روشن کردن سرویس ▶️", svcCb.enable(sid)).row();
   }
-  kb.text("بازگشت به لیست", svcCb.list(1)).row().text("بازگشت به منو", CB.USER_MENU);
+  kb.text("بازگشت به لیست", svcCb.list(1)).row().text("بازگشت به منوی اصلی", CB.USER_MENU);
   return kb;
 }
 

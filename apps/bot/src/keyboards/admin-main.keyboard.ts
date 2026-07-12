@@ -4,22 +4,19 @@ import { CB } from "../core/callbacks.js";
 
 /**
  * Admin main menu. Labels are hardcoded for now - admin buttons are not part
- * of the operator-editable ButtonText baseline yet (documented in
- * docs/ui-ux-alignment-phase39.md).
+ * of the operator-editable ButtonText baseline yet.
  *
- * UI alignment (Phase 39): only IMPLEMENTED sections are visible. The
- * unfinished placeholders (panel features, bot update, tutorials, mini-app
- * settings, custom service price) are HIDDEN until their real flows land -
- * their callbacks stay registered in admin-placeholders.handler.ts so
- * buttons on old Telegram messages keep answering.
+ * Corrective Fix A: «رسیدهای تایید نشده 💵» moved off the root into the
+ * finance landing (financeLandingKeyboard) - CB.ADMIN_RECEIPTS and its
+ * handler stay fully active for old Telegram keyboards. The unfinished
+ * placeholder sections (panel features, bot update, tutorials, mini-app,
+ * custom service price) are not rendered here either; their callbacks keep
+ * answering via admin-placeholders.handler.
  */
 export function buildAdminMainKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("مالی 💎", CB.ADMIN_FINANCE)
-    .text("رسیدهای تایید نشده 💵", CB.ADMIN_RECEIPTS)
-    .row()
     .text("مدیریت کاربران 👤", CB.ADMIN_USERS)
-    .text("تنظیمات عمومی ⚙️", CB.ADMIN_GENERAL_SETTINGS)
     .row()
     .text("مدیریت محصولات/پلن‌ها", CB.ADMIN_PRODUCTS)
     .text("مدیریت پنل‌ها", CB.ADMIN_PANELS)
@@ -29,5 +26,6 @@ export function buildAdminMainKeyboard(): InlineKeyboard {
     .text("تیکت‌های پشتیبانی 🎫", CB.ADMIN_SUPPORT)
     .text("پیام همگانی 📣", CB.ADMIN_BROADCAST)
     .row()
+    .text("تنظیمات عمومی ⚙️", CB.ADMIN_GENERAL_SETTINGS)
     .text("گزارشات / بکاپ", CB.ADMIN_REPORTS_BACKUP);
 }

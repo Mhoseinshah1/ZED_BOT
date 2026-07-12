@@ -115,11 +115,7 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
       .text("تیکت جدید ➕", SUP_CB.new)
       .row()
       .text("بازگشت به پشتیبانی", CB.USER_SUPPORT);
-    await safeEditOrReply(
-      ctx,
-      `تیکت‌های من 🧾\n\n${await getMessageTemplate("no_tickets_text")}`,
-      kb,
-    );
+    await safeEditOrReply(ctx, "تیکت‌های من 🧾\n\nهنوز تیکتی ثبت نکرده‌اید.", kb);
     return;
   }
   const kb = new InlineKeyboard();

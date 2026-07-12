@@ -1,6 +1,5 @@
 import type {
   UserGroup,
-  UserStatus,
   WalletTransaction,
   WalletTransactionType,
 } from "@zedbot/database";
@@ -14,8 +13,15 @@ import type {
 import { escapeHtml } from "../../utils/html.js";
 
 // =============================================================================
-// Wallet/profile rendering (Phase 13) - read-only views. No amounts are ever
-// asked for and no payment surface exists here (top-up is a placeholder).
+// Wallet/profile rendering (Phase 13, trimmed by Corrective Fix A) -
+// read-only views. The landing shows identity + balance + counters only;
+// transaction lines render solely inside «تاریخچه تراکنش‌ها 📋». The
+// heading/prompt/note/empty texts come from MessageTemplate keys
+// (wallet_header_text, wallet_topup_amount_prompt, wallet_topup_preview_note,
+// wallet_empty_transactions_text) fetched by the handler and passed in -
+// dynamic amounts stay formatted/escaped in code, and the template values
+// are HTML-escaped here because these messages use parseMode HTML (a bad
+// operator edit must never make Telegram reject the wallet pages).
 // =============================================================================
 
 export const WALLET_CB = {
@@ -27,9 +33,6 @@ export const WALLET_CB = {
 } as const;
 
 export const walletTxCb = (page: number): string => `user:wallet:tx:${page}`;
-
-export const TOPUP_AMOUNT_PROMPT = "مبلغ شارژ کیف پول را به تومان وارد کنید.";
-export const NO_TRANSACTIONS_TEXT = "تراکنشی ثبت نشده است.";
 
 export function formatToman(value: number): string {
   return `${value.toLocaleString("en-US")} تومان`;
@@ -43,13 +46,6 @@ const GROUP_LABELS: Record<UserGroup, string> = {
   F: "کاربر عادی (F)",
   N: "نماینده (N)",
   N2: "نماینده ویژه (N2)",
-};
-
-const STATUS_LABELS: Record<UserStatus, string> = {
-  ACTIVE: "فعال ✅",
-  BLOCKED: "مسدود 🚫",
-  DISABLED: "غیرفعال ⏸",
-  DELETED: "حذف‌شده 🗑",
 };
 
 const TX_TYPE_LABELS: Record<WalletTransactionType, string> = {
@@ -103,44 +99,29 @@ export function transactionLine(tx: WalletTransaction): string {
   return `${parts.join(" | ")} (موجودی: ${formatToman(tx.balanceAfterToman)})`;
 }
 
-export function walletSummaryText(summary: WalletSummary): string {
+/**
+ * Wallet landing (Corrective Fix A): identity, balance and counters only.
+ * `headerText` is the operator-editable wallet_header_text template.
+ */
+export function walletSummaryText(summary: WalletSummary, headerText: string): string {
   const user = summary.user;
   const fullName = [user.firstName, user.lastName].filter(Boolean).join(" ");
-  const lines = [
-    "کیف پول و حساب کاربری 🏦",
+  return [
+    escapeHtml(headerText),
     "",
     `شناسه عددی تلگرام: <code>${user.telegramId}</code>`,
     `نام: ${fullName === "" ? "-" : escapeHtml(fullName)}`,
     `نام کاربری: ${user.username === null ? "-" : `@${escapeHtml(user.username)}`}`,
     `شماره تماس: ${user.phoneNumber === null ? "ثبت نشده" : escapeHtml(user.phoneNumber)}`,
     `زمان ثبت‌نام: ${formatDate(user.joinedAt)}`,
-    `آخرین بازدید: ${formatDate(user.lastSeenAt)}`,
     `گروه کاربری: ${GROUP_LABELS[user.group] ?? user.group}`,
-    `وضعیت کاربر: ${STATUS_LABELS[user.status] ?? user.status}`,
     "",
     `موجودی کیف پول: <b>${formatToman(user.balanceToman)}</b>`,
-    `مجموع شارژ: ${formatToman(user.totalChargedToman)}`,
-    `مجموع خرید: ${formatToman(user.totalSpentToman)}`,
-    `مجموع تخفیف: ${formatToman(user.totalDiscountToman)}`,
-    `مجموع برگشتی: ${formatToman(user.totalRefundedToman)}`,
     "",
     `تعداد سرویس‌ها: ${summary.totalServices}`,
-    `تعداد سرویس‌های فعال: ${summary.activeServices}`,
-    `تعداد کل سفارش‌ها: ${summary.totalOrders}`,
-    `تعداد سفارش‌های پرداخت‌شده: ${summary.paidOrders}`,
+    `سفارش‌های در انتظار پرداخت/بررسی: ${summary.pendingOrders}`,
     `تعداد زیرمجموعه‌ها: ${summary.referralCount}`,
-    "",
-    "آخرین تراکنش‌ها:",
-  ];
-  if (summary.latestTransactions.length === 0) {
-    lines.push(NO_TRANSACTIONS_TEXT);
-  } else {
-    for (const tx of summary.latestTransactions) {
-      lines.push(transactionLine(tx));
-    }
-  }
-  lines.push("", `تاریخ/ساعت فعلی: ${formatDate(summary.now)}`);
-  return lines.join("\n");
+  ].join("\n");
 }
 
 export function walletMainKeyboard(): InlineKeyboard {
@@ -150,13 +131,17 @@ export function walletMainKeyboard(): InlineKeyboard {
     .text("تاریخچه تراکنش‌ها 📋", walletTxCb(1))
     .text("بروزرسانی ♻️", WALLET_CB.REFRESH)
     .row()
-    .text("بازگشت به منو", CB.USER_MENU);
+    .text("بازگشت به منوی اصلی", CB.USER_MENU);
 }
 
-export function transactionHistoryText(pageData: WalletTransactionPage): string {
+/** `emptyText` is the wallet_empty_transactions_text template. */
+export function transactionHistoryText(
+  pageData: WalletTransactionPage,
+  emptyText: string,
+): string {
   const lines = ["تاریخچه تراکنش‌های کیف پول", ""];
   if (pageData.total === 0) {
-    lines.push(NO_TRANSACTIONS_TEXT);
+    lines.push(escapeHtml(emptyText));
   } else {
     for (const tx of pageData.transactions) {
       lines.push(transactionLine(tx));
@@ -189,8 +174,15 @@ export function topupAmountKeyboard(): InlineKeyboard {
     .text("بازگشت به منو", CB.USER_MENU);
 }
 
-/** Pre-invoice for a validated top-up amount (nothing written yet). */
-export function topupPreInvoiceText(amountToman: number, balanceToman: number): string {
+/**
+ * Pre-invoice for a validated top-up amount (nothing written yet).
+ * `previewNote` is the wallet_topup_preview_note template.
+ */
+export function topupPreInvoiceText(
+  amountToman: number,
+  balanceToman: number,
+  previewNote: string,
+): string {
   return [
     "پیش‌فاکتور شارژ کیف پول 🏦",
     "",
@@ -198,7 +190,7 @@ export function topupPreInvoiceText(amountToman: number, balanceToman: number): 
     `موجودی فعلی کیف پول: ${formatToman(balanceToman)}`,
     `موجودی بعد از شارژ: ${formatToman(balanceToman + amountToman)}`,
     "",
-    "توضیح: پس از تایید رسید توسط ادمین، موجودی کیف پول شما افزایش می‌یابد.",
+    `توضیح: ${escapeHtml(previewNote)}`,
   ].join("\n");
 }
 

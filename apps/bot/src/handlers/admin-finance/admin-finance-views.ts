@@ -47,18 +47,24 @@ export function shortId(row: Pick<PaymentGateway, "id">): string {
   return row.id.slice(0, 8);
 }
 
+/**
+ * Corrective Fix A layout: receipts review lives here (no longer on the
+ * admin root); «مدیریت کیف پول کاربران 👤» reuses the existing user-search
+ * entry (CB.ADMIN_USERS) - user wallet adjustments already live on the
+ * admin user page, so no duplicate wallet-management surface is built.
+ */
 export function financeLandingKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
+    .text("رسیدهای تاییدنشده 💵", CB.ADMIN_RECEIPTS)
+    .row()
     .text("روش‌های پرداخت 💳", FIN_CB.methods)
+    .text("تنظیمات کیف پول و پرداخت 🏦", FIN_CB.settings)
     .row()
-    .text("تنظیمات پرداخت و کیف پول ⚙️", FIN_CB.settings)
-    .row()
-    .text("رسیدهای تایید نشده 💵", CB.ADMIN_RECEIPTS)
-    .row()
+    .text("مدیریت کیف پول کاربران 👤", CB.ADMIN_USERS)
     // Phase 31: read-only financial reports.
     .text("گزارش مالی 📊", "admin:fin:reports")
     .row()
-    .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
+    .text("بازگشت به پنل ادمین", CB.ADMIN_MENU);
 }
 
 // --- payment/wallet settings (Phase 22) --------------------------------------------
