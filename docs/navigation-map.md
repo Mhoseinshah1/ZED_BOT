@@ -6,9 +6,14 @@ implemented tree against the intended design and mark corrections per page.
 
 **LOCKED flows (approved as-is):** the «خرید اشتراک» subscription purchase
 (`user:buy`, panel-first → category → product → pre-invoice → payment),
-the OTHER_PRODUCT checkout, and their separation. Zero dead buttons: every
-emitted callback has a registered handler (structural locks in
-`apps/bot/tests/corrective-fix-a.test.ts`).
+the OTHER_PRODUCT checkout, and their separation.
+
+Audit status (final production audit): **277 emitted button callbacks
+cross-checked against all 204 registered routes — zero dead buttons, zero
+orphan routes, zero dead-end pages, all callbacks < 64 bytes, every admin
+route behind admin auth** (locked by
+`apps/bot/tests/navigation-integrity.test.ts`; see
+`docs/final-production-audit.md`).
 
 Legend: `»` opens page · *(flow)* switches to a text-input flow.
 
