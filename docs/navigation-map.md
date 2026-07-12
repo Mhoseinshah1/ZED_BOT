@@ -24,19 +24,19 @@ Legend: `»` opens page · *(flow)* switches to a text-input flow.
 
 `user:menu` and `common:back` both re-render the main menu.
 
-## User main menu (13 buttons, ButtonText-backed)
+## User main menu (4 rows, ButtonText-backed)
 
 | row | button → callback |
 | --- | --- |
 | 1 | خرید اشتراک 🔐 → `user:buy` (**LOCKED**) · تمدید سرویس ♻️ → `user:renew` |
 | 2 | سرویس‌های من 🛍 → `user:services` · کیف پول + شارژ 🏦 → `user:wallet` |
-| 3 | زیرمجموعه گیری 👥 → `user:referral` (placeholder) · اشتراک رایگان {تست} → `user:free_test` (placeholder) |
-| 4 | گردونه شانس 🎲 → `user:lucky_wheel` (placeholder) · آموزش 📚 → `user:tutorials` (placeholder) |
-| 5 | پشتیبانی ☎️ → `user:support` · تعرفه اشتراک‌ها 💵 → `user:pricing` (placeholder) |
-| 6 | درخواست نمایندگی 👨‍💼 → `user:representative_request` (placeholder) · محصولات دیگر 🛍 → `user:other_products` (**LOCKED**, separate) |
-| 7 | سفارش‌های من 🧾 → `user:orders` |
+| 3 | محصولات دیگر 🛍 → `user:other_products` (**LOCKED**, separate) · سفارش‌های من 🧾 → `user:orders` |
+| 4 | پشتیبانی ☎️ → `user:support` |
 
-Placeholder sections answer with their placeholder page + back button.
+Hidden until implemented (callbacks still answered with the placeholder
+page for old keyboards): `user:referral`, `user:free_test`,
+`user:lucky_wheel`, `user:tutorials`, `user:pricing`,
+`user:representative_request`.
 
 ### خرید اشتراک — LOCKED flow (documented only)
 
