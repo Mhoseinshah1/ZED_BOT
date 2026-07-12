@@ -27,6 +27,41 @@ import {
 
 export const USER_HISTORY_PAGE_SIZE = 10;
 
+// Fix D: «خرید اشتراک‌ها 🔐» - every subscription-service-related order
+// type (OTHER_PRODUCT stays a separate list, per the locked separation).
+export const SUBSCRIPTION_ORDER_TYPES: OrderType[] = [
+  "SERVICE_PURCHASE",
+  "SERVICE_RENEWAL",
+  "EXTRA_VOLUME",
+  "EXTRA_TIME",
+  "LOCATION_CHANGE",
+];
+
+export interface UserSubscriptionOrdersPage {
+  orders: Order[];
+  page: number;
+  pages: number;
+  total: number;
+}
+
+/** Owner-scoped, newest-first page of subscription-related orders (Fix D). */
+export async function listUserSubscriptionOrders(
+  userId: string,
+  page: number,
+): Promise<UserSubscriptionOrdersPage> {
+  const where = { userId, type: { in: SUBSCRIPTION_ORDER_TYPES } } as const;
+  const total = await prisma.order.count({ where });
+  const pages = Math.max(1, Math.ceil(total / USER_HISTORY_PAGE_SIZE));
+  const safePage = Math.min(Math.max(1, page), pages);
+  const orders = await prisma.order.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    skip: (safePage - 1) * USER_HISTORY_PAGE_SIZE,
+    take: USER_HISTORY_PAGE_SIZE,
+  });
+  return { orders, page: safePage, pages, total };
+}
+
 // --- labels ----------------------------------------------------------------------------------
 
 export const ORDER_TYPE_LABEL: Record<OrderType, string> = {

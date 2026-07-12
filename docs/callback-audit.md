@@ -8,10 +8,10 @@ Permanently locked by `apps/bot/tests/navigation-integrity.test.ts`.
 
 | metric | value |
 | --- | --- |
-| emitted callback shapes (literals + template prefixes) | **277** |
+| emitted callback shapes (literals + template prefixes) | **279** |
 | registered exact-string routes | **41** |
-| registered regex routes | **163** |
-| `callbackQuery(...)` registration sites | 276 |
+| registered regex routes | **165** |
+| `callbackQuery(...)` registration sites | 278 |
 | **dead buttons** (emitted, no handler) | **0** |
 | **orphan routes** (registered, never emitted) | **0** |
 | **unreachable handlers** | **0** |
@@ -32,7 +32,8 @@ Permanently locked by `apps/bot/tests/navigation-integrity.test.ts`.
 ## Namespace inventory
 
 - `user:*` — menu, buy (LOCKED), renew, services (svc), wallet, orders /
-  history (hist/payhist/op), support (sup), extra volume/time (ev/et),
+  history (hist incl. Fix D sub/wtx, payhist, op), support (sup, Fix D
+  landing/detail), extra volume/time (ev/et),
   hidden placeholders (referral, free_test, wheel, tutorials, pricing,
   representative_request — answered for old keyboards).
 - `admin:*` — menu, finance (+fin reports), receipts (rec incl. Fix B

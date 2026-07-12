@@ -15,6 +15,18 @@ const TEMPLATE_FALLBACKS: Record<string, string> = {
   no_services_text: "شما هنوز سرویسی ندارید.",
   no_orders_text: "شما هنوز سفارشی ندارید.",
   no_tickets_text: "هنوز تیکتی ثبت نکرده‌اید.",
+  // Corrective Fix D: support + history texts ({min}/{max} render in code).
+  support_landing_text:
+    "از این بخش می‌توانید با پشتیبانی در ارتباط باشید و پاسخ تیکت‌های قبلی را پیگیری کنید.",
+  support_subject_prompt: "موضوع تیکت را وارد کنید. ({min} تا {max} کاراکتر)",
+  support_message_prompt: "متن پیام را بنویسید. (حداکثر {max} کاراکتر)",
+  support_reply_prompt: "پاسخ شما را بنویسید. (حداکثر {max} کاراکتر)",
+  support_empty_tickets_text: "هنوز تیکتی ثبت نکرده‌اید.",
+  support_ticket_created_text: "تیکت شما ثبت شد ✅",
+  history_landing_text:
+    "سوابق سفارش‌ها، پرداخت‌ها و تراکنش‌های کیف پول شما در این بخش قابل مشاهده است.",
+  no_payments_text: "هنوز پرداختی ثبت نشده است.",
+  no_other_product_orders_text: "شما هنوز سفارشی ندارید.",
   // Corrective Fix A: wallet headings/prompts/notes (dynamic amounts stay in code).
   wallet_header_text: "کیف پول و حساب کاربری 🏦",
   wallet_topup_amount_prompt: "مبلغ شارژ کیف پول را به تومان وارد کنید.",
@@ -44,6 +56,18 @@ const BUTTON_FALLBACKS: Record<string, string> = {
   confirm: "تایید ✅",
   next: "بعدی »",
   previous: "« قبلی",
+  // Corrective Fix D: support + history buttons.
+  new_ticket: "ایجاد تیکت جدید ➕",
+  my_tickets: "تیکت‌های من 📋",
+  reply_ticket: "پاسخ به تیکت ✍️",
+  refresh: "بروزرسانی ♻️",
+  all_orders: "همه سفارش‌ها 📋",
+  subscription_orders: "خرید اشتراک‌ها 🔐",
+  other_product_orders: "محصولات دیگر 🛍",
+  payments: "پرداخت‌ها 💳",
+  wallet_transactions: "تراکنش‌های کیف پول 🏦",
+  back_to_support: "بازگشت به پشتیبانی",
+  back_to_history: "بازگشت به سوابق",
 };
 
 const CACHE_TTL_MS = 30_000;

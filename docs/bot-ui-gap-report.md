@@ -93,6 +93,14 @@ failing the Telegram send.
   product configuration lives on the Fix C product root. Fix C
   before/after: `docs/corrective-ui-fix-c.md`.
 
+## Corrective Fix D
+
+Delivered after Fix C and before the final production audit: the support
+landing/detail navigation, the history landing with the subscription
+filter and wallet-transaction entry, same-page returns and the
+operator-editable support/history texts — see `docs/corrective-ui-fix-d.md`
+for the full before/after.
+
 ## Verification
 
 Locked/structural assertions live in
