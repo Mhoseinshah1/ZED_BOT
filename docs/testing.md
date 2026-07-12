@@ -75,3 +75,20 @@ conditional-`updateMany` fix.
 Every run tags its rows with a timestamp-derived id, so re-running against
 the same throwaway database does not collide. Rows are intentionally left
 behind (disposable DB) — drop/recreate the database to reset.
+
+## Redis-backed suites
+
+The per-service operation lock suites
+(`service-operation-concurrency.test.ts`, `startup-recovery.test.ts`)
+additionally require a reachable Redis: set `REDIS_URL` (or
+`REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`) to a disposable
+password-protected instance, e.g.
+
+```bash
+redis-server --port 6490 --requirepass test-pw --daemonize yes --save ""
+export REDIS_URL="redis://:test-pw@127.0.0.1:6490"
+```
+
+Without it those suites self-skip. CI starts its password-protected Redis
+before the test step. Service mutation pipelines FAIL CLOSED without the
+lock backend, so running them against a real flow always needs Redis.

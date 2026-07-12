@@ -21,6 +21,14 @@ import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import type { ProductWithRelations } from "./product.service.js";
 import { failOrderWithRefund, type OrderForProvisioning } from "./provisioning.service.js";
+import {
+  acquireServiceLock,
+  SERVICE_LOCK_BUSY_TEXT,
+  SERVICE_LOCK_LOST_TEXT,
+  SERVICE_LOCK_UNAVAILABLE_TEXT,
+  serviceOperationLockKey,
+  type ServiceLock,
+} from "./service-lock.service.js";
 import { escapeHtml } from "../utils/html.js";
 
 // =============================================================================
@@ -248,8 +256,53 @@ async function findAppliedExtraTime(orderId: string) {
  * Executes one PAID EXTRA_TIME order: updates the EXISTING panel account and
  * EXISTING Service in place. Safe to call repeatedly (event-log guard +
  * PAID->PROVISIONING claim). Failure = FAILED + shared wallet refund.
+ *
+ * CONCURRENCY: the whole critical sequence (fresh reads -> expiry
+ * calculation -> panel write -> persistence) runs under the per-service
+ * distributed lock, so two different orders on one service can never both
+ * extend from the same starting expiry and lose one paid mutation.
+ * Contention or an unavailable lock backend leaves the order PAID and
+ * retryable - no panel call, no refund, no event log.
  */
 export async function executeExtraTimeOrder(orderId: string): Promise<ExtraTimeOutcome> {
+  // Pre-lock reads touch only immutable order fields (type, serviceId).
+  const head = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { type: true, serviceId: true },
+  });
+  if (head === null) {
+    return { ok: false, refunded: false, error: "سفارش یافت نشد." };
+  }
+  if (head.type !== OrderType.EXTRA_TIME) {
+    return { ok: false, refunded: false, error: "این سفارش از نوع زمان اضافه نیست." };
+  }
+  if (head.serviceId === null) {
+    // No shared service state to protect - the body refunds via its
+    // existing service-missing dead end.
+    return executeExtraTimeOrderUnlocked(orderId, null);
+  }
+  const acquisition = await acquireServiceLock(serviceOperationLockKey(head.serviceId));
+  if (!acquisition.ok) {
+    return {
+      ok: false,
+      refunded: false,
+      error:
+        acquisition.reason === "contended"
+          ? SERVICE_LOCK_BUSY_TEXT
+          : SERVICE_LOCK_UNAVAILABLE_TEXT,
+    };
+  }
+  try {
+    return await executeExtraTimeOrderUnlocked(orderId, acquisition.lock);
+  } finally {
+    await acquisition.lock.release();
+  }
+}
+
+async function executeExtraTimeOrderUnlocked(
+  orderId: string,
+  lock: ServiceLock | null,
+): Promise<ExtraTimeOutcome> {
   const order = (await prisma.order.findUnique({
     where: { id: orderId },
     include: { user: true, product: { include: { panel: true } } },
@@ -364,6 +417,17 @@ export async function executeExtraTimeOrder(orderId: string): Promise<ExtraTimeO
       panelResult.errorMessage ?? "unknown adapter error",
     );
     return { ok: false, refunded, error: "افزایش زمان سرویس ناموفق بود." };
+  }
+
+  // Confirmed lock loss after the panel write: persisting could interleave
+  // with a new lock owner. Leave the order PROVISIONING - startup
+  // reconciliation resolves it from panel truth under the lock.
+  if (lock !== null && lock.isLost()) {
+    logger.error("extra time: lock ownership lost after panel call - deferring to reconciliation", {
+      orderId: order.id,
+      serviceId: service.id,
+    });
+    return { ok: false, refunded: false, error: SERVICE_LOCK_LOST_TEXT };
   }
 
   // Status: expired/disabled services come back; exhausted finite traffic

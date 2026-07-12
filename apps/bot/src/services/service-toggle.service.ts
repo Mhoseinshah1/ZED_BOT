@@ -11,6 +11,12 @@ import { errorMessage } from "@zedbot/shared";
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
+import {
+  acquireServiceLock,
+  SERVICE_LOCK_BUSY_TEXT,
+  SERVICE_LOCK_UNAVAILABLE_TEXT,
+  serviceOperationLockKey,
+} from "./service-lock.service.js";
 
 // =============================================================================
 // Service enable/disable (Phase 18): the user turns their OWN service off/on.
@@ -180,6 +186,34 @@ function isAlreadyInDesiredState(status: ServiceStatus, action: ToggleAction): b
  * double-apply or overwrite a newer state.
  */
 export async function toggleServiceStatus(
+  userId: string,
+  serviceId: string,
+  action: ToggleAction,
+): Promise<ToggleOutcome> {
+  // CONCURRENCY: the toggle mutates the panel and the Service row - it must
+  // never interleave with a renewal/extra/sync on the same service. The
+  // per-service distributed lock covers the whole panel+persist sequence;
+  // contention returns the retryable busy message, and an unavailable lock
+  // backend fails closed (no panel call).
+  const acquisition = await acquireServiceLock(serviceOperationLockKey(serviceId));
+  if (!acquisition.ok) {
+    return {
+      ok: false,
+      error: `service lock ${acquisition.reason}`,
+      safeUserMessage:
+        acquisition.reason === "contended"
+          ? SERVICE_LOCK_BUSY_TEXT
+          : SERVICE_LOCK_UNAVAILABLE_TEXT,
+    };
+  }
+  try {
+    return await toggleServiceStatusUnlocked(userId, serviceId, action);
+  } finally {
+    await acquisition.lock.release();
+  }
+}
+
+async function toggleServiceStatusUnlocked(
   userId: string,
   serviceId: string,
   action: ToggleAction,
