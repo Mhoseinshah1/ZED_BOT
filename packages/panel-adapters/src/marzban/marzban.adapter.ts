@@ -181,7 +181,9 @@ export class MarzbanAdapter implements PanelAdapter {
     const fetched = await this.client.getUser(auth.token, input.username);
     if (!fetched.ok || fetched.user === undefined) {
       if (fetched.status === 404) {
-        return { ok: false, errorMessage: "Panel account not found." };
+        // Documented 404 = the panel positively confirmed the account does
+        // not exist (distinct from "could not check" transport/auth errors).
+        return { ok: false, notFound: true, errorMessage: "Panel account not found." };
       }
       return { ok: false, errorMessage: `Marzban read user failed: ${fetched.message}` };
     }

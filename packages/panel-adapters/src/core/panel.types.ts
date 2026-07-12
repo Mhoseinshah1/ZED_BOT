@@ -186,6 +186,14 @@ export type RegenerateSubscriptionResult = RenewServiceAccountResult;
  */
 export interface GetServiceAccountResult {
   ok: boolean;
+  /**
+   * true ONLY when the panel POSITIVELY reported that no account with this
+   * username exists (e.g. a documented 404). Reconciliation treats this as
+   * proof the mutation never happened; transport errors, auth failures and
+   * unimplemented adapters must leave it unset - "could not check" is NOT
+   * "does not exist".
+   */
+  notFound?: boolean;
   username?: string;
   status?: NormalizedAccountStatus;
   usedBytes?: bigint;

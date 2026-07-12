@@ -103,8 +103,15 @@ pipeline's own documented semantics:
   in-process recovery ladder; never another user's row). For
   renewal/extras it is the pipeline's ServiceEventLog row, which commits
   in the same transaction as the service update.
-- no anchor -> the existing `failOrderWithRefund` (order `FAILED` +
-  idempotent wallet refund), exactly what an in-process failure does.
+- no anchor -> the panel is asked (safe reconciliation, see
+  docs/panel-database-reconciliation.md): a purchase whose account exists
+  on the panel is ADOPTED (Service row recreated, order completed); a
+  renewal/extra whose mutation-owned panel fields differ from the stored
+  pre-state is reconciled and completed; only a POSITIVELY-proven
+  unapplied mutation takes the existing `failOrderWithRefund` path; an
+  unverifiable panel defers the order (no refund, retried next sweep). A
+  missing database anchor alone never refunds - the crash window includes
+  "panel succeeded, DB commit lost".
 
 **Why the fix is correct.** It introduces no new outcome - both branches
 are the pipelines' own end states, decided by the same anchors the
