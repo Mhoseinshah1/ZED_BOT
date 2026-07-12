@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
-import { createWriteStream } from "node:fs";
-import { access, constants, mkdir, readdir, stat, unlink } from "node:fs/promises";
+import { access, constants, mkdir, open, readdir, stat, unlink, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
@@ -97,20 +96,31 @@ function backupStamp(when: Date): string {
 }
 
 /**
- * A stamp whose file does not exist yet - two backups inside the same
- * second must never share a name (overwriting, then failure-cleanup, would
- * otherwise destroy the earlier good file).
+ * Atomically CLAIMS a backup filename by creating it exclusively ("wx").
+ * Two concurrent backups can therefore never share a file: the exclusive
+ * create is the race arbiter (a stat-probe would be check-then-act - both
+ * callers could see the same name as free, interleave their dumps into one
+ * corrupt file, and the loser's failure-cleanup would delete the winner's
+ * good file). The returned handle is owned by the caller.
  */
-async function freeBackupStamp(): Promise<string> {
+async function claimBackupFile(): Promise<{ handle: FileHandle; name: string; stamp: string }> {
   for (let offset = 0; offset < 60; offset++) {
     const stamp = backupStamp(new Date(Date.now() + offset * 1000));
+    const name = `zedbot-db-${stamp}.sql.gz`;
     try {
-      await stat(path.join(backupDir(), `zedbot-db-${stamp}.sql.gz`));
+      const handle = await open(path.join(backupDir(), name), "wx");
+      return { handle, name, stamp };
     } catch {
-      return stamp; // no such file - name is free
+      // Name taken (or transient fs error) - try the next second's stamp.
     }
   }
   throw new Error("no free backup filename");
+}
+
+/** Overridable so tests can exercise the hung-pg_dump watchdog quickly. */
+export function backupTimeoutMs(): number {
+  const parsed = Number(process.env.BACKUP_TIMEOUT_MS ?? 10 * 60_000);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10 * 60_000;
 }
 
 // Prisma connection strings may carry Prisma-only query parameters that
@@ -146,24 +156,29 @@ export function pgDumpSafeUrl(databaseUrl: string): string {
   }
 }
 
-/** pg_dump (URL as argv, no shell) -> gzip -> file; partial files removed. */
+/**
+ * pg_dump (URL as argv, no shell) -> gzip -> file; partial files removed.
+ * The output file is claimed exclusively BEFORE pg_dump starts, and only a
+ * file this call created is ever cleaned up on failure. A watchdog kills a
+ * hung pg_dump (unreachable/stalled database) after backupTimeoutMs(), so
+ * the admin action can never wait forever and no child process is orphaned.
+ */
 export async function createDatabaseBackup(): Promise<CreateBackupOutcome> {
   const databaseUrl = process.env.DATABASE_URL;
   if (databaseUrl === undefined || databaseUrl === "") {
     return { ok: false, safeMessage: BACKUP_FAILED_TEXT };
   }
   await ensureBackupDir().catch(() => undefined);
-  let stamp: string;
+  let claimed: { handle: FileHandle; name: string; stamp: string };
   try {
-    stamp = await freeBackupStamp();
+    claimed = await claimBackupFile();
   } catch (err) {
     logger.error("database backup failed", { error: scrubError(err) });
     return { ok: false, safeMessage: BACKUP_FAILED_TEXT };
   }
-  const name = `zedbot-db-${stamp}.sql.gz`;
+  const { handle, name, stamp } = claimed;
   const filePath = path.join(backupDir(), name);
   try {
-    await ensureBackupDir();
     const dump = spawn("pg_dump", [pgDumpSafeUrl(databaseUrl)], {
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -171,14 +186,28 @@ export async function createDatabaseBackup(): Promise<CreateBackupOutcome> {
     dump.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
+    let timedOut = false;
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      dump.kill("SIGKILL");
+    }, backupTimeoutMs());
+    watchdog.unref();
     const exit = new Promise<number>((resolve, reject) => {
       dump.on("error", reject); // e.g. pg_dump not installed
       dump.on("close", (code) => resolve(code ?? -1));
     });
-    await pipeline(dump.stdout, createGzip(), createWriteStream(filePath));
-    const code = await exit;
-    if (code !== 0) {
-      throw new Error(`pg_dump exited with ${code}: ${stderr.slice(0, 200)}`);
+    try {
+      // The handle owns the exclusively-created file; the stream closes it.
+      await pipeline(dump.stdout, createGzip(), handle.createWriteStream());
+      const code = await exit;
+      if (timedOut) {
+        throw new Error(`pg_dump timed out after ${backupTimeoutMs()}ms and was killed`);
+      }
+      if (code !== 0) {
+        throw new Error(`pg_dump exited with ${code}: ${stderr.slice(0, 200)}`);
+      }
+    } finally {
+      clearTimeout(watchdog);
     }
     const stats = await stat(filePath);
     if (stats.size <= 0) {
@@ -191,6 +220,8 @@ export async function createDatabaseBackup(): Promise<CreateBackupOutcome> {
     };
   } catch (err) {
     logger.error("database backup failed", { name, error: scrubError(err) });
+    // Safe: this call exclusively created filePath, so it only ever removes
+    // its OWN partial file - never another backup's output.
     await unlink(filePath).catch(() => undefined);
     return { ok: false, safeMessage: BACKUP_FAILED_TEXT };
   }
