@@ -19,6 +19,7 @@ import {
   getSystemHealth,
   isBackupFileName,
   listBackups,
+  pgDumpSafeUrl,
 } from "../src/services/backup-health.service.js";
 
 // =============================================================================
@@ -163,6 +164,34 @@ describe.runIf(hasDb)("system health (Phase 35)", () => {
   });
 });
 
+describe("pg_dump URL sanitizing", () => {
+  it("strips Prisma-only query parameters that libpq rejects", () => {
+    // The exact CI shape that made pg_dump fail with
+    // `invalid URI query parameter: "schema"`.
+    expect(pgDumpSafeUrl("postgresql://u:p@localhost:5432/db?schema=public")).toBe(
+      "postgresql://u:p@localhost:5432/db",
+    );
+    expect(
+      pgDumpSafeUrl(
+        "postgresql://u:p@localhost:5432/db?schema=public&connection_limit=5&pool_timeout=10&pgbouncer=true",
+      ),
+    ).toBe("postgresql://u:p@localhost:5432/db");
+  });
+
+  it("keeps libpq-valid parameters and URLs without a query untouched", () => {
+    expect(
+      pgDumpSafeUrl("postgresql://u:p@db.example.com:5432/db?sslmode=require&schema=public&connect_timeout=10"),
+    ).toBe("postgresql://u:p@db.example.com:5432/db?sslmode=require&connect_timeout=10");
+    expect(pgDumpSafeUrl("postgresql://u:p@localhost:5432/db")).toBe(
+      "postgresql://u:p@localhost:5432/db",
+    );
+  });
+
+  it("passes unparseable input through unchanged (pg_dump reports its own error)", () => {
+    expect(pgDumpSafeUrl("not a url")).toBe("not a url");
+  });
+});
+
 describe.runIf(hasDb && hasPgDump)("pg_dump backup round-trip (Phase 35)", () => {
   it("creates a real non-empty gzip backup that lists with a short id", async () => {
     const outcome = await createDatabaseBackup();
@@ -174,6 +203,22 @@ describe.runIf(hasDb && hasPgDump)("pg_dump backup round-trip (Phase 35)", () =>
     expect(stats.size).toBe(outcome.backup.sizeBytes);
     const page = await listBackups(1);
     expect(page.backups.some((backup) => backup.name === outcome.backup.name)).toBe(true);
+  });
+
+  it("creates a backup when DATABASE_URL carries Prisma-only query parameters", async () => {
+    // Reproduces the CI connection string shape (?schema=public&...) that
+    // libpq rejected before the fix.
+    const original = process.env.DATABASE_URL ?? "";
+    const separator = original.includes("?") ? "&" : "?";
+    process.env.DATABASE_URL = `${original}${separator}schema=public&connection_limit=5`;
+    try {
+      const outcome = await createDatabaseBackup();
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.backup.sizeBytes).toBeGreaterThan(0);
+    } finally {
+      process.env.DATABASE_URL = original;
+    }
   });
 
   it("fails safely on an unreachable DATABASE_URL and removes the partial file", async () => {

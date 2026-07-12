@@ -240,7 +240,11 @@ run_migrations_if_available() {
 
 # --- Nginx / HTTPS (Phase 37) ------------------------------------------------
 
+# Consumed by the sourcing scripts (nginx-setup.sh, ssl-setup.sh,
+# security-check.sh) - shellcheck cannot see that from this file alone.
+# shellcheck disable=SC2034
 ZEDBOT_NGINX_SITE_AVAILABLE="/etc/nginx/sites-available/zedbot.conf"
+# shellcheck disable=SC2034
 ZEDBOT_NGINX_SITE_ENABLED="/etc/nginx/sites-enabled/zedbot.conf"
 ZEDBOT_ACME_WEBROOT="/var/www/letsencrypt"
 

@@ -198,16 +198,26 @@ jobs:
           rm -f .env
           echo "docker-compose.yml is valid."
 
+      # scripts/restore.sh and scripts/uninstall.sh were REMOVED in Phase 36
+      # (no destructive restore/uninstall); the Phase 36-38 scripts (zedbot
+      # CLI, backup-db, validate-env, nginx/ssl, firewall, security-check)
+      # are validated instead.
       - name: Validate bash scripts (syntax)
         run: |
           bash -n scripts/install.sh
           bash -n scripts/update.sh
           bash -n scripts/backup.sh
-          bash -n scripts/restore.sh
-          bash -n scripts/uninstall.sh
+          bash -n scripts/backup-db.sh
           bash -n scripts/doctor.sh
           bash -n scripts/migrate.sh
+          bash -n scripts/validate-env.sh
           bash -n scripts/zedbot
+          bash -n scripts/zedbot.sh
+          bash -n scripts/nginx-setup.sh
+          bash -n scripts/ssl-setup.sh
+          bash -n scripts/ssl-renew.sh
+          bash -n scripts/firewall-setup.sh
+          bash -n scripts/security-check.sh
           bash -n scripts/lib/common.sh
           echo "All scripts parse cleanly."
 
@@ -217,9 +227,15 @@ jobs:
             scripts/install.sh \
             scripts/update.sh \
             scripts/backup.sh \
-            scripts/restore.sh \
-            scripts/uninstall.sh \
+            scripts/backup-db.sh \
             scripts/doctor.sh \
             scripts/migrate.sh \
+            scripts/validate-env.sh \
             scripts/zedbot \
+            scripts/zedbot.sh \
+            scripts/nginx-setup.sh \
+            scripts/ssl-setup.sh \
+            scripts/ssl-renew.sh \
+            scripts/firewall-setup.sh \
+            scripts/security-check.sh \
             scripts/lib/common.sh
