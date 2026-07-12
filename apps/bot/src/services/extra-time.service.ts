@@ -19,6 +19,7 @@ import type { ExtraTimeDraft } from "../core/session.js";
 import { groupMatches } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
+import { panelOperationAvailable, panelTypesSupporting } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 import { failOrderWithRefund, type OrderForProvisioning } from "./provisioning.service.js";
 import {
@@ -78,7 +79,9 @@ function eligibleWhere(userId: string): Prisma.ServiceWhereInput {
       ],
     },
     expiresAt: { not: null },
-    panel: { status: PanelStatus.ACTIVE },
+    // Capability model: services on panels whose adapter cannot add time
+    // (XUI) are never offered extra time - blocked before payment.
+    panel: { status: PanelStatus.ACTIVE, type: { in: panelTypesSupporting("addTime") } },
   };
 }
 
@@ -161,7 +164,7 @@ export function isExtraTimePackageValid(
     product.category.isActive &&
     product.panelId === service.panelId &&
     product.panel !== null &&
-    product.panel.status === PanelStatus.ACTIVE &&
+    panelOperationAvailable(product.panel, "addTime") &&
     (product.durationDays ?? 0) > 0 &&
     product.priceToman > 0 &&
     groupMatches(product.displayGroups, group)

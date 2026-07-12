@@ -8,7 +8,7 @@ import type {
 
 /** In-progress "add panel" wizard state. */
 export interface PanelAddState {
-  step: "name" | "baseUrl" | "username" | "password" | "token";
+  step: "name" | "baseUrl" | "username" | "password";
   type: PanelType;
   name?: string;
   baseUrl?: string;
@@ -166,7 +166,8 @@ export interface SessionData {
     // Field short-key being edited (from panel-fields registry).
     editingField?: string;
     // For credential edits ("password" | "token").
-    editingCredential?: "password" | "token";
+    editingCredential?: "password" | "token" | "cred-username" | "cred-password";
+    editingCredentialUsername?: string;
     // Category management flows.
     categoryAdd?: CategoryAddState;
     editingCategoryId?: string;

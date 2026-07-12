@@ -79,8 +79,8 @@ behind (disposable DB) — drop/recreate the database to reset.
 ## Redis-backed suites
 
 The per-service operation lock suites
-(`service-operation-concurrency.test.ts`, `startup-recovery.test.ts`)
-additionally require a reachable Redis: set `REDIS_URL` (or
+(`service-operation-concurrency.test.ts`, `startup-recovery.test.ts`,
+`panel-provisioning-e2e.test.ts`) additionally require a reachable Redis: set `REDIS_URL` (or
 `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`) to a disposable
 password-protected instance, e.g.
 
@@ -92,3 +92,13 @@ export REDIS_URL="redis://:test-pw@127.0.0.1:6490"
 Without it those suites self-skip. CI starts its password-protected Redis
 before the test step. Service mutation pipelines FAIL CLOSED without the
 lock backend, so running them against a real flow always needs Redis.
+
+## Panel HTTP-contract suites
+
+`marzban-provisioning.test.ts` and `xui-provisioning.test.ts` run mock
+HTTP servers reproducing the real panel API contracts and need neither
+PostgreSQL nor Redis. They set `PANEL_HTTP_TIMEOUT_MS` to a small value
+before importing the adapters so the timeout scenarios finish quickly.
+`staging-panels.test.ts` is opt-in and runs only with `MARZBAN_STAGING_*`
+/ `XUI_STAGING_*` environment variables (never point them at production
+panels - see docs/marzban-provisioning.md and docs/xui-provisioning.md).

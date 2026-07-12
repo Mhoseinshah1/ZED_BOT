@@ -106,10 +106,18 @@ function groupsText(value: unknown): string {
 // HTML parse mode: every dynamic (operator-entered) value must be escaped.
 // Credentials NEVER render - only a set/not-set marker (Fix C).
 export function panelDetailText(panel: Panel, linkedProductCount?: number): string {
+  // Both panel families authenticate with username + password now.
   const credentialSet =
-    panel.type === "MARZBAN"
-      ? panel.passwordEncrypted !== null && panel.passwordEncrypted !== ""
-      : panel.tokenEncrypted !== null && panel.tokenEncrypted !== "";
+    panel.username !== null &&
+    panel.username !== "" &&
+    panel.passwordEncrypted !== null &&
+    panel.passwordEncrypted !== "";
+  const readinessLine =
+    panel.provisioningReady === true
+      ? "آماده ساخت سرویس ✅"
+      : panel.provisioningReady === false
+        ? "ساخت سرویس آماده نیست ❌ (تست اتصال را اجرا کنید)"
+        : "تست نشده ➖ (تست اتصال را اجرا کنید)";
   const lines = [
     `📋 <b>${escapeHtml(panel.name)}</b>`,
     "",
@@ -117,6 +125,7 @@ export function panelDetailText(panel: Panel, linkedProductCount?: number): stri
     `نوع پنل: ${panel.type}`,
     `هاست: ${escapeHtml(panelHostname(panel.baseUrl))}`,
     `اطلاعات ورود: ${credentialSet ? "تنظیم شده ✅" : "تنظیم نشده ❌"}`,
+    `آمادگی ساخت سرویس: ${readinessLine}`,
     ...(linkedProductCount === undefined ? [] : [`محصولات متصل: ${linkedProductCount}`]),
     `ایجاد: ${panel.createdAt.toISOString().slice(0, 10)}`,
     `وضعیت: ${STATUS_EMOJI[panel.status]} ${STATUS_LABEL[panel.status]}`,
@@ -145,7 +154,7 @@ export function panelDetailKeyboard(
   backList?: { filter?: "a" | "i"; page: number },
 ): InlineKeyboard {
   const sid = panelShortId(panel);
-  const credentialLabel = panel.type === "MARZBAN" ? "ویرایش رمز 🔑" : "ویرایش توکن 🔑";
+  const credentialLabel = "ویرایش اطلاعات ورود 🔑";
   const listBack =
     backList?.filter === undefined ? cb.list(backList?.page ?? 1) : cb.listFiltered(backList.filter, backList.page);
   return new InlineKeyboard()

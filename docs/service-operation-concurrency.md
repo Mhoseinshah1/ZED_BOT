@@ -159,8 +159,10 @@ mid-operation.
   stays PAID and the user is asked to retry; nothing re-queues it
   automatically (consistent with the project's deferred-worker design for
   PAID orders).
-- **XUI**: mutations remain unimplemented upstream and reconciliation
-  still defers (cannot read accounts) - unchanged, by design.
+- **XUI**: mutations remain unimplemented and are now blocked BEFORE
+  payment by the capability model (docs/panel-capabilities.md);
+  provisioning and purchase reconciliation run under the same locks as
+  Marzban.
 - **The lock serializes per service, not per panel**: a panel-wide
   outage still surfaces as per-operation failures/refunds exactly as
   before; the lock adds no cross-service coupling.

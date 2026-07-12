@@ -259,6 +259,11 @@ async function adoptPanelAccount(
           ...(fetched.configLinks !== undefined && fetched.configLinks.length > 0
             ? { configLinks: fetched.configLinks }
             : {}),
+          // Non-secret remote identifiers (XUI adoption): client labels /
+          // inbound ids reported by the panel's read endpoint.
+          ...(fetched.remoteMetadata !== undefined
+            ? { remoteMetadata: fetched.remoteMetadata as object }
+            : {}),
         },
       });
     }

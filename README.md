@@ -236,9 +236,19 @@ implemented yet, by design:
 - Telegram menus, purchase flows and any bot business logic (the bot only
   answers `/start` with a placeholder message and `/ping` with `pong`)
 - Products, orders, services, users management, payments
-- Marzban / XUI (Sanaei) panel integrations — only placeholder
-  interfaces/classes exist in `packages/panel-adapters`
 - Admin panel, reseller system, mini app
+
+Panel integrations have since been implemented (see
+`packages/panel-adapters` and `docs/panel-capabilities.md`):
+
+- **Marzban** (and RickPanelAPI-compatible panels exposing the same
+  documented contract): authenticated provisioning, read/sync, renewal,
+  extra volume/time, enable/disable, subscription regeneration,
+  reconciliation — `docs/marzban-provisioning.md`
+- **XUI / Sanaei 3X-UI** (SANAEI variant only): authenticated
+  provisioning, read/sync and reconciliation. Renewal, extras, toggling
+  and subscription regeneration are NOT implemented and are blocked
+  before payment by the capability model — `docs/xui-provisioning.md`
 
 ## Development foundation
 

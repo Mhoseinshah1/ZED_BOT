@@ -127,7 +127,7 @@ describe.runIf(hasDb)("payment/wallet settings (Phase 22)", () => {
 
   it("disabled wallet payment blocks the service before any writes", async () => {
     const panel = await prisma.panel.create({
-      data: { type: "MARZBAN", name: `p22-panel-${runTag}`, baseUrl: "http://127.0.0.1:1", status: "ACTIVE" },
+      data: { type: "MARZBAN", name: `p22-panel-${runTag}`, baseUrl: "http://127.0.0.1:1", status: "ACTIVE", username: "admin", passwordEncrypted: "enc", templateUsername: "tpl" },
     });
     const category = await prisma.productCategory.create({
       data: { type: "SERVICE_PRODUCT", name: `p22-cat-${runTag}`, isActive: true },

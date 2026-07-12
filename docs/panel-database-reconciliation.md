@@ -44,9 +44,10 @@ be probed with the read-only `getServiceAccount`:
 
 `notFound` is a new structured field on `GetServiceAccountResult`, set
 **only** when the panel positively reports the account does not exist
-(Marzban: documented 404 on `GET /api/user/{username}`). Transport errors,
-auth failures and unimplemented adapters (XUI) never set it — "could not
-check" is not "does not exist".
+(Marzban: documented 404 on `GET /api/user/{username}`; XUI: a fully
+readable and parseable inbound inventory with no matching client).
+Transport errors, auth failures and unreadable inbounds never set it —
+"could not check" is not "does not exist".
 
 ### Renewals / extra volume / extra time
 
@@ -115,9 +116,11 @@ docs/service-operation-concurrency.md):
 
 - **Deferred orders park indefinitely** until the panel becomes readable or
   an admin intervenes; each sweep logs a warning with the order id and
-  reason. This is intentional: money only moves on proof. XUI panels defer
-  always (their adapter cannot read accounts yet — same phase status as XUI
-  provisioning).
+  reason. This is intentional: money only moves on proof. XUI purchases
+  now reconcile like Marzban ones (the SANAEI adapter reads clients and
+  reports positive absence); XUI *mutation* orders still defer, but such
+  orders can no longer be created — the capability model blocks
+  renewal/extras on XUI before payment.
 - **Renewal coincidence**: a renewal plan with `durationDays = 0` whose
   computed new limit happens to equal the old limit is indistinguishable
   from "not applied" and refunds. The error direction favors the user

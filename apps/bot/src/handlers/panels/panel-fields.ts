@@ -58,7 +58,9 @@ export const EDITABLE_FIELDS: EditableField[] = [
   { key: "itn", column: "inboundTemplateName", label: "نام اینباند نمونه", kind: "text", nullable: true, page: "cfg", onlyFor: "MARZBAN" },
   { key: "rs", column: "resetStrategy", label: "استراتژی ریست", kind: "text", nullable: true, page: "cfg", onlyFor: "MARZBAN" },
   { key: "iid", column: "inboundIds", label: "شناسه‌های inbound", kind: "json-int-array", nullable: true, page: "cfg", onlyFor: "XUI" },
-  { key: "ps", column: "protocolSettings", label: "تنظیمات پروتکل (JSON)", kind: "json-object", nullable: true, page: "cfg", onlyFor: "XUI" },
+  // protocolSettings serves both families: XUI per-protocol options (flow)
+  // and Marzban explicit template-free proxy configuration.
+  { key: "ps", column: "protocolSettings", label: "تنظیمات پروتکل (JSON)", kind: "json-object", nullable: true, page: "cfg" },
 ];
 
 export function findField(key: string): EditableField | undefined {
