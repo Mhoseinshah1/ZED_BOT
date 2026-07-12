@@ -20,7 +20,7 @@ import { logger } from "../core/logger.js";
 import type { CheckoutDraft, ExtraTimeDraft, ExtraVolumeDraft, RenewalDraft } from "../core/session.js";
 import { isProductVisible } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
-import { validateDiscountCode } from "./discount.service.js";
+import { claimDiscountUsage, validateDiscountCode } from "./discount.service.js";
 import {
   isWalletPaymentEnabled,
   WALLET_PAYMENT_DISABLED_TEXT,
@@ -281,25 +281,22 @@ async function executeWalletOrderPayment(
         },
       });
 
-      // Discount finalization: the checkout is brand new, so at most once.
+      // SECURITY-CRITICAL discount finalization: claimDiscountUsage locks
+      // the DiscountCode row and re-validates active/window/total/per-user
+      // limits against the committed state - the pre-payment validation
+      // above is UX only and is never trusted here. A failed claim aborts
+      // the WHOLE payment (order, payment, deduction all roll back), so a
+      // discounted price can never settle without its claimed usage.
       if (args.discountCodeId !== null && args.discountAmountToman > 0) {
-        const usage = await tx.discountCodeUsage.findFirst({
-          where: { checkoutSessionId: checkout.id },
+        const claim = await claimDiscountUsage(tx, {
+          discountCodeId: args.discountCodeId,
+          userId: user.id,
+          orderId: order.id,
+          checkoutSessionId: checkout.id,
+          amountToman: args.discountAmountToman,
         });
-        if (usage === null) {
-          await tx.discountCodeUsage.create({
-            data: {
-              discountCodeId: args.discountCodeId,
-              userId: user.id,
-              orderId: order.id,
-              checkoutSessionId: checkout.id,
-              amountToman: args.discountAmountToman,
-            },
-          });
-          await tx.discountCode.update({
-            where: { id: args.discountCodeId },
-            data: { totalUsedCount: { increment: 1 } },
-          });
+        if (!claim.ok) {
+          throw new WalletPaymentAbort(claim.safeMessage);
         }
       }
 
