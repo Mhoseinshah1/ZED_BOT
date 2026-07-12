@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { mkdir, readdir, stat, utimes, writeFile } from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -234,6 +235,56 @@ describe.runIf(hasDb && hasPgDump)("pg_dump backup round-trip (Phase 35)", () =>
       expect(after).toBe(before); // partial file deleted
     } finally {
       process.env.DATABASE_URL = original;
+    }
+  });
+
+  it("concurrent backups claim distinct files and both succeed", async () => {
+    // Reproduces the same-second stamp race: before the exclusive-create
+    // claim, both calls could pick one name, interleave two pg_dump streams
+    // into one corrupt file, and the loser's cleanup could delete the
+    // winner's output.
+    const [a, b] = await Promise.all([createDatabaseBackup(), createDatabaseBackup()]);
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    if (!a.ok || !b.ok) return;
+    expect(a.backup.name).not.toBe(b.backup.name); // NEVER the same file
+    const [statsA, statsB] = await Promise.all([
+      stat(path.join(tempDir, a.backup.name)),
+      stat(path.join(tempDir, b.backup.name)),
+    ]);
+    expect(statsA.size).toBeGreaterThan(0);
+    expect(statsB.size).toBeGreaterThan(0);
+  });
+
+  it("kills a hung pg_dump via the watchdog and removes the partial file", async () => {
+    // A TCP listener that accepts and never answers: pg_dump connects and
+    // waits for the server greeting forever - the pre-fix code had no
+    // timeout, so the admin action would hang and orphan the child process.
+    const server = net.createServer(() => {
+      /* accept and stay silent */
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as net.AddressInfo).port;
+    const originalUrl = process.env.DATABASE_URL;
+    const originalTimeout = process.env.BACKUP_TIMEOUT_MS;
+    process.env.DATABASE_URL = `postgresql://postgres@127.0.0.1:${port}/nope`;
+    process.env.BACKUP_TIMEOUT_MS = "1500";
+    try {
+      const before = (await readdir(tempDir)).filter(isBackupFileName).length;
+      const startedAt = Date.now();
+      const outcome = await createDatabaseBackup();
+      expect(outcome.ok).toBe(false);
+      expect(Date.now() - startedAt).toBeLessThan(30_000); // no infinite hang
+      const after = (await readdir(tempDir)).filter(isBackupFileName).length;
+      expect(after).toBe(before); // partial file deleted
+    } finally {
+      process.env.DATABASE_URL = originalUrl;
+      if (originalTimeout === undefined) {
+        delete process.env.BACKUP_TIMEOUT_MS;
+      } else {
+        process.env.BACKUP_TIMEOUT_MS = originalTimeout;
+      }
+      server.close();
     }
   });
 });

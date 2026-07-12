@@ -4,6 +4,10 @@ import { errorMessage } from "@zedbot/shared";
 import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
+import {
+  RECOVERY_RECHECK_DELAY_MS,
+  runStartupRecovery,
+} from "./services/startup-recovery.service.js";
 
 const token = getBotToken();
 if (token === null) {
@@ -45,6 +49,16 @@ async function run(botToken: string): Promise<void> {
   } catch (err) {
     logger.warn("database not reachable at startup, continuing", { error: errorMessage(err) });
   }
+
+  // Crash recovery: resolve orders stuck in PROVISIONING and broadcasts
+  // stuck in RUNNING by a previous process death (runStartupRecovery never
+  // throws). Once now for old orphans, once after the stale threshold so
+  // rows orphaned seconds before this restart are caught too - a crash is
+  // always followed by a restart, so every orphan meets one of these runs.
+  void runStartupRecovery();
+  setTimeout(() => {
+    void runStartupRecovery();
+  }, RECOVERY_RECHECK_DELAY_MS).unref();
 
   await bot.start({
     onStart: (botInfo) => {
