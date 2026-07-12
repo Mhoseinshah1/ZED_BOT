@@ -51,7 +51,24 @@ const LABEL_FLOW = "admin_stock:label";
 const BULK_FLOW = "admin_stock:bulk_content";
 const THRESHOLD_FLOW = "admin_stock:threshold";
 
-const ST_CB = {
+/**
+ * Fix B status aliases for the filtered item lists (kept to one byte so
+ * every callback stays far under Telegram's 64-byte limit).
+ */
+export const STOCK_STATUS_ALIAS = {
+  a: "AVAILABLE",
+  r: "RESERVED",
+  x: "DISABLED",
+  d: "DELIVERED",
+} as const;
+export type StockStatusAlias = keyof typeof STOCK_STATUS_ALIAS;
+
+/** Item-action callbacks carry `:<alias>:<page>` so actions return to the same list. */
+const actionSuffix = (status?: StockStatusAlias, page?: number): string =>
+  status === undefined ? "" : `:${status}:${page ?? 1}`;
+
+/** Exported for tests (Fix B navigation locks). */
+export const ST_CB = {
   products: "admin:stock:products",
   product: (sid: string): string => `admin:stock:p:${sid}`,
   toggle: (sid: string): string => `admin:stock:toggle:${sid}`,
@@ -63,10 +80,17 @@ const ST_CB = {
   bulkCancel: "admin:stock:bulk_cancel",
   threshold: (sid: string): string => `admin:stock:threshold:${sid}`,
   thresholdClear: (sid: string): string => `admin:stock:threshold_clear:${sid}`,
+  // Old all-statuses list (kept working for old keyboards).
   items: (sid: string, page: number): string => `admin:stock:items:${sid}:${page}`,
-  disableItem: (itemSid: string): string => `admin:stock:item_off:${itemSid}`,
-  releaseReserved: (itemSid: string): string => `admin:stock:item_release:${itemSid}`,
-  disableReserved: (itemSid: string): string => `admin:stock:item_disable_reserved:${itemSid}`,
+  // Fix B: status-filtered lists.
+  itemsFiltered: (sid: string, status: StockStatusAlias, page: number): string =>
+    `admin:stock:items:${sid}:${status}:${page}`,
+  disableItem: (itemSid: string, status?: StockStatusAlias, page?: number): string =>
+    `admin:stock:item_off:${itemSid}${actionSuffix(status, page)}`,
+  releaseReserved: (itemSid: string, status?: StockStatusAlias, page?: number): string =>
+    `admin:stock:item_release:${itemSid}${actionSuffix(status, page)}`,
+  disableReserved: (itemSid: string, status?: StockStatusAlias, page?: number): string =>
+    `admin:stock:item_disable_reserved:${itemSid}${actionSuffix(status, page)}`,
 } as const;
 
 export const stockHandler = new Composer<BotContext>();
@@ -109,12 +133,12 @@ async function renderProducts(ctx: BotContext): Promise<void> {
       ST_CB.product(productShortId(row)),
     ).row();
   }
-  kb.text("بازگشت", CB.ADMIN_OTHER_PRODUCTS);
+  kb.text("بازگشت به محصولات دیگر", CB.ADMIN_OTHER_PRODUCTS);
   await safeEditOrReply(
     ctx,
     rows.length === 0
-      ? "مدیریت موجودی محصولات 🎟\n\nمحصولی از نوع «محصولات دیگر» وجود ندارد."
-      : "مدیریت موجودی محصولات 🎟\n\nیک محصول را انتخاب کنید:",
+      ? "مدیریت موجودی استاک 🎟\n\nمحصولی از نوع «محصولات دیگر» وجود ندارد."
+      : "مدیریت موجودی استاک 🎟\n\nیک محصول را انتخاب کنید:",
     kb,
   );
 }
@@ -124,9 +148,8 @@ async function renderProductPage(ctx: BotContext, product: Product): Promise<voi
     getStockCounts(product.id),
     getStockLowThreshold(product.id),
   ]);
-  const sid = productShortId(product);
   const lines = [
-    `مدیریت موجودی 🎟 (${escapeHtml(product.name)})`,
+    `مدیریت موجودی استاک 🎟 (${escapeHtml(product.name)})`,
     "",
     `وضعیت محصول: ${product.isActive ? "فعال ✅" : "غیرفعال ⏸"}`,
     `نوع تحویل: ${product.deliveryType ?? "-"}`,
@@ -145,25 +168,36 @@ async function renderProductPage(ctx: BotContext, product: Product): Promise<voi
   } else if (level === "low") {
     lines.push("", "⚠️ موجودی کم است.");
   }
+  await safeEditOrReply(ctx, lines.join("\n"), stockProductKeyboard(product, threshold), HTML);
+}
+
+/** Stock product page keyboard (Fix B layout). Exported for tests. */
+export function stockProductKeyboard(product: Product, threshold: number | null): InlineKeyboard {
+  const sid = productShortId(product);
   const kb = new InlineKeyboard()
-    .text("افزودن آیتم موجودی ➕", ST_CB.add(sid))
-    .row()
+    .text("افزودن آیتم تکی ➕", ST_CB.add(sid))
     .text("افزودن گروهی آیتم‌ها ➕➕", ST_CB.bulkAdd(sid))
     .row()
-    .text("مشاهده آیتم‌های موجودی", ST_CB.items(sid, 1))
+    .text("آیتم‌های موجود ✅", ST_CB.itemsFiltered(sid, "a", 1))
+    .text("آیتم‌های رزروشده ⏳", ST_CB.itemsFiltered(sid, "r", 1))
     .row()
-    .text("تنظیم هشدار کمبود موجودی 🔔", ST_CB.threshold(sid))
+    .text("آیتم‌های غیرفعال ⏸", ST_CB.itemsFiltered(sid, "x", 1))
+    .text("تاریخچه تحویل 📦", ST_CB.itemsFiltered(sid, "d", 1))
+    .row()
+    .text("تنظیم حد هشدار 🔔", ST_CB.threshold(sid))
     .row();
   if (threshold !== null) {
-    kb.text("حذف هشدار کمبود موجودی", ST_CB.thresholdClear(sid)).row();
+    kb.text("پاک کردن حد هشدار", ST_CB.thresholdClear(sid)).row();
   }
   kb.text(
     product.stockEnabled ? "خاموش کردن تحویل استاک ⏸" : "روشن کردن تحویل استاک ✅",
     ST_CB.toggle(sid),
   )
     .row()
-    .text("بازگشت", ST_CB.products);
-  await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
+    .text("بازگشت به لیست محصولات استاک", ST_CB.products)
+    .row()
+    .text("بازگشت به محصولات دیگر", CB.ADMIN_OTHER_PRODUCTS);
+  return kb;
 }
 
 function itemLine(item: OtherProductStockItem): string {
@@ -199,10 +233,53 @@ function itemLine(item: OtherProductStockItem): string {
   return parts.join(" | ");
 }
 
-async function renderItems(ctx: BotContext, product: Product, page: number): Promise<void> {
-  const pageData = await listStockItems(product.id, page);
+const STATUS_LIST_TITLES: Record<StockStatusAlias, string> = {
+  a: "آیتم‌های موجود ✅",
+  r: "آیتم‌های رزروشده ⏳",
+  x: "آیتم‌های غیرفعال ⏸",
+  d: "تاریخچه تحویل 📦",
+};
+
+/**
+ * Action buttons one item may show (Fix B, exported for tests). Existing
+ * rules only: AVAILABLE may be disabled; stuck RESERVED may be released or
+ * disabled (Phase 26); DISABLED and DELIVERED are immutable here (no
+ * re-enable is invented, delivered history stays read-only). Actions carry
+ * the current status/page so they return to the same list.
+ */
+export function stockItemActions(
+  item: OtherProductStockItem,
+  status?: StockStatusAlias,
+  page?: number,
+): Array<{ label: string; callback: string }> {
+  const itemSid = item.id.slice(0, 8);
+  const name = item.label === null || item.label === "" ? itemSid : item.label;
+  if (item.status === "AVAILABLE") {
+    return [{ label: `غیرفعال کردن ${name}`, callback: ST_CB.disableItem(itemSid, status, page) }];
+  }
+  if (item.status === "RESERVED") {
+    return [
+      { label: `آزادسازی رزرو ${name}`, callback: ST_CB.releaseReserved(itemSid, status, page) },
+      { label: `غیرفعال کردن رزرو ${name}`, callback: ST_CB.disableReserved(itemSid, status, page) },
+    ];
+  }
+  return [];
+}
+
+async function renderItems(
+  ctx: BotContext,
+  product: Product,
+  page: number,
+  status?: StockStatusAlias,
+): Promise<void> {
+  const pageData = await listStockItems(
+    product.id,
+    page,
+    status === undefined ? undefined : STOCK_STATUS_ALIAS[status],
+  );
   const sid = productShortId(product);
-  const lines = [`آیتم‌های موجودی (${escapeHtml(product.name)}) — ${pageData.total} آیتم`, ""];
+  const title = status === undefined ? "همه آیتم‌های موجودی" : STATUS_LIST_TITLES[status];
+  const lines = [`${title} (${escapeHtml(product.name)}) — ${pageData.total} آیتم`, ""];
   for (const item of pageData.items) {
     lines.push(`• ${itemLine(item)}`);
   }
@@ -211,24 +288,23 @@ async function renderItems(ctx: BotContext, product: Product, page: number): Pro
   }
   const kb = new InlineKeyboard();
   for (const item of pageData.items) {
-    const name = item.label === null || item.label === "" ? item.id.slice(0, 8) : item.label;
-    if (item.status === "AVAILABLE") {
-      kb.text(`غیرفعال کردن ${name}`, ST_CB.disableItem(item.id.slice(0, 8))).row();
-    }
-    // Phase 26: stuck-RESERVED recovery actions.
-    if (item.status === "RESERVED") {
-      kb.text(`آزادسازی رزرو ${name}`, ST_CB.releaseReserved(item.id.slice(0, 8)))
-        .text(`غیرفعال کردن رزرو ${name}`, ST_CB.disableReserved(item.id.slice(0, 8)))
-        .row();
+    const actions = stockItemActions(item, status, pageData.page);
+    if (actions.length > 0) {
+      for (const action of actions) {
+        kb.text(action.label, action.callback);
+      }
+      kb.row();
     }
   }
+  const pageCb = (p: number): string =>
+    status === undefined ? ST_CB.items(sid, p) : ST_CB.itemsFiltered(sid, status, p);
   if (pageData.pages > 1) {
     if (pageData.page > 1) {
-      kb.text("« قبلی", ST_CB.items(sid, pageData.page - 1));
+      kb.text("« قبلی", pageCb(pageData.page - 1));
     }
-    kb.text(`${pageData.page}/${pageData.pages}`, ST_CB.items(sid, pageData.page));
+    kb.text(`${pageData.page}/${pageData.pages}`, pageCb(pageData.page));
     if (pageData.page < pageData.pages) {
-      kb.text("بعدی »", ST_CB.items(sid, pageData.page + 1));
+      kb.text("بعدی »", pageCb(pageData.page + 1));
     }
     kb.row();
   }
@@ -277,6 +353,7 @@ stockHandler.callbackQuery(/^admin:stock:toggle:([0-9a-f-]+)$/, async (ctx) => {
   }
 });
 
+// Old all-statuses list - kept working for old keyboards.
 stockHandler.callbackQuery(/^admin:stock:items:([0-9a-f-]+):(\d+)$/, async (ctx) => {
   if (ctx.admin === null) {
     return;
@@ -291,7 +368,35 @@ stockHandler.callbackQuery(/^admin:stock:items:([0-9a-f-]+):(\d+)$/, async (ctx)
   await renderItems(ctx, product, Number.parseInt(ctx.match[2], 10));
 });
 
-stockHandler.callbackQuery(/^admin:stock:item_off:([0-9a-f-]+)$/, async (ctx) => {
+// Fix B: status-filtered lists (a=available, r=reserved, x=disabled, d=delivered).
+stockHandler.callbackQuery(/^admin:stock:items:([0-9a-f-]+):([arxd]):(\d+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminStockState(ctx);
+  const product = await getStockProductByShortId(ctx.match[1]);
+  if (product === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await renderItems(
+    ctx,
+    product,
+    Number.parseInt(ctx.match[3], 10),
+    ctx.match[2] as StockStatusAlias,
+  );
+});
+
+/** Fix B: optional `:<alias>:<page>` on item actions -> back to the same list. */
+function actionListContext(ctx: BotContext): { status?: StockStatusAlias; page: number } {
+  const match = ctx.match as RegExpMatchArray;
+  return match[2] !== undefined
+    ? { status: match[2] as StockStatusAlias, page: Number.parseInt(match[3], 10) }
+    : { page: 1 };
+}
+
+stockHandler.callbackQuery(/^admin:stock:item_off:([0-9a-f-]+)(?::([arxd]):(\d+))?$/, async (ctx) => {
   if (ctx.admin === null) {
     return;
   }
@@ -305,7 +410,8 @@ stockHandler.callbackQuery(/^admin:stock:item_off:([0-9a-f-]+)$/, async (ctx) =>
     ctx,
     disabled ? "آیتم غیرفعال شد ⏸" : "این آیتم قابل غیرفعال کردن نیست.",
   );
-  await renderItems(ctx, item.product, 1);
+  const back = actionListContext(ctx);
+  await renderItems(ctx, item.product, back.page, back.status);
 });
 
 // --- stuck-RESERVED recovery (Phase 26) ------------------------------------------------------
@@ -322,22 +428,29 @@ async function handleReservedAction(
   }
   const result = await action(item.id);
   await safeAnswerCallback(ctx, result.safeMessage);
-  await renderItems(ctx, item.product, 1);
+  const back = actionListContext(ctx);
+  await renderItems(ctx, item.product, back.page, back.status);
 }
 
-stockHandler.callbackQuery(/^admin:stock:item_release:([0-9a-f-]+)$/, async (ctx) => {
-  if (ctx.admin === null) {
-    return;
-  }
-  await handleReservedAction(ctx, ctx.match[1], releaseReservedStockItem);
-});
+stockHandler.callbackQuery(
+  /^admin:stock:item_release:([0-9a-f-]+)(?::([arxd]):(\d+))?$/,
+  async (ctx) => {
+    if (ctx.admin === null) {
+      return;
+    }
+    await handleReservedAction(ctx, ctx.match[1], releaseReservedStockItem);
+  },
+);
 
-stockHandler.callbackQuery(/^admin:stock:item_disable_reserved:([0-9a-f-]+)$/, async (ctx) => {
-  if (ctx.admin === null) {
-    return;
-  }
-  await handleReservedAction(ctx, ctx.match[1], disableReservedStockItem);
-});
+stockHandler.callbackQuery(
+  /^admin:stock:item_disable_reserved:([0-9a-f-]+)(?::([arxd]):(\d+))?$/,
+  async (ctx) => {
+    if (ctx.admin === null) {
+      return;
+    }
+    await handleReservedAction(ctx, ctx.match[1], disableReservedStockItem);
+  },
+);
 
 // --- add-item wizard -----------------------------------------------------------------------
 

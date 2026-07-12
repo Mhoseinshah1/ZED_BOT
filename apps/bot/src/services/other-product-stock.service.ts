@@ -4,6 +4,7 @@ import {
   prisma,
   type Order,
   type OtherProductStockItem,
+  type StockItemStatus,
   type Product,
   type User,
 } from "@zedbot/database";
@@ -252,13 +253,21 @@ export interface StockItemsPage {
   total: number;
 }
 
-/** Latest items of one product, 10/page. Content stays encrypted here. */
-export async function listStockItems(productId: string, page: number): Promise<StockItemsPage> {
-  const total = await prisma.otherProductStockItem.count({ where: { productId } });
+/**
+ * Latest items of one product, 10/page, optionally filtered to one status
+ * (Corrective Fix B). Content stays encrypted here.
+ */
+export async function listStockItems(
+  productId: string,
+  page: number,
+  status?: StockItemStatus,
+): Promise<StockItemsPage> {
+  const where = status === undefined ? { productId } : { productId, status };
+  const total = await prisma.otherProductStockItem.count({ where });
   const pages = Math.max(1, Math.ceil(total / STOCK_ITEMS_PAGE_SIZE));
   const safePage = Math.min(Math.max(1, page), pages);
   const items = await prisma.otherProductStockItem.findMany({
-    where: { productId },
+    where,
     orderBy: { createdAt: "desc" },
     skip: (safePage - 1) * STOCK_ITEMS_PAGE_SIZE,
     take: STOCK_ITEMS_PAGE_SIZE,

@@ -82,9 +82,14 @@ failing the Telegram send.
 
 ## Deferred
 
-- **Receipt-detail extra actions → Corrective Fix B** (not started).
+- **Receipt-detail extra actions → Corrective Fix B** — since delivered;
+  see `docs/corrective-ui-fix-b.md` for the Fix B before/after (receipt
+  detail actions, user-management jumps with return context, the
+  OTHER_PRODUCT landing tree and the stock status filters).
 - **Service transfer / user note / QR code** — not added, deferred.
 - Detail-aware back from the renewal plan page.
+- User block/unblock and an OTHER_PRODUCT-filtered product list (Fix B
+  deferrals).
 
 ## Verification
 

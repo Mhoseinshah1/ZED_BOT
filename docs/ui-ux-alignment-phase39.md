@@ -21,7 +21,13 @@ a blanket alignment pass:
   «تمدید سرویس ♻️» button on the service detail page via the existing
   `user:renew:svc:<sid>` route. See `docs/bot-ui-gap-report.md`
   (before/after) and `docs/bot-ui-contract.md` (the resulting contract).
-- **Corrective Fix B** (not started) — receipt-detail extra actions.
+- **Corrective Fix B** (delivered) — receipt detail fields + keyboard
+  (approve/reject only while pending, on-demand media action,
+  navigation-only jumps to the existing user wallet/profile pages with a
+  «بازگشت به رسید 🧾» return context), receipt backs to the finance
+  landing, the «محصولات دیگر 🛍» admin landing over the existing
+  manual-order filters and stock root, and status-filtered stock item
+  lists. See `docs/corrective-ui-fix-b.md`.
 - **Fix A regression fix** (current) — the pre-Fix-A revert had made the
   six unfinished user placeholder buttons visible again; the accepted
   4-row user menu (placeholders hidden, callbacks still answered) and the

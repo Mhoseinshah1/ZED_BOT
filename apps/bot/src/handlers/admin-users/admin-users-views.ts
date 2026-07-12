@@ -98,8 +98,21 @@ export function userProfileText(user: User): string {
   ].join("\n");
 }
 
-export function userProfileKeyboard(sid: string, hasResults: boolean): InlineKeyboard {
+/**
+ * Fix B: when the page was reached from a receipt detail,
+ * `returnReceiptSid` adds «بازگشت به رسید 🧾» (the literal callback shape of
+ * the receipts handler's admin:rec:view route - not imported to avoid a
+ * module cycle).
+ */
+export function userProfileKeyboard(
+  sid: string,
+  hasResults: boolean,
+  returnReceiptSid?: string,
+): InlineKeyboard {
   const kb = new InlineKeyboard().text("کیف پول کاربر 🏦", AU_CB.wallet(sid)).row();
+  if (returnReceiptSid !== undefined) {
+    kb.text("بازگشت به رسید 🧾", `admin:rec:view:${returnReceiptSid}`).row();
+  }
   if (hasResults) {
     kb.text("بازگشت به نتایج", AU_CB.results).row();
   }
@@ -132,11 +145,16 @@ export function userWalletText(user: User, transactions: WalletTransaction[]): s
   return lines.join("\n");
 }
 
-export function userWalletKeyboard(sid: string): InlineKeyboard {
-  return new InlineKeyboard()
+/** Fix B: `returnReceiptSid` adds «بازگشت به رسید 🧾» (see userProfileKeyboard). */
+export function userWalletKeyboard(sid: string, returnReceiptSid?: string): InlineKeyboard {
+  const kb = new InlineKeyboard()
     .text("افزایش موجودی ➕", AU_CB.walletAdd(sid))
     .text("کسر موجودی ➖", AU_CB.walletSubtract(sid))
-    .row()
+    .row();
+  if (returnReceiptSid !== undefined) {
+    kb.text("بازگشت به رسید 🧾", `admin:rec:view:${returnReceiptSid}`).row();
+  }
+  return kb
     .text("بازگشت به پروفایل کاربر", AU_CB.view(sid))
     .row()
     .text("بازگشت به مدیریت کاربران", AU_CB.root);

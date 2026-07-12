@@ -50,8 +50,16 @@ import {
   rejectReceiptPayment,
   walletTopupSuccessNotice,
 } from "../../services/receipt-review.service.js";
+import { listUserWalletTransactionsForAdmin } from "../../services/admin-user-wallet.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
+import {
+  userProfileKeyboard,
+  userProfileText,
+  userShortId,
+  userWalletKeyboard,
+  userWalletText,
+} from "../admin-users/admin-users-views.js";
 
 // =============================================================================
 // Admin "رسیدهای تایید نشده" - Phase 8: list + detail + approve / reject.
@@ -66,12 +74,18 @@ const REJECT_REASON_PROMPT =
   "دلیل رد رسید را بنویسید (۱ تا ۱۰۰۰ کاراکتر).\n" +
   "همین متن عیناً برای کاربر ارسال می‌شود.";
 
-const rcb = {
+/** Exported for tests and for the admin-users "بازگشت به رسید 🧾" button. */
+export const rcb = {
   list: (page: number): string => `admin:rec:list:${page}`,
   view: (sid: string): string => `admin:rec:view:${sid}`,
   approveAsk: (sid: string): string => `admin:rec:ap:${sid}`,
   approveConfirm: (sid: string): string => `admin:rec:ap:${sid}:yes`,
   reject: (sid: string): string => `admin:rec:rj:${sid}`,
+  // Corrective Fix B: on-demand media/details + jumps into the existing
+  // admin user-management pages for the paying user.
+  media: (sid: string): string => `admin:rec:media:${sid}`,
+  userView: (sid: string): string => `admin:rec:user:${sid}`,
+  userWallet: (sid: string): string => `admin:rec:uwallet:${sid}`,
 } as const;
 
 function formatToman(value: number): string {
@@ -95,8 +109,22 @@ function clearReceiptReviewFlow(ctx: BotContext): void {
   ctx.session.temp.rejectingPaymentId = undefined;
 }
 
-function backKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("بازگشت به لیست", rcb.list(1)).row().text("بازگشت به ادمین", CB.ADMIN_MENU);
+/** Current receipt-list page from the session (Fix B), fallback 1. */
+function receiptListPage(ctx: BotContext): number {
+  const page = ctx.session.temp.adminReceiptListPage;
+  return typeof page === "number" && page >= 1 ? page : 1;
+}
+
+/** After approve/reject: back to the receipt list (same page) or finance. */
+export function reviewResultKeyboard(page: number): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("بازگشت به لیست رسیدها", rcb.list(page))
+    .row()
+    .text("بازگشت به مالی", CB.ADMIN_FINANCE);
+}
+
+function backKeyboard(ctx: BotContext): InlineKeyboard {
+  return reviewResultKeyboard(receiptListPage(ctx));
 }
 
 /**
@@ -144,7 +172,7 @@ async function runExtraTimeAfterApproval(
         buildExtraTimeSuccessMessage(outcome.service, outcome.addedDays),
         "HTML",
       );
-      await safeReply(ctx, "زمان سرویس افزایش یافت ✅", backKeyboard());
+      await safeReply(ctx, "زمان سرویس افزایش یافت ✅", backKeyboard(ctx));
       return;
     }
     if (outcome.refunded) {
@@ -152,18 +180,18 @@ async function runExtraTimeAfterApproval(
       await safeReply(
         ctx,
         "افزایش زمان ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
-        backKeyboard(),
+        backKeyboard(ctx),
       );
       return;
     }
     await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.EXTRA_TIME));
-    await safeReply(ctx, outcome.error, backKeyboard());
+    await safeReply(ctx, outcome.error, backKeyboard(ctx));
   } catch (err) {
     logger.error("extra time after approval crashed", { orderId, error: errorMessage(err) });
     await safeReply(
       ctx,
       "خطایی در افزایش زمان سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
-      backKeyboard(),
+      backKeyboard(ctx),
     );
   }
 }
@@ -186,7 +214,7 @@ async function runExtraVolumeAfterApproval(
         buildExtraVolumeSuccessMessage(outcome.service, outcome.addedVolumeGb),
         "HTML",
       );
-      await safeReply(ctx, "حجم سرویس افزایش یافت ✅", backKeyboard());
+      await safeReply(ctx, "حجم سرویس افزایش یافت ✅", backKeyboard(ctx));
       return;
     }
     if (outcome.refunded) {
@@ -194,18 +222,18 @@ async function runExtraVolumeAfterApproval(
       await safeReply(
         ctx,
         "افزایش حجم ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
-        backKeyboard(),
+        backKeyboard(ctx),
       );
       return;
     }
     await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.EXTRA_VOLUME));
-    await safeReply(ctx, outcome.error, backKeyboard());
+    await safeReply(ctx, outcome.error, backKeyboard(ctx));
   } catch (err) {
     logger.error("extra volume after approval crashed", { orderId, error: errorMessage(err) });
     await safeReply(
       ctx,
       "خطایی در افزایش حجم سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
-      backKeyboard(),
+      backKeyboard(ctx),
     );
   }
 }
@@ -223,7 +251,7 @@ async function runRenewalAfterApproval(
     const outcome = await executeRenewalOrder(orderId);
     if (outcome.ok) {
       await notifyUserSafe(ctx, user, buildRenewalSuccessMessage(outcome.service), "HTML");
-      await safeReply(ctx, "سرویس تمدید شد ✅", backKeyboard());
+      await safeReply(ctx, "سرویس تمدید شد ✅", backKeyboard(ctx));
       return;
     }
     if (outcome.refunded) {
@@ -231,18 +259,18 @@ async function runRenewalAfterApproval(
       await safeReply(
         ctx,
         "تمدید سرویس ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
-        backKeyboard(),
+        backKeyboard(ctx),
       );
       return;
     }
     await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.SERVICE_RENEWAL));
-    await safeReply(ctx, outcome.error, backKeyboard());
+    await safeReply(ctx, outcome.error, backKeyboard(ctx));
   } catch (err) {
     logger.error("renewal after approval crashed", { orderId, error: errorMessage(err) });
     await safeReply(
       ctx,
       "خطایی در تمدید سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
-      backKeyboard(),
+      backKeyboard(ctx),
     );
   }
 }
@@ -262,7 +290,7 @@ async function runProvisioningAfterApproval(
     const outcome = await provisionPaidOrder(orderId);
     if (outcome.ok) {
       await notifyUserSafe(ctx, user, buildServiceInfoMessage(outcome.service), "HTML");
-      await safeReply(ctx, "سرویس ساخته شد ✅", backKeyboard());
+      await safeReply(ctx, "سرویس ساخته شد ✅", backKeyboard(ctx));
       return;
     }
     if (outcome.refunded) {
@@ -270,14 +298,14 @@ async function runProvisioningAfterApproval(
       await safeReply(
         ctx,
         "ساخت سرویس ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
-        backKeyboard(),
+        backKeyboard(ctx),
       );
       return;
     }
     // Refused without refund (already provisioning, already failed, ...):
     // the payment stays approved, so tell the user that much.
     await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.SERVICE_PURCHASE));
-    await safeReply(ctx, outcome.error, backKeyboard());
+    await safeReply(ctx, outcome.error, backKeyboard(ctx));
   } catch (err) {
     logger.error("provisioning after approval crashed", {
       orderId,
@@ -286,45 +314,54 @@ async function runProvisioningAfterApproval(
     await safeReply(
       ctx,
       "خطایی در ساخت سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
-      backKeyboard(),
+      backKeyboard(ctx),
     );
   }
 }
 
 export const receiptsHandler = new Composer<BotContext>();
 
-receiptsHandler.callbackQuery([CB.ADMIN_RECEIPTS, /^admin:rec:list:(\d+)$/], async (ctx) => {
-  clearReceiptReviewFlow(ctx);
-  const page = ctx.match !== undefined && typeof ctx.match !== "string"
-    ? Number.parseInt(ctx.match[1] ?? "1", 10)
-    : 1;
-  const { payments, page: current, pages, total } = await listPendingReviewPayments(page);
-  await safeAnswerCallback(ctx);
-
+/** Receipt list keyboard (Fix B): back goes to the finance landing. */
+export function receiptListKeyboard(pageData: {
+  payments: PaymentWithRelations[];
+  page: number;
+  pages: number;
+}): InlineKeyboard {
   const kb = new InlineKeyboard();
-  for (const payment of payments) {
+  for (const payment of pageData.payments) {
     kb.text(
       `${formatToman(payment.amountToman)} | ${userLabel(payment)} | ${shortDate(payment.createdAt)}`,
       rcb.view(paymentShortId(payment)),
     ).row();
   }
-  if (pages > 1) {
-    if (current > 1) {
-      kb.text("« قبلی", rcb.list(current - 1));
+  if (pageData.pages > 1) {
+    if (pageData.page > 1) {
+      kb.text("« قبلی", rcb.list(pageData.page - 1));
     }
-    kb.text(`${current}/${pages}`, rcb.list(current));
-    if (current < pages) {
-      kb.text("بعدی »", rcb.list(current + 1));
+    kb.text(`${pageData.page}/${pageData.pages}`, rcb.list(pageData.page));
+    if (pageData.page < pageData.pages) {
+      kb.text("بعدی »", rcb.list(pageData.page + 1));
     }
     kb.row();
   }
-  kb.text("بازگشت", CB.ADMIN_MENU);
+  kb.text("بازگشت به مالی", CB.ADMIN_FINANCE);
+  return kb;
+}
+
+receiptsHandler.callbackQuery([CB.ADMIN_RECEIPTS, /^admin:rec:list:(\d+)$/], async (ctx) => {
+  clearReceiptReviewFlow(ctx);
+  const page = ctx.match !== undefined && typeof ctx.match !== "string"
+    ? Number.parseInt(ctx.match[1] ?? "1", 10)
+    : 1;
+  const pageData = await listPendingReviewPayments(page);
+  ctx.session.temp.adminReceiptListPage = pageData.page;
+  await safeAnswerCallback(ctx);
 
   const title =
-    total === 0
+    pageData.total === 0
       ? "رسید در انتظار بررسی وجود ندارد ✅"
-      : `رسیدهای تایید نشده 💵 (${total})\n\nبرای بررسی روی یک رسید بزنید.`;
-  await safeEditOrReply(ctx, title, kb);
+      : `رسیدهای تاییدنشده 💵 (${pageData.total})\n\nبرای بررسی روی یک رسید بزنید.`;
+  await safeEditOrReply(ctx, title, receiptListKeyboard(pageData));
 });
 
 function statusLabel(status: PaymentStatus): string {
@@ -340,16 +377,17 @@ function statusLabel(status: PaymentStatus): string {
   }
 }
 
-receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
-  clearReceiptReviewFlow(ctx);
-  const payment = await getPaymentByShortId(ctx.match[1]);
-  if (payment === null) {
-    await safeAnswerCallback(ctx, "مورد یافت نشد.");
-    return;
-  }
-  await safeAnswerCallback(ctx);
+function latestReceipt(payment: PaymentWithRelations) {
+  return payment.receipts[payment.receipts.length - 1];
+}
 
-  const receipt = payment.receipts[payment.receipts.length - 1];
+function formatUtc(date: Date): string {
+  return `${date.toISOString().replace("T", " ").slice(0, 16)} (UTC)`;
+}
+
+/** «جزئیات رسید 🧾» (Fix B) - readable, fully escaped, no secrets. */
+export function receiptDetailText(payment: PaymentWithRelations): string {
+  const receipt = latestReceipt(payment);
   const snapshot = (payment.checkoutSession?.productSnapshot ?? {}) as Record<string, unknown>;
   const receiptKind =
     receipt === undefined
@@ -360,15 +398,18 @@ receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
 
   const isWalletTopup = payment.purpose === "WALLET_CHARGE";
   const lines = [
-    `🧾 <b>رسید ${escapeHtml(paymentShortId(payment))}</b>`,
+    `جزئیات رسید 🧾 <b>${escapeHtml(paymentShortId(payment))}</b>`,
     "",
     `نوع پرداخت: ${isWalletTopup ? "شارژ کیف پول 🏦" : "پرداخت سفارش"}`,
     `وضعیت: ${escapeHtml(statusLabel(payment.status))}`,
     `کاربر: ${escapeHtml(userLabel(payment))} | <code>${payment.user.telegramId}</code>`,
     `نام: ${escapeHtml([payment.user.firstName, payment.user.lastName].filter(Boolean).join(" ") || "-")}`,
     `مبلغ: <b>${formatToman(payment.amountToman)}</b>`,
-    `درگاه: ${escapeHtml(payment.gateway?.name ?? "-")} (${payment.gateway?.type ?? "-"})`,
+    `روش پرداخت: ${escapeHtml(payment.gateway?.name ?? "-")} (${payment.gateway?.type ?? "-"})`,
     `پیش‌فاکتور: <code>${escapeHtml(payment.checkoutSessionId?.slice(0, 8) ?? "-")}</code>`,
+    ...(payment.orderId === null
+      ? []
+      : [`سفارش: <code>${escapeHtml(payment.orderId.slice(0, 8))}</code>`]),
     ...(isWalletTopup ? [] : [`محصول: ${escapeHtml(String(snapshot.productName ?? "-"))}`]),
     `نوع رسید: ${receiptKind}`,
   ];
@@ -378,35 +419,175 @@ receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
   if (payment.status === PaymentStatus.REJECTED && payment.rejectReason !== null) {
     lines.push(`دلیل رد: ${escapeHtml(payment.rejectReason)}`);
   }
-  lines.push(`ثبت: ${payment.createdAt.toISOString().replace("T", " ").slice(0, 16)} (UTC)`);
+  lines.push(`ثبت: ${formatUtc(payment.createdAt)}`);
+  if (payment.reviewedAt !== null) {
+    lines.push(`بررسی: ${formatUtc(payment.reviewedAt)}`);
+  }
+  return lines.join("\n");
+}
 
+/**
+ * Receipt detail keyboard (Fix B). Approve/reject only while PENDING_REVIEW;
+ * media/details and the user-management jumps always; backs go to the
+ * current list page and the finance landing. No wallet mutation and no user
+ * block happens here - those buttons only NAVIGATE to the existing admin
+ * user pages with their own confirmation flows.
+ */
+export function receiptDetailKeyboard(
+  payment: PaymentWithRelations,
+  listPage: number,
+): InlineKeyboard {
+  const sid = paymentShortId(payment);
   const kb = new InlineKeyboard();
   if (payment.status === PaymentStatus.PENDING_REVIEW) {
-    kb.text("تایید رسید ✅", rcb.approveAsk(paymentShortId(payment)))
-      .text("رد رسید ❌", rcb.reject(paymentShortId(payment)))
-      .row();
+    kb.text("تایید رسید ✅", rcb.approveAsk(sid)).text("رد رسید ❌", rcb.reject(sid)).row();
   }
-  kb.text("بازگشت به لیست", rcb.list(1)).row().text("بازگشت به ادمین", CB.ADMIN_MENU);
-  await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
+  kb.text("ارسال/مشاهده رسید و مشخصات 🧾", rcb.media(sid)).row();
+  kb.text("افزایش موجودی کاربر 💰", rcb.userWallet(sid))
+    .text("مدیریت/مسدودسازی کاربر 👤", rcb.userView(sid))
+    .row();
+  kb.text("بازگشت به لیست", rcb.list(listPage)).text("بازگشت به مالی", CB.ADMIN_FINANCE);
+  return kb;
+}
 
-  // Phase 21.1: forward the actual receipt media next to the detail text.
-  // ManualReceipt stores no media kind, so photo is tried first and
-  // document is the fallback; failures never break the review screen.
-  if (receipt?.fileId != null && ctx.chat !== undefined) {
-    const caption = `رسید ${paymentShortId(payment)} 🧾`;
+receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
+  clearReceiptReviewFlow(ctx);
+  // A return-to-receipt jump (if any) is consumed by arriving here.
+  delete ctx.session.temp.adminUserReturnContext;
+  const payment = await getPaymentByShortId(ctx.match[1]);
+  if (payment === null) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  // Fix B: the stored media is NOT auto-forwarded on every render anymore -
+  // «ارسال/مشاهده رسید و مشخصات 🧾» sends it on demand.
+  await safeEditOrReply(
+    ctx,
+    receiptDetailText(payment),
+    receiptDetailKeyboard(payment, receiptListPage(ctx)),
+    HTML,
+  );
+});
+
+// --- on-demand receipt media / details (Fix B) ---------------------------------
+
+export type ReceiptMediaOutcome =
+  | { kind: "photo" | "document" }
+  | { kind: "text"; text: string }
+  | { kind: "none" }
+  | { kind: "failed" };
+
+/**
+ * Sends the stored receipt media (photo first, document fallback) or returns
+ * the receipt text. Never throws; never logs file ids.
+ */
+export async function sendReceiptMedia(
+  api: Pick<BotContext["api"], "sendPhoto" | "sendDocument">,
+  chatId: number | string,
+  payment: PaymentWithRelations,
+): Promise<ReceiptMediaOutcome> {
+  const receipt = latestReceipt(payment);
+  if (receipt === undefined) {
+    return { kind: "none" };
+  }
+  if (receipt.fileId === null || receipt.fileId === "") {
+    if (receipt.text !== null && receipt.text !== "") {
+      return { kind: "text", text: receipt.text };
+    }
+    return { kind: "none" };
+  }
+  const caption = `رسید ${paymentShortId(payment)} 🧾 | ${userLabel(payment)} | ${formatToman(payment.amountToman)}`;
+  try {
+    await api.sendPhoto(chatId, receipt.fileId, { caption });
+    return { kind: "photo" };
+  } catch {
     try {
-      await ctx.api.sendPhoto(ctx.chat.id, receipt.fileId, { caption });
-    } catch {
-      try {
-        await ctx.api.sendDocument(ctx.chat.id, receipt.fileId, { caption });
-      } catch (err) {
-        logger.warn("receipt media forward failed", {
-          paymentId: payment.id,
-          error: errorMessage(err),
-        });
-      }
+      await api.sendDocument(chatId, receipt.fileId, { caption });
+      return { kind: "document" };
+    } catch (err) {
+      logger.warn("receipt media send failed", {
+        paymentId: payment.id,
+        error: errorMessage(err),
+      });
+      return { kind: "failed" };
     }
   }
+}
+
+receiptsHandler.callbackQuery(/^admin:rec:media:([0-9a-f-]+)$/, async (ctx) => {
+  const payment = await getPaymentByShortId(ctx.match[1]);
+  if (payment === null || ctx.chat === undefined) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+  const outcome = await sendReceiptMedia(ctx.api, ctx.chat.id, payment);
+  if (outcome.kind === "none") {
+    await safeAnswerCallback(ctx, "فایل یا متن رسید ثبت نشده است.");
+    return;
+  }
+  if (outcome.kind === "failed") {
+    await safeAnswerCallback(ctx, "ارسال فایل رسید ناموفق بود ⚠️");
+    return;
+  }
+  if (outcome.kind === "text") {
+    await safeAnswerCallback(ctx);
+    await safeReply(
+      ctx,
+      `متن رسید ${paymentShortId(payment)} 🧾\n${userLabel(payment)} | ${formatToman(payment.amountToman)}\n\n${outcome.text}`,
+    );
+    return;
+  }
+  await safeAnswerCallback(ctx, "رسید ارسال شد ✅");
+});
+
+// --- jumps into the existing admin user management (Fix B) ----------------------
+// NAVIGATION ONLY: no wallet mutation and no block happens from the receipt
+// pages. The existing Phase 20 pages own the increase/decrease confirmation
+// flow; the return context brings the admin back to this receipt.
+
+function setReceiptReturnContext(ctx: BotContext, paymentId: string): void {
+  ctx.session.temp.adminUserReturnContext = {
+    kind: "receipt",
+    receiptId: paymentId,
+    receiptPage: receiptListPage(ctx),
+  };
+}
+
+// «مدیریت/مسدودسازی کاربر 👤» -> the existing user profile page.
+receiptsHandler.callbackQuery(/^admin:rec:user:([0-9a-f-]+)$/, async (ctx) => {
+  const payment = await getPaymentByShortId(ctx.match[1]);
+  if (payment === null) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+  setReceiptReturnContext(ctx, payment.id);
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    userProfileText(payment.user),
+    userProfileKeyboard(userShortId(payment.user), false, paymentShortId(payment)),
+    HTML,
+  );
+});
+
+// «افزایش موجودی کاربر 💰» -> the existing user wallet page (its own
+// increase/decrease buttons + confirmation flow).
+receiptsHandler.callbackQuery(/^admin:rec:uwallet:([0-9a-f-]+)$/, async (ctx) => {
+  const payment = await getPaymentByShortId(ctx.match[1]);
+  if (payment === null) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+  setReceiptReturnContext(ctx, payment.id);
+  await safeAnswerCallback(ctx);
+  const transactions = await listUserWalletTransactionsForAdmin(payment.user.id, 5);
+  await safeEditOrReply(
+    ctx,
+    userWalletText(payment.user, transactions),
+    userWalletKeyboard(userShortId(payment.user), paymentShortId(payment)),
+    HTML,
+  );
 });
 
 // --- approval (confirmation first, Phase 8.1) -----------------------------------
@@ -469,7 +650,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
         result.user,
         walletTopupSuccessNotice(result.amountToman, result.newBalanceToman),
       );
-      await safeEditOrReply(ctx, result.message, backKeyboard());
+      await safeEditOrReply(ctx, result.message, backKeyboard(ctx));
       return;
     }
 
@@ -483,7 +664,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       await safeEditOrReply(
         ctx,
         "رسید تایید شد ✅\n\nOrder ساخته شد.\nساخت سرویس شروع شد.",
-        backKeyboard(),
+        backKeyboard(ctx),
       );
       await runProvisioningAfterApproval(ctx, result.order.id, result.user);
       return;
@@ -493,7 +674,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       await safeEditOrReply(
         ctx,
         "رسید تایید شد ✅\n\nOrder ساخته شد.\nتمدید سرویس شروع شد.",
-        backKeyboard(),
+        backKeyboard(ctx),
       );
       await runRenewalAfterApproval(ctx, result.order.id, result.user);
       return;
@@ -503,7 +684,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       await safeEditOrReply(
         ctx,
         "رسید تایید شد ✅\n\nOrder ساخته شد.\nافزایش حجم سرویس شروع شد.",
-        backKeyboard(),
+        backKeyboard(ctx),
       );
       await runExtraVolumeAfterApproval(ctx, result.order.id, result.user);
       return;
@@ -513,7 +694,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       await safeEditOrReply(
         ctx,
         "رسید تایید شد ✅\n\nOrder ساخته شد.\nافزایش زمان سرویس شروع شد.",
-        backKeyboard(),
+        backKeyboard(ctx),
       );
       await runExtraTimeAfterApproval(ctx, result.order.id, result.user);
       return;
@@ -537,7 +718,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
         await safeEditOrReply(
           ctx,
           "رسید تایید شد ✅\n\nسفارش استاک به صورت خودکار تحویل شد 🎟",
-          backKeyboard(),
+          backKeyboard(ctx),
         );
         return;
       }
@@ -567,7 +748,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
         await safeEditOrReply(
           ctx,
           "رسید تایید شد ✅\n\nسفارش ثبت شد اما ساخت سفارش دستی با خطا مواجه شد؛ از بخش سفارش‌های دستی پیگیری کنید.",
-          backKeyboard(),
+          backKeyboard(ctx),
         );
         return;
       }
@@ -608,14 +789,14 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
         new InlineKeyboard()
           .text("مشاهده سفارش 📦", `admin:mo:view:${init.record.id.slice(0, 8)}`)
           .row()
-          .text("بازگشت به لیست رسیدها", rcb.list(1))
+          .text("بازگشت به لیست رسیدها", rcb.list(receiptListPage(ctx)))
           .row()
-          .text("بازگشت به ادمین", CB.ADMIN_MENU),
+          .text("بازگشت به مالی", CB.ADMIN_FINANCE),
       );
       return;
     }
     await notifyUserSafe(ctx, result.user, approvalUserNotice(result.orderType));
-    await safeEditOrReply(ctx, result.message, backKeyboard());
+    await safeEditOrReply(ctx, result.message, backKeyboard(ctx));
   } catch (err) {
     logger.error("receipt approval failed", { paymentId: payment.id, error: errorMessage(err) });
     await safeAnswerCallback(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.");
@@ -670,7 +851,7 @@ receiptReviewTextHandler.on("message:text", async (ctx, next) => {
   const paymentId = ctx.session.temp.rejectingPaymentId;
   if (paymentId === undefined) {
     clearReceiptReviewFlow(ctx);
-    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره از لیست رسیدها شروع کنید.", backKeyboard());
+    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره از لیست رسیدها شروع کنید.", backKeyboard(ctx));
     return;
   }
   const reason = text.trim();
@@ -684,7 +865,7 @@ receiptReviewTextHandler.on("message:text", async (ctx, next) => {
   try {
     const result = await rejectReceiptPayment(paymentId, admin, reason);
     if (!result.ok) {
-      await safeReply(ctx, result.error, backKeyboard());
+      await safeReply(ctx, result.error, backKeyboard(ctx));
       return;
     }
     logger.info("receipt rejected", { paymentId: result.payment.id, adminId: admin.id });
@@ -696,10 +877,10 @@ receiptReviewTextHandler.on("message:text", async (ctx, next) => {
     await safeReply(
       ctx,
       notified ? result.message : "رسید رد شد ❌\nاما ارسال پیام به کاربر ناموفق بود.",
-      backKeyboard(),
+      backKeyboard(ctx),
     );
   } catch (err) {
     logger.error("receipt rejection failed", { error: errorMessage(err) });
-    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.", backKeyboard());
+    await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.", backKeyboard(ctx));
   }
 });

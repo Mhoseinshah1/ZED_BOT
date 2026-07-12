@@ -92,19 +92,43 @@ for old Telegram keyboards even though their buttons are not on the root.
 | 3 | مدیریت کیف پول کاربران 👤 → `admin:users` (existing user-search entry; per-user wallet adjustments live on the admin user page) · گزارش مالی 📊 → `admin:fin:reports` |
 | 4 | بازگشت به پنل ادمین → `admin:menu` |
 
+## Admin receipts (Fix B)
+
+List: pending receipts, paginated, back → **finance landing**. Detail
+(«جزئیات رسید 🧾»): approve/reject only while PENDING_REVIEW, then
+ارسال/مشاهده رسید و مشخصات 🧾 (`admin:rec:media:<sid>`, on-demand media —
+never auto-forwarded), افزایش موجودی کاربر 💰 → existing user wallet page,
+مدیریت/مسدودسازی کاربر 👤 → existing user profile page (navigation only —
+mutations stay in the Phase 20 flows), بازگشت به لیست (current page) ·
+بازگشت به مالی. User pages reached from a receipt show
+«بازگشت به رسید 🧾»; the context clears on the users landing / admin menu.
+See `docs/corrective-ui-fix-b.md`.
+
+## OTHER_PRODUCT admin tree (Fix B)
+
+`admin:other_products` = «محصولات دیگر 🛍» landing: مدیریت محصولات دیگر 🛍
+(→ `admin:products`) / سفارش‌های دستی 📦 · در انتظار اطلاعات 📝 /
+آماده تحویل 🚚 · تاریخچه تحویل ✅ (the existing filter lists) /
+مدیریت موجودی استاک 🎟 / بازگشت به پنل ادمین. Manual-order details return
+to the same filter/page; lists carry the search button and return to the
+landing. Stock product pages expose status-filtered item lists
+(`admin:stock:items:<sid>:<a|r|x|d>:<page>`), item actions return to the
+same list, DELIVERED/DISABLED items are read-only, content stays
+masked-preview-only.
+
 ## Back navigation
 
-- Finance children (methods, settings, reports) → `FIN_CB.root`;
+- Finance children (methods, settings, reports, receipts) → `FIN_CB.root`;
   finance root → `CB.ADMIN_MENU`.
 - Wallet transaction list → `WALLET_CB.MAIN` (+ منو).
-- Receipt pages keep their existing backs to `CB.ADMIN_MENU`
-  (receipt submenus are locked; the finance landing is one tap away).
+- Manual orders / stock → direct parents (landing ← lists ← details).
 - Renewal plan selection keeps its existing back to the renewal list
   (`user:renew:list:1`) even when entered from the service detail —
   deliberate: a detail-aware back would need fragile session state.
 
 ## Deferred (documented, NOT implemented)
 
-- Receipt-detail extra actions → Corrective Fix B.
+- User block/unblock (no existing implementation — not invented in Fix B).
+- OTHER_PRODUCT-filtered product management list.
 - Service transfer, per-service user note, QR code on service detail.
 - Detail-aware back from the renewal plan page.
