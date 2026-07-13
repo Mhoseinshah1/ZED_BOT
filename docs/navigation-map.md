@@ -1,5 +1,17 @@
 # ZED_BOT navigation map
 
+> **Persian text alignment phase**: visible labels across the tree were
+> aligned with `ZED_BOT_Master_Requirements_FA.docx` (see
+> `docs/persian-text-alignment.md`). Row order inside two-button rows
+> follows the document's right/left tables under the project convention
+> (first array item = the document's RIGHT column). Service-detail rows
+> 2/4/8 were reordered accordingly (لینک اشتراک 🔗+کانفیگ‌ها 📄 · تمدید
+> سرویس ♻️+خرید حجم اضافه ➕ · بازگشت به لیست+بازگشت به منوی اصلی), the
+> pre-invoice buttons became «پرداخت / تایید خرید ✅» / «ثبت کد تخفیف 🎟» /
+> «بازگشت», the card-to-card screen gained «پرداخت کردم ✅» / «بازگشت»,
+> and the admin root row labels gained their 🖥/📦/📊 emojis. Callback
+> data did NOT change anywhere - labels only.
+
 The Telegram navigation tree as of **Corrective UI/UX Fixes A–D** — every
 page, its keyboard and every button destination. Use this document to diff
 the implemented tree against the intended design and mark corrections per

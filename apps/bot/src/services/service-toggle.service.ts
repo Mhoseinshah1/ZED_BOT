@@ -43,7 +43,7 @@ export const TOGGLE_NOT_FOUND_TEXT = "مورد یافت نشد.";
 export const TOGGLE_UNAVAILABLE_TEXT = "امکان تغییر وضعیت این سرویس وجود ندارد.";
 export const TOGGLE_EXPIRED_TEXT = "این سرویس منقضی شده و ابتدا باید تمدید شود.";
 export const TOGGLE_FAILED_TEXT =
-  "تغییر وضعیت سرویس با خطا مواجه شد. لطفاً بعداً دوباره تلاش کنید.";
+  "تغییر وضعیت سرویس انجام نشد. لطفاً کمی بعد دوباره تلاش کنید.";
 export const TOGGLE_ALREADY_DONE_TEXT = "وضعیت سرویس قبلاً همین حالت بوده است.";
 export const TOGGLE_DISABLED_OK_TEXT = "سرویس با موفقیت غیرفعال شد.";
 export const TOGGLE_ENABLED_OK_TEXT = "سرویس با موفقیت فعال شد.";

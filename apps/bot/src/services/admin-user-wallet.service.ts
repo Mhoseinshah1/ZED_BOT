@@ -40,7 +40,7 @@ export const REASON_MIN_LENGTH = 3;
 export const REASON_MAX_LENGTH = 500;
 
 export const TARGET_NOT_FOUND_TEXT = "کاربر یافت نشد.";
-export const INSUFFICIENT_USER_BALANCE_TEXT = "موجودی کاربر کافی نیست.";
+export const INSUFFICIENT_USER_BALANCE_TEXT = "موجودی کاربر نمی‌تواند منفی شود.";
 export const ADJUST_FAILED_TEXT = "ثبت تغییر موجودی با خطا مواجه شد. لطفاً دوباره تلاش کنید.";
 export const INVALID_AMOUNT_TEXT = "مبلغ نامعتبر است.";
 export const INVALID_REASON_TEXT = `دلیل باید بین ${REASON_MIN_LENGTH} تا ${REASON_MAX_LENGTH} کاراکتر باشد.`;

@@ -109,18 +109,18 @@ export function walletSummaryText(summary: WalletSummary, headerText: string): s
   return [
     escapeHtml(headerText),
     "",
-    `شناسه عددی تلگرام: <code>${user.telegramId}</code>`,
+    `آیدی عددی: <code>${user.telegramId}</code>`,
     `نام: ${fullName === "" ? "-" : escapeHtml(fullName)}`,
     `نام کاربری: ${user.username === null ? "-" : `@${escapeHtml(user.username)}`}`,
-    `شماره تماس: ${user.phoneNumber === null ? "ثبت نشده" : escapeHtml(user.phoneNumber)}`,
-    `زمان ثبت‌نام: ${formatDate(user.joinedAt)}`,
+    `شماره موبایل: ${user.phoneNumber === null ? "ثبت نشده" : escapeHtml(user.phoneNumber)}`,
+    `تاریخ ثبت‌نام: ${formatDate(user.joinedAt)}`,
     `گروه کاربری: ${GROUP_LABELS[user.group] ?? user.group}`,
     "",
-    `موجودی کیف پول: <b>${formatToman(user.balanceToman)}</b>`,
+    `موجودی: <b>${formatToman(user.balanceToman)}</b>`,
     "",
     `تعداد سرویس‌ها: ${summary.totalServices}`,
-    `سفارش‌های در انتظار پرداخت/بررسی: ${summary.pendingOrders}`,
-    `تعداد زیرمجموعه‌ها: ${summary.referralCount}`,
+    `سفارش‌های پرداخت‌نشده: ${summary.pendingOrders}`,
+    `تعداد زیرمجموعه: ${summary.referralCount}`,
   ].join("\n");
 }
 

@@ -198,11 +198,11 @@ walletTopupTextHandler.on("message:text", async (ctx, next) => {
   }
   const limits = await walletTopupLimits();
   if (amount < limits.minToman) {
-    await safeReply(ctx, `حداقل مبلغ شارژ کیف پول ${formatToman(limits.minToman)} است.`);
+    await safeReply(ctx, `حداقل مبلغ شارژ ${formatToman(limits.minToman)} است.`);
     return;
   }
   if (amount > limits.maxToman) {
-    await safeReply(ctx, `حداکثر مبلغ شارژ کیف پول ${formatToman(limits.maxToman)} است.`);
+    await safeReply(ctx, `حداکثر مبلغ شارژ ${formatToman(limits.maxToman)} است.`);
     return;
   }
   draft.amountToman = amount;

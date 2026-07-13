@@ -34,10 +34,10 @@ export const TICKET_MESSAGES_PREVIEW_LIMIT = 10;
 
 export const INVALID_TICKET_SUBJECT_TEXT = `موضوع تیکت باید بین ${TICKET_SUBJECT_MIN} تا ${TICKET_SUBJECT_MAX} کاراکتر باشد.`;
 export const INVALID_TICKET_MESSAGE_TEXT = `متن پیام باید بین ${TICKET_MESSAGE_MIN} تا ${TICKET_MESSAGE_MAX} کاراکتر باشد.`;
-export const TICKET_CLOSED_TEXT = "این تیکت بسته شده است.";
+export const TICKET_CLOSED_TEXT = "این تیکت بسته شده است و امکان ارسال پاسخ جدید وجود ندارد.";
 export const TICKET_ALREADY_CLOSED_TEXT = "این تیکت قبلاً بسته شده است.";
 export const TICKET_NOT_FOUND_TEXT = "مورد یافت نشد.";
-export const TICKET_CLOSED_SYSTEM_MESSAGE = "تیکت بسته شد.";
+export const TICKET_CLOSED_SYSTEM_MESSAGE = "تیکت با موفقیت بسته شد.";
 
 export const TICKET_STATUS_ICON: Record<SupportTicketStatus, string> = {
   OPEN: "🟡",
@@ -430,5 +430,5 @@ export async function notifyUserTicketClosed(
   api: DeliverySendApi,
   ticketId: string,
 ): Promise<boolean> {
-  return notifyTicketUser(api, ticketId, "تیکت شما بسته شد ✅");
+  return notifyTicketUser(api, ticketId, "تیکت شما با موفقیت بسته شد.");
 }

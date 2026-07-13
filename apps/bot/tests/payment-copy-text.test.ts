@@ -50,9 +50,9 @@ describe("cardToCardKeyboard copy_text buttons", () => {
   });
 
   it("the rest of the keyboard still uses callback buttons", () => {
-    const receipt = buttons.find((b) => b.text === "ارسال رسید 🧾");
+    const receipt = buttons.find((b) => b.text === "پرداخت کردم ✅");
     expect(receipt).toHaveProperty("callback_data", "user:pay:receipt");
-    const back = buttons.find((b) => b.text === "بازگشت به روش‌های پرداخت");
+    const back = buttons.find((b) => b.text === "بازگشت");
     expect(back).toHaveProperty("callback_data", "user:pay:m:abcd1234");
   });
 });

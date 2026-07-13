@@ -110,7 +110,7 @@ describe("admin users tree (Fix C)", () => {
     expect(text).toContain("@u&lt;i&gt;x");
     expect(text).not.toContain("<b>bad");
     expect(text).toContain("مجموع شارژ (بستانکار): 750 تومان");
-    expect(text).toContain("مجموع خرید/کسر (بدهکار): 150 تومان");
+    expect(text).toContain("مجموع خرید/کاهش (بدهکار): 150 تومان");
     expect(text).toContain("سفارش‌های در انتظار: 1 | موفق: 3");
     expect(text).toContain("سرویس‌ها: 2 (فعال: 1)");
     expect(text).toContain("سفارش‌ها: 5 | پرداخت‌ها: 4 | تیکت‌ها: 2");

@@ -141,19 +141,19 @@ function resolveOrderType(
 /** Customer-facing approval notice, by what was bought. */
 export function approvalUserNotice(orderType: OrderType): string {
   if (orderType === OrderType.OTHER_PRODUCT) {
-    return "رسید پرداخت شما تایید شد ✅\n\nسفارش محصول شما ثبت شد و در انتظار مرحله تحویل است.";
+    return "پرداخت شما تایید شد ✅\n\nسفارش محصول شما ثبت شد و در انتظار مرحله تحویل است.";
   }
   if (orderType === OrderType.SERVICE_RENEWAL) {
-    return "رسید پرداخت شما تایید شد ✅\n\nتمدید سرویس شما در حال انجام است.";
+    return "پرداخت شما تایید شد ✅\n\nتمدید سرویس شما در حال انجام است.";
   }
   if (orderType === OrderType.EXTRA_VOLUME) {
-    return "رسید پرداخت شما تایید شد ✅\n\nافزایش حجم سرویس شما در حال انجام است.";
+    return "پرداخت شما تایید شد ✅\n\nافزایش حجم سرویس شما در حال انجام است.";
   }
   if (orderType === OrderType.EXTRA_TIME) {
-    return "رسید پرداخت شما تایید شد ✅\n\nافزایش زمان سرویس شما در حال انجام است.";
+    return "پرداخت شما تایید شد ✅\n\nافزایش زمان سرویس شما در حال انجام است.";
   }
   return (
-    "رسید پرداخت شما تایید شد ✅\n\n" +
+    "پرداخت شما تایید شد ✅\n\n" +
     "سفارش شما ثبت شد و در مرحله آماده‌سازی قرار گرفت.\n" +
     "ساخت سرویس در مرحله بعدی فعال می‌شود."
   );
@@ -166,11 +166,11 @@ export function rejectionUserNotice(
 ): string {
   const head =
     purpose === PaymentPurpose.WALLET_CHARGE
-      ? "رسید شارژ کیف پول شما رد شد ❌"
-      : "رسید پرداخت شما رد شد ❌";
+      ? "پرداخت شارژ کیف پول شما رد شد."
+      : "پرداخت شما رد شد.";
   return (
     `${head}\n\n` +
-    `دلیل رد:\n${reason}\n\n` +
+    `دلیل: ${reason}\n\n` +
     "لطفاً در صورت نیاز دوباره پرداخت را انجام دهید یا با پشتیبانی تماس بگیرید."
   );
 }
@@ -359,7 +359,7 @@ export async function approveReceiptPayment(
       order,
       user: payment.user,
       orderType,
-      message: "رسید تایید شد ✅\n\nOrder ساخته شد.\nساخت سرویس/تحویل در فاز بعدی انجام می‌شود.",
+      message: "رسید تایید شد ✅\n\nسفارش ساخته شد.\nساخت سرویس/تحویل در فاز بعدی انجام می‌شود.",
     };
   } catch (err) {
     if (err instanceof ReviewAbortError) {

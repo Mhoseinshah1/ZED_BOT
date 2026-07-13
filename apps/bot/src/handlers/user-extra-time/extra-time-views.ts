@@ -81,7 +81,7 @@ export function extraTimeSummaryText(service: Service): string {
         : `${formatGb(service.remainingBytes)} از ${formatGb(service.volumeBytes)} گیگابایت باقی‌مانده`
     }`,
     "",
-    "بسته زمان اضافه را انتخاب کنید:",
+    "تعداد روز اضافه را انتخاب کنید.",
   ].join("\n");
 }
 

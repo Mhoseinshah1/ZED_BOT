@@ -1,3 +1,4 @@
+import type { OtherProductOrderStatus, ServiceStatus } from "@zedbot/database";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -42,6 +43,30 @@ const REP_CB = {
   payment: (sid: string): string => `admin:fin:pay:${sid}`,
   order: (sid: string): string => `admin:fin:ord:${sid}`,
 } as const;
+
+// Persian labels for the linked-record status lines (raw enums never render).
+// Wording matches the existing user/admin views (service-views.ts and the
+// manual-orders handler).
+const SERVICE_STATUS_LABEL: Record<ServiceStatus, string> = {
+  ACTIVE: "فعال ✅",
+  DISABLED: "غیرفعال ⏸",
+  EXPIRED: "منقضی ⌛",
+  LIMITED: "اتمام حجم 📦",
+  FAILED: "ناموفق ❌",
+  CREATING: "در حال ساخت ⏳",
+  DELETED: "حذف‌شده 🗑",
+};
+
+const MANUAL_ORDER_STATUS_LABEL: Record<OtherProductOrderStatus, string> = {
+  PAID: "پرداخت‌شده 💰",
+  WAITING_USER_INFO: "در انتظار اطلاعات کاربر 📝",
+  WAITING_ADMIN_DELIVERY: "آماده تحویل 📦",
+  DELIVERED: "تحویل شده ✅",
+  CANCELLED: "لغوشده 🚫",
+  REFUNDED: "برگشت‌خورده ↩️",
+  DELIVERY_CANCELLED_REFUNDED: "تحویل لغو و مبلغ برگشت داده شد ↩️",
+  DELIVERY_REJECTED_NO_REFUND: "تحویل رد شد (بدون برگشت وجه) ❌",
+};
 
 const ORDER_TYPE_ICON: Record<string, string> = {
   SERVICE_PURCHASE: "🔐",
@@ -255,10 +280,10 @@ async function renderOrderDetail(ctx: BotContext, order: AdminOrderDetail): Prom
     );
   }
   if (order.service !== null) {
-    lines.push(`سرویس: <code>${escapeHtml(order.service.username)}</code> | ${order.service.status}`);
+    lines.push(`سرویس: <code>${escapeHtml(order.service.username)}</code> | ${SERVICE_STATUS_LABEL[order.service.status]}`);
   }
   if (order.otherProductOrder !== null) {
-    lines.push(`سفارش دستی: <code>${order.otherProductOrder.id.slice(0, 8)}</code> | ${order.otherProductOrder.status}`);
+    lines.push(`سفارش دستی: <code>${order.otherProductOrder.id.slice(0, 8)}</code> | ${MANUAL_ORDER_STATUS_LABEL[order.otherProductOrder.status]}`);
   }
   if (order.stockDelivered) {
     lines.push("تحویل استاک: انجام شده ✅");

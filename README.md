@@ -257,6 +257,17 @@ Panel integrations have since been implemented (see
   API are detected and blocked as unsupported —
   `docs/xui-global-client-lifecycle.md`
 
+### Persian bot copy
+
+All Telegram-visible user and admin texts are Persian and aligned with the
+master requirements document (`docs/persian-text-alignment.md`). Reusable
+copy lives in operator-editable `MessageTemplate`/`ButtonText` rows whose
+defaults come from a single registry (`packages/database/src/seed-data.ts`;
+see `docs/text-system.md`, `docs/message-template-registry.md`,
+`docs/button-text-registry.md`). Template edits are validated against an
+explicit per-template variable list; secret-shaped variables can never be
+rendered. Callback data never derives from button labels.
+
 ## Development foundation
 
 ### Project structure

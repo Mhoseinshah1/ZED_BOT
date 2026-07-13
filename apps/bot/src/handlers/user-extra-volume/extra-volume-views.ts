@@ -76,7 +76,7 @@ export function extraVolumeSummaryText(service: Service): string {
     }`,
     `حجم: ${formatGb(service.remainingBytes)} از ${formatGb(service.volumeBytes)} گیگابایت باقی‌مانده`,
     "",
-    "بسته حجم اضافه را انتخاب کنید:",
+    "مقدار حجم اضافه را انتخاب کنید.",
   ].join("\n");
 }
 

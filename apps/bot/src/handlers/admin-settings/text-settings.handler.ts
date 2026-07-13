@@ -370,7 +370,7 @@ adminTextSettingsHandler.callbackQuery(/^admin:texts:reset_yes_t:([0-9a-f-]+)$/,
     return;
   }
   const outcome = await resetMessageTemplateToDefault(template.id, admin.id);
-  await safeAnswerCallback(ctx, outcome.ok ? "قالب بازنشانی شد ♻️" : outcome.safeMessage);
+  await safeAnswerCallback(ctx, outcome.ok ? "متن به مقدار پیش‌فرض بازنشانی شد ✅" : outcome.safeMessage);
   await renderTemplateDetail(ctx, outcome.ok ? outcome.template : template);
 });
 
@@ -385,7 +385,7 @@ adminTextSettingsHandler.callbackQuery(/^admin:texts:reset_yes_b:([0-9a-f-]+)$/,
     return;
   }
   const outcome = await resetButtonTextToDefault(button.id, admin.id);
-  await safeAnswerCallback(ctx, outcome.ok ? "دکمه بازنشانی شد ♻️" : outcome.safeMessage);
+  await safeAnswerCallback(ctx, outcome.ok ? "متن به مقدار پیش‌فرض بازنشانی شد ✅" : outcome.safeMessage);
   await renderButtonDetail(ctx, outcome.ok ? outcome.button : button);
 });
 
@@ -422,7 +422,7 @@ adminTextSettingsTextHandler.on("message:text", async (ctx, next) => {
       return;
     }
     clearAdminTextSettingsState(ctx);
-    await safeReply(ctx, "متن قالب به‌روزرسانی شد ✅");
+    await safeReply(ctx, "متن با موفقیت بروزرسانی شد ✅");
     await renderTemplateDetail(ctx, outcome.template);
     return;
   }
@@ -438,7 +438,7 @@ adminTextSettingsTextHandler.on("message:text", async (ctx, next) => {
       return;
     }
     clearAdminTextSettingsState(ctx);
-    await safeReply(ctx, "متن دکمه به‌روزرسانی شد ✅");
+    await safeReply(ctx, "متن با موفقیت بروزرسانی شد ✅");
     await renderButtonDetail(ctx, outcome.button);
     return;
   }

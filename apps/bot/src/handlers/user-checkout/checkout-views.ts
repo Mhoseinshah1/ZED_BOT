@@ -12,9 +12,9 @@ export const EMPTY_CATALOG_TEXT = "فعلاً محصولی برای این بخ�
 
 // Phase 11.1 panel-first purchase texts.
 export const NO_PANEL_TEXT = "در حال حاضر پنلی برای خرید فعال نیست.";
-export const PICK_PANEL_TEXT = "از کدام پنل می‌خواهید خرید کنید؟";
-export const PICK_CATEGORY_TEXT = "دسته‌بندی مورد نظر را انتخاب کنید.";
-export const PICK_PRODUCT_TEXT = "پلن مورد نظر را انتخاب کنید.";
+export const PICK_PANEL_TEXT = "انتخاب پنل / لوکیشن";
+export const PICK_CATEGORY_TEXT = "انتخاب دسته‌بندی";
+export const PICK_PRODUCT_TEXT = "انتخاب پلن";
 export const NO_CATEGORY_TEXT = "برای این پنل دسته‌بندی فعالی وجود ندارد.";
 export const NO_PRODUCT_TEXT = "پلنی برای این دسته‌بندی موجود نیست.";
 export const LEGACY_STEP_TEXT = "این مرحله حذف شده است. لطفاً دوباره خرید اشتراک را انتخاب کنید.";
@@ -94,19 +94,17 @@ export function preInvoiceText(
   user: User,
   draft: CheckoutDraft,
 ): string {
-  const lines = ["🧾 <b>پیش‌فاکتور</b>", "", `محصول: ${escapeHtml(product.name)}`];
-  lines.push(`دسته‌بندی: ${escapeHtml(product.category.name)}`);
+  const lines = ["🧾 <b>پیش‌فاکتور شما:</b>", "", `🌿 نام سرویس: ${escapeHtml(product.name)}`];
 
   if (product.type === "SERVICE_PRODUCT") {
     lines.push(
-      `پنل: ${escapeHtml(product.panel?.name ?? "-")}`,
-      `موقعیت: ${product.allLocations ? "همه موقعیت‌ها" : (LOCATION_LABEL[product.serviceLocation ?? ""] ?? "-")}`,
-      `حجم: ${volumeLabel(product.volumeGb)}`,
-      `مدت: ${durationLabel(product.durationDays)}`,
+      `🌐 لوکیشن: ${product.allLocations ? "همه موقعیت‌ها" : (LOCATION_LABEL[product.serviceLocation ?? ""] ?? "-")}`,
+      `⏳ مدت اعتبار: ${durationLabel(product.durationDays)}`,
+      `🧯 حجم سرویس: ${volumeLabel(product.volumeGb)}`,
     );
   } else {
     if (product.durationDays !== null && product.durationDays > 0) {
-      lines.push(`مدت/اعتبار: ${durationLabel(product.durationDays)}`);
+      lines.push(`⏳ مدت اعتبار: ${durationLabel(product.durationDays)}`);
     }
     lines.push(
       `نوع تحویل: ${product.deliveryType === null ? "-" : DELIVERY_LABEL[product.deliveryType]}`,
@@ -114,7 +112,7 @@ export function preInvoiceText(
   }
 
   if (product.invoiceDescription !== null && product.invoiceDescription !== "") {
-    lines.push("", escapeHtml(product.invoiceDescription));
+    lines.push(`📝 توضیح: ${escapeHtml(product.invoiceDescription)}`);
   }
 
   if (product.type === "OTHER_PRODUCT" && product.requiredUserInfoEnabled) {
@@ -125,18 +123,18 @@ export function preInvoiceText(
     );
   }
 
-  lines.push("", `قیمت: ${formatToman(draft.originalPriceToman)}`);
+  lines.push("");
   if (draft.discountCode !== undefined) {
     lines.push(
+      `💵 قیمت اصلی: ${formatToman(draft.originalPriceToman)}`,
+      `🎟 تخفیف: ${formatToman(draft.discountAmountToman)}`,
       `کد تخفیف: <code>${escapeHtml(draft.discountCode)}</code>`,
-      `مبلغ تخفیف: ${formatToman(draft.discountAmountToman)}`,
+      `✅ <b>مبلغ نهایی: ${formatToman(draft.finalPriceToman)}</b>`,
     );
+  } else {
+    lines.push(`💵 قیمت: ${formatToman(draft.originalPriceToman)}`);
   }
-  lines.push(
-    `<b>مبلغ قابل پرداخت: ${formatToman(draft.finalPriceToman)}</b>`,
-    "",
-    `موجودی کیف پول شما: ${formatToman(user.balanceToman)}`,
-  );
+  lines.push("", `🏦 موجودی کیف پول: ${formatToman(user.balanceToman)}`);
   if (
     product.type === "SERVICE_PRODUCT" &&
     draft.finalPriceToman > 0 &&
@@ -168,7 +166,7 @@ export function preInvoiceKeyboard(
   user: User,
   walletPaymentEnabled = true,
 ): InlineKeyboard {
-  const kb = new InlineKeyboard().text("ادامه و انتخاب روش پرداخت ✅", CO_CB.CONTINUE).row();
+  const kb = new InlineKeyboard().text("پرداخت / تایید خرید ✅", CO_CB.CONTINUE).row();
   if (
     walletPaymentEnabled &&
     draft.flowType === "SERVICE_PRODUCT" &&
@@ -177,7 +175,7 @@ export function preInvoiceKeyboard(
     kb.text("پرداخت با کیف پول 🏦", CO_CB.WALLET).row();
   }
   if (draft.discountCode === undefined) {
-    kb.text("وارد کردن کد تخفیف 🎁", CO_CB.DISCOUNT).row();
+    kb.text("ثبت کد تخفیف 🎟", CO_CB.DISCOUNT).row();
   } else {
     kb.text("حذف کد تخفیف ❌", CO_CB.DISCOUNT_CLEAR).row();
   }
@@ -187,7 +185,7 @@ export function preInvoiceKeyboard(
         ? ccb.buyCategory(draft.panelId.slice(0, 8), draft.categoryId.slice(0, 8))
         : CO_CB.BUY
       : ccb.otherCategory(draft.categoryId.slice(0, 8));
-  kb.text("بازگشت به محصولات", backCb).text("منوی اصلی", CB.USER_MENU);
+  kb.text("بازگشت", backCb).text("منوی اصلی", CB.USER_MENU);
   return kb;
 }
 
@@ -195,11 +193,21 @@ export function preInvoiceKeyboard(
 // (The "created" screen now lives in payment-views: method selection follows
 // checkout creation directly since Phase 7.)
 
+/** Persian labels for EVERY CheckoutStatus member (the raw enum never renders). */
+const CHECKOUT_STATUS_LABEL: Record<CheckoutSession["status"], string> = {
+  PENDING: "در انتظار پرداخت",
+  PAID: "پرداخت‌شده",
+  CANCELLED: "لغوشده",
+  EXPIRED: "منقضی‌شده",
+  FAILED_REFUNDED: "پرداخت ناموفق (مبلغ برگشت داده شد)",
+  COMPLETED: "تکمیل‌شده",
+};
+
 export function checkoutViewText(checkout: CheckoutSession): string {
   const snapshot = (checkout.productSnapshot ?? {}) as Record<string, unknown>;
   const isWalletTopup = checkout.purpose === "WALLET_CHARGE";
   const lines = [
-    "🧾 <b>پیش‌فاکتور ثبت‌شده</b>",
+    "🧾 <b>پیش‌فاکتور شما:</b>",
     "",
     ...(isWalletTopup
       ? [`نوع: ${escapeHtml(String(snapshot.title ?? "شارژ کیف پول"))} 🏦`]
@@ -215,8 +223,9 @@ export function checkoutViewText(checkout: CheckoutSession): string {
   lines.push(
     `<b>مبلغ قابل پرداخت: ${formatToman(checkout.finalPriceToman)}</b>`,
     "",
-    `وضعیت: ${checkout.status === "PENDING" ? "در انتظار پرداخت" : checkout.status}`,
-    `اعتبار تا: ${checkout.expiresAt.toISOString().replace("T", " ").slice(0, 16)} (UTC)`,
+    `وضعیت: ${CHECKOUT_STATUS_LABEL[checkout.status]}`,
+    `⏱ اعتبار پیش‌فاکتور: ${checkout.expiresAt.toISOString().replace("T", " ").slice(0, 16)} (UTC)`,
+    `🔎 کد پیگیری: <code>${checkout.id.slice(0, 8)}</code>`,
   );
   return lines.join("\n");
 }

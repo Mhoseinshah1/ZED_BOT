@@ -129,23 +129,24 @@ export function serviceListKeyboard(pageData: ServiceListPage): InlineKeyboard {
 export function serviceDetailText(service: Service): string {
   const days = remainingDays(service.expiresAt);
   const unlimitedVolume = service.volumeBytes === 0n;
-  const lines = [
-    `🛍 <b>${escapeHtml(service.productNameSnapshot ?? service.username)}</b>`,
-    "",
+  const lines = [`🛍 <b>${escapeHtml(service.productNameSnapshot ?? service.username)}</b>`, ""];
+  if (service.productNameSnapshot !== null) {
+    lines.push(`نام محصول: ${escapeHtml(service.productNameSnapshot)}`);
+  }
+  lines.push(
     `وضعیت: ${statusLabel(service.status)}`,
-    `نام کاربری: <code>${escapeHtml(service.username)}</code>`,
-    `پنل: ${escapeHtml(service.panelNameSnapshot ?? "-")}`,
-    `موقعیت: ${escapeHtml(locationLabel(service.serviceLocation))}`,
+    `نام سرویس: <code>${escapeHtml(service.username)}</code>`,
+    `لوکیشن / پنل: ${escapeHtml(locationLabel(service.serviceLocation))} — ${escapeHtml(service.panelNameSnapshot ?? "-")}`,
     "",
-    `حجم کل: ${unlimitedVolume ? "نامحدود" : `${formatGb(service.volumeBytes)} گیگابایت`}`,
-    `مصرف‌شده: ${formatGb(service.usedBytes)} گیگابایت`,
-    `باقی‌مانده: ${unlimitedVolume ? "نامحدود" : `${formatGb(service.remainingBytes)} گیگابایت`}`,
+    `ترافیک کل: ${unlimitedVolume ? "نامحدود" : `${formatGb(service.volumeBytes)} گیگابایت`}`,
+    `ترافیک مصرف‌شده: ${formatGb(service.usedBytes)} گیگابایت`,
+    `ترافیک باقی‌مانده: ${unlimitedVolume ? "نامحدود" : `${formatGb(service.remainingBytes)} گیگابایت`}`,
     "",
     `مدت: ${service.durationDays > 0 ? `${service.durationDays} روز` : "نامحدود"}`,
     `شروع: ${formatDate(service.startsAt)}`,
-    `انقضا: ${service.expiresAt === null ? "نامحدود" : formatDate(service.expiresAt)}`,
-    `روز باقی‌مانده: ${days === null ? "نامحدود" : `${days} روز`}`,
-  ];
+    `تاریخ اتمام: ${service.expiresAt === null ? "نامحدود" : formatDate(service.expiresAt)}`,
+    `روزهای باقی‌مانده: ${days === null ? "نامحدود" : `${days} روز`}`,
+  );
   if (service.lastConnectedAt !== null) {
     lines.push(`آخرین اتصال: ${formatDate(service.lastConnectedAt)}`);
   }
@@ -184,14 +185,15 @@ export function serviceDetailKeyboard(
   const sid = serviceShortId(service);
   // Row 1: refresh.
   const kb = new InlineKeyboard().text("بروزرسانی اطلاعات ♻️", svcCb.refresh(sid)).row();
-  // Row 2: configs + subscription link (only what is actually stored).
+  // Row 2: subscription link + configs (doc right/left order; only what is
+  // actually stored).
   const hasLink = service.subscriptionUrl !== null && service.subscriptionUrl !== "";
   const hasConfigs = serviceConfigLinks(service).length > 0;
-  if (hasConfigs) {
-    kb.text("کانفیگ‌ها 📄", svcCb.configs(sid));
-  }
   if (hasLink) {
     kb.text("لینک اشتراک 🔗", svcCb.link(sid));
+  }
+  if (hasConfigs) {
+    kb.text("کانفیگ‌ها 📄", svcCb.configs(sid));
   }
   if (hasLink || hasConfigs) {
     kb.row();
@@ -200,12 +202,12 @@ export function serviceDetailKeyboard(
   if (actions.canRegenerateLink) {
     kb.text("تغییر لینک 🔄", svcCb.regenLink(sid)).row();
   }
-  // Row 4: extra volume + renewal - both routes re-validate on click.
-  if (actions.canBuyExtraVolume) {
-    kb.text("خرید حجم اضافه ➕", evcb.service(sid));
-  }
+  // Row 4: renewal + extra volume - both routes re-validate on click.
   if (actions.canRenew) {
     kb.text("تمدید سرویس ♻️", rncb.service(sid));
+  }
+  if (actions.canBuyExtraVolume) {
+    kb.text("خرید حجم اضافه ➕", evcb.service(sid));
   }
   if (actions.canBuyExtraVolume || actions.canRenew) {
     kb.row();
@@ -224,8 +226,8 @@ export function serviceDetailKeyboard(
   // Row 7: support entry - routes into the existing ticket flow (tutorials
   // slot hidden - placeholder only).
   kb.text("مشکل دارم", CB.USER_SUPPORT).row();
-  // Row 8: back navigation.
-  kb.text("بازگشت به منوی اصلی", CB.USER_MENU).text("بازگشت به لیست", svcCb.list(1));
+  // Row 8: back navigation (doc right/left order).
+  kb.text("بازگشت به لیست", svcCb.list(1)).text("بازگشت به منوی اصلی", CB.USER_MENU);
   return kb;
 }
 

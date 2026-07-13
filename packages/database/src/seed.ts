@@ -1,6 +1,7 @@
 import { AdminRole, SettingType } from "@prisma/client";
 
 import { connectDatabase, disconnectDatabase, prisma } from "./client.js";
+import { INITIAL_BUTTON_TEXTS, INITIAL_MESSAGE_TEMPLATES } from "./seed-data.js";
 
 // =============================================================================
 // ZED_BOT seed - idempotent baseline data.
@@ -8,8 +9,12 @@ import { connectDatabase, disconnectDatabase, prisma } from "./client.js";
 // Rules:
 //   - Admins from ADMIN_TELEGRAM_IDS are upserted as OWNER (role/isActive are
 //     re-asserted on every run so an OWNER can always recover access).
-//   - Everything else is create-if-missing only: operator-edited settings,
-//     log topics, and message templates are NEVER overwritten.
+//   - Settings and log topics are create-if-missing only.
+//   - Message templates / button texts: created when missing; when the
+//     registry default changes, the stored DEFAULT is refreshed so
+//     reset-to-default returns the approved copy - but the CURRENT value is
+//     only moved along when the operator never customized it (current ===
+//     old default). Operator-edited texts are NEVER overwritten.
 //   - Product categories and products are intentionally NOT seeded: the
 //     operator creates them manually (with their own names) from the admin
 //     panel. A fresh install has an empty catalog. Payment gateways and card
@@ -66,145 +71,6 @@ const INITIAL_LOG_TOPICS: Array<{ key: string; title: string }> = [
   { key: "representative_bot_backup", title: "بکاپ ربات نماینده" },
 ];
 
-// Minimal message-template baseline. Final Persian copy is refined in later
-// phases; operators can already edit these safely (edits are never clobbered).
-const INITIAL_MESSAGE_TEMPLATES: Array<{
-  key: string;
-  title: string;
-  category: string;
-  defaultContent: string;
-}> = [
-  {
-    key: "start_text",
-    title: "پیام شروع",
-    category: "general",
-    defaultContent: "به ربات خوش آمدید.",
-  },
-  {
-    key: "bot_off_text",
-    title: "پیام خاموشی ربات",
-    category: "general",
-    defaultContent: "ربات در حال حاضر در دسترس نیست. لطفا بعدا مراجعه کنید.",
-  },
-  {
-    key: "support_text",
-    title: "پیام پشتیبانی",
-    category: "support",
-    defaultContent: "برای ارتباط با پشتیبانی پیام خود را ارسال کنید.",
-  },
-  {
-    key: "faq_text",
-    title: "سوالات متداول",
-    category: "general",
-    defaultContent: "سوالات متداول به زودی تکمیل می‌شود.",
-  },
-  // Corrective Fix A: wallet landing/top-up texts. The Phase 22
-  // Setting-backed top-up instruction and payment-page notice are NOT
-  // duplicated here.
-  {
-    key: "wallet_header_text",
-    title: "عنوان صفحه کیف پول",
-    category: "wallet",
-    defaultContent: "کیف پول و حساب کاربری 🏦",
-  },
-  {
-    key: "wallet_topup_amount_prompt",
-    title: "درخواست مبلغ شارژ کیف پول",
-    category: "wallet",
-    defaultContent: "مبلغ شارژ کیف پول را به تومان وارد کنید.",
-  },
-  {
-    key: "wallet_topup_preview_note",
-    title: "توضیح پیش‌فاکتور شارژ کیف پول",
-    category: "wallet",
-    defaultContent: "پس از تایید رسید توسط ادمین، موجودی کیف پول شما افزایش می‌یابد.",
-  },
-  {
-    key: "wallet_empty_transactions_text",
-    title: "پیام نبود تراکنش",
-    category: "wallet",
-    defaultContent: "تراکنشی ثبت نشده است.",
-  },
-  // Empty states (accepted UI texts, restored after the Phase 39 revert) -
-  // no variables.
-  {
-    key: "no_services_text",
-    title: "پیام نبود سرویس",
-    category: "empty_state",
-    defaultContent: "شما هنوز سرویسی ندارید.",
-  },
-  {
-    key: "no_orders_text",
-    title: "پیام نبود سفارش",
-    category: "empty_state",
-    defaultContent: "شما هنوز سفارشی ندارید.",
-  },
-  {
-    key: "no_tickets_text",
-    title: "پیام نبود تیکت",
-    category: "empty_state",
-    defaultContent: "هنوز تیکتی ثبت نکرده‌اید.",
-  },
-  // Corrective Fix D: support + history texts ({min}/{max} are rendered by
-  // the code with the real validation limits).
-  {
-    key: "support_landing_text",
-    title: "متن صفحه پشتیبانی",
-    category: "support",
-    defaultContent:
-      "از این بخش می‌توانید با پشتیبانی در ارتباط باشید و پاسخ تیکت‌های قبلی را پیگیری کنید.",
-  },
-  {
-    key: "support_subject_prompt",
-    title: "درخواست موضوع تیکت",
-    category: "support",
-    defaultContent: "موضوع تیکت را وارد کنید. ({min} تا {max} کاراکتر)",
-  },
-  {
-    key: "support_message_prompt",
-    title: "درخواست متن تیکت",
-    category: "support",
-    defaultContent: "متن پیام را بنویسید. (حداکثر {max} کاراکتر)",
-  },
-  {
-    key: "support_reply_prompt",
-    title: "درخواست پاسخ تیکت",
-    category: "support",
-    defaultContent: "پاسخ شما را بنویسید. (حداکثر {max} کاراکتر)",
-  },
-  {
-    key: "support_empty_tickets_text",
-    title: "پیام نبود تیکت (پشتیبانی)",
-    category: "support",
-    defaultContent: "هنوز تیکتی ثبت نکرده‌اید.",
-  },
-  {
-    key: "support_ticket_created_text",
-    title: "پیام ثبت تیکت",
-    category: "support",
-    defaultContent: "تیکت شما ثبت شد ✅",
-  },
-  {
-    key: "history_landing_text",
-    title: "متن صفحه سوابق",
-    category: "history",
-    defaultContent:
-      "سوابق سفارش‌ها، پرداخت‌ها و تراکنش‌های کیف پول شما در این بخش قابل مشاهده است.",
-  },
-  {
-    key: "no_payments_text",
-    title: "پیام نبود پرداخت",
-    category: "empty_state",
-    defaultContent: "هنوز پرداختی ثبت نشده است.",
-  },
-  {
-    key: "no_other_product_orders_text",
-    title: "پیام نبود سفارش محصولات دیگر",
-    category: "empty_state",
-    defaultContent: "شما هنوز سفارشی ندارید.",
-  },
-];
-
 async function seedAdmins(): Promise<number> {
   const ids = parseAdminTelegramIds(process.env.ADMIN_TELEGRAM_IDS);
   for (const telegramId of ids) {
@@ -241,46 +107,56 @@ async function seedLogTopics(): Promise<number> {
   return created;
 }
 
-// Baseline main-menu / navigation button texts. Final button set arrives
-// with the menu phase; operator edits are never clobbered.
-const INITIAL_BUTTON_TEXTS: Array<{ key: string; title: string; text: string }> = [
-  { key: "buy_subscription", title: "خرید اشتراک", text: "خرید اشتراک 🔐" },
-  { key: "renew_service", title: "تمدید سرویس", text: "تمدید سرویس ♻️" },
-  { key: "extra_volume", title: "خرید حجم اضافه", text: "خرید حجم اضافه ➕" },
-  { key: "extra_time", title: "خرید زمان اضافه", text: "خرید زمان اضافه ⏳" },
-  { key: "my_services", title: "سرویس‌های من", text: "سرویس‌های من 🛍" },
-  { key: "wallet", title: "کیف پول", text: "کیف پول + شارژ 🏦" },
-  { key: "support", title: "پشتیبانی", text: "پشتیبانی ☎️" },
-  { key: "tutorials", title: "آموزش", text: "آموزش 📚" },
-  { key: "free_test", title: "اشتراک رایگان تست", text: "اشتراک رایگان {تست}" },
-  { key: "referral", title: "زیرمجموعه گیری", text: "زیرمجموعه گیری 👥" },
-  { key: "other_products", title: "محصولات دیگر", text: "محصولات دیگر 🛍" },
-  { key: "my_orders", title: "سفارش‌های من", text: "سفارش‌های من 🧾" },
-  { key: "pricing", title: "تعرفه اشتراک‌ها", text: "تعرفه اشتراک‌ها 💵" },
-  { key: "representative_request", title: "درخواست نمایندگی", text: "درخواست نمایندگی 👨‍💼" },
-  { key: "lucky_wheel", title: "گردونه شانس", text: "گردونه شانس 🎲" },
-  { key: "back", title: "بازگشت", text: "بازگشت" },
-  { key: "main_menu", title: "منوی اصلی", text: "منوی اصلی" },
-  { key: "cancel", title: "لغو", text: "لغو ❌" },
-  { key: "confirm", title: "تایید", text: "تایید ✅" },
-  { key: "next", title: "بعدی", text: "بعدی »" },
-  { key: "previous", title: "قبلی", text: "« قبلی" },
-  // Corrective Fix D: support + history buttons.
-  { key: "new_ticket", title: "ایجاد تیکت جدید", text: "ایجاد تیکت جدید ➕" },
-  { key: "my_tickets", title: "تیکت‌های من", text: "تیکت‌های من 📋" },
-  { key: "reply_ticket", title: "پاسخ به تیکت", text: "پاسخ به تیکت ✍️" },
-  { key: "refresh", title: "بروزرسانی", text: "بروزرسانی ♻️" },
-  { key: "all_orders", title: "همه سفارش‌ها", text: "همه سفارش‌ها 📋" },
-  { key: "subscription_orders", title: "خرید اشتراک‌ها", text: "خرید اشتراک‌ها 🔐" },
-  { key: "other_product_orders", title: "سفارش‌های محصولات دیگر", text: "محصولات دیگر 🛍" },
-  { key: "payments", title: "پرداخت‌ها", text: "پرداخت‌ها 💳" },
-  { key: "wallet_transactions", title: "تراکنش‌های کیف پول", text: "تراکنش‌های کیف پول 🏦" },
-  { key: "back_to_support", title: "بازگشت به پشتیبانی", text: "بازگشت به پشتیبانی" },
-  { key: "back_to_history", title: "بازگشت به سوابق", text: "بازگشت به سوابق" },
-];
-
-async function seedButtonTexts(): Promise<number> {
+async function seedMessageTemplates(): Promise<{ created: number; refreshed: number }> {
   let created = 0;
+  let refreshed = 0;
+  for (const template of INITIAL_MESSAGE_TEMPLATES) {
+    const existing = await prisma.messageTemplate.findUnique({ where: { key: template.key } });
+    if (existing === null) {
+      await prisma.messageTemplate.create({
+        data: {
+          key: template.key,
+          title: template.title,
+          category: template.category,
+          defaultContent: template.defaultContent,
+          currentContent: template.defaultContent,
+          allowedVariables: template.allowedVariables,
+        },
+      });
+      created += 1;
+      continue;
+    }
+    const defaultChanged = existing.defaultContent !== template.defaultContent;
+    const variablesChanged =
+      JSON.stringify(existing.allowedVariables ?? []) !==
+      JSON.stringify(template.allowedVariables);
+    if (!defaultChanged && !variablesChanged) {
+      continue;
+    }
+    // Refresh the registry-owned fields. The operator's customized CURRENT
+    // value is untouched; an uncustomized current (=== old default) moves
+    // along with the approved default.
+    const uncustomized = existing.currentContent === existing.defaultContent;
+    await prisma.messageTemplate.update({
+      where: { key: template.key },
+      data: {
+        title: template.title,
+        category: template.category,
+        defaultContent: template.defaultContent,
+        allowedVariables: template.allowedVariables,
+        ...(uncustomized && defaultChanged
+          ? { currentContent: template.defaultContent }
+          : {}),
+      },
+    });
+    refreshed += 1;
+  }
+  return { created, refreshed };
+}
+
+async function seedButtonTexts(): Promise<{ created: number; refreshed: number }> {
+  let created = 0;
+  let refreshed = 0;
   for (const button of INITIAL_BUTTON_TEXTS) {
     const existing = await prisma.buttonText.findUnique({ where: { key: button.key } });
     if (existing === null) {
@@ -293,9 +169,24 @@ async function seedButtonTexts(): Promise<number> {
         },
       });
       created += 1;
+      continue;
     }
+    if (existing.defaultText === button.text) {
+      continue;
+    }
+    // Same preserve-customizations rule as message templates.
+    const uncustomized = existing.currentText === existing.defaultText;
+    await prisma.buttonText.update({
+      where: { key: button.key },
+      data: {
+        title: button.title,
+        defaultText: button.text,
+        ...(uncustomized ? { currentText: button.text } : {}),
+      },
+    });
+    refreshed += 1;
   }
-  return created;
+  return { created, refreshed };
 }
 
 // Ensures the single global Telegram Stars pricing row exists; existing
@@ -311,41 +202,20 @@ async function seedStarsPricingSetting(): Promise<number> {
   return 1;
 }
 
-async function seedMessageTemplates(): Promise<number> {
-  let created = 0;
-  for (const template of INITIAL_MESSAGE_TEMPLATES) {
-    const existing = await prisma.messageTemplate.findUnique({ where: { key: template.key } });
-    if (existing === null) {
-      await prisma.messageTemplate.create({
-        data: {
-          key: template.key,
-          title: template.title,
-          category: template.category,
-          defaultContent: template.defaultContent,
-          currentContent: template.defaultContent,
-          allowedVariables: [],
-        },
-      });
-      created += 1;
-    }
-  }
-  return created;
-}
-
 async function main(): Promise<void> {
   await connectDatabase();
   const adminCount = await seedAdmins();
   const settingsCreated = await seedSettings();
   const logTopicsCreated = await seedLogTopics();
-  const templatesCreated = await seedMessageTemplates();
-  const buttonsCreated = await seedButtonTexts();
+  const templates = await seedMessageTemplates();
+  const buttons = await seedButtonTexts();
   const starsCreated = await seedStarsPricingSetting();
   console.log(
     `[seed] done: ${adminCount} OWNER admin(s) upserted, ` +
       `${settingsCreated}/${INITIAL_SETTINGS.length} setting(s) created, ` +
       `${logTopicsCreated}/${INITIAL_LOG_TOPICS.length} log topic(s) created, ` +
-      `${templatesCreated}/${INITIAL_MESSAGE_TEMPLATES.length} message template(s) created, ` +
-      `${buttonsCreated}/${INITIAL_BUTTON_TEXTS.length} button text(s) created, ` +
+      `${templates.created} template(s) created + ${templates.refreshed} default(s) refreshed, ` +
+      `${buttons.created} button text(s) created + ${buttons.refreshed} default(s) refreshed, ` +
       `${starsCreated} stars pricing row(s) created.`,
   );
   if (adminCount === 0) {

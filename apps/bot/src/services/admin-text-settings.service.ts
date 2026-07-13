@@ -1,6 +1,7 @@
 import { prisma, type ButtonText, type MessageTemplate } from "@zedbot/database";
 
 import { logger } from "../core/logger.js";
+import { validateTemplateContentVariables } from "./template-variables.js";
 import { clearTextCache } from "./text.service.js";
 
 // =============================================================================
@@ -85,6 +86,20 @@ export async function updateMessageTemplateContent(
   const clean = content.trim();
   if (clean.length < TEMPLATE_CONTENT_MIN || clean.length > TEMPLATE_CONTENT_MAX) {
     return { ok: false, safeMessage: INVALID_TEMPLATE_CONTENT_TEXT };
+  }
+  // Variable registry gate (TEXT-007): the edit may only use the row's
+  // explicit allowed variables; secret-shaped names never pass.
+  const existing = await prisma.messageTemplate.findUnique({ where: { id } });
+  if (existing === null) {
+    return { ok: false, safeMessage: TEXT_NOT_FOUND };
+  }
+  const variables = validateTemplateContentVariables(
+    existing.allowedVariables,
+    existing.defaultContent,
+    clean,
+  );
+  if (!variables.ok) {
+    return { ok: false, safeMessage: variables.safeMessage };
   }
   const updated = await prisma.messageTemplate.updateMany({
     where: { id, isEditable: true },

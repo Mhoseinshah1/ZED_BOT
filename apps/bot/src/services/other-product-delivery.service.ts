@@ -38,7 +38,7 @@ export const ALREADY_DELIVERED_TEXT = "این سفارش قبلاً تحویل �
 export const NOT_READY_TEXT = "این سفارش هنوز آماده تحویل نیست.";
 export const DELIVERY_SEND_FAILED_TEXT = "ارسال پیام به کاربر ناموفق بود؛ سفارش تحویل‌خورده نشد.";
 export const USER_INFO_SAVED_TEXT =
-  "اطلاعات سفارش ثبت شد ✅\nسفارش شما در انتظار تحویل توسط ادمین است.";
+  "اطلاعات شما با موفقیت ثبت شد و سفارش در انتظار تحویل است.";
 export const WAITING_DELIVERY_USER_TEXT = "سفارش شما ثبت شد و در انتظار تحویل توسط ادمین است.";
 
 export type ManualOrderWithRelations = OtherProductOrder & {
@@ -65,7 +65,7 @@ export function userInfoButtonKeyboard(orderId: string): InlineKeyboard {
 
 /** The prompt asking the user for the product's required information. */
 export function userInfoPromptText(promptText: string | null): string {
-  const lines = ["برای تکمیل سفارش، اطلاعات زیر را ارسال کنید:"];
+  const lines = ["اطلاعات موردنیاز برای این سفارش را ارسال کنید:"];
   if (promptText !== null && promptText !== "") {
     lines.push("", promptText);
   }
@@ -352,7 +352,7 @@ export interface DeliverySendApi {
 /** The message the buyer receives on delivery. */
 export function buildDeliveryUserMessage(productName: string, deliveryText: string): string {
   return [
-    "سفارش شما آماده شد ✅",
+    "محصول شما با موفقیت تحویل شد ✅",
     "",
     `محصول: ${escapeHtml(productName)}`,
     "",

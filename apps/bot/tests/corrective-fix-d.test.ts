@@ -2,7 +2,14 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { prisma, type Order, type Payment, type User } from "@zedbot/database";
+import {
+  INITIAL_BUTTON_TEXTS,
+  INITIAL_MESSAGE_TEMPLATES,
+  prisma,
+  type Order,
+  type Payment,
+  type User,
+} from "@zedbot/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 process.env.APP_SECRET ??= "fix-d-test-secret-fix-d-test-secret-1234";
@@ -177,27 +184,22 @@ describe("Fix D texts (fallbacks + seeds)", () => {
     "previous",
   ];
 
-  it("every key has a code fallback and a create-if-missing seed", async () => {
-    const textService = src("apps/bot/src/services/text.service.ts");
-    const seed = src("packages/database/src/seed.ts");
-    const templateBlock =
-      /INITIAL_MESSAGE_TEMPLATES[^=]*= \[([\s\S]*?)\n\];/.exec(seed)?.[1] ?? "";
-    const buttonBlock = /INITIAL_BUTTON_TEXTS[^=]*= \[([\s\S]*?)\n\];/.exec(seed)?.[1] ?? "";
+  it("every key has a registry default (fallbacks derive from it)", async () => {
+    // Fallbacks come from the seed registry (seed-data.ts) since the
+    // Persian text-alignment phase - assert the registry rows directly.
+    const templateKeys = INITIAL_MESSAGE_TEMPLATES.map((t) => t.key);
+    const buttonKeys = INITIAL_BUTTON_TEXTS.map((b) => b.key);
     for (const key of templates) {
-      expect(textService, `fallback for ${key}`).toContain(`${key}:`);
-      expect(templateBlock, `seed for ${key}`).toContain(`key: "${key}"`);
+      expect(templateKeys, `registry row for ${key}`).toContain(key);
       expect(await getMessageTemplate(key)).not.toBe(key);
     }
     for (const key of buttons) {
-      expect(textService, `fallback for ${key}`).toContain(`${key}: "`);
-      expect(buttonBlock, `seed for ${key}`).toContain(`key: "${key}"`);
+      expect(buttonKeys, `registry row for ${key}`).toContain(key);
       expect(await getButtonText(key)).not.toBe(key);
     }
-    // No duplicate keys within either seed array.
-    for (const block of [templateBlock, buttonBlock]) {
-      const keys = [...block.matchAll(/key: "([^"]+)"/g)].map((m) => m[1]);
-      expect(new Set(keys).size).toBe(keys.length);
-    }
+    // No duplicate keys within either registry.
+    expect(new Set(templateKeys).size).toBe(templateKeys.length);
+    expect(new Set(buttonKeys).size).toBe(buttonKeys.length);
   });
 
   it("prompts render the real validation limits via {min}/{max}", async () => {
@@ -205,7 +207,7 @@ describe("Fix D texts (fallbacks + seeds)", () => {
       await getMessageTemplate("support_subject_prompt", undefined, { min: 3, max: 100 }),
     ).toBe("موضوع تیکت را وارد کنید. (3 تا 100 کاراکتر)");
     expect(await getMessageTemplate("support_message_prompt", undefined, { max: 3000 })).toBe(
-      "متن پیام را بنویسید. (حداکثر 3000 کاراکتر)",
+      "پیام خود را برای پشتیبانی ارسال کنید. (حداکثر 3000 کاراکتر)",
     );
   });
 });

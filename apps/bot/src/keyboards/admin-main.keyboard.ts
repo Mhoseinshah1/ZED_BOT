@@ -18,8 +18,8 @@ export function buildAdminMainKeyboard(): InlineKeyboard {
     .text("مالی 💎", CB.ADMIN_FINANCE)
     .text("مدیریت کاربران 👤", CB.ADMIN_USERS)
     .row()
-    .text("مدیریت محصولات/پلن‌ها", CB.ADMIN_PRODUCTS)
-    .text("مدیریت پنل‌ها", CB.ADMIN_PANELS)
+    .text("مدیریت محصولات/پلن‌ها 📦", CB.ADMIN_PRODUCTS)
+    .text("مدیریت پنل‌ها 🖥", CB.ADMIN_PANELS)
     .row()
     .text("محصولات دیگر / سفارش‌های محصولات دیگر", CB.ADMIN_OTHER_PRODUCTS)
     .row()
@@ -27,5 +27,5 @@ export function buildAdminMainKeyboard(): InlineKeyboard {
     .text("پیام همگانی 📣", CB.ADMIN_BROADCAST)
     .row()
     .text("تنظیمات عمومی ⚙️", CB.ADMIN_GENERAL_SETTINGS)
-    .text("گزارشات / بکاپ", CB.ADMIN_REPORTS_BACKUP);
+    .text("گزارشات / بکاپ 📊", CB.ADMIN_REPORTS_BACKUP);
 }

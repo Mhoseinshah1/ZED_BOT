@@ -71,7 +71,7 @@ import {
 
 const HTML = { parseMode: "HTML" as const };
 const REJECT_REASON_PROMPT =
-  "دلیل رد رسید را بنویسید (۱ تا ۱۰۰۰ کاراکتر).\n" +
+  "دلیل رد پرداخت را وارد کنید. (۱ تا ۱۰۰۰ کاراکتر)\n" +
   "همین متن عیناً برای کاربر ارسال می‌شود.";
 
 /** Exported for tests and for the admin-users "بازگشت به رسید 🧾" button. */
@@ -440,10 +440,10 @@ export function receiptDetailKeyboard(
   const sid = paymentShortId(payment);
   const kb = new InlineKeyboard();
   if (payment.status === PaymentStatus.PENDING_REVIEW) {
-    kb.text("تایید رسید ✅", rcb.approveAsk(sid)).text("رد رسید ❌", rcb.reject(sid)).row();
+    kb.text("تایید پرداخت ✅", rcb.approveAsk(sid)).text("رد پرداخت ❌", rcb.reject(sid)).row();
   }
-  kb.text("ارسال/مشاهده رسید و مشخصات 🧾", rcb.media(sid)).row();
-  kb.text("افزایش موجودی کاربر 💰", rcb.userWallet(sid))
+  kb.text("مشاهده رسید و مشخصات 🧾", rcb.media(sid)).row();
+  kb.text("مدیریت کیف پول کاربر 💰", rcb.userWallet(sid))
     .text("مدیریت/مسدودسازی کاربر 👤", rcb.userView(sid))
     .row();
   kb.text("بازگشت به لیست", rcb.list(listPage)).text("بازگشت به مالی", CB.ADMIN_FINANCE);
@@ -461,7 +461,7 @@ receiptsHandler.callbackQuery(/^admin:rec:view:([0-9a-f-]+)$/, async (ctx) => {
   }
   await safeAnswerCallback(ctx);
   // Fix B: the stored media is NOT auto-forwarded on every render anymore -
-  // «ارسال/مشاهده رسید و مشخصات 🧾» sends it on demand.
+  // «مشاهده رسید و مشخصات 🧾» sends it on demand.
   await safeEditOrReply(
     ctx,
     receiptDetailText(payment),
@@ -571,7 +571,7 @@ receiptsHandler.callbackQuery(/^admin:rec:user:([0-9a-f-]+)$/, async (ctx) => {
   );
 });
 
-// «افزایش موجودی کاربر 💰» -> the existing user wallet page (its own
+// «مدیریت کیف پول کاربر 💰» -> the existing user wallet page (its own
 // increase/decrease buttons + confirmation flow).
 receiptsHandler.callbackQuery(/^admin:rec:uwallet:([0-9a-f-]+)$/, async (ctx) => {
   const payment = await getPaymentByShortId(ctx.match[1]);
@@ -592,7 +592,7 @@ receiptsHandler.callbackQuery(/^admin:rec:uwallet:([0-9a-f-]+)$/, async (ctx) =>
 
 // --- approval (confirmation first, Phase 8.1) -----------------------------------
 
-// Step 1: «تایید رسید ✅» only opens a confirmation screen - nothing changes yet.
+// Step 1: «تایید پرداخت ✅» only opens a confirmation screen - nothing changes yet.
 receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+)$/, async (ctx) => {
   clearReceiptReviewFlow(ctx);
   const payment = await getPaymentByShortId(ctx.match[1]);
@@ -608,7 +608,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+)$/, async (ctx) => {
   const sid = paymentShortId(payment);
   await safeEditOrReply(
     ctx,
-    "آیا از تایید این رسید مطمئن هستید؟",
+    "آیا از تایید این پرداخت مطمئن هستید؟",
     new InlineKeyboard()
       .text("تایید نهایی ✅", rcb.approveConfirm(sid))
       .row()
@@ -663,7 +663,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       // Phase 9: provision the PAID order right away (synchronously).
       await safeEditOrReply(
         ctx,
-        "رسید تایید شد ✅\n\nOrder ساخته شد.\nساخت سرویس شروع شد.",
+        "رسید تایید شد ✅\n\nسفارش ساخته شد.\nساخت سرویس شروع شد.",
         backKeyboard(ctx),
       );
       await runProvisioningAfterApproval(ctx, result.order.id, result.user);
@@ -673,7 +673,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       // Phase 12: renew the existing panel account + Service right away.
       await safeEditOrReply(
         ctx,
-        "رسید تایید شد ✅\n\nOrder ساخته شد.\nتمدید سرویس شروع شد.",
+        "رسید تایید شد ✅\n\nسفارش ساخته شد.\nتمدید سرویس شروع شد.",
         backKeyboard(ctx),
       );
       await runRenewalAfterApproval(ctx, result.order.id, result.user);
@@ -683,7 +683,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       // Phase 16: apply the purchased volume right away.
       await safeEditOrReply(
         ctx,
-        "رسید تایید شد ✅\n\nOrder ساخته شد.\nافزایش حجم سرویس شروع شد.",
+        "رسید تایید شد ✅\n\nسفارش ساخته شد.\nافزایش حجم سرویس شروع شد.",
         backKeyboard(ctx),
       );
       await runExtraVolumeAfterApproval(ctx, result.order.id, result.user);
@@ -693,7 +693,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       // Phase 17: apply the purchased time right away.
       await safeEditOrReply(
         ctx,
-        "رسید تایید شد ✅\n\nOrder ساخته شد.\nافزایش زمان سرویس شروع شد.",
+        "رسید تایید شد ✅\n\nسفارش ساخته شد.\nافزایش زمان سرویس شروع شد.",
         backKeyboard(ctx),
       );
       await runExtraTimeAfterApproval(ctx, result.order.id, result.user);
@@ -726,7 +726,7 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
         await notifyUserSafe(
           ctx,
           result.user,
-          "پرداخت تایید شد ✅\nموجودی خودکار این محصول فعلاً تمام شده است.\nسفارش شما برای تحویل دستی ادمین ثبت شد.",
+          "پرداخت شما تایید شد ✅\nموجودی این محصول به پایان رسیده است و سفارش برای تحویل دستی ثبت شد.",
         );
       } else if (auto.status === "SEND_FAILED") {
         // The user received NO content (send failed before finalize), so the

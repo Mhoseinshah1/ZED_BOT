@@ -149,7 +149,7 @@ export async function addStockItem(args: {
 // splits them. Raw content is never logged and never echoed back.
 
 export const STOCK_BULK_MAX_ITEMS = 100;
-export const BULK_TOO_MANY_TEXT = "حداکثر ۱۰۰ آیتم در هر بار قابل ثبت است.";
+export const BULK_TOO_MANY_TEXT = `حداکثر ${STOCK_BULK_MAX_ITEMS} آیتم در هر مرحله قابل ثبت است.`;
 export const BULK_NO_VALID_ITEMS_TEXT = "هیچ آیتم معتبری در متن پیدا نشد.";
 export const BULK_CREATE_FAILED_TEXT = "ثبت گروهی آیتم‌ها ناموفق بود. دوباره تلاش کنید.";
 
@@ -457,8 +457,8 @@ export async function toggleProductStockEnabled(productId: string): Promise<Prod
 
 export const STOCK_THRESHOLD_MAX = 100_000;
 export const INVALID_THRESHOLD_TEXT = `حد هشدار باید عددی صحیح بین 0 تا ${STOCK_THRESHOLD_MAX} باشد. برای حذف، - را بزنید.`;
-export const STOCK_OUT_ALERT_TITLE = "🚨 موجودی محصول تمام شد";
-export const STOCK_LOW_ALERT_TITLE = "⚠️ موجودی محصول کم است";
+export const STOCK_OUT_ALERT_TITLE = "🚨 موجودی این محصول به پایان رسیده است.";
+export const STOCK_LOW_ALERT_TITLE = "⚠️ موجودی این محصول کم شده است.";
 
 function stockThresholdKey(productId: string): string {
   return `stock.low_threshold.${productId}`;

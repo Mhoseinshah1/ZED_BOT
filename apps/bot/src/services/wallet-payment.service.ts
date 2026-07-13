@@ -66,8 +66,8 @@ import {
 
 export const WALLET_ORDER_PAYMENT_REASON = "WALLET_ORDER_PAYMENT";
 
-export const WALLET_PAYMENT_DONE_TEXT = "پرداخت با کیف پول انجام شد ✅\nسفارش شما ثبت شد.";
-export const INSUFFICIENT_BALANCE_TEXT = "موجودی کیف پول کافی نیست.";
+export const WALLET_PAYMENT_DONE_TEXT = "پرداخت از کیف پول با موفقیت انجام شد ✅\nسفارش شما ثبت شد.";
+export const INSUFFICIENT_BALANCE_TEXT = "موجودی کیف پول شما کافی نیست.";
 const DRAFT_STALE_TEXT = "پیش‌فاکتور در دسترس نیست؛ لطفاً دوباره شروع کنید.";
 const DISCOUNT_CHANGED_TEXT = "کد تخفیف دیگر معتبر نیست. لطفاً دوباره پیش‌فاکتور را بررسی کنید.";
 
@@ -380,7 +380,7 @@ export async function payPurchaseDraftWithWallet(
   }
   const finalPriceToman = Math.max(0, originalPriceToman - discountAmountToman);
   if (finalPriceToman <= 0) {
-    return { ok: false, error: "پرداخت رایگان در فاز بعدی فعال می‌شود." };
+    return { ok: false, error: "امکان پرداخت بدون مبلغ وجود ندارد." };
   }
   if (user.balanceToman < finalPriceToman) {
     return { ok: false, error: INSUFFICIENT_BALANCE_TEXT };
@@ -448,7 +448,7 @@ export async function payRenewalDraftWithWallet(
   }
   const finalPriceToman = Math.max(0, originalPriceToman - discountAmountToman);
   if (finalPriceToman <= 0) {
-    return { result: { ok: false, error: "پرداخت رایگان در فاز بعدی فعال می‌شود." }, service };
+    return { result: { ok: false, error: "امکان پرداخت بدون مبلغ وجود ندارد." }, service };
   }
   if (user.balanceToman < finalPriceToman) {
     return { result: { ok: false, error: INSUFFICIENT_BALANCE_TEXT }, service };
@@ -514,7 +514,7 @@ export async function payExtraVolumeDraftWithWallet(
   }
   const finalPriceToman = Math.max(0, originalPriceToman - discountAmountToman);
   if (finalPriceToman <= 0) {
-    return { result: { ok: false, error: "پرداخت رایگان در فاز بعدی فعال می‌شود." }, service };
+    return { result: { ok: false, error: "امکان پرداخت بدون مبلغ وجود ندارد." }, service };
   }
   if (user.balanceToman < finalPriceToman) {
     return { result: { ok: false, error: INSUFFICIENT_BALANCE_TEXT }, service };
@@ -580,7 +580,7 @@ export async function payExtraTimeDraftWithWallet(
   }
   const finalPriceToman = Math.max(0, originalPriceToman - discountAmountToman);
   if (finalPriceToman <= 0) {
-    return { result: { ok: false, error: "پرداخت رایگان در فاز بعدی فعال می‌شود." }, service };
+    return { result: { ok: false, error: "امکان پرداخت بدون مبلغ وجود ندارد." }, service };
   }
   if (user.balanceToman < finalPriceToman) {
     return { result: { ok: false, error: INSUFFICIENT_BALANCE_TEXT }, service };

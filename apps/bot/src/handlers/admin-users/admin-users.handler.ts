@@ -293,7 +293,7 @@ async function askBlockChange(ctx: BotContext, shortId: string, block: boolean):
       }`,
       "",
       block
-        ? "کاربر مسدود دیگر به ربات دسترسی نخواهد داشت. ادامه؟"
+        ? "آیا از مسدود کردن این کاربر مطمئن هستید؟\nکاربر مسدود دیگر به ربات دسترسی نخواهد داشت."
         : "دسترسی کاربر به ربات دوباره فعال می‌شود. ادامه؟",
     ].join("\n"),
     blockConfirmKeyboard(userShortId(user), block),
@@ -316,7 +316,7 @@ async function confirmBlockChange(ctx: BotContext, shortId: string, block: boole
     await renderProfile(ctx, user);
     return;
   }
-  await safeAnswerCallback(ctx, block ? "کاربر مسدود شد 🚫" : "مسدودی کاربر برداشته شد ✅");
+  await safeAnswerCallback(ctx, block ? "کاربر با موفقیت مسدود شد." : "کاربر با موفقیت فعال شد.");
   await renderProfile(ctx, outcome.user);
 }
 
@@ -480,8 +480,8 @@ async function startAdjustFlow(
   await safeEditOrReply(
     ctx,
     action === "INCREASE"
-      ? "مبلغ افزایش موجودی را به تومان وارد کنید."
-      : "مبلغ کسر موجودی را به تومان وارد کنید.",
+      ? "مبلغ افزایش موجودی را وارد کنید."
+      : "مبلغ کاهش موجودی را وارد کنید.",
     searchCancelKeyboard(),
   );
 }
@@ -549,7 +549,7 @@ adminUsersHandler.callbackQuery(AU_CB.walletConfirm, async (ctx) => {
   const noticeLines = [
     increase
       ? "موجودی کیف پول شما توسط مدیریت افزایش یافت ✅"
-      : "موجودی کیف پول شما توسط مدیریت کسر شد.",
+      : "موجودی کیف پول شما توسط مدیریت کاهش یافت.",
     "",
     `مبلغ: ${formatToman(draft.amountToman)}`,
     `دلیل: ${escapeHtml(outcome.walletTransaction.reason ?? "")}`,
@@ -570,10 +570,10 @@ adminUsersHandler.callbackQuery(AU_CB.walletConfirm, async (ctx) => {
 
   await safeAnswerCallback(
     ctx,
-    increase ? "موجودی کاربر با موفقیت افزایش یافت ✅" : "موجودی کاربر با موفقیت کسر شد ✅",
+    increase ? "موجودی کاربر با موفقیت افزایش یافت ✅" : "موجودی کاربر با موفقیت کاهش یافت ✅",
   );
   const summary = [
-    increase ? "افزایش موجودی ثبت شد ✅" : "کسر موجودی ثبت شد ✅",
+    increase ? "افزایش موجودی ثبت شد ✅" : "کاهش موجودی ثبت شد ✅",
     "",
     `مبلغ: ${formatToman(draft.amountToman)}`,
     `موجودی جدید کاربر: ${formatToman(outcome.user.balanceToman)}`,
@@ -642,13 +642,7 @@ adminUsersTextHandler.on("message:text", async (ctx, next) => {
     }
     draft.amountToman = amount;
     ctx.session.currentFlow = REASON_FLOW;
-    await safeReply(
-      ctx,
-      draft.action === "INCREASE"
-        ? "دلیل افزایش موجودی را وارد کنید."
-        : "دلیل کسر موجودی را وارد کنید.",
-      searchCancelKeyboard(),
-    );
+    await safeReply(ctx, "دلیل این عملیات را وارد کنید.", searchCancelKeyboard());
     return;
   }
 

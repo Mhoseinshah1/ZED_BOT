@@ -56,7 +56,7 @@ const AUDIENCES: BroadcastAudience[] = [
 export const AUDIENCE_LABEL: Record<BroadcastAudience, string> = {
   all_active: "همه کاربران فعال",
   active_services: "کاربران دارای سرویس فعال",
-  buyers: "کاربران دارای خرید موفق",
+  buyers: "خریداران",
   no_purchase: "کاربران بدون خرید موفق",
   test_only: "فقط تست (بدون ارسال نهایی)",
 };

@@ -229,7 +229,7 @@ checkoutHandler.callbackQuery(/^user:buy:prod:([0-9a-f-]+):([0-9a-f-]+):([0-9a-f
     !product.categoryId.startsWith(ctx.match[2]) ||
     !isProductVisible(product, user.group)
   ) {
-    await safeAnswerCallback(ctx, "این محصول در دسترس نیست.");
+    await safeAnswerCallback(ctx, "این محصول در حال حاضر قابل خرید نیست.");
     return;
   }
   await safeAnswerCallback(ctx);
@@ -296,7 +296,7 @@ checkoutHandler.callbackQuery(/^user:op:p:([0-9a-f-]+)$/, async (ctx) => {
   }
   const product = await getProductByShortId(ctx.match[1]);
   if (product === null || product.type !== "OTHER_PRODUCT" || !isProductVisible(product, user.group)) {
-    await safeAnswerCallback(ctx, "این محصول در دسترس نیست.");
+    await safeAnswerCallback(ctx, "این محصول در حال حاضر قابل خرید نیست.");
     return;
   }
   await safeAnswerCallback(ctx);
@@ -531,7 +531,7 @@ checkoutTextHandler.on("message:text", async (ctx, next) => {
       draft.discountCodeId = validation.discountCode.id;
       draft.discountAmountToman = validation.discountAmountToman;
       draft.finalPriceToman = validation.finalPriceToman;
-      await safeReply(ctx, "کد تخفیف اعمال شد ✅");
+      await safeReply(ctx, "کد تخفیف با موفقیت اعمال شد ✅");
     } else {
       await safeReply(ctx, validation.error);
     }

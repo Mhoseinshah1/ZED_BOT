@@ -150,7 +150,7 @@ export async function submitReceipt(
 ): Promise<ReceiptSubmission> {
   const existing = await getPendingReviewPayment(checkout.id);
   if (existing !== null) {
-    return { ok: false, error: "برای این پیش‌فاکتور قبلاً رسید ثبت شده و در انتظار بررسی است." };
+    return { ok: false, error: "این پرداخت قبلاً رسید دریافت کرده است." };
   }
   const metadata: Prisma.InputJsonObject = {
     method: "CARD_TO_CARD",

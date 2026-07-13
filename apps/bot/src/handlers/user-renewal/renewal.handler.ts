@@ -77,7 +77,7 @@ async function renderRenewableList(ctx: BotContext, page: number): Promise<void>
     await safeEditOrReply(ctx, NO_RENEWABLE_TEXT, kb);
     return;
   }
-  await safeEditOrReply(ctx, "تمدید سرویس ♻️\n\nسرویس مورد نظر را انتخاب کنید:", renewableListKeyboard(pageData));
+  await safeEditOrReply(ctx, "تمدید سرویس ♻️\n\nسرویس موردنظر برای تمدید را انتخاب کنید.", renewableListKeyboard(pageData));
 }
 
 renewalHandler.callbackQuery(CB.USER_RENEW, async (ctx) => {
