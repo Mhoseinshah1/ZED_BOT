@@ -86,7 +86,7 @@ as «نسخه API پشتیبانی نمی‌شود» / login-endpoint-not-found.
 | `authMode` (optional) | `SESSION_COOKIE` (default) or `API_TOKEN` |
 | `username` / password | SESSION_COOKIE mode login credentials (password encrypted with `APP_SECRET`) |
 | `tokenEncrypted` | API_TOKEN mode bearer token (encrypted with `APP_SECRET`) |
-| `inboundIds` | JSON int array of inbound ids to provision into, e.g. `[1]` or `[1,4]` |
+| `inboundIds` | JSON int array: the ALLOWLIST of inbound ids ZED_BOT may use, e.g. `[1]` or `[3,5,8,12]` |
 | `apiVariant` (optional) | `SANAEI` (default) |
 | `subscriptionDomain` (optional) | Full base URL of the 3x-ui subscription service, e.g. `https://sub.example.com:2096/sub` |
 | `protocolSettings` (optional) | `{"flow": "xtls-rprx-vision"}` applied to VLESS clients only |
@@ -98,6 +98,43 @@ mode's credential). Whatever the mode, the credential for the CONFIGURED
 mode must be present - a token alone never satisfies SESSION_COOKIE and
 vice versa. Legacy panels that only carry a token can either get login
 credentials or be switched explicitly to API_TOKEN.
+
+## Configuration hierarchy: panel allowlist + product selection
+
+Inbound configuration has two levels:
+
+- **Panel level** (`Panel.inboundIds`): the full ALLOWLIST of inbound ids
+  ZED_BOT is allowed to use on this panel. The authenticated readiness
+  check validates every allowlisted id against the live panel.
+- **Product level** (`Product.inboundIds`): each SERVICE_PRODUCT selects
+  its own SUBSET of the panel allowlist. Provisioning attaches the global
+  client ONLY to the product's resolved selection. `null`/empty selection
+  inherits the panel's full allowlist, so products configured before this
+  phase keep working unchanged.
+
+Validation (`resolveProductInboundIds`, local - the readiness check
+already validated the allowlist against the panel):
+
+- a selected id outside the allowlist is a configuration error: the
+  product becomes **unsellable** (hidden from the catalog, blocked at
+  checkout and at the pre-charge wallet re-check), and a paid order that
+  somehow reaches provisioning fails definitively BEFORE any panel call
+  and refunds;
+- admins edit the selection per product («ویرایش اینباندها» on XUI
+  products; `-` clears it back to inherit) with subset validation at save
+  time («شناسه‌های اینباند محصول خارج از لیست مجاز پنل است.»);
+- shrinking the PANEL allowlist warns the admin about products whose
+  selection now falls outside it - those products are unsellable until
+  fixed.
+
+Example:
+
+```text
+Panel allowed inbound IDs:   [3, 5, 8, 12]
+Product A selection:         [3, 5]      -> client attached to 3, 5
+Product B selection:         null        -> client attached to 3, 5, 8, 12
+Product C selection:         [5, 99]     -> invalid: 99 outside the allowlist
+```
 
 ## Inbound validation
 

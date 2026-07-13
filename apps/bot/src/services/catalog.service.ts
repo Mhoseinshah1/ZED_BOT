@@ -6,7 +6,7 @@ import {
   type UserGroup,
 } from "@zedbot/database";
 
-import { isPanelSellable } from "./panel-readiness.service.js";
+import { isPanelSellable, resolveProductInboundIds } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 
 // =============================================================================
@@ -118,6 +118,14 @@ export function isProductVisible(product: ProductWithRelations, group: UserGroup
       product.panel === null ||
       !product.panel.isVisible ||
       !isPanelSellable(product.panel)
+    ) {
+      return false;
+    }
+    // XUI: the product's inbound selection must stay inside the panel's
+    // allowlist - a violating product is unsellable BEFORE checkout/payment.
+    if (
+      product.panel.type === "XUI" &&
+      !resolveProductInboundIds(product.panel, product.inboundIds).ok
     ) {
       return false;
     }

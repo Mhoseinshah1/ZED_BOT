@@ -659,6 +659,11 @@ model Product {
   // SERVICE_PRODUCT fields (trafficResetCycle has no effect on XUI panels)
   trafficResetCycle TrafficResetCycle?
   allLocations      Boolean            @default(false)
+  // XUI only: the product's selected SUBSET of the panel's allowed inbound
+  // ids (Panel.inboundIds is the allowlist). null/empty = inherit the
+  // panel's full allowlist, so existing products keep working unchanged.
+  // A selection outside the allowlist makes the product unsellable.
+  inboundIds        Json?
 
   // OTHER_PRODUCT fields (stock implementation lands in a later phase)
   requiredUserInfoEnabled    Boolean                   @default(false)

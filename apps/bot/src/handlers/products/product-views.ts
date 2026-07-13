@@ -6,6 +6,7 @@ import { categoryShortId } from "../../services/category.service.js";
 import { panelShortId } from "../../services/panel.service.js";
 import { productShortId, type ProductWithRelations } from "../../services/product.service.js";
 import { escapeHtml } from "../../utils/html.js";
+import { resolveProductInboundIds } from "../../services/panel-readiness.service.js";
 import { pcb, PROD_CB } from "./product-cb.js";
 
 const PANEL_STATUS_EMOJI: Record<string, string> = {
@@ -223,6 +224,18 @@ export function productDetailText(product: ProductWithRelations): string {
         `ریست ترافیک: ${product.trafficResetCycle === null ? "-" : RESET_CYCLE_LABEL[product.trafficResetCycle]}`,
       );
     }
+    if (product.panel?.type === "XUI") {
+      const resolution = resolveProductInboundIds(product.panel, product.inboundIds);
+      lines.push(
+        `اینباندها: ${
+          !resolution.ok
+            ? `نامعتبر ❌ (${resolution.reason === "panel-allowlist-empty" ? "پنل اینباند مجاز ندارد" : `خارج از لیست مجاز: ${(resolution.invalidIds ?? []).join(", ")}`})`
+            : resolution.inherited
+              ? `همه اینباندهای مجاز پنل (${resolution.inboundIds.join(", ")})`
+              : resolution.inboundIds.join(", ")
+        }`,
+      );
+    }
   } else {
     lines.push(
       `اطلاعات از کاربر: ${product.requiredUserInfoEnabled ? "✅" : "❌"}`,
@@ -269,6 +282,9 @@ export function productDetailKeyboard(
       .text("تغییر موقعیت", pcb.pickLocation(sid));
     if (product.panel?.type === "MARZBAN") {
       kb.text("ریست ترافیک", pcb.pickResetCycle(sid));
+    }
+    if (product.panel?.type === "XUI") {
+      kb.text("ویرایش اینباندها", pcb.fieldEdit(sid, "inb"));
     }
     kb.row();
   } else {

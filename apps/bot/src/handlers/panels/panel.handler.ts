@@ -19,6 +19,7 @@ import {
   readinessResetData,
 } from "../../services/panel-readiness.service.js";
 import { resolveXuiAuthMode } from "../../services/panel-adapter-factory.js";
+import { resolveProductInboundIds } from "../../services/panel-readiness.service.js";
 import { normalizePanelBaseUrl } from "../../utils/url.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { cb, PANEL_CB } from "./panel-cb.js";
@@ -711,6 +712,27 @@ async function handleEditField(ctx: BotContext, text: string): Promise<void> {
   } as Prisma.PanelUpdateInput);
   clearFlow(ctx);
   await safeReply(ctx, `«${field.label}» بروزرسانی شد ✅`);
+  // Shrinking the XUI inbound allowlist can strand products whose selection
+  // now falls outside it - they become unsellable until fixed. Warn loudly.
+  if (field.column === "inboundIds" && updated.type === "XUI") {
+    const products = await prisma.product.findMany({
+      where: { panelId: updated.id, type: "SERVICE_PRODUCT" },
+      select: { name: true, inboundIds: true },
+    });
+    const violating = products.filter(
+      (product) => !resolveProductInboundIds(updated, product.inboundIds).ok,
+    );
+    if (violating.length > 0) {
+      const names = violating
+        .slice(0, 5)
+        .map((product) => `• ${product.name}`)
+        .join("\n");
+      await safeReply(
+        ctx,
+        `⚠️ ${violating.length} محصول این پنل اینباندهایی خارج از لیست مجاز جدید دارند و تا اصلاح، قابل فروش نیستند:\n${names}${violating.length > 5 ? "\n..." : ""}`,
+      );
+    }
+  }
   // The name field belongs to the detail view; group fields return to their page.
   if (field.page === "detail") {
     await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated), HTML);

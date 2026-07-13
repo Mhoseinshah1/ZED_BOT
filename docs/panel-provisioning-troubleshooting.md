@@ -85,6 +85,12 @@ only happen when the panel POSITIVELY reported a state that later changed
 order id and the panel account's `note`/label (`zedbot order:<id>` /
 `zed_..._...-<inbound>`).
 
+**An XUI product disappeared from the catalog** - its product-level
+inbound selection (`Product.inboundIds`) falls outside the panel's
+current allowlist (usually after the panel allowlist was edited). The
+product detail page shows «اینباندها: نامعتبر ❌» with the offending ids;
+fix the selection via «ویرایش اینباندها» or restore the allowlist.
+
 **Orphaned XUI clients** - after an unverifiable compensating cleanup, one
 global client with a `zed_*` email may remain with no local Service. The
 log line documents the email; remove it in the panel's Clients page (one
