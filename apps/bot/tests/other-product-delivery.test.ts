@@ -195,7 +195,7 @@ describe.runIf(hasDb)("OTHER_PRODUCT manual delivery (Phase 23)", () => {
     expect(delivered.ok).toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0].chatId).toBe(user.telegramId.toString());
-    expect(calls[0].text).toContain("سفارش شما آماده شد ✅");
+    expect(calls[0].text).toContain("محصول شما با موفقیت تحویل شد ✅");
     expect(calls[0].text).toContain(plainProduct.name);
     expect(calls[0].text).toContain("کد گیفت کارت: ABCD-1234");
 

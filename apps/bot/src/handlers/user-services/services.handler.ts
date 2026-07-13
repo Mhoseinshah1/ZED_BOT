@@ -78,7 +78,7 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
   await safeAnswerCallback(ctx);
   if (pageData.total === 0) {
     const buy = await getButtonText("buy_subscription");
-    const kb = new InlineKeyboard().text(buy, CB.USER_BUY).row().text("بازگشت به منو", CB.USER_MENU);
+    const kb = new InlineKeyboard().text(buy, CB.USER_BUY).row().text("بازگشت به منوی اصلی", CB.USER_MENU);
     await safeEditOrReply(ctx, await getMessageTemplate("no_services_text"), kb);
     return;
   }
@@ -309,7 +309,7 @@ servicesHandler.callbackQuery(/^user:svc:link:([0-9a-f-]+)$/, async (ctx) => {
   // <code> is tap-to-copy in official Telegram clients.
   await safeReply(
     ctx,
-    `لینک اشتراک شما 🔗\n\n<code>${escapeHtml(service.subscriptionUrl)}</code>`,
+    `لینک اشتراک شما:\n<code>${escapeHtml(service.subscriptionUrl)}</code>`,
     undefined,
     HTML,
   );
@@ -331,7 +331,7 @@ servicesHandler.callbackQuery(/^user:svc:configs:([0-9a-f-]+)$/, async (ctx) => 
     return;
   }
   await safeAnswerCallback(ctx);
-  const lines = ["کانفیگ‌های سرویس شما 📄", ""];
+  const lines = ["کانفیگ‌های سرویس شما:", ""];
   for (const link of links.slice(0, MAX_CONFIGS_SHOWN)) {
     lines.push(`<code>${escapeHtml(link)}</code>`, "");
   }

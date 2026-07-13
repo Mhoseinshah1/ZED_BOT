@@ -1303,10 +1303,10 @@ describe.runIf(hasDeps)("XUI capability gates, legacy compatibility and menu", (
     for (const dead of ["QR Code", "تغییر یادداشت ✏️", "انتقال سرویس", "آموزش اتصال"]) {
       expect(labels).not.toContain(dead);
     }
-    // Row 8 back navigation: main menu + list on the final row.
+    // Row 8 back navigation: list + main menu on the final row (doc order).
     const lastRow = rows.at(-1) ?? [];
-    expect(lastRow[0]?.text).toBe("بازگشت به منوی اصلی");
-    expect(lastRow[1]?.text).toBe("بازگشت به لیست");
+    expect(lastRow[0]?.text).toBe("بازگشت به لیست");
+    expect(lastRow[1]?.text).toBe("بازگشت به منوی اصلی");
     // Row 7 support entry routes into the existing ticket flow.
     expect(buttons.some((b) => b.text === "مشکل دارم" && b.callback_data === CB.USER_SUPPORT)).toBe(
       true,

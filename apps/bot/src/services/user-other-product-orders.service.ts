@@ -104,7 +104,7 @@ export const USER_ORDER_STATUS_ICON: Record<UserOrderDisplayStatus, string> = {
 };
 
 export const USER_ORDER_STATUS_LABEL: Record<UserOrderDisplayStatus, string> = {
-  waiting_info: "در انتظار اطلاعات شما 📝",
+  waiting_info: "در انتظار اطلاعات کاربر 📝",
   waiting_delivery: "در انتظار تحویل ادمین ⏳",
   delivered_manual: "تحویل‌شده ✅",
   delivered_stock: "تحویل‌شده (خودکار) ✅",

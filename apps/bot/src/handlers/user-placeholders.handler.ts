@@ -6,7 +6,7 @@ import { buildBackToMenuKeyboard } from "../keyboards/common.keyboard.js";
 import { getButtonText } from "../services/text.service.js";
 import { safeAnswerCallback, safeEditOrReply } from "../utils/safe-reply.js";
 
-export const PLACEHOLDER_TEXT = "این بخش در فاز بعدی تکمیل می‌شود.";
+export const PLACEHOLDER_TEXT = "این بخش هنوز فعال نشده است.";
 
 // callback -> ButtonText key used as the section title.
 // user:buy and user:other_products are handled by the real checkout flow

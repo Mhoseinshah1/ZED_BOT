@@ -39,7 +39,7 @@ export const AU_CB = {
 export const USERS_LANDING_TEXT = "مدیریت کاربران 👤";
 export const SEARCH_PROMPT_TEXT =
   "آیدی عددی تلگرام، یوزرنیم (با یا بدون @)، شناسه داخلی، نام یا شماره موبایل کاربر را وارد کنید.";
-export const NO_USER_FOUND_TEXT = "کاربری پیدا نشد.";
+export const NO_USER_FOUND_TEXT = "کاربری با این مشخصات پیدا نشد.";
 
 const GROUP_LABELS: Record<UserGroup, string> = {
   F: "کاربر عادی (F)",
@@ -129,7 +129,7 @@ export function userProfileText(user: User, overview?: UserOverviewView): string
     "",
     `موجودی کیف پول: ${formatToman(user.balanceToman)}`,
     `مجموع شارژ (بستانکار): ${formatToman(user.totalChargedToman + user.totalManualAddedToman)}`,
-    `مجموع خرید/کسر (بدهکار): ${formatToman(user.totalSpentToman + user.totalManualDeductedToman)}`,
+    `مجموع خرید/کاهش (بدهکار): ${formatToman(user.totalSpentToman + user.totalManualDeductedToman)}`,
   ];
   if (overview !== undefined) {
     lines.push(
@@ -214,7 +214,7 @@ export function userWalletText(user: User, transactions: WalletTransaction[]): s
     `مجموع شارژ: ${formatToman(user.totalChargedToman)}`,
     `مجموع خرید: ${formatToman(user.totalSpentToman)}`,
     `مجموع تخفیف: ${formatToman(user.totalDiscountToman)}`,
-    `افزایش دستی: ${formatToman(user.totalManualAddedToman)} | کسر دستی: ${formatToman(user.totalManualDeductedToman)}`,
+    `افزایش دستی: ${formatToman(user.totalManualAddedToman)} | کاهش دستی: ${formatToman(user.totalManualDeductedToman)}`,
   ];
   if (transactions.length > 0) {
     lines.push("", "آخرین تراکنش‌ها:");
@@ -279,7 +279,7 @@ export function adjustConfirmText(
     ? user.balanceToman + draft.amountToman
     : user.balanceToman - draft.amountToman;
   const lines = [
-    increase ? "افزایش موجودی کیف پول" : "کسر موجودی کیف پول",
+    increase ? "افزایش موجودی کیف پول" : "کاهش موجودی کیف پول",
     "",
     `کاربر: <code>${user.telegramId}</code>${
       user.username === null || user.username === "" ? "" : ` (@${escapeHtml(user.username)})`
@@ -288,19 +288,17 @@ export function adjustConfirmText(
     `مبلغ: ${formatToman(draft.amountToman)}`,
     enough
       ? `موجودی پس از تغییر: ${formatToman(after)}`
-      : "⚠️ موجودی کاربر برای این کسر کافی نیست.",
+      : "⚠️ موجودی کاربر برای این کاهش کافی نیست.",
     `دلیل: ${escapeHtml(draft.reason)}`,
     "",
-    increase
-      ? "آیا از افزایش موجودی این کاربر مطمئن هستید؟"
-      : "آیا از کسر موجودی این کاربر مطمئن هستید؟",
+    "آیا از انجام این تغییر مطمئن هستید؟",
   ];
   return lines.join("\n");
 }
 
 export function adjustConfirmKeyboard(action: "INCREASE" | "DECREASE"): InlineKeyboard {
   return new InlineKeyboard()
-    .text(action === "INCREASE" ? "تایید افزایش ✅" : "تایید کسر ✅", AU_CB.walletConfirm)
+    .text(action === "INCREASE" ? "تایید افزایش ✅" : "تایید کاهش ✅", AU_CB.walletConfirm)
     .row()
     .text("انصراف", AU_CB.walletCancel);
 }

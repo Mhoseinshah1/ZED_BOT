@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { INITIAL_BUTTON_TEXTS, INITIAL_MESSAGE_TEMPLATES } from "@zedbot/database";
 import { describe, expect, it } from "vitest";
 
 process.env.APP_SECRET ??= "menu-fix-test-secret-menu-fix-test-secret";
@@ -90,8 +91,8 @@ describe("user main menu (placeholders hidden)", () => {
 
 describe("restored text fallbacks, seeds and wiring", () => {
   const templates: Record<string, string> = {
-    no_services_text: "شما هنوز سرویسی ندارید.",
-    no_orders_text: "شما هنوز سفارشی ندارید.",
+    no_services_text: "هنوز سرویسی برای شما ثبت نشده است.",
+    no_orders_text: "هنوز سفارشی ثبت نکرده‌اید.",
     no_tickets_text: "هنوز تیکتی ثبت نکرده‌اید.",
   };
   const buttons: Record<string, string> = {
@@ -99,32 +100,20 @@ describe("restored text fallbacks, seeds and wiring", () => {
     previous: "« قبلی",
   };
 
-  it("empty-state template fallbacks and seeds exist", async () => {
-    const textService = readFileSync(
-      path.join(repoRoot, "apps/bot/src/services/text.service.ts"),
-      "utf8",
-    );
-    const seed = readFileSync(path.join(repoRoot, "packages/database/src/seed.ts"), "utf8");
-    const templateBlock =
-      /INITIAL_MESSAGE_TEMPLATES[^=]*= \[([\s\S]*?)\n\];/.exec(seed)?.[1] ?? "";
+  it("empty-state template registry defaults exist", async () => {
+    // Fallbacks derive from the seed registry (seed-data.ts) - assert the
+    // registry rows directly instead of scraping source files.
     for (const [key, value] of Object.entries(templates)) {
-      expect(textService, `fallback for ${key}`).toContain(`${key}: "${value}"`);
-      expect(templateBlock, `seed for ${key}`).toContain(`key: "${key}"`);
-      expect(templateBlock).toContain(`defaultContent: "${value}"`);
+      const row = INITIAL_MESSAGE_TEMPLATES.find((t) => t.key === key);
+      expect(row?.defaultContent, `registry default for ${key}`).toBe(value);
       expect(await getMessageTemplate(key)).not.toBe(key);
     }
   });
 
-  it("next/previous ButtonText fallbacks and seeds exist", async () => {
-    const textService = readFileSync(
-      path.join(repoRoot, "apps/bot/src/services/text.service.ts"),
-      "utf8",
-    );
-    const seed = readFileSync(path.join(repoRoot, "packages/database/src/seed.ts"), "utf8");
-    const buttonBlock = /INITIAL_BUTTON_TEXTS[^=]*= \[([\s\S]*?)\n\];/.exec(seed)?.[1] ?? "";
+  it("next/previous ButtonText registry defaults exist", async () => {
     for (const [key, value] of Object.entries(buttons)) {
-      expect(textService, `fallback for ${key}`).toContain(`${key}: "${value}"`);
-      expect(buttonBlock, `seed for ${key}`).toContain(`key: "${key}"`);
+      const row = INITIAL_BUTTON_TEXTS.find((b) => b.key === key);
+      expect(row?.text, `registry default for ${key}`).toBe(value);
       expect(await getButtonText(key)).not.toBe(key);
     }
   });

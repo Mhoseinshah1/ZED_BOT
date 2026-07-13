@@ -14,7 +14,7 @@ import { showUserMenu } from "./menu.handler.js";
 export const forceJoinHandler = new Composer<BotContext>();
 
 forceJoinHandler.callbackQuery(CB.FORCE_JOIN_CHECK, async (ctx) => {
-  await safeAnswerCallback(ctx, "بررسی عضویت در فاز بعدی فعال می‌شود ✅");
+  await safeAnswerCallback(ctx, "عضویت شما ثبت شد ✅");
   if (await ensureUserAccess(ctx)) {
     await showUserMenu(ctx);
   }

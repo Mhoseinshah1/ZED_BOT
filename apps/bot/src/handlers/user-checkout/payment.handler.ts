@@ -22,6 +22,7 @@ import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { clearCheckoutState } from "./checkout-state.js";
 import {
+  CARD_INFO_INCOMPLETE_TEXT,
   cardToCardKeyboard,
   cardToCardText,
   CHECKOUT_EXPIRED_TEXT,
@@ -37,7 +38,7 @@ import {
 } from "./payment-views.js";
 
 const HTML = { parseMode: "HTML" as const };
-const RECEIPT_PROMPT = "رسید پرداخت را به صورت عکس، فایل یا متن ارسال کنید.";
+const RECEIPT_PROMPT = "لطفاً تصویر یا فایل رسید پرداخت را ارسال کنید.";
 const RECEIPT_KIND_ERROR = "لطفاً رسید را به صورت عکس، فایل یا متن ارسال کنید.";
 
 export const paymentHandler = new Composer<BotContext>();
@@ -161,7 +162,7 @@ paymentHandler.callbackQuery(/^user:pay:g:([0-9a-f-]+):([0-9a-f-]+)$/, async (ct
       error: errorMessage(err),
     });
     await safeAnswerCallback(ctx);
-    await safeEditOrReply(ctx, NO_METHODS_TEXT, paymentMethodsKeyboard(checkout, []));
+    await safeEditOrReply(ctx, CARD_INFO_INCOMPLETE_TEXT, paymentMethodsKeyboard(checkout, []));
     return;
   }
 
@@ -296,8 +297,8 @@ paymentReceiptHandler.on("message", async (ctx, next) => {
     });
     const submittedText =
       checkout.purpose === "WALLET_CHARGE"
-        ? "رسید شارژ کیف پول شما ثبت شد و در انتظار بررسی است."
-        : "رسید شما ثبت شد و در انتظار بررسی است ✅";
+        ? "رسید شارژ کیف پول شما با موفقیت ثبت شد و در انتظار بررسی است."
+        : "رسید شما با موفقیت ثبت شد و در انتظار بررسی است.";
     await safeReply(ctx, submittedText, receiptRegisteredKeyboard());
     // Phase 21.1: forward the receipt to active admins for review. The
     // helper never throws and a failed send never rolls back the receipt.

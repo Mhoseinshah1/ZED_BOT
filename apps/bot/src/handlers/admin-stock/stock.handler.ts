@@ -161,12 +161,12 @@ async function renderProductPage(ctx: BotContext, product: Product): Promise<voi
   // Phase 28 warnings: 🚨 exhausted / ⚠️ at-or-below threshold.
   const level = stockAlertLevel(product, counts.available, threshold);
   if (level === "out") {
-    lines.push("", "🚨 موجودی تمام شده است.");
+    lines.push("", "🚨 موجودی این محصول به پایان رسیده است.");
     if (isStockDeliveryProduct(product)) {
       lines.push("سفارش‌های جدید به تحویل دستی می‌روند.");
     }
   } else if (level === "low") {
-    lines.push("", "⚠️ موجودی کم است.");
+    lines.push("", "⚠️ موجودی این محصول کم شده است.");
   }
   await safeEditOrReply(ctx, lines.join("\n"), stockProductKeyboard(product, threshold), HTML);
 }
@@ -511,7 +511,7 @@ stockHandler.callbackQuery(ST_CB.addConfirm, async (ctx) => {
     await safeAnswerCallback(ctx, outcome.safeMessage);
     return;
   }
-  await safeAnswerCallback(ctx, "آیتم موجودی ثبت شد ✅");
+  await safeAnswerCallback(ctx, "آیتم با موفقیت و به‌صورت رمزنگاری‌شده ذخیره شد ✅");
   const product = await getStockProductByShortId(draft.productId.slice(0, 8));
   if (product !== null) {
     await renderProductPage(ctx, product);
@@ -537,9 +537,9 @@ stockHandler.callbackQuery(/^admin:stock:bulk_add:([0-9a-f-]+)$/, async (ctx) =>
     [
       "افزودن گروهی موجودی 🎟",
       "",
-      "هر آیتم را در یک خط جدا وارد کنید.",
+      "هر خط باید شامل یک آیتم باشد.",
       "خط‌های خالی نادیده گرفته می‌شوند.",
-      `(حداکثر ${STOCK_BULK_MAX_ITEMS} آیتم در هر بار)`,
+      `(حداکثر ${STOCK_BULK_MAX_ITEMS} آیتم در هر مرحله)`,
     ].join("\n"),
     new InlineKeyboard().text("انصراف", ST_CB.bulkCancel),
   );
@@ -566,7 +566,10 @@ stockHandler.callbackQuery(ST_CB.bulkConfirm, async (ctx) => {
     await safeAnswerCallback(ctx, outcome.safeMessage);
     return;
   }
-  await safeAnswerCallback(ctx, `${outcome.createdCount} آیتم موجودی ثبت شد ✅`);
+  await safeAnswerCallback(
+    ctx,
+    `${outcome.createdCount} آیتم با موفقیت و به‌صورت رمزنگاری‌شده ذخیره شد ✅`,
+  );
   const product = await getStockProductByShortId(draft.productId.slice(0, 8));
   if (product !== null) {
     await renderProductPage(ctx, product);
@@ -695,7 +698,7 @@ stockTextHandler.on("message:text", async (ctx, next) => {
         "",
         `محصول: ${escapeHtml(product.name)}`,
         `آیتم‌های معتبر برای ثبت: ${parsed.items.length}`,
-        `تکراری (نادیده گرفته‌شده): ${parsed.duplicateCount}`,
+        `آیتم‌های تکراری حذف شدند: ${parsed.duplicateCount}`,
         `نامعتبر (نادیده گرفته‌شده): ${parsed.invalidCount}`,
         "",
         "پیش‌نمایش:",

@@ -26,7 +26,7 @@ import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe
 // =============================================================================
 
 const HTML = { parseMode: "HTML" as const };
-const OWNER_ONLY_TEXT = "این عملیات فقط برای ادمین OWNER مجاز است.";
+const OWNER_ONLY_TEXT = "این عملیات فقط برای مدیر اصلی (OWNER) مجاز است.";
 
 const RB_CB = {
   root: CB.ADMIN_REPORTS_BACKUP,
@@ -159,7 +159,7 @@ reportsBackupHandler.callbackQuery(RB_CB.backupYes, async (ctx) => {
   await safeEditOrReply(
     ctx,
     [
-      "بکاپ ساخته شد ✅",
+      "بکاپ با موفقیت ساخته شد ✅",
       "",
       `فایل: ${outcome.backup.name}`,
       `حجم: ${formatBytes(outcome.backup.sizeBytes)}`,

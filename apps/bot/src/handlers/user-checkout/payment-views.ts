@@ -20,9 +20,11 @@ export const paycb = {
 
 export const NO_METHODS_TEXT =
   "فعلاً روش پرداختی برای این مبلغ فعال نیست. لطفاً بعداً تلاش کنید یا با پشتیبانی تماس بگیرید.";
-export const METHOD_LATER_TEXT = "این روش پرداخت در فاز بعدی فعال می‌شود.";
+export const CARD_INFO_INCOMPLETE_TEXT =
+  "اطلاعات روش پرداخت کامل نیست. لطفاً با پشتیبانی تماس بگیرید.";
+export const METHOD_LATER_TEXT = "این روش پرداخت در حال حاضر در دسترس نیست.";
 export const RECEIPT_WAITING_TEXT = "رسید شما در انتظار بررسی است.";
-export const CHECKOUT_EXPIRED_TEXT = "این پیش‌فاکتور منقضی شده است. لطفاً دوباره خرید را شروع کنید.";
+export const CHECKOUT_EXPIRED_TEXT = "این پیش‌فاکتور منقضی شده است. لطفاً دوباره اقدام کنید.";
 
 function formatToman(value: number): string {
   return `${value.toLocaleString("en-US")} تومان`;
@@ -73,15 +75,16 @@ export function cardToCardText(
   cardNumber: string,
 ): string {
   return [
-    "پرداخت کارت به کارت 💳",
+    `برای تکمیل پرداخت، مبلغ ${formatToman(checkout.finalPriceToman)} را واریز کنید:`,
     "",
-    `مبلغ دقیق: <b>${formatToman(checkout.finalPriceToman)}</b>`,
-    `شماره کارت: <code>${escapeHtml(formatCardNumber(cardNumber))}</code>`,
-    `نام صاحب کارت: ${escapeHtml(account.ownerName)}`,
-    `مهلت پرداخت: ${checkout.expiresAt.toISOString().replace("T", " ").slice(0, 16)} (UTC)`,
+    "====================",
+    `<code>${escapeHtml(formatCardNumber(cardNumber))}</code>`,
+    escapeHtml(account.ownerName),
+    "====================",
     "",
-    "⚠️ دقیقاً همین مبلغ را واریز کنید.",
-    "بعد از واریز، رسید را ارسال کنید.",
+    "سپس روی «پرداخت کردم» بزنید و رسید را ارسال کنید.",
+    "",
+    `⏱ مهلت پرداخت: ${checkout.expiresAt.toISOString().replace("T", " ").slice(0, 16)} (UTC)`,
   ].join("\n");
 }
 
@@ -99,12 +102,12 @@ export function cardToCardKeyboard(
 ): InlineKeyboard {
   const coSid = checkoutShortId(checkout);
   return new InlineKeyboard()
-    .copyText("کپی شماره کارت", cardNumber)
     .copyText("کپی مبلغ", String(checkout.finalPriceToman))
+    .copyText("کپی شماره کارت", cardNumber)
     .row()
-    .text("ارسال رسید 🧾", PAY_CB.SEND_RECEIPT)
+    .text("پرداخت کردم ✅", PAY_CB.SEND_RECEIPT)
+    .text("بازگشت", paycb.methods(coSid))
     .row()
-    .text("بازگشت به روش‌های پرداخت", paycb.methods(coSid))
     .text("منوی اصلی", CB.USER_MENU);
 }
 

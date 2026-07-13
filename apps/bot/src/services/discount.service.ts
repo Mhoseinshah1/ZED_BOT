@@ -68,10 +68,10 @@ export async function validateDiscountCode(
     return invalid("این کد تخفیف هنوز فعال نشده است.");
   }
   if (code.expiresAt !== null && code.expiresAt <= now) {
-    return invalid("کد تخفیف منقضی شده است.");
+    return invalid("مهلت استفاده از این کد تخفیف به پایان رسیده است.");
   }
   if (code.totalUsageLimit !== null && code.totalUsedCount >= code.totalUsageLimit) {
-    return invalid("سقف استفاده از این کد تخفیف تکمیل شده است.");
+    return invalid("ظرفیت استفاده از این کد تخفیف تکمیل شده است.");
   }
   if (purpose === "PURCHASE" && code.appliesTo === "RENEWAL") {
     return invalid("این کد تخفیف برای خرید جدید قابل استفاده نیست.");
@@ -93,7 +93,7 @@ export async function validateDiscountCode(
       where: { discountCodeId: code.id, userId: user.id },
     });
     if (used >= code.perUserUsageLimit) {
-      return invalid("شما قبلاً از این کد تخفیف استفاده کرده‌اید.");
+      return invalid("شما قبلاً از این کد تخفیف به حداکثر تعداد مجاز استفاده کرده‌اید.");
     }
   }
 

@@ -87,7 +87,7 @@ export function renewServiceSummaryText(service: Service): string {
         : `${formatGb(service.remainingBytes)} از ${formatGb(service.volumeBytes)} گیگابایت باقی‌مانده`
     }`,
     "",
-    "پلن تمدید را انتخاب کنید:",
+    "بسته تمدید را انتخاب کنید.",
   ].join("\n");
 }
 

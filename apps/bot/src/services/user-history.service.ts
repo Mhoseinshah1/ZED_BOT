@@ -85,7 +85,7 @@ export function orderStatusInfo(status: OrderStatus): { icon: string; label: str
     case "FAILED":
       return { icon: "❌", label: "ناموفق ❌" };
     case "CANCELLED":
-      return { icon: "❌", label: "لغو شده ❌" };
+      return { icon: "❌", label: "لغوشده ❌" };
     case "REFUNDED":
       return { icon: "❌", label: "استرداد شده ❌" };
     default:

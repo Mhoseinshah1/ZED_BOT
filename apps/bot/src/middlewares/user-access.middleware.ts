@@ -11,11 +11,10 @@ import { getMessageTemplate } from "../services/text.service.js";
 import { registerOrUpdateUser } from "../services/user.service.js";
 import { safeAnswerCallback, safeReply } from "../utils/safe-reply.js";
 
-export const ACCESS_DENIED_TEXT = "دسترسی شما به ربات محدود شده است.";
-const TERMS_TEXT_FALLBACK =
-  "برای استفاده از ربات ابتدا قوانین را مطالعه و تایید کنید.\n(متن قوانین در فاز بعدی تکمیل می‌شود.)";
-const FORCE_JOIN_TEXT_FALLBACK =
-  "برای استفاده از ربات ابتدا در کانال ما عضو شوید.\n(بررسی عضویت در فاز بعدی فعال می‌شود.)";
+export const ACCESS_DENIED_TEXT =
+  "حساب کاربری شما مسدود شده است. برای بررسی بیشتر با پشتیبانی تماس بگیرید.";
+const TERMS_TEXT_FALLBACK = "برای استفاده از ربات، ابتدا قوانین را مطالعه و تایید کنید.";
+const FORCE_JOIN_TEXT_FALLBACK = "برای ادامه، ابتدا در کانال‌های مشخص‌شده عضو شوید.";
 
 /**
  * User access gate, in spec order:
@@ -58,7 +57,7 @@ export async function ensureUserAccess(ctx: BotContext): Promise<boolean> {
   // 2. Blocked / disabled / deleted users never reach the user menu.
   if (user.status !== UserStatus.ACTIVE) {
     await safeAnswerCallback(ctx);
-    await safeReply(ctx, ACCESS_DENIED_TEXT);
+    await safeReply(ctx, await getMessageTemplate("blocked_text", ACCESS_DENIED_TEXT));
     return false;
   }
 

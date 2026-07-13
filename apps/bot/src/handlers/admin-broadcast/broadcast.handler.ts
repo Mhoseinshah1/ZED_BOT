@@ -104,11 +104,11 @@ async function renderDetail(ctx: BotContext, broadcast: Broadcast): Promise<void
   ];
   if (broadcast.status === "CONFIRMING" || broadcast.status === "DRAFT") {
     const estimate = audience === null ? 0 : await estimateAudienceCount(audience);
-    lines.push(`تخمین گیرندگان: ${estimate}`);
+    lines.push(`تخمین تعداد مخاطبان: ${estimate}`);
   } else if (progress !== null) {
     lines.push(
       `گیرندگان: ${broadcast.totalTargets} | ارسال‌شده: ${progress.sent} | ناموفق: ${progress.failed}${
-        progress.pending > 0 ? ` | در صف: ${progress.pending}` : ""
+        progress.pending > 0 ? ` | در انتظار: ${progress.pending}` : ""
       }${progress.skipped > 0 ? ` | ردشده: ${progress.skipped}` : ""}`,
     );
   }
@@ -277,7 +277,7 @@ adminBroadcastHandler.callbackQuery(/^admin:bc:start:([0-9a-f-]+)$/, async (ctx)
       `شروع ارسال نهایی 🚀 <code>${sid}</code>`,
       "",
       `مخاطب: ${audience === null ? "-" : audienceLabel(audience)}`,
-      `تخمین گیرندگان: ${estimate}`,
+      `تخمین تعداد مخاطبان: ${estimate}`,
       "",
       "پیام برای همه گیرندگان ارسال می‌شود و قابل بازگشت نیست. ادامه می‌دهید؟",
     ].join("\n"),

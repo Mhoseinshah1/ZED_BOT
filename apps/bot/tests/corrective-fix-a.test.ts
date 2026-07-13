@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { prisma, type Service, type User } from "@zedbot/database";
+import { INITIAL_MESSAGE_TEMPLATES, prisma, type Service, type User } from "@zedbot/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 process.env.APP_SECRET ??= "fix-a-test-secret-fix-a-test-secret-1234";
@@ -113,16 +113,16 @@ describe("wallet landing (Fix A)", () => {
 
   it("renders exactly the agreed fields", () => {
     expect(text).toContain("کیف پول و حساب کاربری 🏦");
-    expect(text).toContain("شناسه عددی تلگرام: <code>777000111</code>");
+    expect(text).toContain("آیدی عددی: <code>777000111</code>");
     expect(text).toContain("نام: علی رضایی");
     expect(text).toContain("نام کاربری: @ali_r");
-    expect(text).toContain("شماره تماس: ثبت نشده");
-    expect(text).toContain("زمان ثبت‌نام: 2026-01-05");
-    expect(text).toContain("موجودی کیف پول: <b>120,000 تومان</b>");
+    expect(text).toContain("شماره موبایل: ثبت نشده");
+    expect(text).toContain("تاریخ ثبت‌نام: 2026-01-05");
+    expect(text).toContain("موجودی: <b>120,000 تومان</b>");
     expect(text).toContain("گروه کاربری: کاربر عادی (F)");
     expect(text).toContain("تعداد سرویس‌ها: 2");
-    expect(text).toContain("سفارش‌های در انتظار پرداخت/بررسی: 3");
-    expect(text).toContain("تعداد زیرمجموعه‌ها: 4");
+    expect(text).toContain("سفارش‌های پرداخت‌نشده: 3");
+    expect(text).toContain("تعداد زیرمجموعه: 4");
   });
 
   it("does not render the removed fields", () => {
@@ -188,34 +188,28 @@ describe("wallet landing (Fix A)", () => {
     expect(preview).toContain("توضیح: a&lt;b");
   });
 
-  it("the four wallet MessageTemplate keys have code fallbacks and behave", async () => {
-    const defaults: Record<string, string> = {
+  it("the four wallet MessageTemplate keys have registry fallbacks and behave", async () => {
+    const expected: Record<string, string> = {
       wallet_header_text: "کیف پول و حساب کاربری 🏦",
-      wallet_topup_amount_prompt: "مبلغ شارژ کیف پول را به تومان وارد کنید.",
+      wallet_topup_amount_prompt: "مبلغ موردنظر برای افزایش موجودی را به تومان وارد کنید.",
       wallet_topup_preview_note:
         "پس از تایید رسید توسط ادمین، موجودی کیف پول شما افزایش می‌یابد.",
-      wallet_empty_transactions_text: "تراکنشی ثبت نشده است.",
+      wallet_empty_transactions_text: "هنوز تراکنشی برای کیف پول شما ثبت نشده است.",
     };
-    // Deterministic: the fallback map itself carries the exact defaults
-    // (getMessageTemplate would return DB content instead when a row exists).
-    const src = readFileSync(
-      path.join(repoRoot, "apps/bot/src/services/text.service.ts"),
-      "utf8",
-    );
-    for (const [key, value] of Object.entries(defaults)) {
-      expect(src, `TEMPLATE_FALLBACKS must carry ${key}`).toContain(`${key}: "${value}"`);
+    // Deterministic: fallbacks derive from the seed registry (the single
+    // source of truth for default copy) - getMessageTemplate would return
+    // DB content instead when a row exists.
+    for (const [key, value] of Object.entries(expected)) {
+      const row = INITIAL_MESSAGE_TEMPLATES.find((t) => t.key === key);
+      expect(row?.defaultContent, `registry must carry ${key}`).toBe(value);
       // Behavioral smoke check - resolves via DB row or fallback, never the
       // bare key, in every test configuration.
       expect(await getMessageTemplate(key)).not.toBe(key);
     }
   });
 
-  it("the seed contains the wallet template keys without duplicates", () => {
-    const seed = readFileSync(path.join(repoRoot, "packages/database/src/seed.ts"), "utf8");
-    // Uniqueness matters only within the MessageTemplate seed array (the DB
-    // unique constraint is per-model) - scope the check to that block.
-    const block = /INITIAL_MESSAGE_TEMPLATES[^=]*= \[([\s\S]*?)\n\];/.exec(seed)?.[1] ?? "";
-    const keys = [...block.matchAll(/key: "([^"]+)"/g)].map((m) => m[1]);
+  it("the seed registry contains the wallet template keys without duplicates", () => {
+    const keys = INITIAL_MESSAGE_TEMPLATES.map((t) => t.key);
     for (const key of [
       "wallet_header_text",
       "wallet_topup_amount_prompt",
@@ -286,17 +280,17 @@ describe("direct renewal from service detail (Fix A)", () => {
     const order = [
       "user:svc:refresh:abcdef12",
       "user:svc:regen_link:abcdef12",
-      "user:ev:svc:abcdef12",
       "user:renew:svc:abcdef12",
+      "user:ev:svc:abcdef12",
       "user:et:svc:abcdef12",
       "user:svc:disable:abcdef12",
-      CB.USER_MENU,
       "user:svc:list:1",
+      CB.USER_MENU,
     ];
     const positions = order.map((cb) => flat.indexOf(cb));
     expect(positions).not.toContain(-1);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
-    expect(rows(kb).at(-1)?.[0]?.text).toBe("بازگشت به منوی اصلی");
+    expect(rows(kb).at(-1)?.[0]?.text).toBe("بازگشت به لیست");
   });
 
   it("canRenew reuses RENEWABLE_STATUSES instead of duplicating status rules", () => {
