@@ -2,6 +2,7 @@ import type { Panel } from "@zedbot/database";
 import { describe, expect, it } from "vitest";
 
 import { isProductVisible } from "../src/services/catalog.service.js";
+import { buildProductSnapshot } from "../src/services/checkout.service.js";
 import { resolveProductInboundIds } from "../src/services/panel-readiness.service.js";
 import type { ProductWithRelations } from "../src/services/product.service.js";
 
@@ -93,6 +94,44 @@ describe("resolveProductInboundIds (configuration hierarchy)", () => {
     if (!resolution.ok) {
       expect(resolution.reason).toBe("panel-allowlist-empty");
     }
+  });
+});
+
+describe("buildProductSnapshot captures the sold inbound set", () => {
+  const draft = {
+    productId: "p",
+    categoryId: "c",
+    flowType: "SERVICE_PRODUCT",
+    originalPriceToman: 1000,
+    discountAmountToman: 0,
+    finalPriceToman: 1000,
+  } as never;
+
+  it("records the resolved selection for XUI products", () => {
+    const panel = xuiPanel();
+    const explicit = buildProductSnapshot(serviceProduct(panel, [5, 8]), draft);
+    expect(explicit["inboundIds"]).toEqual([5, 8]);
+    // Inherited selections are MATERIALIZED: the sold set is the allowlist
+    // as it stood at checkout, so later allowlist growth never expands a
+    // paid order's entitlement.
+    const inherited = buildProductSnapshot(serviceProduct(panel, null), draft);
+    expect(inherited["inboundIds"]).toEqual([3, 5, 8, 12]);
+  });
+
+  it("records null for invalid selections and non-XUI products", () => {
+    const panel = xuiPanel();
+    expect(buildProductSnapshot(serviceProduct(panel, [99]), draft)["inboundIds"]).toBeNull();
+    const marzban = {
+      type: "MARZBAN",
+      status: "ACTIVE",
+      isVisible: true,
+      username: "admin",
+      passwordEncrypted: "enc",
+      templateUsername: "tpl",
+      inboundIds: null,
+      provisioningReady: null,
+    } as unknown as Panel;
+    expect(buildProductSnapshot(serviceProduct(marzban, null), draft)["inboundIds"]).toBeNull();
   });
 });
 

@@ -115,6 +115,16 @@ function snapshotInt(snapshot: Record<string, unknown>, key: string): number | n
   return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
 
+/** Validated int-array snapshot field ([] and non-arrays -> null). */
+function snapshotIntArray(snapshot: Record<string, unknown>, key: string): number[] | null {
+  const value = snapshot[key];
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const ids = value.filter((v): v is number => typeof v === "number" && Number.isInteger(v));
+  return ids.length > 0 ? ids : null;
+}
+
 /** Order type for a checkout: the stored orderType, else derived from the snapshot. */
 function resolveOrderType(
   checkout: CheckoutSession,
@@ -292,6 +302,9 @@ export async function approveReceiptPayment(
             productPriceSnapshot: snapshotInt(snapshot, "originalPriceToman"),
             durationDaysSnapshot: snapshotInt(snapshot, "durationDays"),
             volumeGbSnapshot: snapshotInt(snapshot, "volumeGb"),
+            ...(snapshotIntArray(snapshot, "inboundIds") !== null
+              ? { inboundIdsSnapshot: snapshotIntArray(snapshot, "inboundIds") as number[] }
+              : {}),
             panelNameSnapshot: snapshotString(snapshot, "panelName"),
             locationSnapshot:
               snapshot.allLocations === true ? "ALL" : snapshotString(snapshot, "serviceLocation"),

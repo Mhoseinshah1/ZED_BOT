@@ -11,6 +11,7 @@ process.env.APP_SECRET ??= "zedbot-panel-tests-shared-secret-00001";
 process.env.PANEL_HTTP_TIMEOUT_MS = "800";
 
 import { isProductVisible } from "../src/services/catalog.service.js";
+import { payPurchaseDraftWithWallet } from "../src/services/wallet-payment.service.js";
 import {
   provisionPaidOrder,
   PROVISION_UNKNOWN_OUTCOME_TEXT,
@@ -415,7 +416,11 @@ async function createUser(): Promise<User> {
 }
 
 /** Full chain: CheckoutSession (PAID) -> Payment (APPROVED) -> Order (PAID). */
-async function createPaidChain(user: User, productId: string): Promise<string> {
+async function createPaidChain(
+  user: User,
+  productId: string,
+  opts: { inboundIdsSnapshot?: number[] } = {},
+): Promise<string> {
   const checkout = await prisma.checkoutSession.create({
     data: {
       userId: user.id,
@@ -453,6 +458,9 @@ async function createPaidChain(user: User, productId: string): Promise<string> {
       finalPriceToman: PRICE,
       volumeGbSnapshot: 20,
       durationDaysSnapshot: 30,
+      ...(opts.inboundIdsSnapshot !== undefined
+        ? { inboundIdsSnapshot: opts.inboundIdsSnapshot }
+        : {}),
       paidAt: new Date(),
     },
   });
@@ -636,6 +644,59 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
     expect(remote?.inboundIds?.slice().sort()).toEqual([1, 2]);
     const services = await prisma.service.findMany({ where: { orderId } });
     expect(services[0].remoteInboundIds).toEqual([1, 2]);
+  });
+
+  it("provisions the EXACT inbound set sold at checkout, surviving product edits", async () => {
+    const user = await createUser();
+    // Sold entitlement snapshotted at checkout: inbound [2].
+    const orderId = await createPaidChain(user, xuiSubsetProductId, { inboundIdsSnapshot: [2] });
+    const username = generatePanelUsername(user.telegramId, orderId);
+
+    // The admin edits the product AFTER payment: selection becomes [1].
+    await prisma.product.update({ where: { id: xuiSubsetProductId }, data: { inboundIds: [1] } });
+    try {
+      const outcome = await provisionPaidOrder(orderId);
+      expect(outcome.ok).toBe(true);
+      // The paid order's entitlement is unchanged: attached to [2], not [1].
+      const remote = xuiClients.find((c) => c.email === username);
+      expect(remote?.inboundIds).toEqual([2]);
+      const services = await prisma.service.findMany({ where: { orderId } });
+      expect(services[0].remoteInboundIds).toEqual([2]);
+    } finally {
+      await prisma.product.update({ where: { id: xuiSubsetProductId }, data: { inboundIds: [2] } });
+    }
+  });
+
+  it("wallet payment snapshots the sold inbound set on the order", async () => {
+    const user = await prisma.user.create({
+      data: { telegramId: runTag + BigInt(9000 + ++tgSeq), balanceToman: PRICE },
+    });
+    const product = await prisma.product.findUniqueOrThrow({
+      where: { id: xuiSubsetProductId },
+      include: { category: true, panel: true },
+    });
+    const result = await payPurchaseDraftWithWallet(user, {
+      productId: product.id,
+      categoryId: product.categoryId,
+      panelId: product.panelId ?? undefined,
+      flowType: "SERVICE_PRODUCT",
+      originalPriceToman: PRICE,
+      discountAmountToman: 0,
+      finalPriceToman: PRICE,
+      draftNonce: `inb-snap-${runTag}-${tgSeq}`,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const order = await prisma.order.findUniqueOrThrow({ where: { id: result.order.id } });
+      // The sold set ([2] - the product's selection) is snapshotted on the
+      // order AND recorded in the checkout's product snapshot.
+      expect(order.inboundIdsSnapshot).toEqual([2]);
+      const checkout = await prisma.checkoutSession.findUniqueOrThrow({
+        where: { id: order.checkoutSessionId ?? "" },
+      });
+      const snapshot = checkout.productSnapshot as { inboundIds?: unknown };
+      expect(snapshot.inboundIds).toEqual([2]);
+    }
   });
 
   it("blocks an out-of-allowlist product selection before payment and refunds after", async () => {
