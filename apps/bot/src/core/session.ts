@@ -8,8 +8,10 @@ import type {
 
 /** In-progress "add panel" wizard state. */
 export interface PanelAddState {
-  step: "name" | "baseUrl" | "username" | "password";
+  step: "name" | "baseUrl" | "authMode" | "username" | "password" | "token";
   type: PanelType;
+  /** XUI only; chosen in the wizard (SESSION_COOKIE default). */
+  authMode?: "SESSION_COOKIE" | "API_TOKEN";
   name?: string;
   baseUrl?: string;
   username?: string;

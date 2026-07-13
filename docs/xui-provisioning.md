@@ -14,20 +14,42 @@ claimed.
   «نسخه API پشتیبانی نمی‌شود» and are never sellable - readiness is
   authenticated, so a merely reachable login page changes nothing.
 
+## Authentication modes
+
+Two explicit modes (`Panel.authMode`; null defaults to `SESSION_COOKIE`,
+so panels configured before this phase keep working unchanged):
+
+- **`SESSION_COOKIE`** (default) - the stock Sanaei 3X-UI mechanism: form
+  login on `{base}/login`, session cookie on subsequent requests. 3x-ui
+  reports login failures as **HTTP 200 with `{"success": false}`** - the
+  envelope, not the status code, decides success.
+- **`API_TOKEN`** - for deployments that require a pre-issued API token
+  and cannot authenticate through the login flow. The token (stored
+  encrypted in `tokenEncrypted`) is sent as `Authorization: Bearer` on
+  every request against the same SANAEI-shaped routes; **`/login` is never
+  called**. There is no interactive round-trip that proves the token, so
+  the connection test and readiness check verify it with a real
+  authenticated read of the inbound list - 401/403 or a login-page
+  redirect is an authentication failure. Token formats and endpoints
+  differ between forks: only this documented bearer convention is
+  implemented, and deployments using other schemes surface as
+  authentication/variant failures - never as guesses.
+
+Cookies and tokens live only in memory for one adapter operation and are
+never logged, returned in messages or persisted (the token is persisted
+only encrypted, like every other panel credential).
+
 ## Endpoints used
 
 | Operation | Endpoint |
 |---|---|
-| Login (session cookie) | `POST {base}/login` (form-encoded) |
+| Login (SESSION_COOKIE mode only) | `POST {base}/login` (form-encoded) |
 | Inbound list (+clients +traffic) | `GET {base}/panel/api/inbounds/list` |
 | Add client | `POST {base}/panel/api/inbounds/addClient` |
 | Delete client (compensating cleanup / staging only) | `POST {base}/panel/api/inbounds/{id}/delClient/{clientId}` |
 
-3x-ui reports login failures as **HTTP 200 with `{"success": false}`** -
-the envelope, not the status code, decides success. The session cookie
-lives only in memory for one adapter operation and is never logged,
-returned or persisted. Unauthenticated API calls answered with a redirect
-are reported as session/base-path errors.
+Unauthenticated API calls answered with a redirect are reported as
+session/token/base-path errors.
 
 ## Base path handling
 
@@ -46,16 +68,21 @@ as «نسخه API پشتیبانی نمی‌شود» / login-endpoint-not-found.
 | Field | Meaning |
 |---|---|
 | `baseUrl` | Panel root incl. any web base path |
-| `username` / password | 3x-ui login credentials (password encrypted with `APP_SECRET`) |
+| `authMode` (optional) | `SESSION_COOKIE` (default) or `API_TOKEN` |
+| `username` / password | SESSION_COOKIE mode login credentials (password encrypted with `APP_SECRET`) |
+| `tokenEncrypted` | API_TOKEN mode bearer token (encrypted with `APP_SECRET`) |
 | `inboundIds` | JSON int array of inbound ids to provision into, e.g. `[1]` or `[1,4]` |
 | `apiVariant` (optional) | `SANAEI` (default) |
 | `subscriptionDomain` (optional) | Full base URL of the 3x-ui subscription service, e.g. `https://sub.example.com:2096/sub` |
 | `protocolSettings` (optional) | `{"flow": "xtls-rprx-vision"}` applied to VLESS clients only |
 
-Panels configured before this phase stored only an API token; the SANAEI
-variant needs username/password, so an admin must enter them
-(«ویرایش اطلاعات ورود») before the panel becomes sellable again. The old
-`tokenEncrypted` column is retained but unused.
+The admin add-wizard asks for the auth mode when creating an XUI panel;
+existing panels can switch modes via «روش احراز هویت 🔐» on the panel
+detail page (switching stales the readiness result and prompts for the new
+mode's credential). Whatever the mode, the credential for the CONFIGURED
+mode must be present - a token alone never satisfies SESSION_COOKIE and
+vice versa. Legacy panels that only carry a token can either get login
+credentials or be switched explicitly to API_TOKEN.
 
 ## Inbound validation
 

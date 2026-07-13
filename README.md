@@ -246,9 +246,11 @@ Panel integrations have since been implemented (see
   extra volume/time, enable/disable, subscription regeneration,
   reconciliation — `docs/marzban-provisioning.md`
 - **XUI / Sanaei 3X-UI** (SANAEI variant only): authenticated
-  provisioning, read/sync and reconciliation. Renewal, extras, toggling
-  and subscription regeneration are NOT implemented and are blocked
-  before payment by the capability model — `docs/xui-provisioning.md`
+  provisioning, read/sync and reconciliation, with two explicit
+  authentication modes (SESSION_COOKIE username/password login and
+  API_TOKEN bearer token). Renewal, extras, toggling and subscription
+  regeneration are NOT implemented and are blocked before payment by the
+  capability model — `docs/xui-provisioning.md`
 
 ## Development foundation
 

@@ -6,8 +6,14 @@ import {
   readJsonSafely,
   safeErrorText,
 } from "../core/http.js";
-import type { XuiCredentials } from "../core/panel.types.js";
-import type { XuiApiEnvelope, XuiLoginResult, XuiRequestResult } from "./xui.types.js";
+import type { XuiAuthMode, XuiCredentials } from "../core/panel.types.js";
+import type {
+  XuiApiEnvelope,
+  XuiAuthContext,
+  XuiAuthResult,
+  XuiLoginResult,
+  XuiRequestResult,
+} from "./xui.types.js";
 
 /**
  * Low-level HTTP client for the Sanaei 3X-UI API family (SANAEI variant).
@@ -19,11 +25,18 @@ import type { XuiApiEnvelope, XuiLoginResult, XuiRequestResult } from "./xui.typ
  *   - POST {base}/panel/api/inbounds/addClient               (JSON)
  *   - POST {base}/panel/api/inbounds/{id}/delClient/{clientId}
  *
- * Authentication is a session cookie set by /login - there is no permanent
- * bearer token. The cookie lives only in memory for the duration of one
- * adapter operation and is NEVER logged, returned in messages or persisted.
- * 3x-ui reports login failures as HTTP 200 with {"success": false}, so the
- * envelope - not the status code - decides success.
+ * Two authentication modes (XuiAuthMode):
+ *   - SESSION_COOKIE (default): form login on {base}/login; the session
+ *     cookie authenticates subsequent requests. 3x-ui reports login
+ *     failures as HTTP 200 with {"success": false}, so the envelope - not
+ *     the status code - decides success.
+ *   - API_TOKEN: no /login call at all; the pre-issued token is sent as
+ *     `Authorization: Bearer` on every API request against the same
+ *     SANAEI-shaped routes. Only this bearer convention is implemented -
+ *     fork-specific token schemes are not guessed.
+ *
+ * Cookies and tokens live only in memory for the duration of one adapter
+ * operation and are NEVER logged, returned in messages or persisted.
  */
 export class XuiClient {
   /** Normalized base URL: trailing slashes removed, path prefix preserved. */
@@ -33,6 +46,56 @@ export class XuiClient {
     // The web base path is part of the deployment contract - only trailing
     // slashes are stripped, no path segments are added or removed.
     this.baseUrl = normalizeBaseUrl(credentials.baseUrl);
+  }
+
+  /** Effective authentication mode (default SESSION_COOKIE). */
+  get authMode(): XuiAuthMode {
+    return this.credentials.authMode ?? "SESSION_COOKIE";
+  }
+
+  /**
+   * Establishes the authentication context for the configured mode.
+   * SESSION_COOKIE performs the real login round-trip; API_TOKEN builds the
+   * bearer context without any network call - the token is validated by the
+   * first authenticated request (401/403/redirect = rejected token).
+   * Missing credentials are a structural config error, never an exception.
+   */
+  async authenticate(): Promise<XuiAuthResult> {
+    if (this.authMode === "API_TOKEN") {
+      const token = this.credentials.token ?? "";
+      if (token === "") {
+        return {
+          ok: false,
+          configIncomplete: true,
+          message: "XUI API token is not configured.",
+        };
+      }
+      return { ok: true, auth: { kind: "token", token }, message: "Token context ready." };
+    }
+    if ((this.credentials.username ?? "") === "" || (this.credentials.password ?? "") === "") {
+      return {
+        ok: false,
+        configIncomplete: true,
+        message: "XUI username/password are not configured.",
+      };
+    }
+    const login = await this.login();
+    if (!login.ok || login.cookie === undefined) {
+      return {
+        ok: false,
+        status: login.status,
+        timedOut: login.timedOut,
+        transportError: login.transportError,
+        malformedBody: login.malformedBody,
+        message: login.message,
+      };
+    }
+    return {
+      ok: true,
+      auth: { kind: "cookie", cookie: login.cookie },
+      status: login.status,
+      message: login.message,
+    };
   }
 
   /**
@@ -46,8 +109,8 @@ export class XuiClient {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
-          username: this.credentials.username,
-          password: this.credentials.password,
+          username: this.credentials.username ?? "",
+          password: this.credentials.password ?? "",
         }),
         redirect: "manual",
         signal: AbortSignal.timeout(panelHttpTimeoutMs()),
@@ -105,7 +168,7 @@ export class XuiClient {
    * reported structurally - never thrown, never logged with the cookie.
    */
   private async request(
-    cookie: string,
+    auth: XuiAuthContext,
     method: "GET" | "POST",
     path: string,
     jsonBody?: unknown,
@@ -115,7 +178,9 @@ export class XuiClient {
       const response = await fetch(url, {
         method,
         headers: {
-          Cookie: cookie,
+          ...(auth.kind === "cookie"
+            ? { Cookie: auth.cookie }
+            : { Authorization: `Bearer ${auth.token}` }),
           Accept: "application/json",
           ...(jsonBody !== undefined ? { "Content-Type": "application/json" } : {}),
         },
@@ -127,7 +192,7 @@ export class XuiClient {
         return {
           ok: false,
           status: response.status,
-          message: "Panel redirected the API request - session expired or wrong base path.",
+          message: "Panel redirected the API request - session/token rejected or wrong base path.",
         };
       }
       const parsed = await readJsonSafely(response);
@@ -169,8 +234,8 @@ export class XuiClient {
   }
 
   /** GET {base}/panel/api/inbounds/list - all inbounds with clients + stats. */
-  async listInbounds(cookie: string): Promise<XuiRequestResult> {
-    return this.request(cookie, "GET", "/panel/api/inbounds/list");
+  async listInbounds(auth: XuiAuthContext): Promise<XuiRequestResult> {
+    return this.request(auth, "GET", "/panel/api/inbounds/list");
   }
 
   /**
@@ -179,11 +244,11 @@ export class XuiClient {
    *   { "id": <inboundId>, "settings": "{\"clients\": [ {...} ]}" }
    */
   async addClient(
-    cookie: string,
+    auth: XuiAuthContext,
     inboundId: number,
     client: Record<string, unknown>,
   ): Promise<XuiRequestResult> {
-    return this.request(cookie, "POST", "/panel/api/inbounds/addClient", {
+    return this.request(auth, "POST", "/panel/api/inbounds/addClient", {
       id: inboundId,
       settings: JSON.stringify({ clients: [client] }),
     });
@@ -195,12 +260,12 @@ export class XuiClient {
    * (3x-ui addresses clients by their credential identifier).
    */
   async deleteClient(
-    cookie: string,
+    auth: XuiAuthContext,
     inboundId: number,
     clientId: string,
   ): Promise<XuiRequestResult> {
     return this.request(
-      cookie,
+      auth,
       "POST",
       `/panel/api/inbounds/${encodeURIComponent(String(inboundId))}/delClient/${encodeURIComponent(clientId)}`,
     );

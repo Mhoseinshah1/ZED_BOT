@@ -150,6 +150,7 @@ let xuiDelFail = false;
 let xuiServer: http.Server;
 let xuiUrl = "";
 const XUI_SESSION = "e2e-session";
+const XUI_API_TOKEN = "e2e-xui-api-token-secret";
 
 function startXuiMock(): Promise<void> {
   xuiServer = http.createServer((req, res) => {
@@ -163,7 +164,9 @@ function startXuiMock(): Promise<void> {
         send(200, { success: true, msg: "Login Successfully" }, { "Set-Cookie": `3x-ui=${XUI_SESSION}; Path=/` });
         return;
       }
-      if ((req.headers.cookie ?? "") !== `3x-ui=${XUI_SESSION}`) {
+      const cookieOk = (req.headers.cookie ?? "") === `3x-ui=${XUI_SESSION}`;
+      const bearerOk = req.headers.authorization === `Bearer ${XUI_API_TOKEN}`;
+      if (!cookieOk && !bearerOk) {
         res.writeHead(302, { Location: "/" });
         res.end();
         return;
@@ -243,8 +246,10 @@ function startXuiMock(): Promise<void> {
 // --- fixtures ----------------------------------------------------------------------
 let marzbanPanel: Panel;
 let xuiPanel: Panel;
+let xuiTokenPanel: Panel;
 let marzbanProductId = "";
 let xuiProductId = "";
+let xuiTokenProductId = "";
 
 beforeAll(async () => {
   if (!hasDeps) return;
@@ -252,7 +257,7 @@ beforeAll(async () => {
   const category = await prisma.productCategory.create({
     data: { type: "SERVICE_PRODUCT", name: `e2e-prov-cat-${runTag}`, isActive: true },
   });
-  [marzbanPanel, xuiPanel] = await Promise.all([
+  [marzbanPanel, xuiPanel, xuiTokenPanel] = await Promise.all([
     prisma.panel.create({
       data: {
         type: "MARZBAN",
@@ -275,6 +280,17 @@ beforeAll(async () => {
         status: "ACTIVE",
       },
     }),
+    prisma.panel.create({
+      data: {
+        type: "XUI",
+        name: `e2e-prov-xui-token-${runTag}`,
+        baseUrl: xuiUrl,
+        authMode: "API_TOKEN",
+        tokenEncrypted: encryptSecret(XUI_API_TOKEN),
+        inboundIds: [1],
+        status: "ACTIVE",
+      },
+    }),
   ]);
   const makeProduct = (name: string, panelId: string) =>
     prisma.product.create({
@@ -289,12 +305,14 @@ beforeAll(async () => {
         isActive: true,
       },
     });
-  const [p1, p2] = await Promise.all([
+  const [p1, p2, p3] = await Promise.all([
     makeProduct(`e2e-prov-marzban-prod-${runTag}`, marzbanPanel.id),
     makeProduct(`e2e-prov-xui-prod-${runTag}`, xuiPanel.id),
+    makeProduct(`e2e-prov-xui-token-prod-${runTag}`, xuiTokenPanel.id),
   ]);
   marzbanProductId = p1.id;
   xuiProductId = p2.id;
+  xuiTokenProductId = p3.id;
 });
 
 afterAll(() => {
@@ -476,6 +494,30 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
     expect(order.status).toBe(OrderStatus.PROVISIONING);
     expect(await refundCount(orderId)).toBe(0);
     expect(await prisma.service.count({ where: { orderId } })).toBe(0);
+  });
+
+  it("provisions end to end in API_TOKEN mode, idempotent on retry", async () => {
+    const user = await createUser();
+    const orderId = await createPaidChain(user, xuiTokenProductId);
+    const username = generatePanelUsername(user.telegramId, orderId);
+
+    const outcome = await provisionPaidOrder(orderId);
+    expect(outcome.ok).toBe(true);
+
+    const remote = xuiClients.find((c) => c.email === `${username}-1`);
+    expect(remote).toBeDefined();
+    const services = await prisma.service.findMany({ where: { orderId } });
+    expect(services).toHaveLength(1);
+    expect(services[0].remoteClientId).toBe(remote?.id);
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe(OrderStatus.COMPLETED);
+    expect(await refundCount(orderId)).toBe(0);
+
+    const addsBefore = xuiAddCount;
+    const retry = await provisionPaidOrder(orderId);
+    expect(retry.ok).toBe(true);
+    expect(xuiAddCount).toBe(addsBefore);
+    expect(await prisma.service.count({ where: { orderId } })).toBe(1);
   });
 
   it("refunds on a definite configuration failure (missing inbound ids)", async () => {

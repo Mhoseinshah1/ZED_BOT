@@ -137,15 +137,35 @@ export interface MarzbanCredentials {
 export type XuiApiVariant = "SANAEI";
 
 /**
- * XUI / Sanaei / 3X-UI connects with the panel login (username + password)
- * and a session cookie - there is no permanent bearer token in the SANAEI
- * family. The base URL may carry a secret web base path
- * (https://host:port/secretpath); it is used verbatim after normalization.
+ * How an XUI-compatible deployment authenticates API requests.
+ *
+ * - "SESSION_COOKIE": the stock Sanaei 3X-UI mechanism - form login on
+ *   {base}/login, session cookie on subsequent requests.
+ * - "API_TOKEN": deployments that require a pre-issued API token instead of
+ *   an interactive login. The token is sent as `Authorization: Bearer` on
+ *   every request against the same SANAEI-shaped API routes; no /login call
+ *   is ever made. Token formats/endpoints differ between forks - only this
+ *   documented bearer convention is implemented; other schemes surface as
+ *   authentication/variant failures, never as guesses.
+ */
+export type XuiAuthMode = "SESSION_COOKIE" | "API_TOKEN";
+
+/**
+ * XUI / Sanaei / 3X-UI credentials. The base URL may carry a secret web
+ * base path (https://host:port/secretpath); it is used verbatim after
+ * normalization. Exactly one credential set is required, selected by
+ * authMode (default SESSION_COOKIE): username+password, or token.
  */
 export interface XuiCredentials {
   baseUrl: string;
-  username: string;
-  password: string;
+  /** Defaults to "SESSION_COOKIE" - the stock 3X-UI mechanism. */
+  authMode?: XuiAuthMode;
+  /** SESSION_COOKIE mode. */
+  username?: string;
+  /** SESSION_COOKIE mode. */
+  password?: string;
+  /** API_TOKEN mode: bearer token sent on every API request. */
+  token?: string;
   /** Defaults to "SANAEI" - the only variant implemented and tested. */
   apiVariant?: XuiApiVariant;
 }

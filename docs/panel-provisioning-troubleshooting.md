@@ -57,9 +57,17 @@ reachable login page is NOT the API. Wrong web base path (the secret path
 segment) or a non-Sanaei fork both surface as
 «نسخه API پشتیبانی نمی‌شود».
 
-**Existing XUI panels stopped selling after the upgrade** - XUI now
-authenticates with username/password (session cookie), not the old token.
-Enter the login credentials via «ویرایش اطلاعات ورود», then run the test.
+**Existing XUI panels stopped selling after the upgrade** - XUI
+authenticates with username/password (session cookie) by default; panels
+that only carry the legacy token need either login credentials
+(«ویرایش اطلاعات ورود») or an explicit switch to the API_TOKEN mode
+(«روش احراز هویت 🔐») with a valid bearer token. Run the test afterwards.
+
+**Token-mode panel fails with «احراز هویت ناموفق»** - the deployment
+rejected the bearer token (401/403 or a redirect to the login page).
+Verify the token is current and that the deployment actually accepts
+`Authorization: Bearer` on `/panel/api/...` routes; fork-specific token
+schemes are not supported and surface exactly like a wrong token.
 
 **Order stuck in PROVISIONING with `uncertain: true` in the log** - the
 panel outcome was UNKNOWN (timeout mid-create / unverifiable partial

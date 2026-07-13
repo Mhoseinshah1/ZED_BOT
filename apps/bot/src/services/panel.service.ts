@@ -9,6 +9,8 @@ export interface CreatePanelInput {
   username?: string | null;
   passwordEncrypted?: string | null;
   tokenEncrypted?: string | null;
+  /** XUI only: "SESSION_COOKIE" | "API_TOKEN" (null = SESSION_COOKIE). */
+  authMode?: string | null;
 }
 
 /** Creates a panel with schema defaults and the next display order. */
@@ -25,6 +27,7 @@ export async function createPanel(input: CreatePanelInput): Promise<Panel> {
       username: input.username ?? null,
       passwordEncrypted: input.passwordEncrypted ?? null,
       tokenEncrypted: input.tokenEncrypted ?? null,
+      authMode: input.authMode ?? null,
       status: PanelStatus.ACTIVE,
       isVisible: true,
       displayOrder: (last?.displayOrder ?? 0) + 1,

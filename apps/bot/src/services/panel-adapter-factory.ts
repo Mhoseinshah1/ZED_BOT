@@ -23,6 +23,15 @@ export function resolveXuiVariant(panel: Panel): string {
   return raw === "" ? "SANAEI" : raw;
 }
 
+/** XUI authentication modes this codebase implements and tests. */
+export const SUPPORTED_XUI_AUTH_MODES = new Set(["SESSION_COOKIE", "API_TOKEN"]);
+
+/** Resolved XUI auth mode for a panel row (null/empty = SESSION_COOKIE). */
+export function resolveXuiAuthMode(panel: Panel): string {
+  const raw = panel.authMode?.trim().toUpperCase() ?? "";
+  return raw === "" ? "SESSION_COOKIE" : raw;
+}
+
 /** Decrypts credentials and builds the panel adapter. Throws on missing config. */
 export function buildAdapterForPanel(panel: Panel): PanelAdapter {
   if (panel.type === "MARZBAN") {
@@ -34,13 +43,30 @@ export function buildAdapterForPanel(panel: Panel): PanelAdapter {
       new MarzbanClient({ baseUrl: panel.baseUrl, username: panel.username, password }),
     );
   }
-  // XUI (Sanaei 3X-UI): session-cookie login with username + password. The
-  // legacy tokenEncrypted column is NOT a supported credential for the
-  // SANAEI variant - panels configured before this phase must have their
-  // login credentials entered by an admin.
+  // XUI (Sanaei 3X-UI family), two explicit auth modes:
+  //   SESSION_COOKIE (default) - username/password login, session cookie;
+  //   API_TOKEN - pre-issued bearer token (tokenEncrypted), no /login call.
   const variant = resolveXuiVariant(panel);
   if (!SUPPORTED_XUI_VARIANTS.has(variant)) {
     throw new Error(`XUI API variant "${variant}" is not supported.`);
+  }
+  const authMode = resolveXuiAuthMode(panel);
+  if (!SUPPORTED_XUI_AUTH_MODES.has(authMode)) {
+    throw new Error(`XUI auth mode "${authMode}" is not supported.`);
+  }
+  if (authMode === "API_TOKEN") {
+    if (panel.tokenEncrypted === null) {
+      throw new Error("XUI API token is missing.");
+    }
+    const token = decryptSecret(panel.tokenEncrypted);
+    return new XuiAdapter(
+      new XuiClient({
+        baseUrl: panel.baseUrl,
+        authMode: "API_TOKEN",
+        token,
+        apiVariant: "SANAEI",
+      }),
+    );
   }
   if (panel.username === null || panel.passwordEncrypted === null) {
     throw new Error("XUI credentials are incomplete (username/password required).");
@@ -49,6 +75,7 @@ export function buildAdapterForPanel(panel: Panel): PanelAdapter {
   return new XuiAdapter(
     new XuiClient({
       baseUrl: panel.baseUrl,
+      authMode: "SESSION_COOKIE",
       username: panel.username,
       password,
       apiVariant: "SANAEI",

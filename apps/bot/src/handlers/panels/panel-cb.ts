@@ -9,6 +9,9 @@ export const PANEL_CB = {
   ADD_XUI: "admin:panels:add:XUI",
   CANCEL: "admin:panels:cancel",
   LIST: "admin:panels:list",
+  // Add-wizard XUI auth-mode selection (c = SESSION_COOKIE, t = API_TOKEN).
+  ADD_AUTH_COOKIE: "admin:panels:addauth:c",
+  ADD_AUTH_TOKEN: "admin:panels:addauth:t",
 } as const;
 
 export const cb = {
@@ -32,4 +35,7 @@ export const cb = {
   fieldEdit: (sid: string, key: string): string => `admin:panel:fe:${sid}:${key}`,
   deleteAsk: (sid: string): string => `admin:panel:del:${sid}`,
   deleteConfirm: (sid: string): string => `admin:panel:del:${sid}:yes`,
+  // XUI auth-mode switch (existing panel).
+  authModeMenu: (sid: string): string => `admin:panel:am:${sid}`,
+  authModeSet: (sid: string, mode: "c" | "t"): string => `admin:panel:am:${sid}:${mode}`,
 } as const;

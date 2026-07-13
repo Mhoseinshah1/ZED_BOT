@@ -136,9 +136,10 @@ describe.runIf(hasXuiStaging)("XUI staging verification (opt-in)", () => {
       // Cleanup via delClient, recovering each per-inbound identifier from
       // the live inbound list (multi-inbound clients have distinct ids).
       // On failure the safe label is printed for manual removal.
-      const login = await client.login();
-      expect(login.ok).toBe(true);
-      const listed = await client.listInbounds(login.cookie ?? "");
+      const session = await client.authenticate();
+      expect(session.ok).toBe(true);
+      const auth = session.auth ?? { kind: "cookie" as const, cookie: "" };
+      const listed = await client.listInbounds(auth);
       let allDeleted = listed.ok;
       if (listed.ok && Array.isArray(listed.envelope?.obj)) {
         for (const inbound of listed.envelope.obj as Array<{ id: number; settings?: string }>) {
@@ -151,7 +152,7 @@ describe.runIf(hasXuiStaging)("XUI staging verification (opt-in)", () => {
           for (const entry of clients) {
             if (typeof entry.email === "string" && entry.email.startsWith(username)) {
               const identifier = entry.id ?? entry.password ?? "";
-              const deleted = await client.deleteClient(login.cookie ?? "", inbound.id, identifier);
+              const deleted = await client.deleteClient(auth, inbound.id, identifier);
               allDeleted = allDeleted && deleted.ok;
             }
           }
