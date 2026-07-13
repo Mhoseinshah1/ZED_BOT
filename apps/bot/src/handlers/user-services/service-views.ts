@@ -2,6 +2,10 @@ import type { Service, ServiceLocation, ServiceStatus } from "@zedbot/database";
 import { InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
+import {
+  serviceSupportsGlobalLifecycle,
+  XUI_LEGACY_SERVICE_TEXT,
+} from "../../services/panel-readiness.service.js";
 import type { ToggleAction } from "../../services/service-toggle.service.js";
 import {
   serviceShortId,
@@ -149,6 +153,11 @@ export function serviceDetailText(service: Service): string {
   if (service.lastSubscriptionUpdateAt !== null) {
     lines.push(`آخرین بروزرسانی: ${formatDate(service.lastSubscriptionUpdateAt)}`);
   }
+  if (!serviceSupportsGlobalLifecycle(service)) {
+    // Legacy per-inbound XUI service: says WHY the mutating buttons are
+    // hidden (renew/extras/toggle/regenerate need the global-client model).
+    lines.push("", XUI_LEGACY_SERVICE_TEXT);
+  }
   return lines.join("\n");
 }
 
@@ -160,50 +169,63 @@ const NO_DETAIL_ACTIONS: ServiceDetailActions = {
   canRenew: false,
 };
 
+/**
+ * Master-requirements arrangement (Section 8): fixed row slots with every
+ * unimplemented capability HIDDEN instead of rendered dead - QR Code, note
+ * editing, service transfer and tutorials are outside this phase, so their
+ * slots collapse. Action buttons render only when the capability model +
+ * remote-model classification allow them (the routes re-validate on click,
+ * so a stale button still fails safely).
+ */
 export function serviceDetailKeyboard(
   service: Service,
   actions: ServiceDetailActions = NO_DETAIL_ACTIONS,
 ): InlineKeyboard {
   const sid = serviceShortId(service);
+  // Row 1: refresh.
   const kb = new InlineKeyboard().text("بروزرسانی اطلاعات ♻️", svcCb.refresh(sid)).row();
+  // Row 2: configs + subscription link (only what is actually stored).
   const hasLink = service.subscriptionUrl !== null && service.subscriptionUrl !== "";
   const hasConfigs = serviceConfigLinks(service).length > 0;
-  if (hasLink) {
-    kb.text("لینک اشتراک 🔗", svcCb.link(sid));
-  }
   if (hasConfigs) {
     kb.text("کانفیگ‌ها 📄", svcCb.configs(sid));
+  }
+  if (hasLink) {
+    kb.text("لینک اشتراک 🔗", svcCb.link(sid));
   }
   if (hasLink || hasConfigs) {
     kb.row();
   }
-  // Phase 19: regenerate the subscription link (confirmation follows).
+  // Row 3: link regeneration (QR Code slot hidden - not implemented).
   if (actions.canRegenerateLink) {
-    kb.text("تغییر لینک اشتراک 🔄", svcCb.regenLink(sid)).row();
+    kb.text("تغییر لینک 🔄", svcCb.regenLink(sid)).row();
   }
-  // Corrective Fix A: straight into the existing Phase 12 renewal flow for
-  // THIS service - the rncb.service route re-validates eligibility on click.
-  if (actions.canRenew) {
-    kb.text("تمدید سرویس ♻️", rncb.service(sid)).row();
-  }
-  // Phase 18.1: straight into the existing Phase 16/17 selected-service
-  // flows - those routes re-validate eligibility on click.
+  // Row 4: extra volume + renewal - both routes re-validate on click.
   if (actions.canBuyExtraVolume) {
     kb.text("خرید حجم اضافه ➕", evcb.service(sid));
   }
-  if (actions.canBuyExtraTime) {
-    kb.text("خرید زمان اضافه ⏳", etcb.service(sid));
+  if (actions.canRenew) {
+    kb.text("تمدید سرویس ♻️", rncb.service(sid));
   }
-  if (actions.canBuyExtraVolume || actions.canBuyExtraTime) {
+  if (actions.canBuyExtraVolume || actions.canRenew) {
     kb.row();
   }
-  // Phase 18: shown ONLY when the service/panel state actually allows it.
+  // Row 5: extra time (note-editing slot hidden - not implemented).
+  if (actions.canBuyExtraTime) {
+    kb.text("خرید زمان اضافه ⏳", etcb.service(sid)).row();
+  }
+  // Row 6: enable/disable, labeled by the direction that currently applies
+  // (transfer slot hidden - not implemented).
   if (actions.toggleAction === "DISABLE") {
     kb.text("خاموش کردن سرویس ⏸", svcCb.disable(sid)).row();
   } else if (actions.toggleAction === "ENABLE") {
     kb.text("روشن کردن سرویس ▶️", svcCb.enable(sid)).row();
   }
-  kb.text("بازگشت به لیست", svcCb.list(1)).row().text("بازگشت به منوی اصلی", CB.USER_MENU);
+  // Row 7: support entry - routes into the existing ticket flow (tutorials
+  // slot hidden - placeholder only).
+  kb.text("مشکل دارم", CB.USER_SUPPORT).row();
+  // Row 8: back navigation.
+  kb.text("بازگشت به منوی اصلی", CB.USER_MENU).text("بازگشت به لیست", svcCb.list(1));
   return kb;
 }
 

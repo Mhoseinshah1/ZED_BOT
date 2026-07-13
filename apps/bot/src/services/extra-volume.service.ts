@@ -19,7 +19,12 @@ import type { ExtraVolumeDraft } from "../core/session.js";
 import { groupMatches } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
-import { panelOperationAvailable, panelTypesSupporting } from "./panel-readiness.service.js";
+import {
+  panelOperationAvailable,
+  panelTypesSupporting,
+  serviceSupportsGlobalLifecycle,
+  XUI_LEGACY_OPERATION_TEXT,
+} from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 import { failOrderWithRefund, type OrderForProvisioning } from "./provisioning.service.js";
 import {
@@ -89,16 +94,20 @@ export async function listExtraVolumeServices(
   userId: string,
   page: number,
 ): Promise<EligibleServicePage> {
-  const where = eligibleWhere(userId);
-  const total = await prisma.service.count({ where });
+  // The XUI remote-model gate (GLOBAL_CLIENT only) needs stored metadata, so
+  // filtering happens in memory; per-user service counts are small.
+  const rows = await prisma.service.findMany({
+    where: eligibleWhere(userId),
+    orderBy: { createdAt: "desc" },
+  });
+  const eligible = rows.filter((s) => serviceSupportsGlobalLifecycle(s));
+  const total = eligible.length;
   const pages = Math.max(1, Math.ceil(total / EXTRA_VOLUME_PAGE_SIZE));
   const safePage = Math.min(Math.max(1, page), pages);
-  const services = await prisma.service.findMany({
-    where,
-    orderBy: { createdAt: "desc" },
-    skip: (safePage - 1) * EXTRA_VOLUME_PAGE_SIZE,
-    take: EXTRA_VOLUME_PAGE_SIZE,
-  });
+  const services = eligible.slice(
+    (safePage - 1) * EXTRA_VOLUME_PAGE_SIZE,
+    safePage * EXTRA_VOLUME_PAGE_SIZE,
+  );
   return { services, page: safePage, pages, total };
 }
 
@@ -114,7 +123,10 @@ export async function getExtraVolumeServiceByShortId(
     where: { id: { startsWith: shortId }, ...eligibleWhere(userId) },
     take: 2,
   });
-  return matches.length === 1 ? matches[0] : null;
+  const match = matches.length === 1 ? matches[0] : null;
+  // Legacy per-inbound XUI services never take extra volume through the
+  // global-client endpoints - same null contract as any other ineligibility.
+  return match !== null && serviceSupportsGlobalLifecycle(match) ? match : null;
 }
 
 /**
@@ -157,6 +169,8 @@ export function isExtraVolumePackageValid(
     product.panelId === service.panelId &&
     product.panel !== null &&
     panelOperationAvailable(product.panel, "addVolume") &&
+    // Remote-model gate: only GLOBAL_CLIENT XUI services take extra volume.
+    serviceSupportsGlobalLifecycle(service) &&
     (product.volumeGb ?? 0) > 0 &&
     product.priceToman > 0 &&
     groupMatches(product.displayGroups, group)
@@ -359,6 +373,16 @@ async function executeExtraVolumeOrderUnlocked(
     const refunded = await failOrderWithRefund(order, "extra-volume target service missing");
     return { ok: false, refunded, error: "افزایش حجم سرویس ناموفق بود." };
   }
+  if (!serviceSupportsGlobalLifecycle(service)) {
+    // Legacy per-inbound XUI services are NEVER mutated through the
+    // global-client endpoints and never silently migrated - a paid order
+    // that slipped past the pre-payment gates dead-ends into a refund.
+    const refunded = await failOrderWithRefund(
+      order,
+      "xui legacy per-inbound service - global lifecycle unsupported",
+    );
+    return { ok: false, refunded, error: XUI_LEGACY_OPERATION_TEXT };
+  }
   if (service.volumeBytes <= 0n) {
     const refunded = await failOrderWithRefund(order, "target service has unlimited volume");
     return { ok: false, refunded, error: "افزایش حجم سرویس ناموفق بود." };
@@ -405,6 +429,20 @@ async function executeExtraVolumeOrderUnlocked(
     panelResult = { ok: false, errorMessage: errorMessage(err) };
   }
 
+  if (!panelResult.ok && panelResult.uncertain === true) {
+    // The panel outcome is UNKNOWN (timeout mid-update / unverifiable
+    // post-state). NEVER refund on uncertainty: the order stays
+    // PROVISIONING and startup reconciliation - which compares the exact
+    // expected post-state under the same lock - completes or refunds it on
+    // positive proof.
+    logger.error("extra volume panel outcome unknown - deferring to reconciliation", {
+      orderId: order.id,
+      serviceId: service.id,
+      panelId: panel.id,
+      error: panelResult.errorMessage ?? "unknown",
+    });
+    return { ok: false, refunded: false, error: SERVICE_LOCK_LOST_TEXT };
+  }
   if (!panelResult.ok) {
     logger.warn("extra volume panel update failed", {
       orderId: order.id,
@@ -509,7 +547,7 @@ async function executeExtraVolumeOrderUnlocked(
 export function buildExtraVolumeSuccessMessage(service: Service, addedVolumeGb: number): string {
   const totalGb = Math.round((Number(service.volumeBytes) / Number(GIB)) * 100) / 100;
   const lines = [
-    "حجم سرویس شما با موفقیت افزایش یافت ✅",
+    "حجم اضافه با موفقیت به سرویس شما اضافه شد ✅",
     "",
     `نام کاربری: <code>${escapeHtml(service.username)}</code>`,
     `حجم اضافه‌شده: ${addedVolumeGb} گیگابایت`,

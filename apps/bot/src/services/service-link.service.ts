@@ -14,6 +14,8 @@ import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter
 import {
   PANEL_OPERATION_UNSUPPORTED_TEXT,
   panelOperationAvailable,
+  serviceSupportsGlobalLifecycle,
+  XUI_LEGACY_OPERATION_TEXT,
 } from "./panel-readiness.service.js";
 import {
   acquireServiceLock,
@@ -39,7 +41,7 @@ export const REGEN_NOT_FOUND_TEXT = "مورد یافت نشد.";
 export const REGEN_UNAVAILABLE_TEXT = "امکان تغییر لینک اشتراک این سرویس وجود ندارد.";
 export const REGEN_FAILED_TEXT =
   "تغییر لینک اشتراک با خطا مواجه شد. لطفاً بعداً دوباره تلاش کنید.";
-export const REGEN_SUCCESS_TEXT = "لینک اشتراک سرویس با موفقیت تغییر کرد ✅";
+export const REGEN_SUCCESS_TEXT = "لینک اشتراک جدید ساخته شد ✅";
 
 export type ServiceWithPanel = Service & { panel: Panel };
 
@@ -137,8 +139,7 @@ export function buildLinkRegenerationPreview(service: Service): string {
     `وضعیت: ${PREVIEW_STATUS_LABELS[service.status] ?? service.status}`,
     `انقضا: ${formatPreviewDate(service.expiresAt)}`,
     "",
-    "آیا از تغییر لینک اشتراک این سرویس مطمئن هستید؟",
-    "⚠️ بعد از تغییر لینک، لینک قبلی ممکن است دیگر کار نکند.",
+    "با تغییر لینک اشتراک، لینک قبلی غیرفعال می‌شود. ادامه می‌دهید؟",
   ].join("\n");
 }
 
@@ -210,14 +211,25 @@ async function regenerateServiceSubscriptionUnlocked(
   const { panel, ...service } = found;
 
   // Capability model: subscription regeneration must be implemented by the
-  // panel's adapter (XUI has no revoke endpoint) - returning the old link
-  // as "new" would be a fake success, so this is blocked with a clear
+  // panel's adapter (Marzban revokes; XUI re-keys the client's subId, which
+  // is what the subscription resolves by) - returning the old link as "new"
+  // would be a fake success, so unsupported panels are blocked with a clear
   // message instead.
   if (!panelOperationAvailable(panel, "regenerateSubscription")) {
     return {
       ok: false,
       error: "panel does not support regenerateSubscription",
       safeUserMessage: PANEL_OPERATION_UNSUPPORTED_TEXT,
+    };
+  }
+
+  // Remote-model gate: legacy per-inbound XUI services are never mutated
+  // through the global-client endpoints and never silently migrated.
+  if (!serviceSupportsGlobalLifecycle(service)) {
+    return {
+      ok: false,
+      error: "xui legacy per-inbound service - global lifecycle unsupported",
+      safeUserMessage: XUI_LEGACY_OPERATION_TEXT,
     };
   }
 

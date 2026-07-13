@@ -60,6 +60,8 @@ only encrypted, like every other panel credential).
 | Global client inventory (+attachments +traffic) | `GET {base}/panel/api/clients/list` |
 | One client (+attachments +usage) | `GET {base}/panel/api/clients/get/{email}` |
 | Create client + attach inbounds (one call) | `POST {base}/panel/api/clients/add` |
+| Central client update (lifecycle mutations) | `POST {base}/panel/api/clients/update/{email}` |
+| Traffic reset (renewal / extra volume) | `POST {base}/panel/api/clients/resetTraffic/{email}` |
 | Delete client (compensating cleanup / staging only) | `POST {base}/panel/api/clients/del/{email}` |
 | Panel-built config links | `GET {base}/panel/api/clients/links/{email}` |
 
@@ -249,17 +251,23 @@ Config links are not derived in this phase.
 ## Capabilities (honest surface)
 
 Implemented and tested: `authenticatedHealth`, `createService`,
-`readService`, `reconciliation`. **Not implemented**: renewal, extra
-volume, extra time, enable/disable, subscription regeneration, delete (as
-a service operation). The capability model blocks all of these BEFORE
-payment: XUI services never appear in renewal/extra listings and their
-plan validation fails pre-invoice; toggle/regenerate return
-«این عملیات برای این سرویس پشتیبانی نمی‌شود.».
+`readService`, `renewService`, `addVolume`, `addTime`, `toggleService`,
+`regenerateSubscription`, `reconciliation` - the lifecycle operations are
+documented in `docs/xui-global-client-lifecycle.md` (one central
+`update/{email}` per mutation, verify-after-write, UNKNOWN on
+unverifiable outcomes). **Not implemented**: `deleteService` as a service
+operation. Lifecycle mutations apply ONLY to services classified
+`GLOBAL_CLIENT`; legacy per-inbound services stay readable but are
+blocked before payment with
+«این عملیات برای سرویس‌های قدیمی XUI پشتیبانی نمی‌شود.».
 
 ## Staging verification
 
 Opt-in tests run only when `XUI_STAGING_URL` / `XUI_STAGING_USERNAME` /
 `XUI_STAGING_PASSWORD` (and `XUI_STAGING_INBOUND_IDS`) are set. They
-create `zedstaging_*`-labeled clients and delete them via `delClient`,
-printing the safe label for manual cleanup if deletion fails. Never point
-them at production panels.
+create `zedstaging_*`-labeled clients, run the full lifecycle on a
+throwaway client (refresh, quota increase, expiry increase,
+disable/enable, subscription regeneration) and delete it via `delClient`,
+printing the safe label for manual cleanup if deletion fails. Secrets and
+subscription identities are never printed. Never point these tests at
+production panels.

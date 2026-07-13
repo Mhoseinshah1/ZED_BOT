@@ -14,6 +14,8 @@ import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter
 import {
   PANEL_OPERATION_UNSUPPORTED_TEXT,
   panelOperationAvailable,
+  serviceSupportsGlobalLifecycle,
+  XUI_LEGACY_OPERATION_TEXT,
 } from "./panel-readiness.service.js";
 import {
   acquireServiceLock,
@@ -43,8 +45,8 @@ export const TOGGLE_EXPIRED_TEXT = "این سرویس منقضی شده و اب�
 export const TOGGLE_FAILED_TEXT =
   "تغییر وضعیت سرویس با خطا مواجه شد. لطفاً بعداً دوباره تلاش کنید.";
 export const TOGGLE_ALREADY_DONE_TEXT = "وضعیت سرویس قبلاً همین حالت بوده است.";
-export const TOGGLE_DISABLED_OK_TEXT = "سرویس با موفقیت خاموش شد ✅";
-export const TOGGLE_ENABLED_OK_TEXT = "سرویس با موفقیت روشن شد ✅";
+export const TOGGLE_DISABLED_OK_TEXT = "سرویس با موفقیت غیرفعال شد.";
+export const TOGGLE_ENABLED_OK_TEXT = "سرویس با موفقیت فعال شد.";
 
 export type ServiceWithPanel = Service & { panel: Panel };
 
@@ -161,11 +163,11 @@ export function buildTogglePreview(service: Service, action: ToggleAction): stri
   ];
   if (action === "DISABLE") {
     lines.push(
-      "آیا از خاموش کردن این سرویس مطمئن هستید؟",
-      "⚠️ تا زمانی که سرویس خاموش باشد، امکان اتصال وجود ندارد.",
+      "آیا از غیرفعال کردن این سرویس مطمئن هستید؟",
+      "⚠️ تا زمانی که سرویس غیرفعال باشد، امکان اتصال وجود ندارد.",
     );
   } else {
-    lines.push("آیا از روشن کردن این سرویس مطمئن هستید؟");
+    lines.push("آیا از فعال کردن این سرویس مطمئن هستید؟");
   }
   return lines.join("\n");
 }
@@ -236,13 +238,23 @@ async function toggleServiceStatusUnlocked(
   }
   const { panel, ...service } = found;
 
-  // Capability model: the panel's adapter must actually implement toggling
-  // (XUI does not) - blocked with a clear message, never a fake success.
+  // Capability model: the panel's adapter must actually implement toggling -
+  // blocked with a clear message, never a fake success.
   if (!panelOperationAvailable(panel, "toggleService")) {
     return {
       ok: false,
       error: "panel does not support toggleService",
       safeUserMessage: PANEL_OPERATION_UNSUPPORTED_TEXT,
+    };
+  }
+
+  // Remote-model gate: legacy per-inbound XUI services are never mutated
+  // through the global-client endpoints and never silently migrated.
+  if (!serviceSupportsGlobalLifecycle(service)) {
+    return {
+      ok: false,
+      error: "xui legacy per-inbound service - global lifecycle unsupported",
+      safeUserMessage: XUI_LEGACY_OPERATION_TEXT,
     };
   }
 

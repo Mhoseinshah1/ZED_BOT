@@ -248,12 +248,14 @@ Panel integrations have since been implemented (see
 - **XUI / Sanaei 3X-UI** (SANAEI variant, global client API - one
   first-class client per service attached to all configured inbounds;
   pinned upstream contract in `docs/xui-provisioning.md`): authenticated
-  provisioning, read/sync and reconciliation, with two explicit
-  authentication modes (SESSION_COOKIE username/password login and
-  API_TOKEN bearer token). Panel versions without the global client API
-  are detected and blocked as unsupported. Renewal, extras, toggling and
-  subscription regeneration are NOT implemented and are blocked before
-  payment by the capability model — `docs/xui-provisioning.md`
+  provisioning, read/sync, renewal, extra volume/time, enable/disable,
+  subscription regeneration (subId re-key) and reconciliation, with two
+  explicit authentication modes (SESSION_COOKIE username/password login
+  and API_TOKEN bearer token). Lifecycle mutations apply only to
+  GLOBAL_CLIENT services; legacy per-inbound services stay readable and
+  are blocked before payment. Panel versions without the global client
+  API are detected and blocked as unsupported —
+  `docs/xui-global-client-lifecycle.md`
 
 ## Development foundation
 

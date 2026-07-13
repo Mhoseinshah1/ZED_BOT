@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import { bigintToSafeNumber, normalizeBaseUrl } from "../core/http.js";
 import type { PanelAdapter } from "../core/panel-adapter.interface.js";
 import type {
@@ -31,24 +33,30 @@ import type {
   XuiAuthResult,
   XuiClientDetails,
   XuiClientPayload,
+  XuiClientRecord,
   XuiClientWithAttachments,
   XuiInbound,
   XuiRequestResult,
 } from "./xui.types.js";
 
 /**
- * Implemented and tested XUI surface: authenticated health, client creation
- * and read/reconciliation against the GLOBAL client API (one first-class
- * Client attached to multiple inbounds - upstream contract pinned at
- * MHSanaei/3x-ui commit 4e928a1ce0945a6e956aa63365034ec24d2b1387).
- * Renewal, extras, toggle and subscription regeneration are NOT implemented
- * - the capability model blocks them before payment; the methods below
- * still fail safely if reached.
+ * Implemented and tested XUI surface against the GLOBAL client API
+ * (one first-class Client attached to multiple inbounds - upstream contract
+ * pinned at MHSanaei/3x-ui commit 4e928a1ce0945a6e956aa63365034ec24d2b1387):
+ * authenticated health, create, read/reconciliation, renewal, extra volume,
+ * extra time, enable/disable and subscription regeneration (subId re-key via
+ * the documented update endpoint). These apply ONLY to global-model clients
+ * - callers gate legacy per-inbound services before reaching the adapter.
  */
 export const XUI_CAPABILITIES: readonly PanelCapability[] = [
   "authenticatedHealth",
   "createService",
   "readService",
+  "renewService",
+  "addVolume",
+  "addTime",
+  "toggleService",
+  "regenerateSubscription",
   "reconciliation",
 ];
 
@@ -703,38 +711,324 @@ export class XuiAdapter implements PanelAdapter {
     return result;
   }
 
+  // ==========================================================================
+  // Lifecycle mutations (global client model)
+  //
+  // Shared shape: read the client from the COMPLETE inventory (positive
+  // existence semantics), build a full-replace update payload that
+  // round-trips every field we do not intend to change (upstream Update
+  // preserves omitted credentials/subId but takes everything else AS SENT),
+  // send ONE update, then VERIFY the intended fields with a fresh read.
+  //   - absent from a fully-readable inventory  -> definite "not found"
+  //   - update/verification timeout or mismatch -> UNKNOWN (never claim
+  //     success, never refundable-definite; reconciliation settles it)
+  // ==========================================================================
+
+  /** Full-replace update payload preserving everything we don't change.
+   * Credentials (id/password/auth/secret) are OMITTED - the upstream update
+   * preserves omitted credentials, so they are never read into memory more
+   * than necessary and never re-sent. */
+  private recordToUpdatePayload(record: XuiClientRecord): Record<string, unknown> {
+    return {
+      email: record.email ?? "",
+      subId: record.subId ?? "",
+      flow: record.flow ?? "",
+      totalGB: typeof record.totalGB === "number" ? record.totalGB : 0,
+      expiryTime: typeof record.expiryTime === "number" ? record.expiryTime : 0,
+      enable: record.enable !== false,
+      limitIp: typeof record.limitIp === "number" ? record.limitIp : 0,
+      tgId: typeof record.tgId === "number" ? record.tgId : 0,
+      group: typeof record.group === "string" ? record.group : "",
+      comment: typeof record.comment === "string" ? record.comment : "",
+      reset: typeof record.reset === "number" ? record.reset : 0,
+      adTag: typeof record.adTag === "string" ? record.adTag : "",
+      ...(record.reverse !== undefined && record.reverse !== null && record.reverse !== ""
+        ? { reverse: record.reverse }
+        : {}),
+    };
+  }
+
+  /** Maps a fresh inventory row onto the shared mutation-result fields. */
+  private recordToMutationResult(
+    row: XuiClientWithAttachments,
+    subscriptionBaseUrl: string | null | undefined,
+  ): RenewServiceAccountResult {
+    const result: RenewServiceAccountResult = { ok: true, username: row.email ?? "" };
+    const totalRaw = typeof row.totalGB === "number" ? row.totalGB : undefined;
+    if (totalRaw !== undefined) {
+      result.totalBytes = totalRaw > 0 ? BigInt(Math.trunc(totalRaw)) : null;
+    }
+    const traffic = row.traffic;
+    if (traffic !== undefined && traffic !== null) {
+      const up = typeof traffic.up === "number" ? traffic.up : 0;
+      const down = typeof traffic.down === "number" ? traffic.down : 0;
+      result.usedBytes = BigInt(Math.max(0, Math.trunc(up))) + BigInt(Math.max(0, Math.trunc(down)));
+    }
+    if (result.totalBytes !== undefined) {
+      result.remainingBytes =
+        result.totalBytes === null
+          ? null
+          : result.totalBytes > (result.usedBytes ?? 0n)
+            ? result.totalBytes - (result.usedBytes ?? 0n)
+            : 0n;
+    }
+    const expiryRaw = typeof row.expiryTime === "number" ? row.expiryTime : undefined;
+    if (expiryRaw !== undefined) {
+      result.expiresAt = expiryRaw > 0 ? new Date(expiryRaw) : null;
+    }
+    let status: NormalizedAccountStatus = row.enable === false ? "disabled" : "active";
+    if (status === "active" && result.expiresAt instanceof Date && result.expiresAt.getTime() <= Date.now()) {
+      status = "expired";
+    } else if (
+      status === "active" &&
+      result.totalBytes !== undefined &&
+      result.totalBytes !== null &&
+      (result.usedBytes ?? 0n) >= result.totalBytes
+    ) {
+      status = "limited";
+    }
+    result.status = status;
+    const subId = typeof row.subId === "string" && row.subId !== "" ? row.subId : undefined;
+    if (subId !== undefined) {
+      result.subscriptionToken = subId;
+      const subscriptionUrl = this.subscriptionUrlFor(subscriptionBaseUrl, subId);
+      if (subscriptionUrl !== undefined) {
+        result.subscriptionUrl = subscriptionUrl;
+      }
+    }
+    return result;
+  }
+
+  /** Reads one client from the full inventory with positive semantics. */
+  private async readClientRow(
+    auth: XuiAuthContext,
+    email: string,
+  ): Promise<
+    | { ok: true; row: XuiClientWithAttachments }
+    | { ok: false; notFound: boolean; result: XuiRequestResult }
+  > {
+    const listed = await this.fetchClients(auth);
+    if (!listed.ok) {
+      return { ok: false, notFound: false, result: listed.result };
+    }
+    const row = listed.clients.find((c) => c.email === email);
+    if (row === undefined) {
+      return {
+        ok: false,
+        notFound: true,
+        result: { ok: false, message: "Client not found in the inventory." },
+      };
+    }
+    return { ok: true, row };
+  }
+
   /**
-   * NOT implemented: quota/expiry mutation via POST /clients/update/{email}
-   * is not covered by tests yet. The capability model blocks renewals
-   * before payment; this safety net never fakes success.
+   * Shared mutation runner: read -> (optional traffic reset) -> ONE
+   * full-replace update -> verification read of the intended fields.
    */
-  async renewServiceAccount(_input: RenewServiceAccountInput): Promise<RenewServiceAccountResult> {
-    return { ok: false, errorMessage: "XUI renewal is not implemented; blocked by the capability model." };
+  private async mutateGlobalClient(args: {
+    operation: string;
+    username: string;
+    subscriptionBaseUrl?: string | null;
+    resetTrafficFirst?: boolean;
+    /** Applies the intended changes to the round-tripped payload. */
+    mutate: (payload: Record<string, unknown>, current: XuiClientRecord) => void;
+    /** true when the fresh row shows the exact intended post-state. */
+    verify: (row: XuiClientWithAttachments) => boolean;
+    /** Skip the update when the current row already satisfies verify (idempotency). */
+    skipIfAlreadyApplied?: boolean;
+  }): Promise<RenewServiceAccountResult> {
+    const session = await this.client.authenticate();
+    if (!session.ok || session.auth === undefined) {
+      return { ok: false, errorMessage: `XUI authentication failed: ${session.message}` };
+    }
+    const auth = session.auth;
+
+    const read = await this.readClientRow(auth, args.username);
+    if (!read.ok) {
+      if (read.notFound) {
+        // Positive absence from a fully-readable inventory - the same
+        // definite semantics every pipeline expects for a missing account.
+        return { ok: false, errorMessage: "Panel account not found." };
+      }
+      return { ok: false, errorMessage: `XUI client read failed: ${read.result.message}` };
+    }
+
+    if (args.skipIfAlreadyApplied === true && args.verify(read.row)) {
+      // Already in the desired state (e.g. repeated enable/disable).
+      return this.recordToMutationResult(read.row, args.subscriptionBaseUrl);
+    }
+
+    if (args.resetTrafficFirst === true) {
+      const reset = await this.client.resetClientTraffic(auth, args.username);
+      if (!reset.ok) {
+        // Nothing about quota/expiry changed yet: a failed/zeroed reset is
+        // refund-safe (mirrors the documented Marzban reset-then-update
+        // reasoning - usage zeroing is never charged).
+        return { ok: false, errorMessage: `XUI traffic reset failed: ${reset.message}` };
+      }
+    }
+
+    const payload = this.recordToUpdatePayload(read.row);
+    args.mutate(payload, read.row);
+    const updated = await this.client.updateClient(auth, args.username, payload);
+    if (!updated.ok) {
+      // The update loops per-inbound settings upstream, so ANY failure here
+      // (validation refusal, mid-loop error, timeout) may coincide with a
+      // partially-applied state. UNKNOWN: reconciliation reads the record
+      // and settles on positive proof (pre-state -> refund, post -> done).
+      return {
+        ok: false,
+        uncertain: true,
+        errorMessage: `XUI client update outcome is unknown: ${updated.message}`,
+      };
+    }
+
+    const verifyRead = await this.readClientRow(auth, args.username);
+    if (!verifyRead.ok || !args.verify(verifyRead.row)) {
+      return {
+        ok: false,
+        uncertain: true,
+        errorMessage: verifyRead.ok
+          ? "XUI post-update verification did not match the expected state."
+          : `XUI post-update verification failed: ${verifyRead.ok === false ? verifyRead.result.message : ""}`,
+      };
+    }
+    return this.recordToMutationResult(verifyRead.row, args.subscriptionBaseUrl);
   }
 
-  /** NOT implemented - see renewServiceAccount. */
-  async addServiceVolume(_input: AddServiceVolumeInput): Promise<AddServiceVolumeResult> {
-    return { ok: false, errorMessage: "XUI extra volume is not implemented; blocked by the capability model." };
-  }
-
-  /** NOT implemented - see renewServiceAccount. */
-  async addServiceTime(_input: AddServiceTimeInput): Promise<AddServiceTimeResult> {
-    return { ok: false, errorMessage: "XUI extra time is not implemented; blocked by the capability model." };
-  }
-
-  /** NOT implemented - see renewServiceAccount. */
-  async setServiceStatus(_input: SetServiceStatusInput): Promise<SetServiceStatusResult> {
-    return { ok: false, errorMessage: "XUI service status change is not implemented; blocked by the capability model." };
+  /** Safe bigint -> bytes (null = unlimited = 0 in the upstream contract). */
+  private safeTotalBytes(
+    value: bigint | null,
+  ): { ok: true; bytes: number } | { ok: false; error: string } {
+    if (value === null) {
+      return { ok: true, bytes: 0 };
+    }
+    const safe = bigintToSafeNumber(value);
+    if (safe === null) {
+      return { ok: false, error: "Volume exceeds the safe integer range; refusing lossy conversion." };
+    }
+    return { ok: true, bytes: safe };
   }
 
   /**
-   * NOT implemented: 3x-ui has no endpoint that revokes and reissues a
-   * client subscription id in place; returning the old link as "new" would
-   * be a fake success.
+   * Renewal: reset the traffic counters (upstream zeroes up/down per
+   * attached inbound and auto-enables a disabled client), then ONE update
+   * setting the new quota/expiry and enable=true. Exactly-once and
+   * verify-after-write; the username never changes.
+   */
+  async renewServiceAccount(input: RenewServiceAccountInput): Promise<RenewServiceAccountResult> {
+    const total = this.safeTotalBytes(input.totalBytes);
+    if (!total.ok) {
+      return { ok: false, errorMessage: total.error };
+    }
+    const expiryMs = input.expiresAt === null ? 0 : input.expiresAt.getTime();
+    return this.mutateGlobalClient({
+      operation: "renew-service",
+      username: input.username,
+      subscriptionBaseUrl: input.subscriptionBaseUrl,
+      resetTrafficFirst: true,
+      mutate: (payload) => {
+        payload["totalGB"] = total.bytes;
+        payload["expiryTime"] = expiryMs;
+        payload["enable"] = true;
+        if (input.note !== null && input.note !== undefined && input.note !== "") {
+          payload["comment"] = input.note;
+        }
+      },
+      verify: (row) =>
+        row.totalGB === total.bytes && row.expiryTime === expiryMs && row.enable !== false,
+    });
+  }
+
+  /**
+   * Extra volume: the input carries the NEW total quota; the traffic reset
+   * plus the new total preserve the project's accounting (remaining =
+   * previous remaining + purchased). Expiry is passed through UNCHANGED.
+   * ONE central update - never a per-inbound loop.
+   */
+  async addServiceVolume(input: AddServiceVolumeInput): Promise<AddServiceVolumeResult> {
+    return this.renewServiceAccount({
+      username: input.username,
+      totalBytes: input.totalBytes,
+      expiresAt: input.expiresAt,
+      note: input.note,
+      subscriptionBaseUrl: input.subscriptionBaseUrl,
+    });
+  }
+
+  /**
+   * Extra time: ONE update setting the exact new expiry (unix ms - the
+   * panel stores milliseconds verbatim, so verification is an exact
+   * comparison). Quota is passed through unchanged and usage is NEVER
+   * reset for extra time.
+   */
+  async addServiceTime(input: AddServiceTimeInput): Promise<AddServiceTimeResult> {
+    const total = this.safeTotalBytes(input.totalBytes);
+    if (!total.ok) {
+      return { ok: false, errorMessage: total.error };
+    }
+    const expiryMs = input.expiresAt.getTime();
+    return this.mutateGlobalClient({
+      operation: "add-service-time",
+      username: input.username,
+      subscriptionBaseUrl: input.subscriptionBaseUrl,
+      mutate: (payload) => {
+        payload["totalGB"] = total.bytes;
+        payload["expiryTime"] = expiryMs;
+        payload["enable"] = true;
+        if (input.note !== null && input.note !== undefined && input.note !== "") {
+          payload["comment"] = input.note;
+        }
+      },
+      verify: (row) => row.totalGB === total.bytes && row.expiryTime === expiryMs,
+    });
+  }
+
+  /**
+   * Enable/disable: ONE update flipping ONLY the enable flag; quota,
+   * expiry, usage and identity stay untouched. Idempotent: a client
+   * already in the desired state verifies without any mutation.
+   */
+  async setServiceStatus(input: SetServiceStatusInput): Promise<SetServiceStatusResult> {
+    return this.mutateGlobalClient({
+      operation: "set-service-status",
+      username: input.username,
+      subscriptionBaseUrl: input.subscriptionBaseUrl,
+      skipIfAlreadyApplied: true,
+      mutate: (payload) => {
+        payload["enable"] = input.enabled;
+      },
+      verify: (row) => (row.enable !== false) === input.enabled,
+    });
+  }
+
+  /**
+   * Subscription regeneration: the upstream update endpoint honors subId
+   * changes (with a panel-wide uniqueness check), and the subscription
+   * service resolves clients BY subId - re-keying the client to a fresh
+   * cryptographically-random subId invalidates the old subscription
+   * identity. ONE update; the new subId is verified with a fresh read and
+   * returned ONLY in the result (never logged).
    */
   async regenerateSubscription(
-    _input: RegenerateSubscriptionInput,
+    input: RegenerateSubscriptionInput,
   ): Promise<RegenerateSubscriptionResult> {
-    return { ok: false, errorMessage: "XUI subscription regeneration is not implemented; blocked by the capability model." };
+    // 16 lowercase alphanumerics - the same shape 3x-ui generates itself.
+    const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+    const bytes = randomBytes(16);
+    let newSubId = "";
+    for (let i = 0; i < 16; i += 1) {
+      newSubId += alphabet[bytes[i] % alphabet.length];
+    }
+    return this.mutateGlobalClient({
+      operation: "regenerate-subscription",
+      username: input.username,
+      subscriptionBaseUrl: input.subscriptionBaseUrl,
+      mutate: (payload) => {
+        payload["subId"] = newSubId;
+      },
+      verify: (row) => row.subId === newSubId,
+    });
   }
 }

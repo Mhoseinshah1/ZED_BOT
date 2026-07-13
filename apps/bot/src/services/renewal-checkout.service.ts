@@ -13,7 +13,11 @@ import {
 import type { RenewalDraft } from "../core/session.js";
 import { groupMatches } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
-import { panelOperationAvailable, panelTypesSupporting } from "./panel-readiness.service.js";
+import {
+  panelOperationAvailable,
+  panelTypesSupporting,
+  serviceSupportsGlobalLifecycle,
+} from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 
 // =============================================================================
@@ -61,16 +65,20 @@ export async function listRenewableServices(
   userId: string,
   page: number,
 ): Promise<RenewableListPage> {
-  const where = renewableWhere(userId);
-  const total = await prisma.service.count({ where });
+  // The XUI remote-model gate (GLOBAL_CLIENT only) needs stored metadata, so
+  // filtering happens in memory; per-user service counts are small.
+  const rows = await prisma.service.findMany({
+    where: renewableWhere(userId),
+    orderBy: { createdAt: "desc" },
+  });
+  const eligible = rows.filter((s) => serviceSupportsGlobalLifecycle(s));
+  const total = eligible.length;
   const pages = Math.max(1, Math.ceil(total / RENEWABLE_PAGE_SIZE));
   const safePage = Math.min(Math.max(1, page), pages);
-  const services = await prisma.service.findMany({
-    where,
-    orderBy: { createdAt: "desc" },
-    skip: (safePage - 1) * RENEWABLE_PAGE_SIZE,
-    take: RENEWABLE_PAGE_SIZE,
-  });
+  const services = eligible.slice(
+    (safePage - 1) * RENEWABLE_PAGE_SIZE,
+    safePage * RENEWABLE_PAGE_SIZE,
+  );
   return { services, page: safePage, pages, total };
 }
 
@@ -89,7 +97,10 @@ export async function getRenewableServiceByShortId(
     where: { id: { startsWith: shortId }, ...renewableWhere(userId) },
     take: 2,
   });
-  return matches.length === 1 ? matches[0] : null;
+  const match = matches.length === 1 ? matches[0] : null;
+  // Legacy per-inbound XUI services are never renewable through the
+  // global-client endpoints - same null contract as any other ineligibility.
+  return match !== null && serviceSupportsGlobalLifecycle(match) ? match : null;
 }
 
 /**
@@ -133,9 +144,11 @@ export function isRenewalPlanValid(
     product.category.isActive &&
     product.panelId === service.panelId &&
     product.panel !== null &&
-    // Capability gate: a panel whose adapter cannot renew (XUI) must be
-    // blocked HERE, before payment - never discovered post-payment.
+    // Capability gate: a panel whose adapter cannot renew must be blocked
+    // HERE, before payment - never discovered post-payment.
     panelOperationAvailable(product.panel, "renewService") &&
+    // Remote-model gate: only GLOBAL_CLIENT XUI services may be renewed.
+    serviceSupportsGlobalLifecycle(service) &&
     groupMatches(product.displayGroups, group)
   );
 }

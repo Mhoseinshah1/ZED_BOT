@@ -148,4 +148,75 @@ describe.runIf(hasXuiStaging)("XUI staging verification (opt-in)", () => {
     },
     60_000,
   );
+
+  it.runIf(xuiEnv.inboundIds.length > 0)(
+    "runs the full lifecycle on a temporary staging client, then deletes it",
+    async () => {
+      const username = stagingUsername();
+      const created = await adapter.createServiceAccount({
+        username,
+        note: "zedbot staging lifecycle test - safe to delete",
+        volumeBytes: 1n * GIB,
+        durationDays: 1,
+        expiresAt: new Date(Date.now() + 86_400_000),
+        inboundIds: xuiEnv.inboundIds,
+      });
+      expect(created.ok).toBe(true);
+      try {
+        // Refresh reads the central client.
+        const read = await adapter.getServiceAccount({ username });
+        expect(read.ok).toBe(true);
+        expect(read.totalBytes).toBe(1n * GIB);
+
+        // Quota + expiry increase (renewal semantics), ms-exact expiry.
+        const renewedExpiry = new Date(Date.now() + 2 * 86_400_000);
+        const renewed = await adapter.renewServiceAccount({
+          username,
+          totalBytes: 2n * GIB,
+          expiresAt: renewedExpiry,
+        });
+        expect(renewed.ok).toBe(true);
+        expect(renewed.totalBytes).toBe(2n * GIB);
+        expect(renewed.expiresAt?.getTime()).toBe(renewedExpiry.getTime());
+
+        // Expiry-only increase (extra time semantics) - quota untouched.
+        const extendedExpiry = new Date(Date.now() + 3 * 86_400_000);
+        const extended = await adapter.addServiceTime({
+          username,
+          totalBytes: 2n * GIB,
+          expiresAt: extendedExpiry,
+        });
+        expect(extended.ok).toBe(true);
+        expect(extended.totalBytes).toBe(2n * GIB);
+        expect(extended.expiresAt?.getTime()).toBe(extendedExpiry.getTime());
+
+        // Disable, then enable - verified remotely each time.
+        const disabled = await adapter.setServiceStatus({ username, enabled: false });
+        expect(disabled.ok).toBe(true);
+        expect(disabled.status).toBe("disabled");
+        const enabled = await adapter.setServiceStatus({ username, enabled: true });
+        expect(enabled.ok).toBe(true);
+        expect(enabled.status).not.toBe("disabled");
+
+        // Subscription regeneration is safe on this throwaway client: the
+        // subId re-key only invalidates the temp client's own identity.
+        // Tokens are compared but NEVER printed.
+        const oldToken = read.subscriptionToken;
+        const regenerated = await adapter.regenerateSubscription({ username });
+        expect(regenerated.ok).toBe(true);
+        expect(regenerated.subscriptionToken).toBeDefined();
+        expect(regenerated.subscriptionToken).not.toBe(oldToken);
+      } finally {
+        const session = await client.authenticate();
+        const auth = session.auth ?? { kind: "cookie" as const, cookie: "" };
+        const deleted = await client.deleteClient(auth, username);
+        if (!deleted.ok) {
+          console.warn(`MANUAL CLEANUP NEEDED: staging XUI client "${username}"`);
+        }
+      }
+      const gone = await adapter.getServiceAccount({ username });
+      expect(gone.notFound).toBe(true);
+    },
+    120_000,
+  );
 });

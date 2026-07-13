@@ -4,6 +4,10 @@ import { Composer, InlineKeyboard } from "grammy";
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import {
+  serviceSupportsGlobalLifecycle,
+  XUI_LEGACY_OPERATION_TEXT,
+} from "../../services/panel-readiness.service.js";
+import {
   buildLinkRegenerationPreview,
   getLinkRegeneratableServiceByShortId,
   linkRegenerationEligibility,
@@ -118,7 +122,7 @@ servicesHandler.callbackQuery(/^user:svc:refresh:([0-9a-f-]+)$/, async (ctx) => 
   }
   const sync = await syncServiceFromPanel(owned.id, user.id);
   if (sync.ok) {
-    await safeAnswerCallback(ctx, "اطلاعات از پنل بروزرسانی شد.");
+    await safeAnswerCallback(ctx, sync.message);
     await renderDetail(ctx, sync.service);
     return;
   }
@@ -143,6 +147,13 @@ async function askToggle(ctx: BotContext, shortId: string, action: ToggleAction)
   const service = await getToggleableServiceByShortId(shortId, user.id);
   if (service === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  // Stale-button guard: legacy per-inbound XUI services never reach the
+  // toggle confirmation (the detail keyboard already hides the button).
+  if (!serviceSupportsGlobalLifecycle(service)) {
+    await safeAnswerCallback(ctx, XUI_LEGACY_OPERATION_TEXT);
+    await renderDetail(ctx, service);
     return;
   }
   const eligibility = toggleEligibility(service, service.panel.status, action);
@@ -223,6 +234,13 @@ servicesHandler.callbackQuery(/^user:svc:regen_link:([0-9a-f-]+)$/, async (ctx) 
   const service = await getLinkRegeneratableServiceByShortId(ctx.match[1], user.id);
   if (service === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  // Stale-button guard: legacy per-inbound XUI services never reach the
+  // regeneration confirmation (the detail keyboard already hides the button).
+  if (!serviceSupportsGlobalLifecycle(service)) {
+    await safeAnswerCallback(ctx, XUI_LEGACY_OPERATION_TEXT);
+    await renderDetail(ctx, service);
     return;
   }
   const eligibility = linkRegenerationEligibility(service, service.panel.status);
