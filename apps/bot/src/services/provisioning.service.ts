@@ -18,7 +18,11 @@ import { errorMessage } from "@zedbot/shared";
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
-import { assessPanelConfig, parsePanelInboundIds } from "./panel-readiness.service.js";
+import {
+  assessPanelConfig,
+  parsePanelInboundIds,
+  resolveProductInboundIds,
+} from "./panel-readiness.service.js";
 import {
   acquireServiceLock,
   SERVICE_LOCK_BUSY_TEXT,
@@ -250,6 +254,12 @@ async function provisionPaidOrderUnlocked(
   // is a provisioning failure: FAIL + refund, never a silent charge.
   const product = order.product;
   const panel = product?.panel ?? null;
+  // XUI: the product provisions into ITS resolved inbound subset of the
+  // panel allowlist (null/empty selection inherits the full allowlist).
+  const inboundResolution =
+    panel !== null && panel.type === "XUI" && product !== null
+      ? resolveProductInboundIds(panel, product.inboundIds)
+      : null;
   const preflightError =
     product === null
       ? "product row no longer exists"
@@ -261,7 +271,12 @@ async function provisionPaidOrderUnlocked(
             ? `panel status is ${panel.status}`
             : !assessPanelConfig(panel).ok
               ? `panel provisioning config incomplete: ${assessPanelConfig(panel).reason ?? "unknown"}`
-              : null;
+              : inboundResolution !== null && !inboundResolution.ok
+                ? `product inbound selection invalid: ${inboundResolution.reason}` +
+                  (inboundResolution.invalidIds !== undefined
+                    ? ` (${inboundResolution.invalidIds.join(", ")})`
+                    : "")
+                : null;
   if (preflightError !== null || product === null || panel === null) {
     const refunded = await failOrderWithRefund(order, preflightError ?? "invalid configuration");
     return { ok: false, refunded, error: "ساخت سرویس ناموفق بود." };
@@ -303,7 +318,10 @@ async function provisionPaidOrderUnlocked(
       dataLimitResetStrategy: panel.resetStrategy,
       trafficResetCycle: product.trafficResetCycle,
       subscriptionBaseUrl: normalizeSubscriptionBase(panel),
-      inboundIds: parsePanelInboundIds(panel.inboundIds),
+      inboundIds:
+        inboundResolution !== null && inboundResolution.ok
+          ? inboundResolution.inboundIds
+          : parsePanelInboundIds(panel.inboundIds),
       protocolSettings:
         panel.protocolSettings !== null && typeof panel.protocolSettings === "object"
           ? (panel.protocolSettings as Record<string, unknown>)

@@ -1,5 +1,6 @@
 import {
   PanelStatus,
+  Prisma,
   prisma,
   type OtherProductDeliveryType,
   type ProductCategory,
@@ -7,6 +8,11 @@ import {
   type TrafficResetCycle,
 } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
+
+import {
+  PRODUCT_INBOUND_SUBSET_TEXT,
+  resolveProductInboundIds,
+} from "../../services/panel-readiness.service.js";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -586,7 +592,10 @@ productHandler.callbackQuery(/^admin:prod:setdlv:([^:]+):(M|S)$/, async (ctx) =>
 
 // --- product text-field edits ---------------------------------------------------------
 
-const PRODUCT_TEXT_FIELDS: Record<string, { prompt: string; serviceOnly?: boolean; otherOnly?: boolean }> = {
+const PRODUCT_TEXT_FIELDS: Record<
+  string,
+  { prompt: string; serviceOnly?: boolean; otherOnly?: boolean; xuiOnly?: boolean }
+> = {
   nm: { prompt: "نام جدید محصول را وارد کنید." },
   pr: { prompt: "قیمت را به تومان وارد کنید." },
   inv: { prompt: "توضیحات محصول برای پیش‌فاکتور را وارد کنید. (برای خالی کردن «-» بفرستید)" },
@@ -596,6 +605,13 @@ const PRODUCT_TEXT_FIELDS: Record<string, { prompt: string; serviceOnly?: boolea
     prompt: "این محصول در جایگاه چندم نمایش داده شود؟ عدد بفرستید یا برای انتهای لیست 0 بفرستید.",
   },
   ruip: { prompt: "متنی که بعد از پرداخت از کاربر پرسیده می‌شود را وارد کنید.", otherOnly: true },
+  inb: {
+    prompt:
+      "شناسه‌های اینباند این محصول را وارد کنید (زیرمجموعه‌ای از اینباندهای مجاز پنل، مثال: 3,5).\n" +
+      "برای استفاده از همه اینباندهای مجاز پنل «-» بفرستید.",
+    serviceOnly: true,
+    xuiOnly: true,
+  },
 };
 
 productHandler.callbackQuery(/^admin:prod:fe:([^:]+):([a-z]+)$/, async (ctx) => {
@@ -608,7 +624,8 @@ productHandler.callbackQuery(/^admin:prod:fe:([^:]+):([a-z]+)$/, async (ctx) => 
   if (
     field === undefined ||
     (field.serviceOnly === true && product.type !== "SERVICE_PRODUCT") ||
-    (field.otherOnly === true && product.type !== "OTHER_PRODUCT")
+    (field.otherOnly === true && product.type !== "OTHER_PRODUCT") ||
+    (field.xuiOnly === true && product.panel?.type !== "XUI")
   ) {
     await safeAnswerCallback(ctx, "فیلد نامعتبر است.");
     return;
@@ -1178,6 +1195,56 @@ async function handleProductEditText(ctx: BotContext, text: string): Promise<voi
       return;
     }
     await finishProductEdit(ctx, productId, { requiredUserInfoPromptText: value });
+    return;
+  }
+
+  if (fieldKey === "inb") {
+    // "-" clears the selection: the product inherits the panel allowlist.
+    if (value === "-") {
+      await finishProductEdit(ctx, productId, { inboundIds: Prisma.DbNull });
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = value.startsWith("[") ? JSON.parse(value) : value.split(",").map((p) => p.trim());
+    } catch {
+      await safeReply(ctx, "فرمت نامعتبر. مثال: 3,5 یا [3,5]\nدوباره وارد کنید.");
+      return;
+    }
+    const ids: number[] = [];
+    for (const item of Array.isArray(parsed) ? parsed : []) {
+      const id = typeof item === "number" ? item : Number.parseInt(String(item), 10);
+      if (!Number.isInteger(id) || id < 0) {
+        await safeReply(ctx, "همه شناسه‌ها باید عدد صحیح باشند. مثال: 3,5\nدوباره وارد کنید.");
+        return;
+      }
+      ids.push(id);
+    }
+    if (ids.length === 0) {
+      await safeReply(ctx, "حداقل یک شناسه وارد کنید یا برای استفاده از همه «-» بفرستید.");
+      return;
+    }
+    // Subset validation against the panel allowlist BEFORE saving - an
+    // out-of-allowlist selection would make the product unsellable.
+    const current = await prisma.product.findUnique({
+      where: { id: productId },
+      include: { panel: true },
+    });
+    if (current === null || current.panel === null || current.panel.type !== "XUI") {
+      clearProductFlows(ctx);
+      await safeReply(ctx, "فیلد نامعتبر است.");
+      return;
+    }
+    const resolution = resolveProductInboundIds(current.panel, ids);
+    if (!resolution.ok) {
+      const detail =
+        resolution.reason === "panel-allowlist-empty"
+          ? "برای پنل این محصول هیچ اینباند مجازی تنظیم نشده است."
+          : `${PRODUCT_INBOUND_SUBSET_TEXT} (شناسه‌های نامعتبر: ${(resolution.invalidIds ?? []).join(", ")})`;
+      await safeReply(ctx, `${detail}\nدوباره وارد کنید.`);
+      return;
+    }
+    await finishProductEdit(ctx, productId, { inboundIds: resolution.inboundIds });
     return;
   }
 

@@ -45,6 +45,9 @@ export const PANEL_AUTH_FAILED_TEXT = "احراز هویت پنل ناموفق �
 export const PANEL_TEMPLATE_NOT_FOUND_TEXT = "کاربر الگوی مرزبان پیدا نشد.";
 /** Persian admin text: no valid inbound id configured for the XUI panel. */
 export const PANEL_XUI_INBOUND_TEXT = "شناسه اینباند معتبر برای پنل XUI تنظیم نشده است.";
+/** Persian admin text: the product's inbound selection leaves the panel allowlist. */
+export const PRODUCT_INBOUND_SUBSET_TEXT =
+  "شناسه‌های اینباند محصول خارج از لیست مجاز پنل است.";
 /** Persian user-facing text when an operation is not supported on the panel. */
 export const PANEL_OPERATION_UNSUPPORTED_TEXT =
   "این عملیات برای این سرویس پشتیبانی نمی‌شود.";
@@ -127,6 +130,43 @@ export function parsePanelInboundIds(raw: unknown): number[] {
     return [];
   }
   return raw.filter((v): v is number => typeof v === "number" && Number.isInteger(v));
+}
+
+/** Result of resolving a product's effective XUI inbound selection. */
+export type ProductInboundResolution =
+  | { ok: true; inboundIds: number[]; inherited: boolean }
+  | { ok: false; reason: "panel-allowlist-empty" | "subset-violation"; invalidIds?: number[] };
+
+/**
+ * Resolves the inbound ids a SERVICE_PRODUCT provisions into on an XUI
+ * panel. Configuration hierarchy:
+ *   - Panel.inboundIds is the ALLOWLIST of inbound ids ZED_BOT may use;
+ *   - Product.inboundIds selects a SUBSET of that allowlist;
+ *   - null/empty product selection inherits the panel's full allowlist
+ *     (backward compatible - existing products keep working unchanged);
+ *   - any selected id outside the allowlist is a configuration error: the
+ *     product is unsellable and provisioning fails BEFORE any panel call.
+ * Pure and local - panel readiness already validates the allowlist against
+ * the live panel, so a valid subset needs no extra network round-trip.
+ */
+export function resolveProductInboundIds(
+  panel: Panel,
+  productInboundIds: unknown,
+): ProductInboundResolution {
+  const allowed = parsePanelInboundIds(panel.inboundIds);
+  if (allowed.length === 0) {
+    return { ok: false, reason: "panel-allowlist-empty" };
+  }
+  const selected = parsePanelInboundIds(productInboundIds);
+  if (selected.length === 0) {
+    return { ok: true, inboundIds: allowed, inherited: true };
+  }
+  const allowedSet = new Set(allowed);
+  const invalidIds = [...new Set(selected.filter((id) => !allowedSet.has(id)))];
+  if (invalidIds.length > 0) {
+    return { ok: false, reason: "subset-violation", invalidIds };
+  }
+  return { ok: true, inboundIds: [...new Set(selected)], inherited: false };
 }
 
 /**

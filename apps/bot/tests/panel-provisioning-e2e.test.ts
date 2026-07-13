@@ -10,6 +10,7 @@ process.env.APP_SECRET ??= "zedbot-panel-tests-shared-secret-00001";
 // Must be set before the provisioning module (and its adapters) load.
 process.env.PANEL_HTTP_TIMEOUT_MS = "800";
 
+import { isProductVisible } from "../src/services/catalog.service.js";
 import {
   provisionPaidOrder,
   PROVISION_UNKNOWN_OUTCOME_TEXT,
@@ -176,7 +177,10 @@ function startXuiMock(): Promise<void> {
       if (req.method === "GET" && url === "/panel/api/inbounds/list") {
         send(200, {
           success: true,
-          obj: [{ id: 1, enable: true, protocol: "vless", remark: "e2e", port: 443 }],
+          obj: [
+            { id: 1, enable: true, protocol: "vless", remark: "e2e", port: 443 },
+            { id: 2, enable: true, protocol: "vless", remark: "e2e-2", port: 444 },
+          ],
         });
         return;
       }
@@ -291,9 +295,13 @@ function startXuiMock(): Promise<void> {
 let marzbanPanel: Panel;
 let xuiPanel: Panel;
 let xuiTokenPanel: Panel;
+let xuiMultiPanel: Panel;
 let marzbanProductId = "";
 let xuiProductId = "";
 let xuiTokenProductId = "";
+let xuiSubsetProductId = "";
+let xuiInheritProductId = "";
+let xuiViolatingProductId = "";
 
 beforeAll(async () => {
   if (!hasDeps) return;
@@ -301,7 +309,7 @@ beforeAll(async () => {
   const category = await prisma.productCategory.create({
     data: { type: "SERVICE_PRODUCT", name: `e2e-prov-cat-${runTag}`, isActive: true },
   });
-  [marzbanPanel, xuiPanel, xuiTokenPanel] = await Promise.all([
+  [marzbanPanel, xuiPanel, xuiTokenPanel, xuiMultiPanel] = await Promise.all([
     prisma.panel.create({
       data: {
         type: "MARZBAN",
@@ -335,6 +343,17 @@ beforeAll(async () => {
         status: "ACTIVE",
       },
     }),
+    prisma.panel.create({
+      data: {
+        type: "XUI",
+        name: `e2e-prov-xui-multi-${runTag}`,
+        baseUrl: xuiUrl,
+        username: "admin",
+        passwordEncrypted: encryptSecret("xui-pass"),
+        inboundIds: [1, 2], // the panel-level ALLOWLIST
+        status: "ACTIVE",
+      },
+    }),
   ]);
   const makeProduct = (name: string, panelId: string) =>
     prisma.product.create({
@@ -357,6 +376,29 @@ beforeAll(async () => {
   marzbanProductId = p1.id;
   xuiProductId = p2.id;
   xuiTokenProductId = p3.id;
+  // Product-level inbound selection fixtures on the [1, 2] allowlist panel.
+  const makeSelectionProduct = (name: string, inboundIds: number[] | null) =>
+    prisma.product.create({
+      data: {
+        type: "SERVICE_PRODUCT",
+        categoryId: category.id,
+        panelId: xuiMultiPanel.id,
+        name,
+        priceToman: PRICE,
+        volumeGb: 20,
+        durationDays: 30,
+        isActive: true,
+        ...(inboundIds !== null ? { inboundIds } : {}),
+      },
+    });
+  const [ps, pi, pv] = await Promise.all([
+    makeSelectionProduct(`e2e-prov-xui-subset-${runTag}`, [2]),
+    makeSelectionProduct(`e2e-prov-xui-inherit-${runTag}`, null),
+    makeSelectionProduct(`e2e-prov-xui-violating-${runTag}`, [3]),
+  ]);
+  xuiSubsetProductId = ps.id;
+  xuiInheritProductId = pi.id;
+  xuiViolatingProductId = pv.id;
 });
 
 afterAll(() => {
@@ -564,6 +606,60 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
     expect(retry.ok).toBe(true);
     expect(xuiAddCount).toBe(addsBefore);
     expect(await prisma.service.count({ where: { orderId } })).toBe(1);
+  });
+
+  it("attaches the global client ONLY to the product-selected inbound subset", async () => {
+    const user = await createUser();
+    const orderId = await createPaidChain(user, xuiSubsetProductId);
+    const username = generatePanelUsername(user.telegramId, orderId);
+
+    const outcome = await provisionPaidOrder(orderId);
+    expect(outcome.ok).toBe(true);
+
+    // Panel allowlist is [1, 2]; the product selected [2] - and ONLY [2]
+    // may be attached.
+    const remote = xuiClients.find((c) => c.email === username);
+    expect(remote?.inboundIds).toEqual([2]);
+    const services = await prisma.service.findMany({ where: { orderId } });
+    expect(services).toHaveLength(1);
+    expect(services[0].remoteInboundIds).toEqual([2]);
+  });
+
+  it("inherits the panel's full allowlist when the product selects nothing", async () => {
+    const user = await createUser();
+    const orderId = await createPaidChain(user, xuiInheritProductId);
+    const username = generatePanelUsername(user.telegramId, orderId);
+
+    const outcome = await provisionPaidOrder(orderId);
+    expect(outcome.ok).toBe(true);
+    const remote = xuiClients.find((c) => c.email === username);
+    expect(remote?.inboundIds?.slice().sort()).toEqual([1, 2]);
+    const services = await prisma.service.findMany({ where: { orderId } });
+    expect(services[0].remoteInboundIds).toEqual([1, 2]);
+  });
+
+  it("blocks an out-of-allowlist product selection before payment and refunds after", async () => {
+    // Pre-payment: the product is not even visible/sellable.
+    const violating = await prisma.product.findUniqueOrThrow({
+      where: { id: xuiViolatingProductId },
+      include: { category: true, panel: true },
+    });
+    expect(isProductVisible(violating, "F")).toBe(false);
+
+    // Post-payment defense in depth: a definite config failure -> refund,
+    // and the panel is never touched.
+    const user = await createUser();
+    const orderId = await createPaidChain(user, xuiViolatingProductId);
+    const username = generatePanelUsername(user.telegramId, orderId);
+
+    const outcome = await provisionPaidOrder(orderId);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.ok === false && outcome.refunded).toBe(true);
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe(OrderStatus.FAILED);
+    expect(order.failureReason).toContain("product inbound selection invalid");
+    expect(await refundCount(orderId)).toBe(1);
+    expect(xuiClients.some((c) => c.email === username)).toBe(false);
   });
 
   it("refunds on a definite configuration failure (missing inbound ids)", async () => {
