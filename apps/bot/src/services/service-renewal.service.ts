@@ -12,6 +12,10 @@ import { errorMessage } from "@zedbot/shared";
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
+import {
+  serviceSupportsGlobalLifecycle,
+  XUI_LEGACY_OPERATION_TEXT,
+} from "./panel-readiness.service.js";
 import { failOrderWithRefund, type OrderForProvisioning } from "./provisioning.service.js";
 import {
   acquireServiceLock,
@@ -247,6 +251,16 @@ async function executeRenewalOrderUnlocked(
     const refunded = await failOrderWithRefund(order, "renewal target service missing");
     return { ok: false, refunded, error: "تمدید سرویس ناموفق بود." };
   }
+  if (!serviceSupportsGlobalLifecycle(service)) {
+    // Legacy per-inbound XUI services are NEVER mutated through the
+    // global-client endpoints and never silently migrated - a paid order
+    // that slipped past the pre-payment gates dead-ends into a refund.
+    const refunded = await failOrderWithRefund(
+      order,
+      "xui legacy per-inbound service - global lifecycle unsupported",
+    );
+    return { ok: false, refunded, error: XUI_LEGACY_OPERATION_TEXT };
+  }
   const panel = service.panel;
   if (panel.status !== "ACTIVE") {
     const refunded = await failOrderWithRefund(order, `panel status is ${panel.status}`);
@@ -287,6 +301,20 @@ async function executeRenewalOrderUnlocked(
     panelResult = { ok: false, errorMessage: errorMessage(err) };
   }
 
+  if (!panelResult.ok && panelResult.uncertain === true) {
+    // The panel outcome is UNKNOWN (timeout mid-update / unverifiable
+    // post-state). NEVER refund on uncertainty: the order stays
+    // PROVISIONING and startup reconciliation - which compares the exact
+    // expected post-state under the same lock - completes or refunds it on
+    // positive proof.
+    logger.error("renewal panel outcome unknown - deferring to reconciliation", {
+      orderId: order.id,
+      serviceId: service.id,
+      panelId: panel.id,
+      error: panelResult.errorMessage ?? "unknown",
+    });
+    return { ok: false, refunded: false, error: SERVICE_LOCK_LOST_TEXT };
+  }
   if (!panelResult.ok) {
     logger.warn("renewal panel update failed", {
       orderId: order.id,

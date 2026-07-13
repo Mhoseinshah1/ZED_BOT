@@ -29,6 +29,8 @@ import type {
  *   - POST {base}/panel/api/clients/add                      ({client, inboundIds})
  *   - POST {base}/panel/api/clients/del/{email}
  *   - GET  {base}/panel/api/clients/links/{email}
+ *   - POST {base}/panel/api/clients/update/{email}      (bare client body)
+ *   - POST {base}/panel/api/clients/resetTraffic/{email}
  * The legacy per-inbound client endpoints
  * (POST /panel/api/inbounds/addClient, .../delClient/...) were REMOVED
  * upstream and are no longer called.
@@ -296,6 +298,41 @@ export class XuiClient {
    */
   async getClientLinks(auth: XuiAuthContext, email: string): Promise<XuiRequestResult> {
     return this.request(auth, "GET", `/panel/api/clients/links/${encodeURIComponent(email)}`);
+  }
+
+  /**
+   * POST {base}/panel/api/clients/update/{email} - update the global
+   * client. The body is the BARE client object (model.Client), not a
+   * wrapper. The server REPLACES the row with the sent fields - omitted
+   * credentials (id/password/auth/secret) and an omitted subId are
+   * preserved upstream, but every other field is taken AS SENT, so the
+   * caller must round-trip the complete set of fields it wants to keep.
+   * Changes propagate to every attached inbound.
+   */
+  async updateClient(
+    auth: XuiAuthContext,
+    email: string,
+    client: Record<string, unknown>,
+  ): Promise<XuiRequestResult> {
+    return this.request(
+      auth,
+      "POST",
+      `/panel/api/clients/update/${encodeURIComponent(email)}`,
+      client,
+    );
+  }
+
+  /**
+   * POST {base}/panel/api/clients/resetTraffic/{email} - zeroes the
+   * client's up/down counters on every attached inbound. NOTE (upstream
+   * semantics): a disabled client is auto-ENABLED as part of the reset.
+   */
+  async resetClientTraffic(auth: XuiAuthContext, email: string): Promise<XuiRequestResult> {
+    return this.request(
+      auth,
+      "POST",
+      `/panel/api/clients/resetTraffic/${encodeURIComponent(email)}`,
+    );
   }
 }
 

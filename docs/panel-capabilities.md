@@ -11,11 +11,11 @@ actually implements and has tested - used to block unsupported operations
 | `authenticatedHealth` | ✅ | ✅ |
 | `createService` | ✅ | ✅ |
 | `readService` | ✅ | ✅ |
-| `renewService` | ✅ | 🚫 |
-| `addVolume` | ✅ | 🚫 |
-| `addTime` | ✅ | 🚫 |
-| `toggleService` | ✅ | 🚫 |
-| `regenerateSubscription` | ✅ | 🚫 |
+| `renewService` | ✅ | ✅ |
+| `addVolume` | ✅ | ✅ |
+| `addTime` | ✅ | ✅ |
+| `toggleService` | ✅ | ✅ |
+| `regenerateSubscription` | ✅ | ✅ |
 | `deleteService` | 🚫 | 🚫 |
 | `reconciliation` | ✅ | ✅ |
 
@@ -23,7 +23,16 @@ Declared in `packages/panel-adapters` (`MARZBAN_CAPABILITIES`,
 `XUI_CAPABILITIES`) and exposed on every adapter instance
 (`adapter.capabilities`). `deleteService` is unimplemented as a *service
 operation* for both families; the low-level delete endpoints exist solely
-for XUI compensating cleanup and opt-in staging cleanup.
+for XUI compensating cleanup and opt-in staging cleanup. The XUI
+lifecycle capabilities became real in the global-client lifecycle phase
+(`docs/xui-global-client-lifecycle.md`): each is backed by the pinned
+upstream endpoint, an implementation with verify-after-write, and
+contract tests - never by documentation presence alone.
+
+**XUI remote-model gate**: even on a capable panel, lifecycle mutations
+additionally require the SERVICE's remote model to be `GLOBAL_CLIENT`
+(`classifyXuiRemoteModel`); legacy per-inbound and unprovable services are
+blocked before payment (`serviceSupportsGlobalLifecycle`).
 
 ## Where capabilities gate behavior
 
@@ -74,6 +83,15 @@ domain, variant) resets the persisted result to "untested".
 «آماده ساخت سرویس» · «تنظیمات ناقص» · «احراز هویت ناموفق» ·
 «اینباند تنظیم نشده» · «کاربر الگو یافت نشد» · «نسخه API پشتیبانی نمی‌شود» ·
 «اتصال برقرار است اما ساخت سرویس قابل تایید نیست» · «پنل در دسترس نیست»
+
+The XUI panel-detail page additionally lists the verified per-operation
+capability statuses (`panelCapabilityStatusLines`): ساخت سرویس ·
+بروزرسانی سرویس · تمدید · حجم اضافه · زمان اضافه · فعال/غیرفعال ·
+تغییر لینک · تطبیق پنل, each shown as «پشتیبانی می‌شود ✅» /
+«پشتیبانی نمی‌شود ❌» / «نیازمند تست مجدد» / «نسخه API ناسازگار است».
+«پشتیبانی می‌شود» requires BOTH the adapter implementation and a passing
+persisted readiness test; an unsupported `apiVariant` marks every
+operation «نسخه API ناسازگار است».
 
 ## Outcome model (provisioning flow safety)
 

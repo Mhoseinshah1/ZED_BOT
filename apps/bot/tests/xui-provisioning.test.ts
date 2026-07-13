@@ -694,7 +694,14 @@ describe("XUI provisioning (global client API contract)", () => {
     expect(ok.ready).toBe(true);
     expect(ok.capabilities).toContain("createService");
     expect(ok.capabilities).toContain("readService");
-    expect(ok.capabilities).not.toContain("renewService"); // honest capabilities
+    // Lifecycle capabilities are real now (update/resetTraffic implemented
+    // + contract-tested); deleteService stays honestly absent.
+    expect(ok.capabilities).toContain("renewService");
+    expect(ok.capabilities).toContain("addVolume");
+    expect(ok.capabilities).toContain("addTime");
+    expect(ok.capabilities).toContain("toggleService");
+    expect(ok.capabilities).toContain("regenerateSubscription");
+    expect(ok.capabilities).not.toContain("deleteService"); // honest capabilities
   });
 
   it("18. handles timeouts and non-JSON responses structurally", async () => {

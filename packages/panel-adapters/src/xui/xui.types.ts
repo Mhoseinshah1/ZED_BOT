@@ -59,6 +59,12 @@ export interface XuiClientRecord {
   enable?: boolean;
   comment?: string;
   reset?: number;
+  limitIp?: number;
+  tgId?: number;
+  group?: string;
+  adTag?: string;
+  /** Legacy JSON-encoded-string form; accepted verbatim on write. */
+  reverse?: unknown;
 }
 
 /** GET /panel/api/clients/list item: client row + attachments + traffic. */

@@ -117,10 +117,12 @@ docs/service-operation-concurrency.md):
 - **Deferred orders park indefinitely** until the panel becomes readable or
   an admin intervenes; each sweep logs a warning with the order id and
   reason. This is intentional: money only moves on proof. XUI purchases
-  now reconcile like Marzban ones (the SANAEI adapter reads clients and
-  reports positive absence); XUI *mutation* orders still defer, but such
-  orders can no longer be created — the capability model blocks
-  renewal/extras on XUI before payment.
+  AND mutation orders (renewal/extras) now reconcile like Marzban ones:
+  the SANAEI adapter reads clients (positive absence semantics) including
+  quota and expiry, so `classifyMutationState` attributes XUI orders
+  exactly. XUI expiry is stored in unix milliseconds verbatim, so the
+  1.5s tolerance (needed for Marzban's whole seconds) is trivially
+  satisfied.
 - **Renewal coincidence**: a renewal plan with `durationDays = 0` whose
   computed new limit happens to equal the old limit is indistinguishable
   from "not applied" and refunds. The error direction favors the user

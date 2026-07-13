@@ -1,5 +1,9 @@
 import { PanelStatus, prisma, ServiceStatus, type Service } from "@zedbot/database";
 
+import {
+  panelOperationAvailable,
+  serviceSupportsGlobalLifecycle,
+} from "./panel-readiness.service.js";
 import { RENEWABLE_STATUSES } from "./renewal-checkout.service.js";
 import { linkRegenerationEligibility } from "./service-link.service.js";
 import { availableToggleAction, type ToggleAction } from "./service-toggle.service.js";
@@ -94,13 +98,12 @@ const EXTRA_TIME_STATUSES: ServiceStatus[] = [
  * these flags only gate what renders - a stale button still fails safely.
  * Unlimited-volume services never offer extra volume; never-expiring
  * services never offer extra time; a non-ACTIVE (or missing) panel offers
- * nothing.
+ * nothing. Buttons whose capability the panel's adapter does not implement
+ * are HIDDEN (capability model - no dead buttons), and XUI services outside
+ * the GLOBAL_CLIENT remote model hide every mutating action.
  */
 export async function resolveServiceDetailActions(service: Service): Promise<ServiceDetailActions> {
-  const panel = await prisma.panel.findUnique({
-    where: { id: service.panelId },
-    select: { status: true },
-  });
+  const panel = await prisma.panel.findUnique({ where: { id: service.panelId } });
   if (panel === null) {
     return {
       toggleAction: null,
@@ -111,15 +114,34 @@ export async function resolveServiceDetailActions(service: Service): Promise<Ser
     };
   }
   const panelActive = panel.status === PanelStatus.ACTIVE;
+  const lifecycleOk = serviceSupportsGlobalLifecycle(service);
   return {
-    toggleAction: availableToggleAction(service, panel.status),
+    toggleAction:
+      lifecycleOk && panelOperationAvailable(panel, "toggleService")
+        ? availableToggleAction(service, panel.status)
+        : null,
     canBuyExtraVolume:
-      panelActive && EXTRA_VOLUME_STATUSES.includes(service.status) && service.volumeBytes > 0n,
+      lifecycleOk &&
+      panelOperationAvailable(panel, "addVolume") &&
+      panelActive &&
+      EXTRA_VOLUME_STATUSES.includes(service.status) &&
+      service.volumeBytes > 0n,
     canBuyExtraTime:
-      panelActive && EXTRA_TIME_STATUSES.includes(service.status) && service.expiresAt !== null,
-    canRegenerateLink: linkRegenerationEligibility(service, panel.status).eligible,
+      lifecycleOk &&
+      panelOperationAvailable(panel, "addTime") &&
+      panelActive &&
+      EXTRA_TIME_STATUSES.includes(service.status) &&
+      service.expiresAt !== null,
+    canRegenerateLink:
+      lifecycleOk &&
+      panelOperationAvailable(panel, "regenerateSubscription") &&
+      linkRegenerationEligibility(service, panel.status).eligible,
     // Same conditions as renewableWhere (deletedAt is already excluded by
     // every detail-page lookup); rncb.service re-validates on click.
-    canRenew: panelActive && RENEWABLE_STATUSES.includes(service.status),
+    canRenew:
+      lifecycleOk &&
+      panelOperationAvailable(panel, "renewService") &&
+      panelActive &&
+      RENEWABLE_STATUSES.includes(service.status),
   };
 }

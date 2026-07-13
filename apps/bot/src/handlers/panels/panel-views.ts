@@ -3,6 +3,7 @@ import { InlineKeyboard } from "grammy";
 
 import { cb, PANEL_CB } from "./panel-cb.js";
 import { fieldsForPage, togglesForPage, type PanelPage } from "./panel-fields.js";
+import { panelCapabilityStatusLines } from "../../services/panel-readiness.service.js";
 import { panelShortId } from "../../services/panel.service.js";
 import { resolveXuiAuthMode } from "../../services/panel-adapter-factory.js";
 import { escapeHtml } from "../../utils/html.js";
@@ -134,6 +135,11 @@ export function panelDetailText(panel: Panel, linkedProductCount?: number): stri
       ? [`روش احراز هویت: ${tokenMode ? "توکن API" : "نام کاربری و رمز عبور"}`]
       : []),
     `آمادگی ساخت سرویس: ${readinessLine}`,
+    // XUI: per-operation capability statuses (static Persian labels; a
+    // capability only reads supported after a passing readiness test).
+    ...(panel.type === "XUI"
+      ? ["", "قابلیت‌های عملیات سرویس:", ...panelCapabilityStatusLines(panel), ""]
+      : []),
     ...(linkedProductCount === undefined ? [] : [`محصولات متصل: ${linkedProductCount}`]),
     `ایجاد: ${panel.createdAt.toISOString().slice(0, 10)}`,
     `وضعیت: ${STATUS_EMOJI[panel.status]} ${STATUS_LABEL[panel.status]}`,

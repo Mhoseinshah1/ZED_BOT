@@ -159,10 +159,13 @@ mid-operation.
   stays PAID and the user is asked to retry; nothing re-queues it
   automatically (consistent with the project's deferred-worker design for
   PAID orders).
-- **XUI**: mutations remain unimplemented and are now blocked BEFORE
-  payment by the capability model (docs/panel-capabilities.md);
-  provisioning and purchase reconciliation run under the same locks as
-  Marzban.
+- **XUI**: lifecycle mutations are implemented for GLOBAL_CLIENT services
+  (docs/xui-global-client-lifecycle.md) and run under the same
+  `zedbot:service-operation:<serviceId>` lock as Marzban; legacy
+  per-inbound XUI services are blocked BEFORE payment by the remote-model
+  gate. An unverifiable XUI update returns `uncertain` and the order is
+  left PROVISIONING for locked reconciliation - never refunded on
+  uncertainty.
 - **The lock serializes per service, not per panel**: a panel-wide
   outage still surfaces as per-operation failures/refunds exactly as
   before; the lock adds no cross-service coupling.

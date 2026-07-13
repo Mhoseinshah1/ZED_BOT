@@ -24,8 +24,9 @@ import {
 // the last stored values). Subscription/config links are never logged.
 // =============================================================================
 
-const SYNC_FAILED_USER_TEXT =
-  "بروزرسانی از پنل ناموفق بود. آخرین اطلاعات ذخیره‌شده نمایش داده می‌شود.";
+export const SYNC_OK_TEXT = "اطلاعات سرویس بروزرسانی شد ✅";
+export const SYNC_FAILED_USER_TEXT = "بروزرسانی اطلاعات سرویس موقتاً امکان‌پذیر نیست.";
+export const SYNC_NOT_FOUND_TEXT = "سرویس در پنل پیدا نشد.";
 
 export type SyncServiceResult =
   | { ok: true; service: Service; message: string }
@@ -75,6 +76,12 @@ function buildUpdateData(service: Service, result: GetServiceAccountResult): Pri
   }
   if (result.configLinks !== undefined && result.configLinks.length > 0) {
     data.configLinks = result.configLinks;
+  }
+  if (result.remoteMetadata !== undefined) {
+    // Fresh non-secret remote evidence (client emails + attached inbound
+    // ids) keeps the GLOBAL_CLIENT / LEGACY_PER_INBOUND classification
+    // current - recording what the panel reports, never migrating anything.
+    data.remoteMetadata = result.remoteMetadata as Prisma.InputJsonObject;
   }
   if (
     result.firstConnectedAt !== undefined &&
@@ -173,13 +180,17 @@ async function syncServiceFromPanelUnlocked(
     logger.warn("service sync failed", {
       serviceId: service.id,
       panelId: panel.id,
+      notFound: result.notFound === true,
       error: result.errorMessage ?? "unknown",
     });
     return {
       ok: false,
       service: serviceRow,
       error: result.errorMessage ?? "unknown",
-      safeUserMessage: SYNC_FAILED_USER_TEXT,
+      // Positive absence (full inventory readable, no client) gets its own
+      // message; "could not check" stays a generic retryable failure. The
+      // stored row is untouched either way - sync never guesses.
+      safeUserMessage: result.notFound === true ? SYNC_NOT_FOUND_TEXT : SYNC_FAILED_USER_TEXT,
     };
   }
 
@@ -188,5 +199,5 @@ async function syncServiceFromPanelUnlocked(
     data: buildUpdateData(serviceRow, result),
   });
   logger.info("service sync succeeded", { serviceId: service.id, panelId: panel.id });
-  return { ok: true, service: updated, message: "اطلاعات از پنل بروزرسانی شد." };
+  return { ok: true, service: updated, message: SYNC_OK_TEXT };
 }

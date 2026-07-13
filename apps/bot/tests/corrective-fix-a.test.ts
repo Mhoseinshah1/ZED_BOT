@@ -271,7 +271,7 @@ describe("direct renewal from service detail (Fix A)", () => {
     expect(without).not.toContain("user:renew:svc:abcdef12");
   });
 
-  it("keeps the required action order (renew after regen-link, before extras)", () => {
+  it("keeps the master-requirements action order (regen, volume+renew, time, toggle)", () => {
     const kb = serviceDetailKeyboard(
       service,
       actions({
@@ -286,11 +286,12 @@ describe("direct renewal from service detail (Fix A)", () => {
     const order = [
       "user:svc:refresh:abcdef12",
       "user:svc:regen_link:abcdef12",
-      "user:renew:svc:abcdef12",
       "user:ev:svc:abcdef12",
+      "user:renew:svc:abcdef12",
+      "user:et:svc:abcdef12",
       "user:svc:disable:abcdef12",
-      "user:svc:list:1",
       CB.USER_MENU,
+      "user:svc:list:1",
     ];
     const positions = order.map((cb) => flat.indexOf(cb));
     expect(positions).not.toContain(-1);

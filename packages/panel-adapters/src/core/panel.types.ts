@@ -284,6 +284,13 @@ export interface AddServiceVolumeInput {
 /** Result of renewServiceAccount - same field semantics as GetServiceAccountResult. */
 export interface RenewServiceAccountResult {
   ok: boolean;
+  /**
+   * Set ONLY with ok=false: the remote outcome is UNKNOWN (timeout after
+   * the mutation may have landed, or an unverifiable post-mutation state).
+   * Callers must NOT refund and must leave the order for reconciliation.
+   * Unset/false with ok=false = definite failure, panel state untouched.
+   */
+  uncertain?: boolean;
   username?: string;
   status?: NormalizedAccountStatus;
   usedBytes?: bigint;

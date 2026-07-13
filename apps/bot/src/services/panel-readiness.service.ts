@@ -1,4 +1,4 @@
-import { PanelStatus, Prisma, prisma, type Panel } from "@zedbot/database";
+import { PanelStatus, Prisma, prisma, type Panel, type Service } from "@zedbot/database";
 import {
   MARZBAN_CAPABILITIES,
   XUI_CAPABILITIES,
@@ -51,6 +51,11 @@ export const PRODUCT_INBOUND_SUBSET_TEXT =
 /** Persian user-facing text when an operation is not supported on the panel. */
 export const PANEL_OPERATION_UNSUPPORTED_TEXT =
   "این عملیات برای این سرویس پشتیبانی نمی‌شود.";
+/** Persian status for services created under the legacy per-inbound model. */
+export const XUI_LEGACY_SERVICE_TEXT = "این سرویس با ساختار قدیمی پنل ساخته شده است.";
+/** Persian block for lifecycle operations on legacy per-inbound services. */
+export const XUI_LEGACY_OPERATION_TEXT =
+  "این عملیات برای سرویس‌های قدیمی XUI پشتیبانی نمی‌شود.";
 
 /** Admin-facing readiness status labels (specified texts). */
 export const READINESS_STATUS_TEXT = {
@@ -116,6 +121,51 @@ export function panelSupportsOperation(panel: Panel, capability: PanelCapability
   return panelCapabilities(panel).includes(capability);
 }
 
+/** Persian capability statuses for the admin panel detail (specified texts). */
+export const CAPABILITY_STATUS_TEXT = {
+  supported: "پشتیبانی می‌شود ✅",
+  unsupported: "پشتیبانی نمی‌شود ❌",
+  retestNeeded: "نیازمند تست مجدد",
+  incompatibleApi: "نسخه API ناسازگار است",
+} as const;
+
+/** Panel-detail operation list (specified labels, in specified order). */
+const DETAIL_CAPABILITY_LABELS: readonly [PanelCapability, string][] = [
+  ["createService", "ساخت سرویس"],
+  ["readService", "بروزرسانی سرویس"],
+  ["renewService", "تمدید"],
+  ["addVolume", "حجم اضافه"],
+  ["addTime", "زمان اضافه"],
+  ["toggleService", "فعال/غیرفعال"],
+  ["regenerateSubscription", "تغییر لینک"],
+  ["reconciliation", "تطبیق پنل"],
+];
+
+/**
+ * Read-only per-operation status list for the admin panel detail view. A
+ * capability reads «پشتیبانی می‌شود» ONLY when the adapter implements it AND
+ * the last persisted authenticated readiness check passed - implemented but
+ * unverified (never tested, failed test, or config edited since) reads
+ * «نیازمند تست مجدد», so documentation presence alone never enables
+ * anything. An unsupported XUI apiVariant marks every operation
+ * «نسخه API ناسازگار است».
+ */
+export function panelCapabilityStatusLines(panel: Panel): string[] {
+  const incompatibleApi =
+    panel.type === "XUI" && !SUPPORTED_XUI_VARIANTS.has(resolveXuiVariant(panel));
+  const supported = new Set(panelCapabilities(panel));
+  return DETAIL_CAPABILITY_LABELS.map(([cap, label]) => {
+    const status = incompatibleApi
+      ? CAPABILITY_STATUS_TEXT.incompatibleApi
+      : !supported.has(cap)
+        ? CAPABILITY_STATUS_TEXT.unsupported
+        : panel.provisioningReady === true
+          ? CAPABILITY_STATUS_TEXT.supported
+          : CAPABILITY_STATUS_TEXT.retestNeeded;
+    return `${label}: ${status}`;
+  });
+}
+
 export interface PanelConfigAssessment {
   ok: boolean;
   /** Machine-readable reason for logs; never contains secrets. */
@@ -130,6 +180,60 @@ export function parsePanelInboundIds(raw: unknown): number[] {
     return [];
   }
   return raw.filter((v): v is number => typeof v === "number" && Number.isInteger(v));
+}
+
+/**
+ * Remote model of an XUI service. Lifecycle mutations run ONLY against
+ * GLOBAL_CLIENT services; legacy per-inbound services (created before the
+ * global-client migration) stay readable but are never mutated through the
+ * global-client endpoints and are never silently migrated.
+ */
+export type XuiRemoteModel = "GLOBAL_CLIENT" | "LEGACY_PER_INBOUND" | "UNKNOWN";
+
+/**
+ * Classifies an XUI service's remote model from its stored identifiers.
+ * GLOBAL_CLIENT: the remote metadata names ONE client whose email is the
+ * service username exactly. LEGACY_PER_INBOUND: per-inbound client labels
+ * (`username-<inboundId>`). Anything unprovable is UNKNOWN and treated like
+ * legacy (mutations blocked) - never guessed.
+ */
+export function classifyXuiRemoteModel(
+  service: Pick<Service, "panelType" | "username" | "remoteMetadata">,
+): XuiRemoteModel {
+  if (service.panelType !== "XUI") {
+    return "GLOBAL_CLIENT";
+  }
+  const metadata = service.remoteMetadata;
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return "UNKNOWN";
+  }
+  const record = metadata as { email?: unknown; clients?: unknown };
+  if (typeof record.email === "string") {
+    return record.email === service.username ? "GLOBAL_CLIENT" : "UNKNOWN";
+  }
+  if (Array.isArray(record.clients) && record.clients.length > 0) {
+    const emails = record.clients
+      .map((c) => (typeof c === "object" && c !== null ? (c as { email?: unknown }).email : undefined))
+      .filter((e): e is string => typeof e === "string");
+    if (emails.length === 0) {
+      return "UNKNOWN";
+    }
+    if (emails.every((e) => e === service.username)) {
+      return "GLOBAL_CLIENT";
+    }
+    if (emails.some((e) => e.startsWith(`${service.username}-`))) {
+      return "LEGACY_PER_INBOUND";
+    }
+    return "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+/** true when lifecycle mutations may target this service's remote model. */
+export function serviceSupportsGlobalLifecycle(
+  service: Pick<Service, "panelType" | "username" | "remoteMetadata">,
+): boolean {
+  return service.panelType !== "XUI" || classifyXuiRemoteModel(service) === "GLOBAL_CLIENT";
 }
 
 /** Result of resolving a product's effective XUI inbound selection. */
