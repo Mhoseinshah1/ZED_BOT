@@ -32,14 +32,22 @@ export interface NowPaymentsConfig {
   /** Optional invoice success/cancel redirect URLs. */
   successUrl?: string;
   cancelUrl?: string;
+  /**
+   * Overrides the API host entirely, including the /v1 prefix (takes
+   * precedence over `sandbox`). Test/mock hook - production deployments
+   * leave this unset.
+   */
+  baseUrl?: string;
 }
 
 /**
  * Reads NOWPayments configuration from the environment: NOWPAYMENTS_API_KEY,
  * NOWPAYMENTS_IPN_SECRET, NOWPAYMENTS_CALLBACK_URL, NOWPAYMENTS_SANDBOX,
  * NOWPAYMENTS_PRICE_CURRENCY (default "usd"), NOWPAYMENTS_TOMAN_PER_UNIT
- * (integer > 0), NOWPAYMENTS_SUCCESS_URL, NOWPAYMENTS_CANCEL_URL. Missing or
- * invalid values never throw - the gateway reports isAvailable()=false.
+ * (integer > 0), NOWPAYMENTS_SUCCESS_URL, NOWPAYMENTS_CANCEL_URL,
+ * NOWPAYMENTS_BASE_URL (host override, primarily for tests against mocks).
+ * Missing or invalid values never throw - the gateway reports
+ * isAvailable()=false.
  */
 export function nowpaymentsConfigFromEnv(): NowPaymentsConfig {
   const read = (name: string): string | undefined => {
@@ -56,6 +64,7 @@ export function nowpaymentsConfigFromEnv(): NowPaymentsConfig {
     tomanPerUnit: Number.isFinite(tomanPerUnitRaw) && tomanPerUnitRaw > 0 ? tomanPerUnitRaw : 0,
     successUrl: read("NOWPAYMENTS_SUCCESS_URL"),
     cancelUrl: read("NOWPAYMENTS_CANCEL_URL"),
+    baseUrl: read("NOWPAYMENTS_BASE_URL"),
   };
 }
 
@@ -132,6 +141,9 @@ export class NowPaymentsGateway implements PaymentGateway {
   constructor(private readonly config: NowPaymentsConfig) {}
 
   private get host(): string {
+    if (this.config.baseUrl !== undefined && this.config.baseUrl !== "") {
+      return this.config.baseUrl;
+    }
     return this.config.sandbox ? NOWPAYMENTS_SANDBOX_HOST : NOWPAYMENTS_PRODUCTION_HOST;
   }
 

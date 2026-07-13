@@ -163,7 +163,7 @@ function paymentDescription(purpose: CheckoutSession["purpose"], paymentId: stri
   return `ZED_BOT ${kind} ${paymentId.slice(0, 8)}`;
 }
 
-function payloadRecord(payment: Payment): Record<string, unknown> {
+function payloadRecord(payment: Pick<Payment, "callbackPayload">): Record<string, unknown> {
   const payload = payment.callbackPayload;
   if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
     return payload as Record<string, unknown>;
@@ -172,7 +172,7 @@ function payloadRecord(payment: Payment): Record<string, unknown> {
 }
 
 /** Integer Stars amount stored on the payment at creation (pre-checkout guard). */
-export function storedStarsAmount(payment: Payment): number | null {
+export function storedStarsAmount(payment: Pick<Payment, "callbackPayload">): number | null {
   const stars = payloadRecord(payment).stars;
   return typeof stars === "number" && Number.isInteger(stars) && stars > 0 ? stars : null;
 }

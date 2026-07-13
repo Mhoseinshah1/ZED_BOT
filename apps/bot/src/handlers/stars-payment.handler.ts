@@ -1,4 +1,10 @@
-import { PaymentGatewayType, PaymentStatus, prisma } from "@zedbot/database";
+import {
+  PaymentGatewayType,
+  PaymentStatus,
+  prisma,
+  type Payment,
+  type User,
+} from "@zedbot/database";
 import { parseStarsPayload } from "@zedbot/payments";
 import { errorMessage } from "@zedbot/shared";
 import { Composer } from "grammy";
@@ -29,6 +35,45 @@ import { safeReply } from "../utils/safe-reply.js";
 
 const INVALID_PRECHECKOUT_TEXT = "این پرداخت معتبر نیست یا منقضی شده است.";
 
+/** The pre_checkout_query fields the validator needs (grammY-shaped). */
+export interface StarsPreCheckoutQuery {
+  from: { id: number };
+  currency: string;
+  total_amount: number;
+}
+
+/** The Payment fields (plus owner) the validator needs. */
+export type StarsPreCheckoutPayment = Pick<
+  Payment,
+  "status" | "expiresAt" | "callbackPayload"
+> & { user: Pick<User, "telegramId"> };
+
+/**
+ * The LAST veto point before Telegram charges Stars, as a pure function:
+ * the payment row must exist, belong to the paying Telegram user, still be
+ * live (PENDING/PROCESSING and unexpired), and the query must carry XTR with
+ * EXACTLY the Stars amount stored on the payment at creation. Anything else
+ * - including a payment whose stored stars amount is missing/invalid - is
+ * rejected.
+ */
+export function validateStarsPreCheckout(
+  payment: StarsPreCheckoutPayment | null,
+  query: StarsPreCheckoutQuery,
+): boolean {
+  if (payment === null) {
+    return false;
+  }
+  const stars = storedStarsAmount(payment);
+  return (
+    payment.user.telegramId === BigInt(query.from.id) &&
+    (payment.status === PaymentStatus.PENDING || payment.status === PaymentStatus.PROCESSING) &&
+    (payment.expiresAt === null || payment.expiresAt.getTime() > Date.now()) &&
+    query.currency === "XTR" &&
+    stars !== null &&
+    query.total_amount === stars
+  );
+}
+
 export const starsPaymentHandler = new Composer<BotContext>();
 
 starsPaymentHandler.on("pre_checkout_query", async (ctx) => {
@@ -42,17 +87,7 @@ starsPaymentHandler.on("pre_checkout_query", async (ctx) => {
             where: { id: paymentId, provider: PaymentGatewayType.TELEGRAM_STARS },
             include: { user: true },
           });
-    const stars = payment === null ? null : storedStarsAmount(payment);
-    const valid =
-      payment !== null &&
-      payment.user.telegramId === BigInt(query.from.id) &&
-      (payment.status === PaymentStatus.PENDING ||
-        payment.status === PaymentStatus.PROCESSING) &&
-      (payment.expiresAt === null || payment.expiresAt.getTime() > Date.now()) &&
-      query.currency === "XTR" &&
-      stars !== null &&
-      query.total_amount === stars;
-    if (valid) {
+    if (validateStarsPreCheckout(payment, query)) {
       await ctx.answerPreCheckoutQuery(true);
       return;
     }

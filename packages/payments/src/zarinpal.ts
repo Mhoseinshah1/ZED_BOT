@@ -20,20 +20,28 @@ export interface ZarinpalConfig {
   sandbox: boolean;
   /** Default absolute callback URL for payment redirects. */
   callbackUrl?: string;
+  /**
+   * Overrides the API host entirely (takes precedence over `sandbox`).
+   * Test/mock hook - production deployments leave this unset.
+   */
+  baseUrl?: string;
 }
 
 /**
  * Reads Zarinpal configuration from the environment: ZARINPAL_MERCHANT_ID,
- * ZARINPAL_SANDBOX ("true" selects the sandbox host), ZARINPAL_CALLBACK_URL.
+ * ZARINPAL_SANDBOX ("true" selects the sandbox host), ZARINPAL_CALLBACK_URL,
+ * ZARINPAL_BASE_URL (host override, primarily for tests against mocks).
  * Missing values never throw - the gateway just reports isAvailable()=false.
  */
 export function zarinpalConfigFromEnv(): ZarinpalConfig {
   const merchantId = (process.env.ZARINPAL_MERCHANT_ID ?? "").trim();
   const callbackUrl = (process.env.ZARINPAL_CALLBACK_URL ?? "").trim();
+  const baseUrl = (process.env.ZARINPAL_BASE_URL ?? "").trim();
   return {
     merchantId: merchantId === "" ? undefined : merchantId,
     sandbox: (process.env.ZARINPAL_SANDBOX ?? "").trim() === "true",
     callbackUrl: callbackUrl === "" ? undefined : callbackUrl,
+    baseUrl: baseUrl === "" ? undefined : baseUrl,
   };
 }
 
@@ -80,6 +88,9 @@ export class ZarinpalGateway implements PaymentGateway {
   constructor(private readonly config: ZarinpalConfig) {}
 
   private get host(): string {
+    if (this.config.baseUrl !== undefined && this.config.baseUrl !== "") {
+      return this.config.baseUrl;
+    }
     return this.config.sandbox ? ZARINPAL_SANDBOX_HOST : ZARINPAL_PRODUCTION_HOST;
   }
 
