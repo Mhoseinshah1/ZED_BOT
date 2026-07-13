@@ -100,6 +100,16 @@ function snapshotInt(snapshot: Record<string, unknown>, key: string): number | n
   return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
 
+/** Validated int-array snapshot field ([] and non-arrays -> null). */
+function snapshotIntArray(snapshot: Record<string, unknown>, key: string): number[] | null {
+  const value = snapshot[key];
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const ids = value.filter((v): v is number => typeof v === "number" && Number.isInteger(v));
+  return ids.length > 0 ? ids : null;
+}
+
 interface WalletOrderArgs {
   orderType: OrderType;
   product: ProductWithRelations;
@@ -221,6 +231,9 @@ async function executeWalletOrderPayment(
           productPriceSnapshot: snapshotInt(snapshotRecord, "originalPriceToman"),
           durationDaysSnapshot: snapshotInt(snapshotRecord, "durationDays"),
           volumeGbSnapshot: snapshotInt(snapshotRecord, "volumeGb"),
+          ...(snapshotIntArray(snapshotRecord, "inboundIds") !== null
+            ? { inboundIdsSnapshot: snapshotIntArray(snapshotRecord, "inboundIds") as number[] }
+            : {}),
           panelNameSnapshot: snapshotString(snapshotRecord, "panelName"),
           locationSnapshot:
             snapshotRecord.allLocations === true

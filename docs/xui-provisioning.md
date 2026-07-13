@@ -136,6 +136,26 @@ Product B selection:         null        -> client attached to 3, 5, 8, 12
 Product C selection:         [5, 99]     -> invalid: 99 outside the allowlist
 ```
 
+### The sold set is snapshotted at checkout
+
+A paid Order provisions the EXACT inbound set sold at checkout:
+
+- `buildProductSnapshot` resolves the product's effective selection when
+  the checkout snapshot is built (inherited selections are MATERIALIZED -
+  the allowlist as it stood at that moment);
+- both payment paths (wallet and receipt approval) persist it as
+  `Order.inboundIdsSnapshot`;
+- provisioning attaches the global client to the snapshot when present -
+  **product or panel edits after payment never change a paid order's
+  entitlement**, and retries provision the identical set;
+- legacy orders without a snapshot resolve from live config exactly as
+  before (the adapter still validates every inbound against the live
+  panel either way, so a since-removed/disabled inbound fails safely).
+
+The product-detail entry point for the selection is
+«انتخاب اینباند XUI» under Product/Plan Management -> product detail -
+no new top-level admin menu was added.
+
 ## Inbound validation
 
 Before ANY mutation, every configured inbound id is validated against the

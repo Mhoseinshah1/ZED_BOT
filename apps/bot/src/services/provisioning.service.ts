@@ -254,10 +254,16 @@ async function provisionPaidOrderUnlocked(
   // is a provisioning failure: FAIL + refund, never a silent charge.
   const product = order.product;
   const panel = product?.panel ?? null;
-  // XUI: the product provisions into ITS resolved inbound subset of the
-  // panel allowlist (null/empty selection inherits the full allowlist).
+  // XUI entitlement: a paid order provisions the EXACT inbound set sold at
+  // checkout (Order.inboundIdsSnapshot) - product/panel edits after payment
+  // never change it. Legacy orders without a snapshot resolve from live
+  // config (panel allowlist + product subset) exactly as before.
+  const soldInboundIds =
+    panel !== null && panel.type === "XUI"
+      ? parsePanelInboundIds(order.inboundIdsSnapshot)
+      : [];
   const inboundResolution =
-    panel !== null && panel.type === "XUI" && product !== null
+    panel !== null && panel.type === "XUI" && soldInboundIds.length === 0 && product !== null
       ? resolveProductInboundIds(panel, product.inboundIds)
       : null;
   const preflightError =
@@ -319,9 +325,11 @@ async function provisionPaidOrderUnlocked(
       trafficResetCycle: product.trafficResetCycle,
       subscriptionBaseUrl: normalizeSubscriptionBase(panel),
       inboundIds:
-        inboundResolution !== null && inboundResolution.ok
-          ? inboundResolution.inboundIds
-          : parsePanelInboundIds(panel.inboundIds),
+        soldInboundIds.length > 0
+          ? soldInboundIds
+          : inboundResolution !== null && inboundResolution.ok
+            ? inboundResolution.inboundIds
+            : parsePanelInboundIds(panel.inboundIds),
       protocolSettings:
         panel.protocolSettings !== null && typeof panel.protocolSettings === "object"
           ? (panel.protocolSettings as Record<string, unknown>)

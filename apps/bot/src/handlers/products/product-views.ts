@@ -284,7 +284,7 @@ export function productDetailKeyboard(
       kb.text("ریست ترافیک", pcb.pickResetCycle(sid));
     }
     if (product.panel?.type === "XUI") {
-      kb.text("ویرایش اینباندها", pcb.fieldEdit(sid, "inb"));
+      kb.text("انتخاب اینباند XUI", pcb.fieldEdit(sid, "inb"));
     }
     kb.row();
   } else {

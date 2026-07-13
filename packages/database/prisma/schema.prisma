@@ -803,6 +803,12 @@ model Order {
   productPriceSnapshot       Int?
   durationDaysSnapshot       Int?
   volumeGbSnapshot           Int?
+  // XUI only: the EXACT inbound ids sold at checkout (resolved from the
+  // panel allowlist + product selection when the snapshot was built).
+  // Provisioning attaches the global client to THIS set - product/panel
+  // edits after payment never change a paid order's entitlement. Null on
+  // legacy orders (they resolve from live config at provisioning time).
+  inboundIdsSnapshot         Json?
   noteSnapshot               String?
   panelNameSnapshot          String?
   locationSnapshot           String?

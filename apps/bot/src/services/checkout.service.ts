@@ -8,6 +8,7 @@ import {
 
 import type { CheckoutDraft } from "../core/session.js";
 import { getSetting } from "./settings.service.js";
+import { resolveProductInboundIds } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 
 // =============================================================================
@@ -51,7 +52,20 @@ export function buildProductSnapshot(
     discountCode: draft.discountCode ?? null,
     discountAmountToman: draft.discountAmountToman,
     finalPriceToman: draft.finalPriceToman,
+    // XUI: the EXACT inbound set being sold, resolved NOW (explicit product
+    // selection or the materialized panel allowlist). The paid order's
+    // entitlement is this set - later product/panel edits never change it.
+    inboundIds: resolveSoldInboundIds(product),
   };
+}
+
+/** Resolved sold inbound set for the snapshot (null for non-XUI/unresolvable). */
+function resolveSoldInboundIds(product: ProductWithRelations): number[] | null {
+  if (product.type !== "SERVICE_PRODUCT" || product.panel?.type !== "XUI") {
+    return null;
+  }
+  const resolution = resolveProductInboundIds(product.panel, product.inboundIds);
+  return resolution.ok ? resolution.inboundIds : null;
 }
 
 /**
