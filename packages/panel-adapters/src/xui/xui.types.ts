@@ -73,6 +73,32 @@ export interface XuiLoginResult {
   message: string;
 }
 
+/**
+ * In-memory authentication context for one adapter operation. Carries the
+ * session cookie or the bearer token - a secret either way: never logged,
+ * never returned in messages, never persisted.
+ */
+export type XuiAuthContext =
+  | { kind: "cookie"; cookie: string }
+  | { kind: "token"; token: string };
+
+/** Result of establishing the authentication context for the configured mode. */
+export interface XuiAuthResult {
+  ok: boolean;
+  auth?: XuiAuthContext;
+  status?: number;
+  timedOut?: boolean;
+  transportError?: boolean;
+  malformedBody?: boolean;
+  /**
+   * The configured mode's credentials are missing (no network request was
+   * attempted) - a configuration error, not a panel failure.
+   */
+  configIncomplete?: boolean;
+  /** Safe short message (never contains credentials, cookies or tokens). */
+  message: string;
+}
+
 /** Result of an authenticated API request. */
 export interface XuiRequestResult {
   ok: boolean;

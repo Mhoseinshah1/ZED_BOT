@@ -18,6 +18,7 @@ import {
   READINESS_RELEVANT_COLUMNS,
   readinessResetData,
 } from "../../services/panel-readiness.service.js";
+import { resolveXuiAuthMode } from "../../services/panel-adapter-factory.js";
 import { normalizePanelBaseUrl } from "../../utils/url.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { cb, PANEL_CB } from "./panel-cb.js";
@@ -167,6 +168,40 @@ panelHandler.callbackQuery(PANEL_CB.ADD_XUI, (ctx) => beginAdd(ctx, "XUI"));
 function cancelKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("لغو ❌", PANEL_CB.CANCEL);
 }
+
+/** XUI add-wizard auth-mode selector. */
+function authModeKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("نام کاربری و رمز عبور", PANEL_CB.ADD_AUTH_COOKIE)
+    .row()
+    .text("توکن API", PANEL_CB.ADD_AUTH_TOKEN)
+    .row()
+    .text("لغو ❌", PANEL_CB.CANCEL);
+}
+
+// Add-wizard auth-mode selection (only meaningful in the authMode step).
+async function chooseAddAuthMode(
+  ctx: BotContext,
+  mode: "SESSION_COOKIE" | "API_TOKEN",
+): Promise<void> {
+  const state = ctx.session.temp.panelAdd;
+  if (ctx.session.currentFlow !== "panel:add" || state === undefined || state.step !== "authMode") {
+    await safeAnswerCallback(ctx, "این مرحله فعال نیست.");
+    return;
+  }
+  state.authMode = mode;
+  await safeAnswerCallback(ctx);
+  if (mode === "API_TOKEN") {
+    state.step = "token";
+    await safeEditOrReply(ctx, "توکن API پنل را وارد کنید.", cancelKeyboard());
+    return;
+  }
+  state.step = "username";
+  await safeEditOrReply(ctx, "نام کاربری پنل را وارد کنید.", cancelKeyboard());
+}
+
+panelHandler.callbackQuery(PANEL_CB.ADD_AUTH_COOKIE, (ctx) => chooseAddAuthMode(ctx, "SESSION_COOKIE"));
+panelHandler.callbackQuery(PANEL_CB.ADD_AUTH_TOKEN, (ctx) => chooseAddAuthMode(ctx, "API_TOKEN"));
 
 panelHandler.callbackQuery(PANEL_CB.CANCEL, async (ctx) => {
   clearFlow(ctx);
@@ -351,6 +386,57 @@ panelHandler.callbackQuery(/^admin:panel:tg:([^:]+):([a-z0-9]+)$/, async (ctx) =
   await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
 });
 
+// --- XUI auth-mode switch ------------------------------------------------------
+
+panelHandler.callbackQuery(/^admin:panel:am:([^:]+)$/, async (ctx) => {
+  const panel = await resolvePanel(ctx, ctx.match[1]);
+  if (panel === null) {
+    return;
+  }
+  if (panel.type !== "XUI") {
+    await safeAnswerCallback(ctx, "فقط برای پنل‌های XUI.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const sid = panelShortId(panel);
+  const current = resolveXuiAuthMode(panel);
+  const kb = new InlineKeyboard()
+    .text(
+      `${current === "SESSION_COOKIE" ? "✅ " : ""}نام کاربری و رمز عبور`,
+      cb.authModeSet(sid, "c"),
+    )
+    .row()
+    .text(`${current === "API_TOKEN" ? "✅ " : ""}توکن API`, cb.authModeSet(sid, "t"))
+    .row()
+    .text("بازگشت", cb.view(sid));
+  await safeEditOrReply(ctx, "روش احراز هویت پنل را انتخاب کنید:", kb);
+});
+
+panelHandler.callbackQuery(/^admin:panel:am:([^:]+):(c|t)$/, async (ctx) => {
+  const panel = await resolvePanel(ctx, ctx.match[1]);
+  if (panel === null) {
+    return;
+  }
+  if (panel.type !== "XUI") {
+    await safeAnswerCallback(ctx, "فقط برای پنل‌های XUI.");
+    return;
+  }
+  const mode = ctx.match[2] === "t" ? "API_TOKEN" : "SESSION_COOKIE";
+  // Switching the mode stales the readiness result; the admin is prompted
+  // for the new mode's credential right away.
+  await updatePanel(panel.id, { authMode: mode, ...readinessResetData() });
+  await safeAnswerCallback(ctx, "روش احراز هویت بروزرسانی شد ✅");
+  ctx.session.currentFlow = "panel:edit:credential";
+  ctx.session.temp.editingPanelId = panel.id;
+  if (mode === "API_TOKEN") {
+    ctx.session.temp.editingCredential = "token";
+    await safeEditOrReply(ctx, "توکن API پنل را وارد کنید.", cancelKeyboard());
+    return;
+  }
+  ctx.session.temp.editingCredential = "cred-username";
+  await safeEditOrReply(ctx, "نام کاربری پنل را وارد کنید.", cancelKeyboard());
+});
+
 // --- field edit entry points -------------------------------------------------
 
 // Basic edits from the detail page use fixed keys: nm / url / cred.
@@ -370,6 +456,11 @@ panelHandler.callbackQuery(/^admin:panel:fe:([^:]+):(.+)$/, async (ctx) => {
   }
   if (fieldKey === "cred") {
     ctx.session.currentFlow = "panel:edit:credential";
+    if (panel.type === "XUI" && resolveXuiAuthMode(panel) === "API_TOKEN") {
+      ctx.session.temp.editingCredential = "token";
+      await safeEditOrReply(ctx, "توکن API جدید پنل را وارد کنید.", cancelKeyboard());
+      return;
+    }
     ctx.session.temp.editingCredential = "cred-username";
     await safeEditOrReply(ctx, "نام کاربری پنل را وارد کنید.", cancelKeyboard());
     return;
@@ -458,10 +549,45 @@ async function handleAddStep(ctx: BotContext, text: string): Promise<void> {
       return;
     }
     state.baseUrl = result.value;
-    // Both panel families authenticate with username + password now
-    // (Marzban: token endpoint; XUI/Sanaei: session-cookie login).
+    if (state.type === "XUI") {
+      // XUI supports two explicit auth modes - the admin picks one.
+      state.step = "authMode";
+      await safeReply(ctx, "روش احراز هویت پنل را انتخاب کنید:", authModeKeyboard());
+      return;
+    }
     state.step = "username";
     await safeReply(ctx, "نام کاربری پنل را وارد کنید.", cancelKeyboard());
+    return;
+  }
+
+  if (state.step === "authMode") {
+    // Mode is chosen via the inline keyboard, not text.
+    await safeReply(ctx, "لطفاً روش احراز هویت را با دکمه‌ها انتخاب کنید.", authModeKeyboard());
+    return;
+  }
+
+  if (state.step === "token") {
+    if (value.length === 0) {
+      await safeReply(ctx, "مقدار نمی‌تواند خالی باشد. دوباره وارد کنید.");
+      return;
+    }
+    const encrypted = encryptSecret(value); // may throw SecretConfigError
+    const panel = await createPanel({
+      type: state.type,
+      name: state.name ?? "پنل",
+      baseUrl: state.baseUrl ?? "",
+      username: null,
+      passwordEncrypted: null,
+      tokenEncrypted: encrypted,
+      authMode: "API_TOKEN",
+    });
+    clearFlow(ctx);
+    await safeReply(ctx, "پنل با موفقیت ذخیره شد ✅");
+    await safeReply(
+      ctx,
+      "بعداً باید شناسه‌های inbound و دامنه ساب را از مدیریت پنل تکمیل کنید و «تست اتصال» را اجرا کنید.",
+    );
+    await safeReply(ctx, panelDetailText(panel), panelDetailKeyboard(panel), HTML);
     return;
   }
 
@@ -489,6 +615,7 @@ async function handleAddStep(ctx: BotContext, text: string): Promise<void> {
       username: state.username ?? null,
       passwordEncrypted: encrypted,
       tokenEncrypted: null,
+      authMode: state.type === "XUI" ? "SESSION_COOKIE" : null,
     });
     clearFlow(ctx);
     await safeReply(ctx, "پنل با موفقیت ذخیره شد ✅");
@@ -528,6 +655,18 @@ async function handleEditCredential(ctx: BotContext, text: string): Promise<void
   const value = text.trim();
   if (value.length === 0) {
     await safeReply(ctx, "مقدار نمی‌تواند خالی باشد. دوباره وارد کنید.");
+    return;
+  }
+  if (kind === "token") {
+    const encrypted = encryptSecret(value); // may throw SecretConfigError
+    // A credential change invalidates the persisted readiness result.
+    const updated = await updatePanel(panelId, {
+      tokenEncrypted: encrypted,
+      ...readinessResetData(),
+    });
+    clearFlow(ctx);
+    await safeReply(ctx, `توکن API بروزرسانی شد ✅ (${maskSecretEdges(value)})`);
+    await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated), HTML);
     return;
   }
   if (kind === "cred-username") {

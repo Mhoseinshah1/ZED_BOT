@@ -505,9 +505,9 @@ model Panel {
   type              PanelType
   name              String
   baseUrl           String
-  username          String? // Marzban + XUI (Sanaei 3X-UI login)
-  passwordEncrypted String? // Marzban + XUI (Sanaei 3X-UI login)
-  tokenEncrypted    String? // reserved for token-based panel variants (unused by SANAEI)
+  username          String? // Marzban + XUI SESSION_COOKIE mode
+  passwordEncrypted String? // Marzban + XUI SESSION_COOKIE mode
+  tokenEncrypted    String? // XUI API_TOKEN mode (bearer token, encrypted)
   status            PanelStatus   @default(ACTIVE)
   panelColor        String?
   isVisible         Boolean       @default(true)
@@ -571,9 +571,13 @@ model Panel {
   inboundIds                       Json? // XUI
   protocolSettings                 Json? // XUI + Marzban explicit (template-free) proxy config
 
-  // Provisioning readiness + API variant.
+  // Provisioning readiness + API variant + auth mode.
   // apiVariant: XUI panels only - "SANAEI" (3X-UI /panel/api family) is the
   //   only supported variant and the default when null. Marzban ignores it.
+  // authMode: XUI panels only - "SESSION_COOKIE" (default when null; stock
+  //   3X-UI username/password login) or "API_TOKEN" (pre-issued bearer
+  //   token from tokenEncrypted, no /login call). Marzban ignores it.
+  authMode              String?
   // provisioningReady: result of the last authenticated readiness check
   //   (null = never checked or stale after a config edit; false blocks
   //   selling). Set by the admin panel test, never by reachability alone.

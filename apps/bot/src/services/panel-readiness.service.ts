@@ -13,7 +13,9 @@ import { logger } from "../core/logger.js";
 import {
   buildAdapterForPanel,
   normalizeSubscriptionBase,
+  resolveXuiAuthMode,
   resolveXuiVariant,
+  SUPPORTED_XUI_AUTH_MODES,
   SUPPORTED_XUI_VARIANTS,
 } from "./panel-adapter-factory.js";
 
@@ -159,7 +161,19 @@ export function assessPanelConfig(panel: Panel): PanelConfigAssessment {
       adminText: READINESS_STATUS_TEXT.unsupportedVariant,
     };
   }
-  if (panel.username === null || panel.passwordEncrypted === null) {
+  const authMode = resolveXuiAuthMode(panel);
+  if (!SUPPORTED_XUI_AUTH_MODES.has(authMode)) {
+    return {
+      ok: false,
+      reason: "unsupported-xui-auth-mode",
+      adminText: PANEL_CONFIG_INCOMPLETE_TEXT,
+    };
+  }
+  if (authMode === "API_TOKEN") {
+    if (panel.tokenEncrypted === null || panel.tokenEncrypted === "") {
+      return { ok: false, reason: "missing-api-token", adminText: PANEL_CONFIG_INCOMPLETE_TEXT };
+    }
+  } else if (panel.username === null || panel.passwordEncrypted === null) {
     return { ok: false, reason: "missing-credentials", adminText: PANEL_CONFIG_INCOMPLETE_TEXT };
   }
   if (parsePanelInboundIds(panel.inboundIds).length === 0) {
@@ -169,6 +183,9 @@ export function assessPanelConfig(panel: Panel): PanelConfigAssessment {
 }
 
 function panelHasCredentials(panel: Panel): boolean {
+  if (panel.type === "XUI" && resolveXuiAuthMode(panel) === "API_TOKEN") {
+    return panel.tokenEncrypted !== null && panel.tokenEncrypted !== "";
+  }
   return panel.username !== null && panel.passwordEncrypted !== null;
 }
 
@@ -385,6 +402,7 @@ export const READINESS_RELEVANT_COLUMNS: ReadonlySet<string> = new Set([
   "protocolSettings",
   "resetStrategy",
   "apiVariant",
+  "authMode",
 ]);
 
 /** Update-payload fragment that marks the readiness result stale (null). */

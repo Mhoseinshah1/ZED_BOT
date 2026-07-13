@@ -29,10 +29,11 @@ import type {
 } from "../core/panel.types.js";
 import { XuiClient } from "./xui.client.js";
 import type {
+  XuiAuthContext,
+  XuiAuthResult,
   XuiClientEntry,
   XuiClientStat,
   XuiInbound,
-  XuiLoginResult,
   XuiRequestResult,
 } from "./xui.types.js";
 
@@ -140,14 +141,17 @@ export class XuiAdapter implements PanelAdapter {
     };
   }
 
-  private loginFailureCode(login: XuiLoginResult): PanelDiagnosticCode {
-    if (login.timedOut === true) {
+  private authFailureCode(auth: XuiAuthResult): PanelDiagnosticCode {
+    if (auth.configIncomplete === true) {
+      return "config-incomplete";
+    }
+    if (auth.timedOut === true) {
       return "timeout";
     }
-    if (login.transportError === true) {
+    if (auth.transportError === true) {
       return "unreachable";
     }
-    if (login.malformedBody === true || login.status === 404) {
+    if (auth.malformedBody === true || auth.status === 404) {
       return "unsupported-variant";
     }
     return "auth-failed";
@@ -163,26 +167,42 @@ export class XuiAdapter implements PanelAdapter {
     if (result.malformedBody === true || result.status === 404) {
       return "unsupported-variant";
     }
+    if (result.status === 401 || result.status === 403) {
+      // Rejected bearer token (API_TOKEN mode) or revoked session.
+      return "auth-failed";
+    }
     if (result.status !== undefined && result.status >= 300 && result.status < 400) {
       return "auth-failed";
     }
     return "panel-rejected";
   }
 
-  /** Real authenticated connection test (no more reachability-only probing). */
+  /**
+   * Real authenticated connection test (no reachability-only probing).
+   * SESSION_COOKIE: the login round-trip proves the credentials.
+   * API_TOKEN: there is no login, so the token is proven by an
+   * authenticated read of the inbound list - a rejected token is an auth
+   * failure, never a success.
+   */
   async testConnection(): Promise<PanelHealthResult> {
-    const login = await this.client.login();
-    if (!login.ok) {
-      return { ok: false, message: login.message };
+    const session = await this.client.authenticate();
+    if (!session.ok || session.auth === undefined) {
+      return { ok: false, message: session.message };
+    }
+    if (session.auth.kind === "token") {
+      const listed = await this.client.listInbounds(session.auth);
+      if (!listed.ok) {
+        return { ok: false, message: listed.message };
+      }
     }
     return { ok: true, message: "Authentication succeeded." };
   }
 
   /** Fetches and minimally validates the inbound list. */
   private async fetchInbounds(
-    cookie: string,
+    auth: XuiAuthContext,
   ): Promise<{ ok: true; inbounds: XuiInbound[] } | { ok: false; result: XuiRequestResult }> {
-    const list = await this.client.listInbounds(cookie);
+    const list = await this.client.listInbounds(auth);
     if (!list.ok) {
       return { ok: false, result: list };
     }
@@ -217,38 +237,65 @@ export class XuiAdapter implements PanelAdapter {
       ...(diagnostic !== undefined ? { diagnostic } : {}),
     });
 
-    const login = await this.client.login();
-    if (!login.ok) {
-      const code = this.loginFailureCode(login);
+    const session = await this.client.authenticate();
+    if (!session.ok || session.auth === undefined) {
+      const code = this.authFailureCode(session);
       checks.push({
         key: "reachable",
-        ok: code === "timeout" || code === "unreachable" ? false : true,
-        detail: login.message,
+        // Config errors and (cookie-mode) auth rejections still reached the
+        // panel; timeouts/transport errors did not. API_TOKEN mode makes no
+        // network call here, so reachability is unknown on config errors.
+        ok:
+          code === "timeout" || code === "unreachable"
+            ? false
+            : code === "config-incomplete"
+              ? null
+              : true,
+        detail: session.message,
       });
-      checks.push({ key: "auth", ok: false, detail: login.message });
+      checks.push({ key: "auth", ok: false, detail: session.message });
       return done(
         false,
         this.diag("readiness", code, {
-          endpointPath: "/login",
-          httpStatus: login.status,
+          ...(this.client.authMode === "SESSION_COOKIE" ? { endpointPath: "/login" } : {}),
+          httpStatus: session.status,
           retryable: code === "timeout" || code === "unreachable",
         }),
       );
     }
-    checks.push({ key: "reachable", ok: true });
-    checks.push({ key: "auth", ok: true });
+    const tokenMode = session.auth.kind === "token";
+    if (!tokenMode) {
+      // The login round-trip already proved reachability + credentials.
+      checks.push({ key: "reachable", ok: true });
+      checks.push({ key: "auth", ok: true });
+    }
 
-    const listed = await this.fetchInbounds(login.cookie ?? "");
+    const listed = await this.fetchInbounds(session.auth);
     if (!listed.ok) {
+      const code = this.requestFailureCode(listed.result);
+      if (tokenMode) {
+        const unreachable = code === "timeout" || code === "unreachable";
+        checks.push({ key: "reachable", ok: unreachable ? false : true, ...(unreachable ? { detail: listed.result.message } : {}) });
+        checks.push({
+          key: "auth",
+          ok: code === "auth-failed" ? false : null,
+          ...(code === "auth-failed" ? { detail: listed.result.message } : {}),
+        });
+      }
       checks.push({ key: "read-endpoint", ok: false, detail: listed.result.message });
       return done(
         false,
-        this.diag("readiness", this.requestFailureCode(listed.result), {
+        this.diag("readiness", code, {
           endpointPath: "/panel/api/inbounds/list",
           httpStatus: listed.result.status,
           retryable: listed.result.transportError === true,
         }),
       );
+    }
+    if (tokenMode) {
+      // A successful authenticated read proves reachability AND the token.
+      checks.push({ key: "reachable", ok: true });
+      checks.push({ key: "auth", ok: true });
     }
     checks.push({ key: "read-endpoint", ok: true });
 
@@ -354,21 +401,21 @@ export class XuiAdapter implements PanelAdapter {
     const expiryTime = input.expiresAt === null ? 0 : input.expiresAt.getTime();
     const subId = input.username;
 
-    const login = await this.client.login();
-    if (!login.ok || login.cookie === undefined) {
-      const code = this.loginFailureCode(login);
+    const session = await this.client.authenticate();
+    if (!session.ok || session.auth === undefined) {
+      const code = this.authFailureCode(session);
       return fail(
-        `XUI authentication failed: ${login.message}`,
+        `XUI authentication failed: ${session.message}`,
         this.diag(op, code, {
-          endpointPath: "/login",
-          httpStatus: login.status,
+          ...(this.client.authMode === "SESSION_COOKIE" ? { endpointPath: "/login" } : {}),
+          httpStatus: session.status,
           retryable: code === "timeout" || code === "unreachable",
         }),
       );
     }
-    const cookie = login.cookie;
+    const auth = session.auth;
 
-    const listed = await this.fetchInbounds(cookie);
+    const listed = await this.fetchInbounds(auth);
     if (!listed.ok) {
       return fail(
         `XUI inbound list failed: ${listed.result.message}`,
@@ -452,7 +499,7 @@ export class XuiAdapter implements PanelAdapter {
     // Add the missing clients one inbound at a time.
     const createdThisCall: Array<{ inboundId: number; email: string; identifier: string }> = [];
     for (const entry of toCreate) {
-      const added = await this.client.addClient(cookie, entry.inboundId, entry.client);
+      const added = await this.client.addClient(auth, entry.inboundId, entry.client);
       if (added.ok) {
         createdThisCall.push({ inboundId: entry.inboundId, email: entry.email, identifier: entry.identifier });
         finalClients.push({ inboundId: entry.inboundId, email: entry.email, identifier: entry.identifier });
@@ -462,7 +509,7 @@ export class XuiAdapter implements PanelAdapter {
       // on the panel, so that attempt is part of the cleanup set too.
       const maybeLanded = added.transportError === true;
       const cleanupSet = [...createdThisCall, ...(maybeLanded ? [entry] : [])];
-      const cleanedUp = await this.cleanupCreatedClients(cookie, cleanupSet, inboundIds, input.username);
+      const cleanedUp = await this.cleanupCreatedClients(auth, cleanupSet, inboundIds, input.username);
       // Definite failure requires BOTH a confirmed-clean re-read AND a real
       // panel response for the failed call: after a timeout the hung
       // request may still be in flight and could land AFTER the
@@ -513,16 +560,16 @@ export class XuiAdapter implements PanelAdapter {
    * reports an UNKNOWN/partial outcome for reconciliation.
    */
   private async cleanupCreatedClients(
-    cookie: string,
+    auth: XuiAuthContext,
     created: Array<{ inboundId: number; email: string; identifier: string }>,
     configuredInboundIds: number[],
     username: string,
   ): Promise<boolean> {
     for (const entry of created) {
       // Best-effort delete; the verification read below is authoritative.
-      await this.client.deleteClient(cookie, entry.inboundId, entry.identifier);
+      await this.client.deleteClient(auth, entry.inboundId, entry.identifier);
     }
-    const listed = await this.fetchInbounds(cookie);
+    const listed = await this.fetchInbounds(auth);
     if (!listed.ok) {
       return false;
     }
@@ -552,20 +599,20 @@ export class XuiAdapter implements PanelAdapter {
    */
   async getServiceAccount(input: GetServiceAccountInput): Promise<GetServiceAccountResult> {
     const op = "read-service";
-    const login = await this.client.login();
-    if (!login.ok || login.cookie === undefined) {
-      const code = this.loginFailureCode(login);
+    const session = await this.client.authenticate();
+    if (!session.ok || session.auth === undefined) {
+      const code = this.authFailureCode(session);
       return {
         ok: false,
-        errorMessage: `XUI authentication failed: ${login.message}`,
+        errorMessage: `XUI authentication failed: ${session.message}`,
         diagnostic: this.diag(op, code, {
-          endpointPath: "/login",
-          httpStatus: login.status,
+          ...(this.client.authMode === "SESSION_COOKIE" ? { endpointPath: "/login" } : {}),
+          httpStatus: session.status,
           retryable: code === "timeout" || code === "unreachable",
         }),
       };
     }
-    const listed = await this.fetchInbounds(login.cookie);
+    const listed = await this.fetchInbounds(session.auth);
     if (!listed.ok) {
       return {
         ok: false,

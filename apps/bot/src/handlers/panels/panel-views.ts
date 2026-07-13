@@ -4,6 +4,7 @@ import { InlineKeyboard } from "grammy";
 import { cb, PANEL_CB } from "./panel-cb.js";
 import { fieldsForPage, togglesForPage, type PanelPage } from "./panel-fields.js";
 import { panelShortId } from "../../services/panel.service.js";
+import { resolveXuiAuthMode } from "../../services/panel-adapter-factory.js";
 import { escapeHtml } from "../../utils/html.js";
 
 const STATUS_EMOJI: Record<PanelStatus, string> = {
@@ -106,12 +107,16 @@ function groupsText(value: unknown): string {
 // HTML parse mode: every dynamic (operator-entered) value must be escaped.
 // Credentials NEVER render - only a set/not-set marker (Fix C).
 export function panelDetailText(panel: Panel, linkedProductCount?: number): string {
-  // Both panel families authenticate with username + password now.
-  const credentialSet =
-    panel.username !== null &&
-    panel.username !== "" &&
-    panel.passwordEncrypted !== null &&
-    panel.passwordEncrypted !== "";
+  // Credential completeness depends on the panel's auth mode:
+  // Marzban + XUI SESSION_COOKIE need username/password; XUI API_TOKEN
+  // needs the stored token.
+  const tokenMode = panel.type === "XUI" && resolveXuiAuthMode(panel) === "API_TOKEN";
+  const credentialSet = tokenMode
+    ? panel.tokenEncrypted !== null && panel.tokenEncrypted !== ""
+    : panel.username !== null &&
+      panel.username !== "" &&
+      panel.passwordEncrypted !== null &&
+      panel.passwordEncrypted !== "";
   const readinessLine =
     panel.provisioningReady === true
       ? "آماده ساخت سرویس ✅"
@@ -125,6 +130,9 @@ export function panelDetailText(panel: Panel, linkedProductCount?: number): stri
     `نوع پنل: ${panel.type}`,
     `هاست: ${escapeHtml(panelHostname(panel.baseUrl))}`,
     `اطلاعات ورود: ${credentialSet ? "تنظیم شده ✅" : "تنظیم نشده ❌"}`,
+    ...(panel.type === "XUI"
+      ? [`روش احراز هویت: ${tokenMode ? "توکن API" : "نام کاربری و رمز عبور"}`]
+      : []),
     `آمادگی ساخت سرویس: ${readinessLine}`,
     ...(linkedProductCount === undefined ? [] : [`محصولات متصل: ${linkedProductCount}`]),
     `ایجاد: ${panel.createdAt.toISOString().slice(0, 10)}`,
@@ -157,14 +165,19 @@ export function panelDetailKeyboard(
   const credentialLabel = "ویرایش اطلاعات ورود 🔑";
   const listBack =
     backList?.filter === undefined ? cb.list(backList?.page ?? 1) : cb.listFiltered(backList.filter, backList.page);
-  return new InlineKeyboard()
+  const kb = new InlineKeyboard()
     .text("تست اتصال 🩺", cb.test(sid))
     .text("تغییر وضعیت", cb.statusMenu(sid))
     .row()
     .text("ویرایش نام", cb.fieldEdit(sid, "nm"))
     .text("ویرایش آدرس", cb.fieldEdit(sid, "url"))
     .row()
-    .text(credentialLabel, cb.fieldEdit(sid, "cred"))
+    .text(credentialLabel, cb.fieldEdit(sid, "cred"));
+  if (panel.type === "XUI") {
+    kb.text("روش احراز هویت 🔐", cb.authModeMenu(sid));
+  }
+  return kb
+    .row()
     .text("محصولات متصل 🛍", cb.products(sid))
     .row()
     .text(panel.isVisible ? "مخفی کردن 🙈" : "نمایش 👁", cb.visibility(sid))
