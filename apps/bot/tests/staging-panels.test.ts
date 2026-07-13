@@ -133,33 +133,15 @@ describe.runIf(hasXuiStaging)("XUI staging verification (opt-in)", () => {
       const read = await adapter.getServiceAccount({ username });
       expect(read.ok).toBe(true);
 
-      // Cleanup via delClient, recovering each per-inbound identifier from
-      // the live inbound list (multi-inbound clients have distinct ids).
-      // On failure the safe label is printed for manual removal.
+      // Cleanup: the global client API deletes the whole client (every
+      // attachment + traffic) by email in ONE call. On failure the safe
+      // label is printed for manual removal.
       const session = await client.authenticate();
       expect(session.ok).toBe(true);
       const auth = session.auth ?? { kind: "cookie" as const, cookie: "" };
-      const listed = await client.listInbounds(auth);
-      let allDeleted = listed.ok;
-      if (listed.ok && Array.isArray(listed.envelope?.obj)) {
-        for (const inbound of listed.envelope.obj as Array<{ id: number; settings?: string }>) {
-          let clients: Array<{ id?: string; password?: string; email?: string }> = [];
-          try {
-            clients = (JSON.parse(inbound.settings ?? "{}") as { clients?: typeof clients }).clients ?? [];
-          } catch {
-            continue;
-          }
-          for (const entry of clients) {
-            if (typeof entry.email === "string" && entry.email.startsWith(username)) {
-              const identifier = entry.id ?? entry.password ?? "";
-              const deleted = await client.deleteClient(auth, inbound.id, identifier);
-              allDeleted = allDeleted && deleted.ok;
-            }
-          }
-        }
-      }
-      if (!allDeleted) {
-        console.warn(`MANUAL CLEANUP NEEDED: staging XUI clients labeled "${username}-*"`);
+      const deleted = await client.deleteClient(auth, username);
+      if (!deleted.ok) {
+        console.warn(`MANUAL CLEANUP NEEDED: staging XUI client "${username}"`);
       }
       const gone = await adapter.getServiceAccount({ username });
       expect(gone.notFound).toBe(true);

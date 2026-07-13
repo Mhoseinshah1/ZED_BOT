@@ -19,11 +19,19 @@ import type {
  * Low-level HTTP client for the Sanaei 3X-UI API family (SANAEI variant).
  *
  * Endpoints (relative to the configured base URL, which may carry a secret
- * web base path such as https://host:port/secretpath):
+ * web base path such as https://host:port/secretpath), following the
+ * GLOBAL client model pinned at MHSanaei/3x-ui commit
+ * 4e928a1ce0945a6e956aa63365034ec24d2b1387:
  *   - POST {base}/login                                      (form-encoded)
- *   - GET  {base}/panel/api/inbounds/list
- *   - POST {base}/panel/api/inbounds/addClient               (JSON)
- *   - POST {base}/panel/api/inbounds/{id}/delClient/{clientId}
+ *   - GET  {base}/panel/api/inbounds/list                    (inbound validation)
+ *   - GET  {base}/panel/api/clients/list
+ *   - GET  {base}/panel/api/clients/get/{email}
+ *   - POST {base}/panel/api/clients/add                      ({client, inboundIds})
+ *   - POST {base}/panel/api/clients/del/{email}
+ *   - GET  {base}/panel/api/clients/links/{email}
+ * The legacy per-inbound client endpoints
+ * (POST /panel/api/inbounds/addClient, .../delClient/...) were REMOVED
+ * upstream and are no longer called.
  *
  * Two authentication modes (XuiAuthMode):
  *   - SESSION_COOKIE (default): form login on {base}/login; the session
@@ -233,42 +241,61 @@ export class XuiClient {
     }
   }
 
-  /** GET {base}/panel/api/inbounds/list - all inbounds with clients + stats. */
+  /** GET {base}/panel/api/inbounds/list - inbound inventory (validation). */
   async listInbounds(auth: XuiAuthContext): Promise<XuiRequestResult> {
     return this.request(auth, "GET", "/panel/api/inbounds/list");
   }
 
   /**
-   * POST {base}/panel/api/inbounds/addClient. The 3x-ui contract wraps the
-   * client list in a JSON STRING inside the JSON body:
-   *   { "id": <inboundId>, "settings": "{\"clients\": [ {...} ]}" }
+   * GET {base}/panel/api/clients/list - every global client with its
+   * attached inbound ids and traffic record. The complete inventory: the
+   * read used for reconciliation and proof of absence.
+   */
+  async listClients(auth: XuiAuthContext): Promise<XuiRequestResult> {
+    return this.request(auth, "GET", "/panel/api/clients/list");
+  }
+
+  /**
+   * GET {base}/panel/api/clients/get/{email} - one client with inbound ids
+   * and used traffic. Missing clients come back as success=false.
+   */
+  async getClient(auth: XuiAuthContext, email: string): Promise<XuiRequestResult> {
+    return this.request(auth, "GET", `/panel/api/clients/get/${encodeURIComponent(email)}`);
+  }
+
+  /**
+   * POST {base}/panel/api/clients/add - create ONE global client and attach
+   * it to one or more inbounds in a single call:
+   *   { "client": { ...universal fields... }, "inboundIds": [1, 4] }
+   * Per-protocol secrets are generated server-side when omitted. Re-adding
+   * an existing email with the SAME subId is idempotent (credentials are
+   * reused, attachments deduplicated); a different subId is rejected.
    */
   async addClient(
     auth: XuiAuthContext,
-    inboundId: number,
     client: Record<string, unknown>,
+    inboundIds: number[],
   ): Promise<XuiRequestResult> {
-    return this.request(auth, "POST", "/panel/api/inbounds/addClient", {
-      id: inboundId,
-      settings: JSON.stringify({ clients: [client] }),
+    return this.request(auth, "POST", "/panel/api/clients/add", {
+      client,
+      inboundIds,
     });
   }
 
   /**
-   * POST {base}/panel/api/inbounds/{id}/delClient/{clientId}. The clientId
-   * is the client's UUID for VLESS/VMess and the password for Trojan
-   * (3x-ui addresses clients by their credential identifier).
+   * POST {base}/panel/api/clients/del/{email} - delete the global client:
+   * removes it from EVERY attached inbound and drops its traffic record.
    */
-  async deleteClient(
-    auth: XuiAuthContext,
-    inboundId: number,
-    clientId: string,
-  ): Promise<XuiRequestResult> {
-    return this.request(
-      auth,
-      "POST",
-      `/panel/api/inbounds/${encodeURIComponent(String(inboundId))}/delClient/${encodeURIComponent(clientId)}`,
-    );
+  async deleteClient(auth: XuiAuthContext, email: string): Promise<XuiRequestResult> {
+    return this.request(auth, "POST", `/panel/api/clients/del/${encodeURIComponent(email)}`);
+  }
+
+  /**
+   * GET {base}/panel/api/clients/links/{email} - every config URL for the
+   * client across all attached inbounds (the panel's own link builder).
+   */
+  async getClientLinks(auth: XuiAuthContext, email: string): Promise<XuiRequestResult> {
+    return this.request(auth, "GET", `/panel/api/clients/links/${encodeURIComponent(email)}`);
   }
 }
 

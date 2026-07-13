@@ -54,8 +54,10 @@ normalized automatically; other prefixes must match the deployment.
 
 **XUI panel test fails although the login page opens in a browser** - a
 reachable login page is NOT the API. Wrong web base path (the secret path
-segment) or a non-Sanaei fork both surface as
-«نسخه API پشتیبانی نمی‌شود».
+segment), a non-Sanaei fork, or a 3X-UI version WITHOUT the global client
+API (`/panel/api/clients/...` - see docs/xui-provisioning.md for the
+pinned upstream contract) all surface as «نسخه API پشتیبانی نمی‌شود».
+Upgrade the panel to a current 3X-UI release.
 
 **Existing XUI panels stopped selling after the upgrade** - XUI
 authenticates with username/password (session cookie) by default; panels
@@ -83,9 +85,10 @@ only happen when the panel POSITIVELY reported a state that later changed
 order id and the panel account's `note`/label (`zedbot order:<id>` /
 `zed_..._...-<inbound>`).
 
-**Orphaned XUI clients** - after an unverifiable compensating cleanup, a
-client labeled `zed_*` may remain on an inbound with no local Service. The
-log line documents the label; remove it in the panel UI.
+**Orphaned XUI clients** - after an unverifiable compensating cleanup, one
+global client with a `zed_*` email may remain with no local Service. The
+log line documents the email; remove it in the panel's Clients page (one
+delete removes every inbound attachment).
 
 ## Verifying against a real staging panel
 

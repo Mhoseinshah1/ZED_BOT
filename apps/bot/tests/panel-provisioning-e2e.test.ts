@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 
 import { OrderStatus, prisma, type Panel, type User } from "@zedbot/database";
@@ -133,17 +134,18 @@ function startMarzbanMock(): Promise<void> {
   });
 }
 
-// --- mock XUI (Sanaei 3X-UI) ----------------------------------------------------------
+// --- mock XUI (Sanaei 3X-UI, GLOBAL client API - pinned 4e928a1c) ---------------------
 interface XuiMockClient {
-  id?: string;
+  uuid?: string;
   password?: string;
   email: string;
   totalGB: number;
   expiryTime: number;
   enable: boolean;
   subId?: string;
+  inboundIds: number[];
 }
-const xuiClients: XuiMockClient[] = []; // single inbound id=1
+const xuiClients: XuiMockClient[] = []; // single vless inbound id=1
 let xuiAddCount = 0;
 let xuiHangAddClient = false;
 let xuiDelFail = false;
@@ -174,30 +176,46 @@ function startXuiMock(): Promise<void> {
       if (req.method === "GET" && url === "/panel/api/inbounds/list") {
         send(200, {
           success: true,
-          obj: [
-            {
-              id: 1,
-              enable: true,
-              protocol: "vless",
-              remark: "e2e",
-              port: 443,
-              settings: JSON.stringify({ clients: xuiClients }),
-              clientStats: xuiClients.map((c, i) => ({
-                id: i + 1,
-                inboundId: 1,
-                email: c.email,
-                up: 0,
-                down: 0,
-                total: c.totalGB,
-                expiryTime: c.expiryTime,
-                enable: true,
-              })),
-            },
-          ],
+          obj: [{ id: 1, enable: true, protocol: "vless", remark: "e2e", port: 443 }],
         });
         return;
       }
-      if (req.method === "POST" && url === "/panel/api/inbounds/addClient") {
+      if (req.method === "GET" && url === "/panel/api/clients/list") {
+        send(200, {
+          success: true,
+          obj: xuiClients.map((c) => ({
+            email: c.email,
+            subId: c.subId ?? "",
+            uuid: c.uuid ?? "",
+            password: c.password ?? "",
+            totalGB: c.totalGB,
+            expiryTime: c.expiryTime,
+            enable: c.enable,
+            inboundIds: c.inboundIds,
+            traffic: { email: c.email, up: 0, down: 0, total: c.totalGB, expiryTime: c.expiryTime, enable: true },
+          })),
+        });
+        return;
+      }
+      const getMatch = /^\/panel\/api\/clients\/get\/([^/]+)$/.exec(url);
+      if (req.method === "GET" && getMatch !== null) {
+        const email = decodeURIComponent(getMatch[1]);
+        const row = xuiClients.find((c) => c.email === email);
+        if (row === undefined) {
+          send(200, { success: false, msg: "record not found" });
+          return;
+        }
+        send(200, {
+          success: true,
+          obj: {
+            client: { email: row.email, subId: row.subId ?? "", uuid: row.uuid ?? "", password: row.password ?? "" },
+            inboundIds: row.inboundIds,
+            usedTraffic: 0,
+          },
+        });
+        return;
+      }
+      if (req.method === "POST" && url === "/panel/api/clients/add") {
         if (xuiHangAddClient) {
           hanging.push(res);
           return;
@@ -205,30 +223,56 @@ function startXuiMock(): Promise<void> {
         let body = "";
         req.on("data", (c: Buffer) => (body += c.toString()));
         req.on("end", () => {
-          const payload = JSON.parse(body) as { id: number; settings: string };
-          const client = (JSON.parse(payload.settings) as { clients: XuiMockClient[] }).clients[0];
-          if (xuiClients.some((c) => c.email === client.email)) {
-            send(200, { success: false, msg: "Duplicate email" });
+          const payload = JSON.parse(body) as { client: { email: string; subId: string; totalGB?: number; expiryTime?: number }; inboundIds: number[] };
+          let row = xuiClients.find((c) => c.email === payload.client.email);
+          if (row !== undefined && row.subId !== payload.client.subId) {
+            send(200, { success: false, msg: `email already in use: ${payload.client.email}` });
             return;
           }
-          xuiClients.push(client);
-          xuiAddCount += 1;
+          if (row === undefined) {
+            row = {
+              email: payload.client.email,
+              subId: payload.client.subId,
+              uuid: randomUUID(),
+              totalGB: payload.client.totalGB ?? 0,
+              expiryTime: payload.client.expiryTime ?? 0,
+              enable: true,
+              inboundIds: [],
+            };
+            xuiClients.push(row);
+            xuiAddCount += 1;
+          }
+          for (const id of payload.inboundIds) {
+            if (!row.inboundIds.includes(id)) {
+              row.inboundIds.push(id);
+            }
+          }
           send(200, { success: true, msg: "Client added" });
         });
         return;
       }
-      const delMatch = /^\/panel\/api\/inbounds\/1\/delClient\/([^/]+)$/.exec(url);
+      const delMatch = /^\/panel\/api\/clients\/del\/([^/]+)$/.exec(url);
       if (req.method === "POST" && delMatch !== null) {
         if (xuiDelFail) {
           send(200, { success: false, msg: "Error" });
           return;
         }
-        const clientId = decodeURIComponent(delMatch[1]);
-        const index = xuiClients.findIndex((c) => c.id === clientId || c.password === clientId);
+        const email = decodeURIComponent(delMatch[1]);
+        const index = xuiClients.findIndex((c) => c.email === email);
         if (index >= 0) {
           xuiClients.splice(index, 1);
         }
         send(200, { success: index >= 0, msg: "" });
+        return;
+      }
+      const linksMatch = /^\/panel\/api\/clients\/links\/([^/]+)$/.exec(url);
+      if (req.method === "GET" && linksMatch !== null) {
+        const email = decodeURIComponent(linksMatch[1]);
+        const row = xuiClients.find((c) => c.email === email);
+        send(200, {
+          success: true,
+          obj: row === undefined ? [] : [`vless://${row.uuid}@e2e.example:443#${email}`],
+        });
         return;
       }
       res.writeHead(404);
@@ -444,18 +488,20 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
     const outcome = await provisionPaidOrder(orderId);
     expect(outcome.ok).toBe(true);
 
-    // Remote mock client exists with the sold values (bytes + ms).
-    const remote = xuiClients.find((c) => c.email === `${username}-1`);
+    // ONE global client with the sold values (bytes + ms), email = username
+    // exactly - no per-inbound suffix.
+    const remote = xuiClients.find((c) => c.email === username);
     expect(remote).toBeDefined();
     expect(remote?.totalGB).toBe(Number(20n * GIB));
     expect(remote?.subId).toBe(username);
     expect(remote?.enable).toBe(true);
+    expect(remote?.inboundIds).toEqual([1]);
 
     // Exactly one local Service with remote identifiers persisted.
     const services = await prisma.service.findMany({ where: { orderId } });
     expect(services).toHaveLength(1);
     expect(services[0].username).toBe(username);
-    expect(services[0].remoteClientId).toBe(remote?.id);
+    expect(services[0].remoteClientId).toBe(remote?.uuid);
     expect(services[0].remoteInboundIds).toEqual([1]);
     expect(services[0].subscriptionToken).toBe(username);
     // No subscription base configured -> no fabricated subscription URL.
@@ -469,7 +515,7 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
     const retry = await provisionPaidOrder(orderId);
     expect(retry.ok).toBe(true);
     expect(xuiAddCount).toBe(addsBefore);
-    expect(xuiClients.filter((c) => c.email.startsWith(username)).length).toBe(1);
+    expect(xuiClients.filter((c) => c.email === username).length).toBe(1);
     expect(await prisma.service.count({ where: { orderId } })).toBe(1);
   });
 
@@ -504,11 +550,11 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
     const outcome = await provisionPaidOrder(orderId);
     expect(outcome.ok).toBe(true);
 
-    const remote = xuiClients.find((c) => c.email === `${username}-1`);
+    const remote = xuiClients.find((c) => c.email === username);
     expect(remote).toBeDefined();
     const services = await prisma.service.findMany({ where: { orderId } });
     expect(services).toHaveLength(1);
-    expect(services[0].remoteClientId).toBe(remote?.id);
+    expect(services[0].remoteClientId).toBe(remote?.uuid);
     const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
     expect(order.status).toBe(OrderStatus.COMPLETED);
     expect(await refundCount(orderId)).toBe(0);

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -10,11 +11,11 @@ import { XuiAdapter, XuiClient, type XuiCredentials } from "@zedbot/panel-adapte
 
 // =============================================================================
 // XUI API_TOKEN authentication mode against a mock server reproducing a
-// token-authenticated SANAEI-compatible deployment:
-//   - the same /panel/api/inbounds routes as stock 3x-ui
-//   - every API request requires `Authorization: Bearer <token>`
-//   - requests without a valid token are redirected to the login page
-//     (302) or rejected with 401, exactly like real deployments
+// token-authenticated deployment of the GLOBAL client API (pinned upstream
+// contract 4e928a1c):
+//   - /panel/api/clients/* and /panel/api/inbounds/list routes
+//   - every API request requires `Authorization: Bearer <token>` (or a valid
+//     session cookie); invalid auth = 302 redirect or 401
 //   - /login still exists (for humans) - the token client must NEVER call it
 // The SESSION_COOKIE mode must stay fully functional and remain the default
 // when no authMode is configured.
@@ -26,31 +27,29 @@ const XUI_PASS = "xui-secret-pass";
 const SESSION = "mock-session-cookie-value";
 const GIB = 1024n * 1024n * 1024n;
 
-interface MockClient {
-  id?: string;
-  password?: string;
+interface MockClientRow {
   email: string;
+  subId: string;
+  uuid?: string;
   totalGB: number;
   expiryTime: number;
   enable: boolean;
-  subId?: string;
-  flow?: string;
 }
 
 const mock = {
-  clients: [] as MockClient[], // single inbound id=1 (vless)
+  clients: [] as MockClientRow[], // single vless inbound id=1
+  attachments: new Map<string, Set<number>>(),
   loginCalls: 0,
   apiCalls: 0,
   lastAuthHeader: null as string | null,
-  /** Reject the bearer token with this status (401) instead of accepting it. */
   rejectTokenWith: null as number | null,
-  /** Redirect unauthenticated/invalid requests instead of 401. */
   redirectOnAuthFailure: false,
   hangList: false,
 };
 
 function resetMock(): void {
   mock.clients = [];
+  mock.attachments = new Map();
   mock.loginCalls = 0;
   mock.apiCalls = 0;
   mock.lastAuthHeader = null;
@@ -66,6 +65,20 @@ const hanging: http.ServerResponse[] = [];
 function json(res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
   res.writeHead(status, { "Content-Type": "application/json", ...headers });
   res.end(JSON.stringify(body));
+}
+
+function clientJson(row: MockClientRow): Record<string, unknown> {
+  return {
+    email: row.email,
+    subId: row.subId,
+    uuid: row.uuid ?? "",
+    password: "",
+    totalGB: row.totalGB,
+    expiryTime: row.expiryTime,
+    enable: row.enable,
+    inboundIds: [...(mock.attachments.get(row.email) ?? [])],
+    traffic: { email: row.email, up: 100, down: 200, total: row.totalGB, expiryTime: row.expiryTime, enable: true },
+  };
 }
 
 beforeAll(async () => {
@@ -93,7 +106,6 @@ beforeAll(async () => {
         return;
       }
 
-      // API area: valid bearer token OR valid session cookie authenticates.
       mock.apiCalls += 1;
       mock.lastAuthHeader = req.headers.authorization ?? null;
       const bearerOk =
@@ -110,55 +122,77 @@ beforeAll(async () => {
       }
 
       if (req.method === "GET" && url === "/panel/api/inbounds/list") {
+        json(res, 200, {
+          success: true,
+          obj: [{ id: 1, enable: true, protocol: "vless", remark: "token-mode", port: 443 }],
+        });
+        return;
+      }
+      if (req.method === "GET" && url === "/panel/api/clients/list") {
         if (mock.hangList) {
           hanging.push(res);
           return;
         }
+        json(res, 200, { success: true, obj: mock.clients.map(clientJson) });
+        return;
+      }
+      const getMatch = /^\/panel\/api\/clients\/get\/([^/]+)$/.exec(url);
+      if (req.method === "GET" && getMatch !== null) {
+        const email = decodeURIComponent(getMatch[1]);
+        const row = mock.clients.find((r) => r.email === email);
+        if (row === undefined) {
+          json(res, 200, { success: false, msg: "record not found" });
+          return;
+        }
         json(res, 200, {
           success: true,
-          obj: [
-            {
-              id: 1,
-              enable: true,
-              protocol: "vless",
-              remark: "token-mode",
-              port: 443,
-              settings: JSON.stringify({ clients: mock.clients }),
-              clientStats: mock.clients.map((c, i) => ({
-                id: i + 1,
-                inboundId: 1,
-                email: c.email,
-                up: 100,
-                down: 200,
-                total: c.totalGB,
-                expiryTime: c.expiryTime,
-                enable: true,
-              })),
-            },
-          ],
+          obj: { client: clientJson(row), inboundIds: [...(mock.attachments.get(email) ?? [])], usedTraffic: 300 },
         });
         return;
       }
-      if (req.method === "POST" && url === "/panel/api/inbounds/addClient") {
+      if (req.method === "POST" && url === "/panel/api/clients/add") {
         let body = "";
         req.on("data", (c: Buffer) => (body += c.toString()));
         req.on("end", () => {
-          const payload = JSON.parse(body) as { id: number; settings: string };
-          const client = (JSON.parse(payload.settings) as { clients: MockClient[] }).clients[0];
-          if (mock.clients.some((c) => c.email === client.email)) {
-            json(res, 200, { success: false, msg: "Duplicate email" });
+          const payload = JSON.parse(body) as { client: Record<string, unknown>; inboundIds: number[] };
+          const email = payload.client["email"] as string;
+          const subId = payload.client["subId"] as string;
+          let row = mock.clients.find((r) => r.email === email);
+          if (row !== undefined && row.subId !== subId) {
+            json(res, 200, { success: false, msg: `email already in use: ${email}` });
             return;
           }
-          mock.clients.push(client);
+          if (row === undefined) {
+            row = {
+              email,
+              subId,
+              uuid: randomUUID(),
+              totalGB: (payload.client["totalGB"] as number) ?? 0,
+              expiryTime: (payload.client["expiryTime"] as number) ?? 0,
+              enable: true,
+            };
+            mock.clients.push(row);
+          }
+          const set = mock.attachments.get(email) ?? new Set<number>();
+          for (const id of payload.inboundIds) {
+            set.add(id);
+          }
+          mock.attachments.set(email, set);
           json(res, 200, { success: true, msg: "Client added" });
         });
         return;
       }
-      const delMatch = /^\/panel\/api\/inbounds\/1\/delClient\/([^/]+)$/.exec(url);
+      const delMatch = /^\/panel\/api\/clients\/del\/([^/]+)$/.exec(url);
       if (req.method === "POST" && delMatch !== null) {
-        const clientId = decodeURIComponent(delMatch[1]);
-        mock.clients = mock.clients.filter((c) => c.id !== clientId && c.password !== clientId);
+        const email = decodeURIComponent(delMatch[1]);
+        mock.clients = mock.clients.filter((r) => r.email !== email);
+        mock.attachments.delete(email);
         json(res, 200, { success: true, msg: "" });
+        return;
+      }
+      const linksMatch = /^\/panel\/api\/clients\/links\/([^/]+)$/.exec(url);
+      if (req.method === "GET" && linksMatch !== null) {
+        json(res, 200, { success: true, obj: [] });
         return;
       }
       res.writeHead(404, { "Content-Type": "text/html" });
@@ -222,14 +256,14 @@ function createInput(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe("XUI API_TOKEN authentication mode", () => {
+describe("XUI API_TOKEN authentication mode (global client API)", () => {
   it("authenticates with a bearer token and NEVER calls /login", async () => {
     const created = await tokenAdapter().createServiceAccount(createInput());
     expect(created.ok).toBe(true);
     expect(mock.loginCalls).toBe(0);
     expect(mock.lastAuthHeader).toBe(`Bearer ${API_TOKEN}`);
     expect(mock.clients).toHaveLength(1);
-    expect(mock.clients[0].email).toBe(`${USERNAME}-1`);
+    expect(mock.clients[0].email).toBe(USERNAME); // ONE global client, no suffix
   });
 
   it("testConnection is a REAL authenticated check, not reachability", async () => {
@@ -237,8 +271,6 @@ describe("XUI API_TOKEN authentication mode", () => {
     expect(ok.ok).toBe(true);
     expect(mock.loginCalls).toBe(0);
 
-    // The panel is perfectly reachable but the token is rejected: the test
-    // must fail - a reachable login page is not authentication.
     mock.rejectTokenWith = 401;
     const rejected = await tokenAdapter().testConnection();
     expect(rejected.ok).toBe(false);
@@ -251,7 +283,6 @@ describe("XUI API_TOKEN authentication mode", () => {
     expect(result.uncertain).toBeUndefined();
     expect(result.diagnostic?.code).toBe("auth-failed");
     expect(mock.clients).toHaveLength(0);
-    // The token never leaks into results/diagnostics.
     expect(JSON.stringify(result)).not.toContain(API_TOKEN);
   });
 
@@ -327,15 +358,13 @@ describe("XUI API_TOKEN authentication mode", () => {
   });
 
   it("SESSION_COOKIE stays the default and fully functional", async () => {
-    // No authMode configured -> the login flow runs exactly as before.
     const created = await cookieAdapter().createServiceAccount(
       createInput({ username: "zed_1001_cookie01" }),
     );
     expect(created.ok).toBe(true);
     expect(mock.loginCalls).toBe(1);
-    expect(mock.clients.some((c) => c.email === "zed_1001_cookie01-1")).toBe(true);
+    expect(mock.clients.some((c) => c.email === "zed_1001_cookie01")).toBe(true);
 
-    // Cookie mode with missing credentials is a config error, no network.
     const noCreds = new XuiAdapter(new XuiClient({ baseUrl: host }));
     const apiCallsBefore = mock.apiCalls;
     const loginCallsBefore = mock.loginCalls;
