@@ -203,6 +203,62 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
       "سوابق سفارش‌ها، پرداخت‌ها و تراکنش‌های کیف پول شما در این بخش قابل مشاهده است.",
     allowedVariables: [],
   },
+  // --- online payments (gateway phase) ----------------------------------------------
+  {
+    key: "payment_redirect_text",
+    title: "متن انتقال به درگاه پرداخت",
+    category: "payment",
+    defaultContent: "در حال انتقال به درگاه پرداخت هستید…",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_crypto_created_text",
+    title: "متن ساخت پرداخت کریپتویی",
+    category: "payment",
+    defaultContent:
+      "لینک پرداخت کریپتویی برای شما ساخته شد.\n" +
+      "پس از تکمیل پرداخت، سفارش شما به‌صورت خودکار بررسی می‌شود.",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_stars_ready_text",
+    title: "متن آماده‌سازی پرداخت Stars",
+    category: "payment",
+    defaultContent:
+      "پرداخت با Telegram Stars آماده است.\n" +
+      "برای ادامه، پرداخت را از طریق تلگرام تکمیل کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_success_text",
+    title: "پیام موفقیت پرداخت آنلاین",
+    category: "payment",
+    defaultContent: "پرداخت شما با موفقیت تایید شد ✅",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_pending_text",
+    title: "پیام در انتظار بودن پرداخت آنلاین",
+    category: "payment",
+    defaultContent: "پرداخت شما در انتظار تایید است.",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_failed_text",
+    title: "پیام ناموفق بودن پرداخت آنلاین",
+    category: "payment",
+    defaultContent:
+      "پرداخت ناموفق بود.\n" +
+      "در صورت کسر مبلغ، وضعیت سفارش پس از بررسی بروزرسانی می‌شود.",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_gateway_unavailable_text",
+    title: "پیام در دسترس نبودن درگاه پرداخت",
+    category: "payment",
+    defaultContent: "این روش پرداخت موقتاً در دسترس نیست. لطفاً روش دیگری را انتخاب کنید.",
+    allowedVariables: [],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [

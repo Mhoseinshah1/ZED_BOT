@@ -125,8 +125,12 @@ function snapshotIntArray(snapshot: Record<string, unknown>, key: string): numbe
   return ids.length > 0 ? ids : null;
 }
 
-/** Order type for a checkout: the stored orderType, else derived from the snapshot. */
-function resolveOrderType(
+/**
+ * Order type for a checkout: the stored orderType, else derived from the
+ * snapshot. Exported so the gateway settlement (gateway-payment.service)
+ * resolves order types exactly like the receipt approval path.
+ */
+export function resolveOrderType(
   checkout: CheckoutSession,
   snapshot: Record<string, unknown>,
 ): OrderType {

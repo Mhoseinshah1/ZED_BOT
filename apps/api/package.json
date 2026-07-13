@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@zedbot/database": "workspace:*",
+    "@zedbot/payments": "workspace:*",
     "@zedbot/shared": "workspace:*",
     "fastify": "^5.2.0",
     "ioredis": "^5.4.2"

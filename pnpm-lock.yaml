@@ -26,6 +26,9 @@ importers:
       '@zedbot/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@zedbot/payments':
+        specifier: workspace:*
+        version: link:../../packages/payments
       '@zedbot/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -54,6 +57,9 @@ importers:
       '@zedbot/panel-adapters':
         specifier: workspace:*
         version: link:../../packages/panel-adapters
+      '@zedbot/payments':
+        specifier: workspace:*
+        version: link:../../packages/payments
       '@zedbot/shared':
         specifier: workspace:*
         version: link:../../packages/shared

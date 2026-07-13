@@ -1,4 +1,9 @@
-import { CheckoutStatus, type CheckoutSession } from "@zedbot/database";
+import {
+  CheckoutStatus,
+  type CheckoutSession,
+  type PaymentGateway,
+  type User,
+} from "@zedbot/database";
 import { decryptSecret, errorMessage } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
@@ -9,7 +14,18 @@ import {
   notifyAdminsAboutReceipt,
   type ReceiptKind,
 } from "../../services/admin-receipt-notification.service.js";
-import { getCheckoutByShortId, getOwnedCheckout } from "../../services/checkout.service.js";
+import {
+  checkoutShortId,
+  getCheckoutByShortId,
+  getOwnedCheckout,
+} from "../../services/checkout.service.js";
+import {
+  fulfillSettledGatewayOrder,
+  getOrCreateGatewayPayment,
+  getUserGatewayPaymentByShortId,
+  isOnlineProvider,
+  settleGatewayPayment,
+} from "../../services/gateway-payment.service.js";
 import { paymentPageNotice } from "../../services/payment-settings.service.js";
 import {
   getAvailablePaymentMethods,
@@ -18,6 +34,7 @@ import {
   pickCardAccountForGateway,
   submitReceipt,
 } from "../../services/payment-method.service.js";
+import { getMessageTemplate } from "../../services/text.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { clearCheckoutState } from "./checkout-state.js";
@@ -27,7 +44,9 @@ import {
   cardToCardText,
   CHECKOUT_EXPIRED_TEXT,
   formatCardNumber,
-  METHOD_LATER_TEXT,
+  gatewayFailedKeyboard,
+  gatewayPaymentKeyboard,
+  gatewayPaymentText,
   NO_METHODS_TEXT,
   PAY_CB,
   paycb,
@@ -134,8 +153,12 @@ paymentHandler.callbackQuery(/^user:pay:g:([0-9a-f-]+):([0-9a-f-]+)$/, async (ct
   }
 
   if (gateway.type !== "CARD_TO_CARD") {
-    // Online gateways / Stars arrive in later phases.
-    await safeAnswerCallback(ctx, METHOD_LATER_TEXT);
+    if (isOnlineProvider(gateway.type)) {
+      await startOnlineGatewayPayment(ctx, user, checkout, gateway);
+      return;
+    }
+    // PLISIO / AGHAYEPARDAKHT / CUSTOM have no adapter yet.
+    await safeAnswerCallback(ctx, await getMessageTemplate("payment_gateway_unavailable_text"));
     return;
   }
 
@@ -180,6 +203,120 @@ paymentHandler.callbackQuery(/^user:pay:g:([0-9a-f-]+):([0-9a-f-]+)$/, async (ct
       ? `${cardToCardText(checkout, account, cardNumber)}\n\n${escapeHtml(gateway.instructionText)}`
       : cardToCardText(checkout, account, cardNumber);
   await safeEditOrReply(ctx, text, cardToCardKeyboard(checkout, cardNumber), HTML);
+});
+
+// --- online gateways (Zarinpal / NOWPayments / Telegram Stars) --------------------------
+
+/**
+ * Creates (or reuses) the gateway payment for the checkout and renders the
+ * provider-specific screen: redirect URL button for Zarinpal/NOWPayments, a
+ * Telegram Stars invoice for TELEGRAM_STARS. Money NEVER moves here - the
+ * settlement service owns that, triggered by callbacks/updates/the check
+ * button.
+ */
+async function startOnlineGatewayPayment(
+  ctx: BotContext,
+  user: User,
+  checkout: CheckoutSession,
+  gateway: PaymentGateway,
+): Promise<void> {
+  const result = await getOrCreateGatewayPayment(user, checkout, gateway);
+  if (!result.ok) {
+    await safeAnswerCallback(ctx, result.error);
+    return;
+  }
+  const coSid = checkoutShortId(checkout);
+  const paySid = result.payment.id.slice(0, 8);
+
+  if (gateway.type === "ZARINPAL" || gateway.type === "NOWPAYMENTS") {
+    const redirectUrl = result.create.redirectUrl;
+    if (redirectUrl === undefined) {
+      logger.error("gateway payment without redirect url", { paymentId: result.payment.id });
+      await safeAnswerCallback(ctx, await getMessageTemplate("payment_gateway_unavailable_text"));
+      return;
+    }
+    const isZarinpal = gateway.type === "ZARINPAL";
+    const base = await getMessageTemplate(
+      isZarinpal ? "payment_redirect_text" : "payment_crypto_created_text",
+    );
+    await safeAnswerCallback(ctx);
+    await safeEditOrReply(
+      ctx,
+      isZarinpal ? gatewayPaymentText(base, checkout.finalPriceToman) : base,
+      gatewayPaymentKeyboard(coSid, paySid, {
+        text: isZarinpal ? "پرداخت آنلاین 🇮🇷" : "پرداخت کریپتویی 🌐",
+        url: redirectUrl,
+      }),
+    );
+    return;
+  }
+
+  // TELEGRAM_STARS: the ready-text first, then the native Telegram invoice.
+  const invoice = result.create.telegramInvoice;
+  if (invoice === undefined) {
+    logger.error("stars payment without invoice spec", { paymentId: result.payment.id });
+    await safeAnswerCallback(ctx, await getMessageTemplate("payment_gateway_unavailable_text"));
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    await getMessageTemplate("payment_stars_ready_text"),
+    gatewayPaymentKeyboard(coSid, paySid),
+  );
+  try {
+    // Stars invoices (currency XTR) take no provider token - grammY 1.44
+    // types provider_token as optional, so it is omitted entirely.
+    await ctx.api.sendInvoice(
+      ctx.chat?.id ?? user.telegramId.toString(),
+      invoice.title,
+      invoice.description,
+      invoice.payload,
+      "XTR",
+      [{ label: "پرداخت", amount: invoice.stars }],
+    );
+  } catch (err) {
+    logger.error("stars invoice send failed", {
+      paymentId: result.payment.id,
+      error: errorMessage(err),
+    });
+    await safeReply(ctx, await getMessageTemplate("payment_gateway_unavailable_text"));
+  }
+}
+
+// «بررسی وضعیت پرداخت ♻️»: manual settlement trigger. settleGatewayPayment is
+// CAS-gated, so mashing the button can never settle twice.
+paymentHandler.callbackQuery(/^user:pay:chk:([0-9a-f-]+)$/, async (ctx) => {
+  const user = ctx.dbUser;
+  if (user === null) {
+    return;
+  }
+  const payment = await getUserGatewayPaymentByShortId(user.id, ctx.match[1]);
+  if (payment === null) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+  const outcome = await settleGatewayPayment(payment.id);
+  if (outcome.kind === "settled" || outcome.kind === "already") {
+    await safeAnswerCallback(ctx);
+    await fulfillSettledGatewayOrder(ctx.api, outcome);
+    await safeEditOrReply(ctx, await getMessageTemplate("payment_success_text"), menuKeyboard());
+    return;
+  }
+  if (outcome.kind === "pending") {
+    await safeAnswerCallback(ctx, await getMessageTemplate("payment_pending_text"));
+    return;
+  }
+  if (outcome.kind === "failed") {
+    await safeAnswerCallback(ctx);
+    await safeEditOrReply(
+      ctx,
+      await getMessageTemplate("payment_failed_text"),
+      gatewayFailedKeyboard(payment.checkoutSessionId?.slice(0, 8) ?? null),
+    );
+    return;
+  }
+  await safeAnswerCallback(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.");
 });
 
 // --- legacy copy callbacks (Phase 21.1) -------------------------------------------------
