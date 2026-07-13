@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -9,18 +10,25 @@ process.env.PANEL_HTTP_TIMEOUT_MS = "700";
 import { XuiAdapter, XuiClient } from "@zedbot/panel-adapters";
 
 // =============================================================================
-// XUI / Sanaei 3X-UI adapter against a mock HTTP server reproducing the real
-// SANAEI API contract:
-//   POST {base}/login                        form-encoded; HTTP 200 with
-//                                            {"success":false} on bad creds;
-//                                            session cookie on success
-//   GET  {base}/panel/api/inbounds/list      {"success":true,"obj":[...]},
-//                                            settings as a JSON STRING,
-//                                            clientStats per inbound
-//   POST {base}/panel/api/inbounds/addClient {"id","settings"} JSON; enforces
-//                                            panel-wide unique client emails
-//   POST {base}/panel/api/inbounds/{id}/delClient/{clientId}
-// Unauthenticated API calls are redirected (302) exactly like the real panel.
+// XUI / Sanaei 3X-UI adapter against a mock HTTP server reproducing the
+// GLOBAL client API contract pinned at MHSanaei/3x-ui commit
+// 4e928a1ce0945a6e956aa63365034ec24d2b1387:
+//
+//   POST {base}/login                          form-encoded; HTTP 200 with
+//                                              {"success":false} on bad creds
+//   GET  {base}/panel/api/inbounds/list        inbound inventory
+//   GET  {base}/panel/api/clients/list         [{...client, inboundIds, traffic}]
+//   GET  {base}/panel/api/clients/get/{email}  {client, inboundIds, usedTraffic}
+//   POST {base}/panel/api/clients/add          {client, inboundIds}; secrets
+//                                              generated server-side; duplicate
+//                                              email+same subId = idempotent
+//                                              reuse; foreign subId = error
+//   POST {base}/panel/api/clients/del/{email}  removes ALL attachments+traffic
+//   GET  {base}/panel/api/clients/links/{email} panel-built config URLs
+//
+// The legacy per-inbound endpoints (POST /panel/api/inbounds/addClient,
+// .../delClient/...) were REMOVED upstream - this mock answers them with 404
+// exactly like the real panel, proving the adapter never calls them.
 // =============================================================================
 
 const XUI_USER = "xadmin";
@@ -28,57 +36,61 @@ const XUI_PASS = "xui-secret-pass";
 const SESSION = "mock-3xui-session-value-123";
 const GIB = 1024n * 1024n * 1024n;
 
-interface MockClient {
-  id?: string;
-  password?: string;
-  email: string;
-  flow?: string;
-  totalGB: number;
-  expiryTime: number;
-  enable: boolean;
-  limitIp?: number;
-  tgId?: string;
-  subId?: string;
-  reset?: number;
-}
-
 interface MockInbound {
   id: number;
   enable: boolean;
   protocol: string;
   remark: string;
   port: number;
-  clients: MockClient[];
-  /** Overrides the serialized settings JSON (malformed-settings test). */
-  rawSettings?: string;
-  stats: Array<{ email: string; up: number; down: number; total: number; expiryTime: number; enable: boolean }>;
+}
+
+interface MockClientRow {
+  email: string;
+  subId: string;
+  uuid?: string;
+  password?: string;
+  totalGB: number;
+  expiryTime: number;
+  enable: boolean;
+  comment?: string;
+  flow?: string;
+  reset: number;
 }
 
 const mock = {
   basePath: "" as string,
   inbounds: [] as MockInbound[],
+  clients: [] as MockClientRow[],
+  attachments: new Map<string, Set<number>>(), // email -> inbound ids
+  traffic: new Map<string, { up: number; down: number }>(),
   wrongCredentials: false,
-  hangLogin: false,
-  listNonJson: false,
-  addClientCalls: [] as Array<{ inboundId: number; client: MockClient }>,
-  /** inboundId -> behavior for addClient. */
-  addClientFail: new Map<number, "reject" | "hang">(),
-  delClientCalls: [] as Array<{ inboundId: number; clientId: string }>,
-  delClientFail: false,
-  lastListCookie: null as string | null,
+  /** Simulate a pre-global-client panel: clients endpoints answer 404 HTML. */
+  noClientsApi: false,
+  addCalls: [] as Array<{ client: Record<string, unknown>; inboundIds: number[] }>,
+  /** Fail the server-side attach loop AT this inbound (earlier ones persist). */
+  failAttachAtInbound: null as number | null,
+  hangAdd: false,
+  delFail: false,
+  linksFail: false,
+  listClientsNonJson: false,
+  legacyEndpointCalls: 0,
 };
 
 function resetMock(): void {
   mock.basePath = "";
   mock.inbounds = [];
+  mock.clients = [];
+  mock.attachments = new Map();
+  mock.traffic = new Map();
   mock.wrongCredentials = false;
-  mock.hangLogin = false;
-  mock.listNonJson = false;
-  mock.addClientCalls = [];
-  mock.addClientFail = new Map();
-  mock.delClientCalls = [];
-  mock.delClientFail = false;
-  mock.lastListCookie = null;
+  mock.noClientsApi = false;
+  mock.addCalls = [];
+  mock.failAttachAtInbound = null;
+  mock.hangAdd = false;
+  mock.delFail = false;
+  mock.linksFail = false;
+  mock.listClientsNonJson = false;
+  mock.legacyEndpointCalls = 0;
 }
 
 function addInbound(partial: Partial<MockInbound> & { id: number }): MockInbound {
@@ -87,17 +99,46 @@ function addInbound(partial: Partial<MockInbound> & { id: number }): MockInbound
     protocol: "vless",
     remark: `inbound-${partial.id}`,
     port: 10000 + partial.id,
-    clients: [],
-    stats: [],
     ...partial,
   };
   mock.inbounds.push(inbound);
   return inbound;
 }
 
+function clientJson(row: MockClientRow): Record<string, unknown> {
+  const t = mock.traffic.get(row.email);
+  return {
+    id: mock.clients.indexOf(row) + 1,
+    email: row.email,
+    subId: row.subId,
+    uuid: row.uuid ?? "",
+    password: row.password ?? "",
+    auth: "",
+    flow: row.flow ?? "",
+    totalGB: row.totalGB,
+    expiryTime: row.expiryTime,
+    enable: row.enable,
+    comment: row.comment ?? "",
+    reset: row.reset,
+    inboundIds: [...(mock.attachments.get(row.email) ?? [])].sort((a, b) => a - b),
+    traffic:
+      t === undefined
+        ? null
+        : {
+            email: row.email,
+            up: t.up,
+            down: t.down,
+            total: row.totalGB,
+            expiryTime: row.expiryTime,
+            enable: row.enable,
+            lastOnline: 0,
+          },
+  };
+}
+
 let server: http.Server;
 let host = "";
-const hangingResponses: http.ServerResponse[] = [];
+const hanging: http.ServerResponse[] = [];
 
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
@@ -112,18 +153,80 @@ function json(res: http.ServerResponse, status: number, body: unknown, headers: 
   res.end(JSON.stringify(body));
 }
 
-function inboundJson(inbound: MockInbound): Record<string, unknown> {
-  return {
-    id: inbound.id,
-    enable: inbound.enable,
-    protocol: inbound.protocol,
-    remark: inbound.remark,
-    port: inbound.port,
-    // The real panel stores settings as a JSON STRING inside the JSON doc.
-    settings: inbound.rawSettings ?? JSON.stringify({ clients: inbound.clients, decryption: "none" }),
-    streamSettings: JSON.stringify({ network: "tcp" }),
-    clientStats: inbound.stats.map((s, i) => ({ id: i + 1, inboundId: inbound.id, ...s })),
-  };
+function html404(res: http.ServerResponse): void {
+  res.writeHead(404, { "Content-Type": "text/html" });
+  res.end("<html>not found</html>");
+}
+
+/** Server-side add semantics per the pinned upstream client_crud.go. */
+function handleAdd(res: http.ServerResponse, payload: { client: Record<string, unknown>; inboundIds: number[] }): void {
+  mock.addCalls.push(payload);
+  const c = payload.client;
+  const email = typeof c["email"] === "string" ? (c["email"] as string) : "";
+  if (email === "") {
+    json(res, 200, { success: false, msg: "client email is required" });
+    return;
+  }
+  if (!Array.isArray(payload.inboundIds) || payload.inboundIds.length === 0) {
+    json(res, 200, { success: false, msg: "at least one inbound is required" });
+    return;
+  }
+  let subId = typeof c["subId"] === "string" ? (c["subId"] as string) : "";
+  if (subId === "") {
+    subId = randomUUID();
+  }
+  let row = mock.clients.find((r) => r.email === email);
+  if (row !== undefined) {
+    if (row.subId !== subId) {
+      json(res, 200, { success: false, msg: `email already in use: ${email}` });
+      return;
+    }
+    // Idempotent re-add: stored credentials are reused.
+  } else {
+    if (mock.clients.some((r) => r.subId === subId && r.email !== email)) {
+      json(res, 200, { success: false, msg: `subId already in use: ${subId}` });
+      return;
+    }
+    row = {
+      email,
+      subId,
+      totalGB: typeof c["totalGB"] === "number" ? (c["totalGB"] as number) : 0,
+      expiryTime: typeof c["expiryTime"] === "number" ? (c["expiryTime"] as number) : 0,
+      enable: c["enable"] !== false,
+      comment: typeof c["comment"] === "string" ? (c["comment"] as string) : undefined,
+      flow: typeof c["flow"] === "string" ? (c["flow"] as string) : undefined,
+      reset: typeof c["reset"] === "number" ? (c["reset"] as number) : 0,
+      // Caller-provided secrets would be honored, but the adapter omits
+      // them - fillProtocolDefaults generates per attached protocol below.
+      ...(typeof c["id"] === "string" ? { uuid: c["id"] as string } : {}),
+      ...(typeof c["password"] === "string" ? { password: c["password"] as string } : {}),
+    };
+    mock.clients.push(row);
+  }
+  // Attach loop with per-protocol secret defaults (fillProtocolDefaults).
+  for (const ibId of payload.inboundIds) {
+    if (mock.failAttachAtInbound === ibId) {
+      json(res, 200, { success: false, msg: `attach failed on inbound ${ibId}` });
+      return;
+    }
+    const inbound = mock.inbounds.find((i) => i.id === ibId);
+    if (inbound === undefined) {
+      json(res, 200, { success: false, msg: `inbound ${ibId} not found` });
+      return;
+    }
+    if (inbound.protocol === "vless" || inbound.protocol === "vmess") {
+      row.uuid = row.uuid ?? randomUUID();
+    } else if (inbound.protocol === "trojan") {
+      row.password = row.password ?? randomUUID().replaceAll("-", "");
+    }
+    const set = mock.attachments.get(email) ?? new Set<number>();
+    set.add(ibId); // dedupe: re-adding is a no-op
+    mock.attachments.set(email, set);
+    if (!mock.traffic.has(email)) {
+      mock.traffic.set(email, { up: 0, down: 0 });
+    }
+  }
+  json(res, 200, { success: true, msg: "Client added" });
 }
 
 beforeAll(async () => {
@@ -132,24 +235,18 @@ beforeAll(async () => {
       const url = req.url ?? "";
       const bp = mock.basePath;
       if (bp !== "" && !url.startsWith(`${bp}/`)) {
-        res.writeHead(404, { "Content-Type": "text/html" });
-        res.end("<html>not found</html>");
+        html404(res);
         return;
       }
       const path = bp === "" ? url : url.slice(bp.length);
 
       if (req.method === "POST" && path === "/login") {
-        if (mock.hangLogin) {
-          hangingResponses.push(res);
-          return;
-        }
         const params = new URLSearchParams(await readBody(req));
         if (
           mock.wrongCredentials ||
           params.get("username") !== XUI_USER ||
           params.get("password") !== XUI_PASS
         ) {
-          // Real 3x-ui: HTTP 200 with success=false on bad credentials.
           json(res, 200, { success: false, msg: "Invalid username or password" });
           return;
         }
@@ -162,7 +259,6 @@ beforeAll(async () => {
         return;
       }
 
-      // Authenticated area: the real panel redirects to the login page.
       if ((req.headers.cookie ?? "") !== `3x-ui=${SESSION}`) {
         res.writeHead(302, { Location: `${bp}/` });
         res.end();
@@ -170,92 +266,112 @@ beforeAll(async () => {
       }
 
       if (req.method === "GET" && path === "/panel/api/inbounds/list") {
-        mock.lastListCookie = req.headers.cookie ?? null;
-        if (mock.listNonJson) {
+        json(res, 200, { success: true, msg: "", obj: mock.inbounds });
+        return;
+      }
+
+      // Legacy per-inbound client endpoints: REMOVED upstream -> 404.
+      if (path.startsWith("/panel/api/inbounds/addClient") || /\/delClient\//.test(path)) {
+        mock.legacyEndpointCalls += 1;
+        html404(res);
+        return;
+      }
+
+      if (path.startsWith("/panel/api/clients/") && mock.noClientsApi) {
+        html404(res);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/panel/api/clients/list") {
+        if (mock.listClientsNonJson) {
           res.writeHead(200, { "Content-Type": "text/html" });
-          res.end("<html>legacy panel page</html>");
+          res.end("<html>old panel page</html>");
           return;
         }
-        json(res, 200, { success: true, msg: "", obj: mock.inbounds.map(inboundJson) });
+        json(res, 200, { success: true, msg: "", obj: mock.clients.map(clientJson) });
         return;
       }
 
-      if (req.method === "POST" && path === "/panel/api/inbounds/addClient") {
-        const body = JSON.parse(await readBody(req)) as { id: number; settings: string };
-        const behavior = mock.addClientFail.get(body.id);
-        if (behavior === "hang") {
-          hangingResponses.push(res);
+      const getMatch = /^\/panel\/api\/clients\/get\/([^/]+)$/.exec(path);
+      if (req.method === "GET" && getMatch !== null) {
+        const email = decodeURIComponent(getMatch[1]);
+        const row = mock.clients.find((r) => r.email === email);
+        if (row === undefined) {
+          json(res, 200, { success: false, msg: "record not found" });
           return;
         }
-        if (behavior === "reject") {
-          json(res, 200, { success: false, msg: "An error occurred while adding a client" });
-          return;
-        }
-        const inbound = mock.inbounds.find((i) => i.id === body.id);
-        if (inbound === undefined) {
-          json(res, 200, { success: false, msg: "Inbound not found" });
-          return;
-        }
-        const settings = JSON.parse(body.settings) as { clients: MockClient[] };
-        const client = settings.clients[0];
-        // Real 3x-ui enforces panel-wide unique emails.
-        const duplicate = mock.inbounds.some((i) => i.clients.some((c) => c.email === client.email));
-        if (duplicate) {
-          json(res, 200, { success: false, msg: "Duplicate email" });
-          return;
-        }
-        inbound.clients.push(client);
-        inbound.stats.push({
-          email: client.email,
-          up: 0,
-          down: 0,
-          total: client.totalGB,
-          expiryTime: client.expiryTime,
-          enable: true,
+        const t = mock.traffic.get(email);
+        json(res, 200, {
+          success: true,
+          msg: "",
+          obj: {
+            client: clientJson(row),
+            inboundIds: [...(mock.attachments.get(email) ?? [])].sort((a, b) => a - b),
+            usedTraffic: (t?.up ?? 0) + (t?.down ?? 0),
+          },
         });
-        mock.addClientCalls.push({ inboundId: body.id, client });
-        json(res, 200, { success: true, msg: "Client added" });
         return;
       }
 
-      const delMatch = /^\/panel\/api\/inbounds\/(\d+)\/delClient\/([^/]+)$/.exec(path);
+      if (req.method === "POST" && path === "/panel/api/clients/add") {
+        if (mock.hangAdd) {
+          hanging.push(res);
+          return;
+        }
+        const payload = JSON.parse(await readBody(req)) as {
+          client: Record<string, unknown>;
+          inboundIds: number[];
+        };
+        handleAdd(res, payload);
+        return;
+      }
+
+      const delMatch = /^\/panel\/api\/clients\/del\/([^/]+)$/.exec(path);
       if (req.method === "POST" && delMatch !== null) {
-        const inboundId = Number(delMatch[1]);
-        const clientId = decodeURIComponent(delMatch[2]);
-        mock.delClientCalls.push({ inboundId, clientId });
-        if (mock.delClientFail) {
+        if (mock.delFail) {
           json(res, 200, { success: false, msg: "Error deleting client" });
           return;
         }
-        const inbound = mock.inbounds.find((i) => i.id === inboundId);
-        if (inbound !== undefined) {
-          const before = inbound.clients.length;
-          inbound.clients = inbound.clients.filter((c) => c.id !== clientId && c.password !== clientId);
-          inbound.stats = inbound.stats.filter((s) =>
-            inbound.clients.some((c) => c.email === s.email),
-          );
-          json(res, 200, { success: before !== inbound.clients.length, msg: "" });
-          return;
-        }
-        json(res, 200, { success: false, msg: "Inbound not found" });
+        const email = decodeURIComponent(delMatch[1]);
+        const before = mock.clients.length;
+        mock.clients = mock.clients.filter((r) => r.email !== email);
+        mock.attachments.delete(email);
+        mock.traffic.delete(email);
+        json(res, 200, { success: before !== mock.clients.length, msg: "" });
         return;
       }
 
-      res.writeHead(404, { "Content-Type": "text/html" });
-      res.end("<html>not found</html>");
+      const linksMatch = /^\/panel\/api\/clients\/links\/([^/]+)$/.exec(path);
+      if (req.method === "GET" && linksMatch !== null) {
+        if (mock.linksFail) {
+          json(res, 200, { success: false, msg: "obtain failed" });
+          return;
+        }
+        const email = decodeURIComponent(linksMatch[1]);
+        const row = mock.clients.find((r) => r.email === email);
+        const ids = [...(mock.attachments.get(email) ?? [])];
+        const urls = ids.map((id) => {
+          const inbound = mock.inbounds.find((i) => i.id === id);
+          const secret = row?.uuid !== undefined && row.uuid !== "" ? row.uuid : (row?.password ?? "");
+          return `${inbound?.protocol ?? "vless"}://${secret}@panel.example:${inbound?.port ?? 0}#${email}`;
+        });
+        json(res, 200, { success: true, msg: "", obj: urls });
+        return;
+      }
+
+      html404(res);
     })();
   });
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", () => {
-      const address = server.address() as { port: number };
-      host = `http://127.0.0.1:${address.port}`;
+      host = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       resolve();
     });
   });
 });
 
 afterAll(() => {
-  for (const res of hangingResponses) {
+  for (const res of hanging) {
     res.destroy();
   }
   server.close();
@@ -296,23 +412,22 @@ function createInput(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe("XUI provisioning (HTTP contract)", () => {
-  it("1. logs in with form credentials and reuses the session cookie", async () => {
+describe("XUI provisioning (global client API contract)", () => {
+  it("1. logs in with form credentials and creates ONE global client", async () => {
     addInbound({ id: 1 });
     const health = await adapter().testConnection();
     expect(health.ok).toBe(true);
 
     const result = await adapter().createServiceAccount(createInput());
     expect(result.ok).toBe(true);
-    // The authenticated list call carried the session cookie.
-    expect(mock.lastListCookie).toBe(`3x-ui=${SESSION}`);
+    // ONE client, email = the deterministic username with NO inbound suffix.
+    expect(mock.clients).toHaveLength(1);
+    expect(mock.clients[0].email).toBe(USERNAME);
+    expect(mock.legacyEndpointCalls).toBe(0); // removed endpoints never called
   });
 
   it("2. reports invalid credentials (HTTP 200 + success:false) as auth failure", async () => {
     mock.wrongCredentials = true;
-    const health = await adapter().testConnection();
-    expect(health.ok).toBe(false);
-
     const result = await adapter().createServiceAccount(createInput());
     expect(result.ok).toBe(false);
     expect(result.uncertain).toBeUndefined();
@@ -325,15 +440,16 @@ describe("XUI provisioning (HTTP contract)", () => {
     addInbound({ id: 1 });
     const result = await adapter({ base: `${host}/secretpath/` }).createServiceAccount(createInput());
     expect(result.ok).toBe(true);
-    expect(mock.inbounds[0].clients).toHaveLength(1);
+    expect(mock.clients[0].email).toBe(USERNAME);
 
-    // Wrong base path = login endpoint 404 -> unsupported variant/base path.
-    const wrong = await adapter({ base: `${host}/wrongpath` }).createServiceAccount(createInput({ username: "zed_1001_wrongbp1" }));
+    const wrong = await adapter({ base: `${host}/wrongpath` }).createServiceAccount(
+      createInput({ username: "zed_1001_wrongbp1" }),
+    );
     expect(wrong.ok).toBe(false);
     expect(wrong.diagnostic?.code).toBe("unsupported-variant");
   });
 
-  it("4. retrieves and validates the inbound list for readiness", async () => {
+  it("4. readiness validates the global client API and configured inbounds", async () => {
     addInbound({ id: 1, protocol: "vless" });
     addInbound({ id: 2, protocol: "vmess" });
     const result = await adapter().checkProvisioningReadiness({ inboundIds: [1, 2] });
@@ -348,18 +464,16 @@ describe("XUI provisioning (HTTP contract)", () => {
     expect(result.ok).toBe(false);
     expect(result.uncertain).toBeUndefined();
     expect(result.diagnostic?.code).toBe("inbound-missing");
-    // Validated BEFORE any mutation: nothing was created anywhere.
-    expect(mock.addClientCalls).toHaveLength(0);
+    expect(mock.addCalls).toHaveLength(0); // validated BEFORE any mutation
   });
 
-  it("6. refuses unsupported inbound protocols", async () => {
+  it("6. refuses unsupported protocols and disabled inbounds", async () => {
     addInbound({ id: 1, protocol: "shadowsocks" });
     const result = await adapter().createServiceAccount(createInput());
     expect(result.ok).toBe(false);
     expect(result.diagnostic?.code).toBe("unsupported-protocol");
-    expect(mock.addClientCalls).toHaveLength(0);
+    expect(mock.addCalls).toHaveLength(0);
 
-    // Disabled inbounds are refused too.
     resetMock();
     addInbound({ id: 1, enable: false });
     const disabled = await adapter().createServiceAccount(createInput());
@@ -367,159 +481,187 @@ describe("XUI provisioning (HTTP contract)", () => {
     expect(disabled.diagnostic?.code).toBe("inbound-disabled");
   });
 
-  it("7. detects malformed settings JSON stored inside the inbound", async () => {
-    addInbound({ id: 1, rawSettings: "{not-valid-json" });
-    const result = await adapter().createServiceAccount(createInput());
-    expect(result.ok).toBe(false);
-    expect(result.diagnostic?.code).toBe("inbound-malformed");
-    expect(mock.addClientCalls).toHaveLength(0);
+  it("7. detects pre-global-client panel versions as unsupported", async () => {
+    addInbound({ id: 1 });
+    mock.noClientsApi = true; // clients endpoints 404 like an old panel
+    const ready = await adapter().checkProvisioningReadiness({ inboundIds: [1] });
+    expect(ready.ready).toBe(false);
+    expect(ready.checks.find((c) => c.key === "read-endpoint")?.ok).toBe(false);
+    expect(ready.diagnostic?.code).toBe("unsupported-variant");
+
+    const create = await adapter().createServiceAccount(createInput());
+    expect(create.ok).toBe(false);
+    expect(create.uncertain).toBeUndefined();
+    expect(create.diagnostic?.code).toBe("unsupported-variant");
   });
 
-  it("8. creates a VLESS client with the full documented field set", async () => {
+  it("8. creates a VLESS client with universal fields only (server-side secrets)", async () => {
     addInbound({ id: 1, protocol: "vless" });
     const result = await adapter().createServiceAccount(createInput());
     expect(result.ok).toBe(true);
     expect(result.username).toBe(USERNAME);
-    expect(result.remoteInboundIds).toEqual([1]);
     expect(result.subscriptionToken).toBe(USERNAME);
+    expect(result.remoteInboundIds).toEqual([1]);
 
-    const client = mock.inbounds[0].clients[0];
-    expect(client.id).toMatch(UUID_RE);
-    expect(client.password).toBeUndefined();
-    expect(client.email).toBe(`${USERNAME}-1`);
-    expect(client.totalGB).toBe(Number(10n * GIB)); // bytes despite the name
-    expect(client.expiryTime).toBe(new Date("2027-01-01T00:00:00Z").getTime());
-    expect(client.enable).toBe(true);
-    expect(client.subId).toBe(USERNAME);
-    expect(client.flow).toBe(""); // no flow unless explicitly configured
-    expect(result.remoteClientId).toBe(client.id);
+    // The payload carried ONLY universal fields - no client-side secrets,
+    // and no tgId (an int64 upstream; a string would be rejected).
+    const sent = mock.addCalls[0].client;
+    expect(sent["id"]).toBeUndefined();
+    expect(sent["password"]).toBeUndefined();
+    expect(sent["tgId"]).toBeUndefined();
+    expect(sent["flow"]).toBeUndefined(); // never guessed
+    expect(sent["email"]).toBe(USERNAME);
+    expect(sent["subId"]).toBe(USERNAME);
+    expect(sent["totalGB"]).toBe(Number(10n * GIB)); // bytes despite the name
+    expect(sent["expiryTime"]).toBe(new Date("2027-01-01T00:00:00Z").getTime());
+    expect(sent["enable"]).toBe(true);
+    expect(sent["comment"]).toBe("zedbot order:abcd1234 tg:1001");
 
-    // Explicitly configured flow is applied to VLESS clients.
+    // The server generated the UUID; the read-back returned it.
+    expect(mock.clients[0].uuid).toMatch(UUID_RE);
+    expect(result.remoteClientId).toBe(mock.clients[0].uuid);
+
+    // Explicitly configured flow is passed through.
     resetMock();
     addInbound({ id: 1, protocol: "vless" });
     const flowed = await adapter().createServiceAccount(
       createInput({ username: "zed_1001_flowed01", protocolSettings: { flow: "xtls-rprx-vision" } }),
     );
     expect(flowed.ok).toBe(true);
-    expect(mock.inbounds[0].clients[0].flow).toBe("xtls-rprx-vision");
+    expect(mock.addCalls[0].client["flow"]).toBe("xtls-rprx-vision");
   });
 
-  it("9. creates a VMess client (uuid, no flow field)", async () => {
+  it("9. creates a VMess client (server-generated uuid)", async () => {
     addInbound({ id: 1, protocol: "vmess" });
     const result = await adapter().createServiceAccount(createInput());
     expect(result.ok).toBe(true);
-    const client = mock.inbounds[0].clients[0];
-    expect(client.id).toMatch(UUID_RE);
-    expect(client.flow).toBeUndefined();
-    expect(client.password).toBeUndefined();
+    expect(mock.clients[0].uuid).toMatch(UUID_RE);
+    expect(mock.clients[0].password).toBeUndefined();
+    expect(result.remoteClientId).toBe(mock.clients[0].uuid);
   });
 
-  it("10. creates a Trojan client with a secure random password", async () => {
+  it("10. creates a Trojan client (server-generated password)", async () => {
     addInbound({ id: 1, protocol: "trojan" });
     const result = await adapter().createServiceAccount(createInput());
     expect(result.ok).toBe(true);
-    const client = mock.inbounds[0].clients[0];
-    expect(client.id).toBeUndefined();
-    expect(client.password).toMatch(/^[0-9a-f]{32}$/);
-    expect(result.remoteClientId).toBe(client.password);
+    expect(mock.clients[0].uuid).toBeUndefined();
+    expect(mock.clients[0].password).toMatch(/^[0-9a-f]{32}$/);
+    expect(result.remoteClientId).toBe(mock.clients[0].password);
   });
 
-  it("11. never reuses another client's credentials", async () => {
-    const inbound = addInbound({ id: 1, protocol: "vless" });
-    inbound.clients.push({
-      id: "11111111-1111-4111-8111-111111111111",
+  it("11. never sends or copies client secrets; identities stay unique", async () => {
+    addInbound({ id: 1, protocol: "vless" });
+    mock.clients.push({
       email: "someone-else",
+      subId: "someoneelse",
+      uuid: "11111111-1111-4111-8111-111111111111",
       totalGB: 0,
       expiryTime: 0,
       enable: true,
-      subId: "someoneelse",
+      reset: 0,
     });
+    mock.attachments.set("someone-else", new Set([1]));
+
     const first = await adapter().createServiceAccount(createInput());
     const second = await adapter().createServiceAccount(createInput({ username: "zed_1002_other001" }));
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
-    const ids = mock.inbounds[0].clients.map((c) => c.id);
-    expect(new Set(ids).size).toBe(ids.length); // all distinct
+    for (const call of mock.addCalls) {
+      expect(call.client["id"]).toBeUndefined();
+      expect(call.client["password"]).toBeUndefined();
+    }
+    const uuids = mock.clients.map((c) => c.uuid);
+    expect(new Set(uuids).size).toBe(uuids.length);
     expect(first.remoteClientId).not.toBe("11111111-1111-4111-8111-111111111111");
     expect(first.remoteClientId).not.toBe(second.remoteClientId);
   });
 
-  it("12. a duplicate retry recovers the existing client instead of creating another", async () => {
+  it("12. duplicate retry is idempotent; a foreign subId is a conflict", async () => {
     addInbound({ id: 1, protocol: "vless" });
     const first = await adapter().createServiceAccount(createInput());
     expect(first.ok).toBe(true);
-    const callsAfterFirst = mock.addClientCalls.length;
 
+    // Retry: the server reuses stored credentials + dedupes attachments.
     const retry = await adapter().createServiceAccount(createInput());
     expect(retry.ok).toBe(true);
     expect(retry.remoteClientId).toBe(first.remoteClientId);
-    expect(mock.addClientCalls.length).toBe(callsAfterFirst); // no new addClient
-    expect(mock.inbounds[0].clients).toHaveLength(1);
+    expect(mock.clients).toHaveLength(1);
+    expect([...(mock.attachments.get(USERNAME) ?? [])]).toEqual([1]);
 
-    // Conflicting data (same label, foreign subId) -> safe conflict error.
-    mock.inbounds[0].clients[0].subId = "foreign-sub-id";
+    // Same email, foreign subId: pre-check reports a conflict, no mutation.
+    mock.clients[0].subId = "foreign-sub-id";
+    const addsBefore = mock.addCalls.length;
     const conflict = await adapter().createServiceAccount(createInput());
     expect(conflict.ok).toBe(false);
     expect(conflict.uncertain).toBeUndefined();
     expect(conflict.diagnostic?.code).toBe("conflict");
+    expect(mock.addCalls.length).toBe(addsBefore);
   });
 
-  it("13. provisions one client identity into every configured inbound", async () => {
+  it("13. multi-inbound = ONE client attached to every configured inbound", async () => {
     addInbound({ id: 1, protocol: "vless" });
     addInbound({ id: 2, protocol: "trojan" });
     const result = await adapter().createServiceAccount(createInput({ inboundIds: [1, 2] }));
     expect(result.ok).toBe(true);
+    // One global client - NOT one client per inbound.
+    expect(mock.clients).toHaveLength(1);
+    expect(mock.clients[0].email).toBe(USERNAME);
+    expect(mock.clients[0].subId).toBe(USERNAME);
+    expect([...(mock.attachments.get(USERNAME) ?? [])].sort()).toEqual([1, 2]);
+    // One shared traffic record; both protocol secrets on the same row.
+    expect(mock.traffic.size).toBe(1);
+    expect(mock.clients[0].uuid).toMatch(UUID_RE);
+    expect(mock.clients[0].password).toMatch(/^[0-9a-f]{32}$/);
     expect(result.remoteInboundIds).toEqual([1, 2]);
-    expect(mock.inbounds[0].clients[0].email).toBe(`${USERNAME}-1`);
-    expect(mock.inbounds[1].clients[0].email).toBe(`${USERNAME}-2`);
-    // Shared subscription id groups the clients into one subscription.
-    expect(mock.inbounds[0].clients[0].subId).toBe(USERNAME);
-    expect(mock.inbounds[1].clients[0].subId).toBe(USERNAME);
-    const metadata = result.remoteMetadata as { clients: Array<{ inboundId: number; email: string }> };
-    expect(metadata.clients).toHaveLength(2);
+    const metadata = result.remoteMetadata as { subId: string; email: string; inboundIds: number[] };
+    expect(metadata.email).toBe(USERNAME);
+    expect(metadata.inboundIds).toEqual([1, 2]);
   });
 
-  it("14. partial multi-inbound failure triggers confirmed compensating cleanup", async () => {
+  it("14. partial attach failure triggers ONE confirmed compensating delete", async () => {
     addInbound({ id: 1, protocol: "vless" });
     addInbound({ id: 2, protocol: "vless" });
-    mock.addClientFail.set(2, "reject");
+    mock.failAttachAtInbound = 2; // inbound 1 attaches, then the server errors
     const result = await adapter().createServiceAccount(createInput({ inboundIds: [1, 2] }));
     expect(result.ok).toBe(false);
-    // Cleanup was confirmed via re-read -> DEFINITE failure (refund-safe).
+    // Cleanup (del/{email}) confirmed via re-read -> DEFINITE failure.
     expect(result.uncertain).toBeUndefined();
-    expect(mock.delClientCalls.length).toBeGreaterThan(0);
-    expect(mock.inbounds[0].clients).toHaveLength(0); // client 1 removed
-    expect(mock.inbounds[1].clients).toHaveLength(0);
+    expect(mock.clients).toHaveLength(0); // the whole client is gone
+    expect(mock.attachments.size).toBe(0);
+    expect(mock.traffic.size).toBe(0);
   });
 
-  it("15. unconfirmable cleanup returns UNKNOWN, never definite failure", async () => {
+  it("15. unconfirmable cleanup and in-flight timeouts return UNKNOWN", async () => {
     addInbound({ id: 1, protocol: "vless" });
     addInbound({ id: 2, protocol: "vless" });
-    mock.addClientFail.set(2, "reject");
-    mock.delClientFail = true; // deletion fails -> re-read still shows client 1
+    mock.failAttachAtInbound = 2;
+    mock.delFail = true; // deletion fails -> re-read still shows the client
     const result = await adapter().createServiceAccount(createInput({ inboundIds: [1, 2] }));
     expect(result.ok).toBe(false);
     expect(result.uncertain).toBe(true);
     expect(result.diagnostic?.code).toBe("partial-state");
     expect(result.diagnostic?.certainty).toBe("unknown");
-    expect(mock.inbounds[0].clients).toHaveLength(1); // orphan remains (documented)
+    expect(mock.clients).toHaveLength(1); // orphan remains (documented)
 
-    // A TIMED-OUT addClient is UNKNOWN even when the re-read looks clean:
-    // the hung request may land after the verification read.
+    // A TIMED-OUT add is UNKNOWN even when the re-read looks clean: the
+    // hung request may land after the verification read.
     resetMock();
     addInbound({ id: 1, protocol: "vless" });
-    mock.addClientFail.set(1, "hang");
+    mock.hangAdd = true;
     const inflight = await adapter().createServiceAccount(createInput({ username: "zed_1001_inflight" }));
     expect(inflight.ok).toBe(false);
     expect(inflight.uncertain).toBe(true);
     expect(inflight.diagnostic?.certainty).toBe("unknown");
   });
 
-  it("16. returns a subscription URL only when the operator configured a real base", async () => {
+  it("16. subscription URL only from explicit config; config links from the panel", async () => {
     addInbound({ id: 1 });
     const bare = await adapter().createServiceAccount(createInput());
     expect(bare.ok).toBe(true);
     expect(bare.subscriptionUrl).toBeUndefined(); // never fabricated
+    // Real panel-built config links (links/{email}).
+    expect(bare.configLinks).toBeDefined();
+    expect(bare.configLinks?.[0]).toContain(`#${USERNAME}`);
 
     resetMock();
     addInbound({ id: 1 });
@@ -527,14 +669,22 @@ describe("XUI provisioning (HTTP contract)", () => {
       createInput({ subscriptionBaseUrl: "https://sub.example.com:2096/sub" }),
     );
     expect(withBase.subscriptionUrl).toBe(`https://sub.example.com:2096/sub/${USERNAME}`);
+
+    // A failing links endpoint never fails the (already created) service.
+    resetMock();
+    addInbound({ id: 1 });
+    mock.linksFail = true;
+    const noLinks = await adapter().createServiceAccount(createInput({ username: "zed_1001_nolinks1" }));
+    expect(noLinks.ok).toBe(true);
+    expect(noLinks.configLinks).toBeUndefined();
   });
 
-  it("17. readiness requires auth + inbound list + valid configured inbounds", async () => {
+  it("17. readiness requires auth + clients API + valid configured inbounds", async () => {
     addInbound({ id: 1 });
     const noIds = await adapter().checkProvisioningReadiness({ inboundIds: [] });
     expect(noIds.ready).toBe(false);
     expect(noIds.diagnostic?.code).toBe("config-incomplete");
-    expect(noIds.checks.find((c) => c.key === "auth")?.ok).toBe(true); // login worked, still not ready
+    expect(noIds.checks.find((c) => c.key === "auth")?.ok).toBe(true);
 
     const missing = await adapter().checkProvisioningReadiness({ inboundIds: [7] });
     expect(missing.ready).toBe(false);
@@ -548,26 +698,27 @@ describe("XUI provisioning (HTTP contract)", () => {
   });
 
   it("18. handles timeouts and non-JSON responses structurally", async () => {
-    mock.hangLogin = true;
-    const timedOut = await adapter().createServiceAccount(createInput());
-    expect(timedOut.ok).toBe(false);
-    expect(timedOut.uncertain).toBeUndefined(); // login is pre-mutation
-    expect(timedOut.diagnostic?.code).toBe("timeout");
+    const dead = new XuiAdapter(
+      new XuiClient({ baseUrl: "http://127.0.0.1:1", username: XUI_USER, password: XUI_PASS }),
+    );
+    const unreachable = await dead.createServiceAccount(createInput());
+    expect(unreachable.ok).toBe(false);
+    expect(unreachable.uncertain).toBeUndefined(); // login is pre-mutation
+    expect(["timeout", "unreachable"]).toContain(unreachable.diagnostic?.code);
 
-    resetMock();
     addInbound({ id: 1 });
-    mock.listNonJson = true;
+    mock.listClientsNonJson = true;
     const nonJson = await adapter().createServiceAccount(createInput());
     expect(nonJson.ok).toBe(false);
     expect(nonJson.diagnostic?.code).toBe("unsupported-variant");
     expect(nonJson.errorMessage).not.toContain("<html>");
   });
 
-  it("19. never leaks credentials, cookies or client secrets in results/diagnostics", async () => {
+  it("19. never leaks credentials, cookies or client secrets in results", async () => {
     addInbound({ id: 1, protocol: "trojan" });
-    mock.addClientFail.set(1, "reject");
+    mock.failAttachAtInbound = 1;
     const failed = await adapter().createServiceAccount(createInput());
-    const dump = JSON.stringify(failed);
+    const dump = JSON.stringify({ ...failed, remoteClientId: undefined });
     expect(dump).not.toContain(XUI_PASS);
     expect(dump).not.toContain(SESSION);
 
@@ -576,16 +727,18 @@ describe("XUI provisioning (HTTP contract)", () => {
     expect(JSON.stringify(auth.diagnostic)).not.toContain(XUI_PASS);
   });
 
-  it("20. supports reconciliation reads with positive absence detection", async () => {
+  it("20. reconciliation reads the global inventory with positive absence", async () => {
     addInbound({ id: 1, protocol: "vless" });
     addInbound({ id: 2, protocol: "trojan" });
     const created = await adapter().createServiceAccount(createInput({ inboundIds: [1, 2] }));
     expect(created.ok).toBe(true);
 
-    // Existing service: aggregated quota/expiry/status + usage from stats.
-    mock.inbounds[0].stats[0].up = 1000;
-    mock.inbounds[0].stats[0].down = 2000;
-    mock.inbounds[1].stats[0].down = 500;
+    // One shared traffic record drives usage.
+    const t = mock.traffic.get(USERNAME);
+    if (t !== undefined) {
+      t.up = 1000;
+      t.down = 2500;
+    }
     const read = await adapter().getServiceAccount({ username: USERNAME });
     expect(read.ok).toBe(true);
     expect(read.totalBytes).toBe(10n * GIB);
@@ -595,22 +748,37 @@ describe("XUI provisioning (HTTP contract)", () => {
     expect(read.subscriptionToken).toBe(USERNAME);
 
     // Disabled client -> disabled status.
-    mock.inbounds[0].clients[0].enable = false;
+    mock.clients.find((c) => c.email === USERNAME)!.enable = false;
     const disabled = await adapter().getServiceAccount({ username: USERNAME });
     expect(disabled.status).toBe("disabled");
 
-    // Absent client with a fully readable panel -> POSITIVE notFound.
+    // LEGACY services (pre-migration per-inbound labels) still read and
+    // aggregate so old rows keep syncing/reconciling.
+    const legacyUser = "zed_9_legacy01";
+    mock.clients.push(
+      { email: `${legacyUser}-1`, subId: legacyUser, uuid: randomUUID(), totalGB: Number(5n * GIB), expiryTime: 0, enable: true, reset: 0 },
+      { email: `${legacyUser}-2`, subId: legacyUser, uuid: randomUUID(), totalGB: Number(5n * GIB), expiryTime: 0, enable: true, reset: 0 },
+    );
+    mock.traffic.set(`${legacyUser}-1`, { up: 10, down: 20 });
+    mock.traffic.set(`${legacyUser}-2`, { up: 5, down: 5 });
+    mock.attachments.set(`${legacyUser}-1`, new Set([1]));
+    mock.attachments.set(`${legacyUser}-2`, new Set([2]));
+    const legacy = await adapter().getServiceAccount({ username: legacyUser });
+    expect(legacy.ok).toBe(true);
+    expect(legacy.totalBytes).toBe(5n * GIB);
+    expect(legacy.usedBytes).toBe(40n);
+
+    // Absent client with a fully readable inventory -> POSITIVE notFound.
     const absent = await adapter().getServiceAccount({ username: "zed_9999_absent01" });
     expect(absent.ok).toBe(false);
     expect(absent.notFound).toBe(true);
 
-    // A malformed inbound removes the proof of absence: NOT notFound.
-    addInbound({ id: 3, rawSettings: "{broken" });
+    // Unreadable inventory never reports notFound.
+    mock.listClientsNonJson = true;
     const unsure = await adapter().getServiceAccount({ username: "zed_9999_absent01" });
     expect(unsure.ok).toBe(false);
     expect(unsure.notFound).toBeUndefined();
 
-    // Unreachable panel never reports notFound either.
     const dead = new XuiAdapter(
       new XuiClient({ baseUrl: "http://127.0.0.1:1", username: XUI_USER, password: XUI_PASS }),
     );

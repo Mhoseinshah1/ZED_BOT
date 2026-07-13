@@ -4,15 +4,27 @@ Real authenticated client provisioning for the Sanaei 3X-UI API family.
 This page covers the exact supported surface - nothing beyond it is
 claimed.
 
-## Supported variant
+## Supported variant and upstream contract
 
-- **SANAEI**: MHSanaei 3X-UI with API routes under
-  `{basePath}/panel/api/inbounds/...`. This is the only implemented and
-  tested variant; `Panel.apiVariant` empty/null defaults to it.
-- **Not supported**: legacy vaxilu x-ui (no addClient API), other forks
-  with different routes. Their panels fail the readiness test with
-  «نسخه API پشتیبانی نمی‌شود» and are never sellable - readiness is
-  authenticated, so a merely reachable login page changes nothing.
+- **SANAEI**: MHSanaei 3X-UI versions exposing the **global client API**
+  under `{basePath}/panel/api/clients/...` - clients are first-class
+  entities attached to one or more inbounds. This is the only implemented
+  and tested variant; `Panel.apiVariant` empty/null defaults to it.
+- **Pinned upstream source of truth**: the implementation follows
+  https://github.com/MHSanaei/3x-ui at commit
+  **`4e928a1ce0945a6e956aa63365034ec24d2b1387`**
+  (`docs/public/openapi.json`, `internal/web/controller/client.go`,
+  `internal/web/service/client_crud.go`,
+  `internal/database/model/model.go`). Field names, payload shapes and
+  duplicate-handling semantics were taken from that commit, not from
+  memory or legacy examples.
+- **Not supported**: 3X-UI versions WITHOUT the global client API (the
+  legacy per-inbound `POST /panel/api/inbounds/addClient` /
+  `.../delClient/...` endpoints were REMOVED upstream and are never
+  called), legacy vaxilu x-ui, and other forks with different routes.
+  Such panels fail the readiness test with «نسخه API پشتیبانی نمی‌شود»
+  and are never sellable - readiness is authenticated, so a merely
+  reachable login page changes nothing.
 
 ## Authentication modes
 
@@ -44,9 +56,12 @@ only encrypted, like every other panel credential).
 | Operation | Endpoint |
 |---|---|
 | Login (SESSION_COOKIE mode only) | `POST {base}/login` (form-encoded) |
-| Inbound list (+clients +traffic) | `GET {base}/panel/api/inbounds/list` |
-| Add client | `POST {base}/panel/api/inbounds/addClient` |
-| Delete client (compensating cleanup / staging only) | `POST {base}/panel/api/inbounds/{id}/delClient/{clientId}` |
+| Inbound inventory (validation) | `GET {base}/panel/api/inbounds/list` |
+| Global client inventory (+attachments +traffic) | `GET {base}/panel/api/clients/list` |
+| One client (+attachments +usage) | `GET {base}/panel/api/clients/get/{email}` |
+| Create client + attach inbounds (one call) | `POST {base}/panel/api/clients/add` |
+| Delete client (compensating cleanup / staging only) | `POST {base}/panel/api/clients/del/{email}` |
+| Panel-built config links | `GET {base}/panel/api/clients/links/{email}` |
 
 Unauthenticated API calls answered with a redirect are reported as
 session/token/base-path errors.
@@ -92,73 +107,85 @@ authenticated inbound list:
 - it must exist (`inbound-missing` otherwise),
 - it must be enabled (`inbound-disabled`),
 - its protocol must be `vless`, `vmess` or `trojan`
-  (`unsupported-protocol`),
-- its `settings` JSON string must parse (`inbound-malformed` - XUI stores
-  client lists as JSON text inside JSON, and corrupted rows do occur).
+  (`unsupported-protocol` - the tested set).
 
-## Client creation
+## Client creation (global client model)
 
-One client identity per configured inbound:
+**ONE global client per service** - never one client per inbound:
 
-- **VLESS/VMess**: fresh `crypto.randomUUID()` per service. VLESS gets
-  `flow` ONLY when explicitly configured (it must match the inbound's
-  security settings and is never guessed).
-- **Trojan**: fresh 32-hex-char password from `crypto.randomBytes`.
-- **email** (client label): `<serviceUsername>-<inboundId>` - 3x-ui
-  enforces panel-wide unique labels, so multi-inbound needs one label per
-  inbound; the shared prefix keeps them discoverable.
-- **subId**: the service username, shared across the service's clients so
-  the panel's subscription service groups them into one subscription.
-- `totalGB` is set in **bytes** (the field name is misleading; the API
-  takes bytes), `expiryTime` in unix milliseconds, `enable: true`,
-  `limitIp: 0`, `reset: 0`. Volumes beyond the JS safe-integer range fail
-  validation before any HTTP call.
+- **email**: the deterministic service username exactly (unique
+  panel-wide, no inbound suffix).
+- **subId**: the same username (subIds are unique per client panel-wide;
+  the panel's subscription groups every attached inbound's config under
+  this one id).
+- **inboundIds**: every configured inbound, attached in the SAME
+  `POST /panel/api/clients/add` call (`{client, inboundIds}` body).
+- **Per-protocol secrets are generated SERVER-side** per the documented
+  contract (UUID for VLESS/VMess, password for Trojan) - the bot sends
+  only universal fields and reads the identifiers back via
+  `get/{email}`. Nothing is ever copied from another client. `flow` is
+  sent ONLY when explicitly configured.
+- `totalGB` is set in **bytes** (the upstream field name is misleading;
+  the UI converts, the API does not), `expiryTime` in unix milliseconds,
+  `enable: true`, `limitIp: 0`, `reset: 0`, `comment` = the order note.
+  `tgId` is an **int64** upstream and is deliberately omitted. Volumes
+  beyond the JS safe-integer range fail validation before any HTTP call.
 
-Nothing is ever copied from another client.
+The result is one shared quota, one shared expiry and ONE shared traffic
+record across all attached inbounds, and one subscription containing every
+attached inbound's configuration.
 
 ## Idempotency
 
-Retrying the same order never duplicates clients: before adding, each
-configured inbound is searched for the deterministic label. An existing
-client is recovered (same identifier returned); a client with the same
-label but a foreign `subId` is a conflict error - never adopted, never
-recreated over.
+Duplicate handling is part of the upstream contract: re-adding an existing
+email with the SAME subId reuses the stored credentials and deduplicates
+attachments (idempotent retry); an email held by a client with a FOREIGN
+subId is rejected. The adapter additionally pre-checks the inventory and
+reports the foreign-subId case as a clean `conflict` diagnostic without
+attempting a mutation.
 
-## Partial multi-inbound failure
+## Partial attach failure
 
-If some inbounds succeeded and one fails, a bounded compensating cleanup
-deletes the clients created during THIS call and re-reads the inbound list
-to verify:
+The server attaches inbounds in a loop, so a mid-call failure can leave
+the client attached to a subset. The compensating cleanup is ONE bounded
+call - `POST /panel/api/clients/del/{email}` removes the client from
+every attached inbound and drops its traffic record - verified by a
+re-read of the inventory:
 
-- re-read confirms clean AND the failed call got a real response ->
-  **definite failure** (refund-safe);
+- re-read confirms the email is gone AND the failed call got a real
+  response -> **definite failure** (refund-safe);
 - the failed call was a timeout/transport error -> **UNKNOWN**, even when
   the re-read looks clean - the hung request may land after the
   verification read;
-- cleanup unverifiable (delete failed / list unreadable) -> **UNKNOWN**.
+- cleanup unverifiable (delete failed / inventory unreadable) ->
+  **UNKNOWN**.
 
 UNKNOWN outcomes leave the order `PROVISIONING`; startup reconciliation
-re-probes minutes later (any in-flight request has long settled) and
-completes or refunds on positive proof. **Residual orphan risk**: an
-UNKNOWN outcome that reconciliation later refunds (absence proven) cannot
-leave clients behind, but an unverifiable cleanup can - such clients keep
-the `zed_*` label and are documented for manual removal in the logs.
+re-probes minutes later and completes or refunds on positive proof.
+**Residual orphan risk**: an unverifiable cleanup can leave one client
+with the `zed_*` email behind; the log documents it for manual removal.
 
 ## Reads / reconciliation
 
-`getServiceAccount` searches ALL panel inbounds for the service's labels,
-aggregates traffic from `clientStats` (up+down summed across inbounds),
-takes quota/expiry from the client entries (equal by construction) and
-normalizes status (any disabled client -> `disabled`; past expiry ->
-`expired`; quota exhausted -> `limited`). `notFound` is set **only** when
-the complete inbound inventory was readable and parseable and no client
-matched - an unreadable/malformed inbound removes the proof of absence.
+`getServiceAccount` reads the complete global client inventory
+(`GET /panel/api/clients/list`) and matches the service's client by exact
+email. Services provisioned BEFORE this migration (legacy per-inbound
+labels `username-<inboundId>`) are still recognized and aggregated, so old
+rows keep syncing and reconciling. Quota/expiry come from the client row,
+usage from its traffic record (summed across legacy labels), and status
+normalizes as before (`disabled`/`expired`/`limited`/`active`). `notFound`
+is set **only** when the full inventory was readable and no client
+matched - an unreadable inventory removes the proof of absence.
 
 ## Subscription URL
 
 The 3x-ui API does not report subscription URLs. One is returned ONLY when
 the operator configured `subscriptionDomain` (the panel's subscription
-service base): `{subscriptionDomain}/{subId}`. Without it, provisioning
+service base): `{subscriptionDomain}/{subId}`. **Config links** are now
+real panel data: `GET /panel/api/clients/links/{email}` returns the same
+URLs the panel's Copy-URL button builds, one per attached inbound; the
+call is best-effort - a failure never fails an already-created service.
+Without a configured subscription base, provisioning
 succeeds with the connection data available and no URL is fabricated.
 Config links are not derived in this phase.
 
