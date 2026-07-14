@@ -5,6 +5,8 @@ import { APP_NAME, createLogger, errorMessage, getRedisOptions, intEnv, optional
 import Fastify from "fastify";
 import { Redis } from "ioredis";
 
+import { paymentRoutes } from "./payment-routes.js";
+
 const logger = createLogger("api");
 const port = intEnv("API_PORT", 3000);
 const host = "0.0.0.0";
@@ -56,6 +58,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 const app = Fastify({ logger: false });
+
+// Payment provider callbacks/webhooks live in an encapsulated plugin so
+// their raw-body JSON parser never affects the rest of the app. Fastify
+// resolves pending registrations before listen().
+void app.register(paymentRoutes);
 
 app.get("/health", async (_request, reply) => {
   let database = "ok";

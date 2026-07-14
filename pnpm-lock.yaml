@@ -26,6 +26,9 @@ importers:
       '@zedbot/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@zedbot/payments':
+        specifier: workspace:*
+        version: link:../../packages/payments
       '@zedbot/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -45,6 +48,9 @@ importers:
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@22.20.0)(vite@8.1.4(@types/node@22.20.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.0))
 
   apps/bot:
     dependencies:
@@ -54,6 +60,9 @@ importers:
       '@zedbot/panel-adapters':
         specifier: workspace:*
         version: link:../../packages/panel-adapters
+      '@zedbot/payments':
+        specifier: workspace:*
+        version: link:../../packages/payments
       '@zedbot/shared':
         specifier: workspace:*
         version: link:../../packages/shared

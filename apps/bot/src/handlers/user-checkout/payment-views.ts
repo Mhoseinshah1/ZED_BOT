@@ -16,6 +16,8 @@ export const PAY_CB = {
 export const paycb = {
   methods: (coSid: string): string => `user:pay:m:${coSid}`,
   gateway: (coSid: string, gwSid: string): string => `user:pay:g:${coSid}:${gwSid}`,
+  // Online gateway payments: manual "check payment status" re-settle trigger.
+  check: (paySid: string): string => `user:pay:chk:${paySid}`,
 } as const;
 
 export const NO_METHODS_TEXT =
@@ -113,4 +115,41 @@ export function cardToCardKeyboard(
 
 export function receiptRegisteredKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("بازگشت به منوی اصلی", CB.USER_MENU);
+}
+
+// --- Online gateway screens (Zarinpal / NOWPayments / Telegram Stars) --------------
+
+/** Gateway screen text: the MessageTemplate body plus the payable amount. */
+export function gatewayPaymentText(templateText: string, amountToman: number): string {
+  return `${templateText}\n\nمبلغ قابل پرداخت: ${formatToman(amountToman)}`;
+}
+
+/**
+ * Keyboard under an online-gateway payment message: optional pay-URL button,
+ * the manual «بررسی وضعیت پرداخت ♻️» re-check (idempotent settlement), and
+ * back-to-methods + main menu. Stars screens pass no payButton - the payment
+ * happens through the Telegram invoice sent separately.
+ */
+export function gatewayPaymentKeyboard(
+  coSid: string,
+  paySid: string,
+  payButton?: { text: string; url: string },
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  if (payButton !== undefined) {
+    kb.url(payButton.text, payButton.url).row();
+  }
+  kb.text("بررسی وضعیت پرداخت ♻️", paycb.check(paySid)).row();
+  kb.text("بازگشت", paycb.methods(coSid)).text("منوی اصلی", CB.USER_MENU);
+  return kb;
+}
+
+/** After a failed online payment: back to the method list or the menu. */
+export function gatewayFailedKeyboard(coSid: string | null): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  if (coSid !== null) {
+    kb.text("بازگشت به روش‌های پرداخت", paycb.methods(coSid)).row();
+  }
+  kb.text("منوی اصلی", CB.USER_MENU);
+  return kb;
 }

@@ -64,6 +64,9 @@ export function financeLandingKeyboard(): InlineKeyboard {
     // Phase 31: read-only financial reports.
     .text("گزارش مالی 📊", "admin:fin:reports")
     .row()
+    // Gateway phase: read-only payment browser (all statuses/providers).
+    .text("لیست پرداخت‌ها 💳", "admin:fin:pay:all:1")
+    .row()
     .text("بازگشت به پنل ادمین", CB.ADMIN_MENU);
 }
 

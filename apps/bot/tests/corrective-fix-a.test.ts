@@ -66,12 +66,14 @@ describe("admin root / finance nesting (Fix A)", () => {
     expect(callbacks(kb)).not.toContain(CB.ADMIN_RECEIPTS);
   });
 
-  it("finance landing carries receipts, methods/settings, users + reports, back", () => {
+  it("finance landing carries receipts, methods/settings, users + reports, payments list, back", () => {
     const kb = financeLandingKeyboard();
     expect(rows(kb).map((row) => row.map((b) => b.callback_data))).toEqual([
       [CB.ADMIN_RECEIPTS],
       [FIN_CB.methods, FIN_CB.settings],
       [CB.ADMIN_USERS, "admin:fin:reports"],
+      // Gateway phase: the read-only payments list row sits above the back row.
+      ["admin:fin:pay:all:1"],
       [CB.ADMIN_MENU],
     ]);
     const labels = rows(kb).flat();

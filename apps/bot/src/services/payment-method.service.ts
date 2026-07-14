@@ -11,6 +11,8 @@ import {
   type UserGroup,
 } from "@zedbot/database";
 
+import { buildGatewayManager, isOnlineProvider } from "./gateway-payment.service.js";
+
 // =============================================================================
 // Payment methods, card-to-card rotation and receipt submission (Phase 7).
 //
@@ -51,13 +53,23 @@ export async function getAvailablePaymentMethods(
     orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }],
   });
   const amount = checkout.finalPriceToman;
-  return gateways.filter(
+  const eligible = gateways.filter(
     (g) =>
       (g.minAmountToman === null || amount >= g.minAmountToman) &&
       (g.maxAmountToman === null || amount <= g.maxAmountToman) &&
       groupAllowed(g.allowedGroups, user.group) &&
       user.paidOrdersCount >= g.activateAfterSuccessfulPaymentsCount &&
       (g.type !== "CARD_TO_CARD" || g._count.cardAccounts > 0),
+  );
+  // Online providers (Zarinpal / NOWPayments / Stars) are additionally gated
+  // on adapter availability (env credentials, Stars rate) - a configured-off
+  // gateway row must never dead-end the user on a broken payment screen.
+  if (!eligible.some((g) => isOnlineProvider(g.type))) {
+    return eligible;
+  }
+  const manager = await buildGatewayManager();
+  return eligible.filter(
+    (g) => !isOnlineProvider(g.type) || manager.get(g.type)?.isAvailable() === true,
   );
 }
 

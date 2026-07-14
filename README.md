@@ -284,7 +284,7 @@ pnpm workspaces monorepo:
 │   ├── shared/           # Env validation, logger, constants (APP_NAME)
 │   ├── database/         # Prisma schema, client singleton, migrations, seed
 │   ├── panel-adapters/   # VPN panel adapter interface (placeholder)
-│   └── payments/         # Payment gateway interface (placeholder)
+│   └── payments/         # Online payment gateways (Zarinpal, NOWPayments, Stars)
 ├── scripts/
 │   ├── install.sh        # One-command installer (self-contained)
 │   ├── update.sh         # Updater (backup → pull → rebuild → doctor)
@@ -333,6 +333,18 @@ logging) is documented in
 [`docs/database-schema.md`](docs/database-schema.md) — including the money
 rules (toman as `Int`, bytes as `BigInt`), the snapshot strategy, and why a
 `CheckoutSession` exists before any `Order`.
+
+### Online payments
+
+The Zarinpal / NOWPayments / Telegram Stars gateway system (`@zedbot/payments`
+plus the bot settlement service and the API webhook routes, with the
+`ZARINPAL_*`, `NOWPAYMENTS_*` and `TELEGRAM_STARS_ENABLED` variables from
+`.env.example`) is documented in
+[`docs/payment-architecture.md`](docs/payment-architecture.md), with
+per-provider details in [`docs/zarinpal.md`](docs/zarinpal.md),
+[`docs/nowpayments.md`](docs/nowpayments.md),
+[`docs/telegram-stars.md`](docs/telegram-stars.md) and the end-to-end state
+machine in [`docs/payment-lifecycle.md`](docs/payment-lifecycle.md).
 
 ### Database migrations
 

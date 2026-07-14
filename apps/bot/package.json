@@ -15,6 +15,7 @@
   "dependencies": {
     "@zedbot/database": "workspace:*",
     "@zedbot/panel-adapters": "workspace:*",
+    "@zedbot/payments": "workspace:*",
     "@zedbot/shared": "workspace:*",
     "grammy": "^1.34.0",
     "ioredis": "^5.10.1"

@@ -2,7 +2,7 @@
   "name": "@zedbot/payments",
   "version": "0.1.0",
   "private": true,
-  "description": "ZED_BOT payment gateway integrations (placeholder)",
+  "description": "ZED_BOT online payment gateway integrations (Zarinpal, NOWPayments, Telegram Stars)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

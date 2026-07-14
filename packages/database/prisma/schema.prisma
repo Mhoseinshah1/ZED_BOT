@@ -200,10 +200,12 @@ enum PaymentGatewayType {
 enum PaymentStatus {
   PENDING
   PENDING_REVIEW
+  PROCESSING
   APPROVED
   REJECTED
   FAILED
   EXPIRED
+  CANCELLED
   DELETED
 }
 
@@ -902,6 +904,23 @@ model Payment {
   status                PaymentStatus   @default(PENDING)
   amountToman           Int
   payableAmountToman    Int
+  // Online gateway fields (payment-gateway-system phase). provider is a
+  // denormalized copy of the gateway type so payment rows stay classifiable
+  // even if the gateway row changes. authority = the provider handle issued
+  // at creation (Zarinpal authority / NOWPayments invoice id / Stars
+  // payload nonce) - unique so callbacks resolve exactly one payment.
+  // externalReference = the provider-side payment/invoice reference;
+  // externalTransactionId = the FINAL settlement reference (Zarinpal ref_id,
+  // NOWPayments payment_id, Telegram charge id). providerStatus is the
+  // NORMALIZED provider outcome (SUCCESS/PROCESSING/FAILED/EXPIRED/
+  // CANCELLED) recorded by verified callbacks/webhooks; money only moves in
+  // the bot settlement transaction. callbackPayload stays sanitized:
+  // NEVER credentials, signatures, api keys or tokens.
+  provider              PaymentGatewayType?
+  authority             String?         @unique
+  externalReference     String?
+  providerStatus        String?
+  verifiedAt            DateTime?
   externalTransactionId String?
   callbackPayload       Json?
   idempotencyKey        String?         @unique
@@ -923,6 +942,8 @@ model Payment {
   @@index([gatewayId])
   @@index([checkoutSessionId])
   @@index([externalTransactionId])
+  @@index([provider, status])
+  @@index([externalReference])
   @@index([createdAt])
 }
 

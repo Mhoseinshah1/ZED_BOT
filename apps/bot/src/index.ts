@@ -4,6 +4,7 @@ import { errorMessage } from "@zedbot/shared";
 import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
+import { startGatewaySettlementLoop } from "./services/gateway-payment.service.js";
 import {
   RECOVERY_RECHECK_DELAY_MS,
   runStartupRecovery,
@@ -59,6 +60,12 @@ async function run(botToken: string): Promise<void> {
   setTimeout(() => {
     void runStartupRecovery();
   }, RECOVERY_RECHECK_DELAY_MS).unref();
+
+  // Gateway settlement sweep: every minute settle payments whose provider
+  // SUCCESS arrived while nobody was pressing buttons (IPNs, lost redirects)
+  // and re-fulfill settled-but-unfulfilled orders. Errors are logged inside;
+  // the loop never throws and its timers never keep the process alive.
+  startGatewaySettlementLoop(bot.api);
 
   await bot.start({
     onStart: (botInfo) => {
