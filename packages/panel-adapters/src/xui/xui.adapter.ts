@@ -1,5 +1,11 @@
 import { randomBytes } from "node:crypto";
 
+import {
+  deriveExpiry,
+  deriveServiceStatus,
+  deriveSubscriptionInfo,
+  deriveTrafficUsage,
+} from "../core/derived-reads.js";
 import { bigintToSafeNumber, normalizeBaseUrl } from "../core/http.js";
 import type { PanelAdapter } from "../core/panel-adapter.interface.js";
 import type {
@@ -24,6 +30,8 @@ import type {
   RegenerateSubscriptionResult,
   RenewServiceAccountInput,
   RenewServiceAccountResult,
+  ServiceSubscriptionInfo,
+  ServiceTrafficUsage,
   SetServiceStatusInput,
   SetServiceStatusResult,
 } from "../core/panel.types.js";
@@ -701,6 +709,21 @@ export class XuiAdapter implements PanelAdapter {
         result.subscriptionUrl = subscriptionUrl;
       }
     }
+    // Live config links from the panel's own link builder (service-live-sync
+    // phase) - global-model clients only (legacy per-inbound labels would
+    // yield a partial set) and strictly best-effort: a failed/empty links
+    // call never fails the read and never clears stored links.
+    if (primary.email === input.username) {
+      const links = await this.client.getClientLinks(session.auth, primary.email);
+      if (links.ok && Array.isArray(links.envelope?.obj)) {
+        const urls = (links.envelope.obj as unknown[]).filter(
+          (l): l is string => typeof l === "string" && l !== "",
+        );
+        if (urls.length > 0) {
+          result.configLinks = urls;
+        }
+      }
+    }
     result.remoteMetadata = {
       ...(subId !== undefined ? { subId } : {}),
       clients: matches.map((m) => ({
@@ -709,6 +732,30 @@ export class XuiAdapter implements PanelAdapter {
       })),
     };
     return result;
+  }
+
+  // --- unified sync surface (service-live-sync phase) -------------------------
+  // One read path: every targeted accessor is a projection of the same
+  // getServiceAccount snapshot via the shared derive* helpers.
+
+  async syncService(input: GetServiceAccountInput): Promise<GetServiceAccountResult> {
+    return this.getServiceAccount(input);
+  }
+
+  async getServiceStatus(input: GetServiceAccountInput): Promise<NormalizedAccountStatus | null> {
+    return deriveServiceStatus(await this.getServiceAccount(input));
+  }
+
+  async getTrafficUsage(input: GetServiceAccountInput): Promise<ServiceTrafficUsage | null> {
+    return deriveTrafficUsage(await this.getServiceAccount(input));
+  }
+
+  async getExpiry(input: GetServiceAccountInput): Promise<Date | null> {
+    return deriveExpiry(await this.getServiceAccount(input));
+  }
+
+  async getSubscriptionInfo(input: GetServiceAccountInput): Promise<ServiceSubscriptionInfo | null> {
+    return deriveSubscriptionInfo(await this.getServiceAccount(input));
   }
 
   // ==========================================================================

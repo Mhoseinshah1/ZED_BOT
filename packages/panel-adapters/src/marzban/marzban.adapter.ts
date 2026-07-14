@@ -1,6 +1,12 @@
 import { randomBytes } from "node:crypto";
 
 import type { PanelAdapter } from "../core/panel-adapter.interface.js";
+import {
+  deriveExpiry,
+  deriveServiceStatus,
+  deriveSubscriptionInfo,
+  deriveTrafficUsage,
+} from "../core/derived-reads.js";
 import { bigintToSafeNumber, joinSubscriptionUrl } from "../core/http.js";
 import type {
   AddServiceTimeInput,
@@ -24,6 +30,8 @@ import type {
   RegenerateSubscriptionResult,
   RenewServiceAccountInput,
   RenewServiceAccountResult,
+  ServiceSubscriptionInfo,
+  ServiceTrafficUsage,
   SetServiceStatusInput,
   SetServiceStatusResult,
 } from "../core/panel.types.js";
@@ -99,8 +107,23 @@ interface MarzbanAccountFields {
   remainingBytes?: bigint | null;
   expiresAt?: Date | null;
   subscriptionUrl?: string;
+  subscriptionToken?: string;
   configLinks?: string[];
   lastConnectedAt?: Date | null;
+}
+
+/**
+ * Extracts the subscription token from Marzban's documented subscription
+ * path shape (`.../sub/<token>[/...]`). Conservative by design: any other
+ * shape yields undefined - a token is never guessed (service-live-sync
+ * phase; lets sync refresh the stored token alongside the URL).
+ */
+function subscriptionTokenFromUrl(url: string | undefined): string | undefined {
+  if (typeof url !== "string" || url === "") {
+    return undefined;
+  }
+  const match = /\/sub\/([^/?#]+)/.exec(url);
+  return match === null || match[1] === "" ? undefined : match[1];
 }
 
 /**
@@ -136,6 +159,10 @@ function mapUserFields(user: MarzbanUser, subscriptionBase: string): MarzbanAcco
   const subscriptionUrl = joinSubscriptionUrl(subscriptionBase, user.subscription_url);
   if (subscriptionUrl !== undefined) {
     result.subscriptionUrl = subscriptionUrl;
+    const token = subscriptionTokenFromUrl(user.subscription_url ?? subscriptionUrl);
+    if (token !== undefined) {
+      result.subscriptionToken = token;
+    }
   }
   if (Array.isArray(user.links)) {
     const links = user.links.filter((l): l is string => typeof l === "string" && l !== "");
@@ -620,6 +647,30 @@ export class MarzbanAdapter implements PanelAdapter {
     }
     const fields = mapUserFields(fetched.user, this.subscriptionBase(input.subscriptionBaseUrl));
     return { ok: true, ...fields };
+  }
+
+  // --- unified sync surface (service-live-sync phase) -------------------------
+  // One read path: every targeted accessor is a projection of the same
+  // getServiceAccount snapshot via the shared derive* helpers.
+
+  async syncService(input: GetServiceAccountInput): Promise<GetServiceAccountResult> {
+    return this.getServiceAccount(input);
+  }
+
+  async getServiceStatus(input: GetServiceAccountInput): Promise<NormalizedAccountStatus | null> {
+    return deriveServiceStatus(await this.getServiceAccount(input));
+  }
+
+  async getTrafficUsage(input: GetServiceAccountInput): Promise<ServiceTrafficUsage | null> {
+    return deriveTrafficUsage(await this.getServiceAccount(input));
+  }
+
+  async getExpiry(input: GetServiceAccountInput): Promise<Date | null> {
+    return deriveExpiry(await this.getServiceAccount(input));
+  }
+
+  async getSubscriptionInfo(input: GetServiceAccountInput): Promise<ServiceSubscriptionInfo | null> {
+    return deriveSubscriptionInfo(await this.getServiceAccount(input));
   }
 
   /**

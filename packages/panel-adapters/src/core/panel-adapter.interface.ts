@@ -9,6 +9,7 @@ import type {
   CreateServiceAccountResult,
   GetServiceAccountInput,
   GetServiceAccountResult,
+  NormalizedAccountStatus,
   PanelCapability,
   PanelHealthResult,
   PanelType,
@@ -18,6 +19,8 @@ import type {
   RegenerateSubscriptionResult,
   RenewServiceAccountInput,
   RenewServiceAccountResult,
+  ServiceSubscriptionInfo,
+  ServiceTrafficUsage,
 } from "./panel.types.js";
 
 /**
@@ -69,6 +72,28 @@ export interface PanelAdapter {
    * failures, never fakes success, never includes credentials.
    */
   getServiceAccount(input: GetServiceAccountInput): Promise<GetServiceAccountResult>;
+
+  // --- unified sync surface (service-live-sync phase) -----------------------
+  // syncService returns the FULL normalized snapshot; the targeted accessors
+  // below are projections of the same single read (implemented via the
+  // shared derive* helpers - one HTTP path, no drift). Each returns null
+  // when the read failed or the panel did not report the value - a panel
+  // field is NEVER invented.
+
+  /** Full normalized live snapshot of one service account (read-only). */
+  syncService(input: GetServiceAccountInput): Promise<GetServiceAccountResult>;
+
+  /** Live account status; null = unavailable (read failed / not reported). */
+  getServiceStatus(input: GetServiceAccountInput): Promise<NormalizedAccountStatus | null>;
+
+  /** Live traffic usage (used/limit/remaining); null = read failed. */
+  getTrafficUsage(input: GetServiceAccountInput): Promise<ServiceTrafficUsage | null>;
+
+  /** Live expiry; null = unavailable or the account never expires. */
+  getExpiry(input: GetServiceAccountInput): Promise<Date | null>;
+
+  /** Live subscription URL/token/config links; null = read failed. */
+  getSubscriptionInfo(input: GetServiceAccountInput): Promise<ServiceSubscriptionInfo | null>;
 
   /**
    * Renews one EXISTING service account: new traffic limit + expiry on the

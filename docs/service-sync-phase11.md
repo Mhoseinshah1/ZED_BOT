@@ -1,5 +1,11 @@
 # ZED_BOT service sync (Phase 11)
 
+> The service-live-sync phase later made this sync AUTOMATIC on opening a
+> service page (TTL cache, display budget, Persian fallbacks) and added the
+> unified adapter sync surface — see `docs/service-sync-architecture.md`.
+> This document describes the underlying Phase 11 engine, which is
+> unchanged.
+
 Phase 11 upgrades the «بروزرسانی اطلاعات ♻️» button from DB-only re-read to
 a real **read-only panel sync**: the bot reads the account from the panel
 and updates the stored `Service` fields. Nothing on the panel is ever
