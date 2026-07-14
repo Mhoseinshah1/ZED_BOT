@@ -26,6 +26,14 @@ import {
   toggleGatewayEnabled,
 } from "../../services/admin-payment-method.service.js";
 import {
+  ensureProviderGateways,
+  listManagedProviders,
+  managedProviderMeta,
+  setProviderEnabled,
+  testProviderConnection,
+  type ManagedProviderRow,
+} from "../../services/admin-payment-provider.service.js";
+import {
   isWalletPaymentEnabled,
   isWalletTopupEnabled,
   paymentPageNotice,
@@ -37,6 +45,7 @@ import {
   setWalletTopupMinToman,
   walletTopupInstruction,
 } from "../../services/payment-settings.service.js";
+import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
 import { walletTopupLimits } from "../../services/wallet-topup.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import {
@@ -52,12 +61,18 @@ import {
   gatewayText,
   lastCardWarningKeyboard,
   noGatewayKeyboard,
-  paymentMethodsKeyboard,
-  paymentMethodsText,
   paymentSettingsKeyboard,
   paymentSettingsText,
+  providerBackKeyboard,
+  providerConfigText,
+  providerListKeyboard,
+  providerListText,
+  providerTestResultText,
+  providerToggleConfirmKeyboard,
+  providerToggleConfirmText,
   shortId,
   type PaymentSettingsView,
+  type ProviderButtonLabels,
 } from "./admin-finance-views.js";
 
 // =============================================================================
@@ -262,22 +277,156 @@ adminFinanceHandler.callbackQuery(
   ),
 );
 
+// --- payment provider management (provider-management phase) ---------------------------
+
+const DUPLICATE_ACTION_TEXT = "این عملیات قبلاً انجام شده است.";
+const TESTING_CONNECTION_TEXT = "در حال تست اتصال…";
+
+async function providerButtonLabels(): Promise<ProviderButtonLabels> {
+  const [enable, disable, settings, test] = await Promise.all([
+    getButtonText("pm_enable"),
+    getButtonText("pm_disable"),
+    getButtonText("pm_settings"),
+    getButtonText("pm_test"),
+  ]);
+  return { enable, disable, settings, test };
+}
+
+async function findManagedProvider(providerKey: string): Promise<ManagedProviderRow | null> {
+  const rows = await listManagedProviders();
+  return rows.find((row) => row.providerKey === providerKey) ?? null;
+}
+
+/** «مدیریت روش‌های پرداخت» - the provider list page (FIN_CB.methods). */
+async function renderProviderList(ctx: BotContext): Promise<void> {
+  const [rows, header, buttons] = await Promise.all([
+    listManagedProviders(),
+    getMessageTemplate("payment_methods_admin_header"),
+    providerButtonLabels(),
+  ]);
+  await safeEditOrReply(ctx, providerListText(header, rows), providerListKeyboard(rows, buttons), HTML);
+}
+
 adminFinanceHandler.callbackQuery(FIN_CB.methods, async (ctx) => {
   if (ctx.admin === null) {
     return;
   }
   clearAdminPaymentState(ctx);
-  const gateways = await listCardGateways();
+  // Bootstrap missing gateway rows (online providers start DISABLED).
+  await ensureProviderGateways();
   await safeAnswerCallback(ctx);
-  await safeEditOrReply(ctx, paymentMethodsText(gateways), paymentMethodsKeyboard(), HTML);
+  await renderProviderList(ctx);
 });
 
-// Card-to-card entry: none -> create prompt, one -> its page, many -> list.
-adminFinanceHandler.callbackQuery(FIN_CB.card, async (ctx) => {
+// Enable/disable: confirmation page first (the confirm callback carries the
+// intended direction, so a stale button can never flip the wrong way).
+adminFinanceHandler.callbackQuery(/^admin:fin:pm:t:([A-Z_]+)$/, async (ctx) => {
   if (ctx.admin === null) {
     return;
   }
   clearAdminPaymentState(ctx);
+  const row = await findManagedProvider(ctx.match[1]);
+  if (row === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  const enable = !row.enabled;
+  const question = await getMessageTemplate(
+    enable ? "payment_provider_enable_confirm" : "payment_provider_disable_confirm",
+  );
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    providerToggleConfirmText(question, row),
+    providerToggleConfirmKeyboard(row.providerKey, enable),
+    HTML,
+  );
+});
+
+adminFinanceHandler.callbackQuery(/^admin:fin:pm:t:([A-Z_]+):(on|off)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminPaymentState(ctx);
+  const enable = ctx.match[2] === "on";
+  const result = await setProviderEnabled(ctx.match[1], enable, ctx.admin.id);
+  if (!result.ok) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  if (!result.changed) {
+    await safeAnswerCallback(ctx, DUPLICATE_ACTION_TEXT);
+  } else {
+    await safeAnswerCallback(
+      ctx,
+      await getMessageTemplate(
+        enable ? "payment_provider_enabled_text" : "payment_provider_disabled_text",
+      ),
+    );
+  }
+  await renderProviderList(ctx);
+});
+
+// «تنظیمات»: CARD_TO_CARD -> the existing card-management page, WALLET ->
+// the existing wallet/payment settings page, online providers -> read-only
+// env-config status.
+adminFinanceHandler.callbackQuery(/^admin:fin:pm:s:([A-Z_]+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminPaymentState(ctx);
+  const meta = managedProviderMeta(ctx.match[1]);
+  if (meta === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  if (meta.key === "CARD_TO_CARD") {
+    await renderCardManagementEntry(ctx);
+    return;
+  }
+  if (meta.key === "WALLET") {
+    await safeAnswerCallback(ctx);
+    await renderSettingsPage(ctx);
+    return;
+  }
+  const row = await findManagedProvider(meta.key);
+  if (row === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(ctx, providerConfigText(row), providerBackKeyboard(), HTML);
+});
+
+// «تست اتصال» (ZARINPAL/NOWPAYMENTS): popup first, then the result page with
+// the refreshed provider section.
+adminFinanceHandler.callbackQuery(/^admin:fin:pm:c:([A-Z_]+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminPaymentState(ctx);
+  const meta = managedProviderMeta(ctx.match[1]);
+  if (meta === null || !meta.supportsConnectionTest) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  await safeAnswerCallback(ctx, TESTING_CONNECTION_TEXT);
+  const { ok } = await testProviderConnection(meta.key);
+  const [row, resultText] = await Promise.all([
+    findManagedProvider(meta.key),
+    getMessageTemplate(ok ? "payment_provider_test_ok_text" : "payment_provider_test_failed_text"),
+  ]);
+  if (row === null) {
+    await safeEditOrReply(ctx, resultText, providerBackKeyboard());
+    return;
+  }
+  await safeEditOrReply(ctx, providerTestResultText(resultText, row), providerBackKeyboard(), HTML);
+});
+
+// Card-to-card entry: none -> create prompt, one -> its page, many -> list.
+// Reached from «تنظیمات» on the CARD_TO_CARD provider row AND from the old
+// admin:finance:card route (stale buttons keep answering).
+async function renderCardManagementEntry(ctx: BotContext): Promise<void> {
   const gateways = await listCardGateways();
   if (gateways.length === 0) {
     await safeAnswerCallback(ctx);
@@ -294,6 +443,14 @@ adminFinanceHandler.callbackQuery(FIN_CB.card, async (ctx) => {
   }
   await safeAnswerCallback(ctx);
   await safeEditOrReply(ctx, "کارت‌به‌کارت 💳\n\nیک مورد را انتخاب کنید:", gatewayListKeyboard(gateways));
+}
+
+adminFinanceHandler.callbackQuery(FIN_CB.card, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminPaymentState(ctx);
+  await renderCardManagementEntry(ctx);
 });
 
 adminFinanceHandler.callbackQuery(FIN_CB.addGateway, async (ctx) => {

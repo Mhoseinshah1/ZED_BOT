@@ -865,6 +865,11 @@ model PaymentGateway {
   supportUsername                     String?
   instructionText                     String?
   displayOrder                        Int                @default(0)
+  // Provider-management phase: optional admin-facing description plus the
+  // last connection-test outcome ("OK"/"FAILED"; never raw provider errors).
+  description                         String?
+  lastCheckedAt                       DateTime?
+  healthStatus                        String?
   createdAt                           DateTime           @default(now())
   updatedAt                           DateTime           @updatedAt
 

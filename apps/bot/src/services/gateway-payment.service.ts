@@ -315,7 +315,9 @@ export async function getOrCreateGatewayPayment(
     ok: false,
     error: await getMessageTemplate("payment_gateway_unavailable_text"),
   });
-  if (!isOnlineProvider(gateway.type)) {
+  // Provider-management phase: an admin-disabled gateway row never creates
+  // a payment, even through a stale/raced selection.
+  if (!gateway.isEnabled || !isOnlineProvider(gateway.type)) {
     return unavailable();
   }
   const manager = await buildGatewayManager();

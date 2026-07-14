@@ -259,6 +259,63 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     defaultContent: "این روش پرداخت موقتاً در دسترس نیست. لطفاً روش دیگری را انتخاب کنید.",
     allowedVariables: [],
   },
+  // --- admin payment provider management (provider-management phase) ---------------
+  {
+    key: "payment_methods_admin_header",
+    title: "عنوان مدیریت روش‌های پرداخت",
+    category: "payment",
+    defaultContent: "مدیریت روش‌های پرداخت",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_provider_enable_confirm",
+    title: "تایید فعال کردن روش پرداخت",
+    category: "payment",
+    defaultContent: "آیا از فعال کردن این روش پرداخت مطمئن هستید؟",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_provider_disable_confirm",
+    title: "تایید غیرفعال کردن روش پرداخت",
+    category: "payment",
+    defaultContent: "آیا از غیرفعال کردن این روش پرداخت مطمئن هستید؟",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_provider_enabled_text",
+    title: "پیام فعال شدن روش پرداخت",
+    category: "payment",
+    defaultContent: "روش پرداخت با موفقیت فعال شد ✅",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_provider_disabled_text",
+    title: "پیام غیرفعال شدن روش پرداخت",
+    category: "payment",
+    defaultContent: "روش پرداخت با موفقیت غیرفعال شد ✅",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_provider_test_ok_text",
+    title: "پیام موفقیت تست اتصال",
+    category: "payment",
+    defaultContent: "اتصال با موفقیت برقرار شد ✅",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_provider_test_failed_text",
+    title: "پیام ناموفق بودن تست اتصال",
+    category: "payment",
+    defaultContent: "اتصال به سرویس پرداخت برقرار نشد.",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_no_online_methods_text",
+    title: "پیام نبود روش پرداخت آنلاین فعال",
+    category: "payment",
+    defaultContent: "در حال حاضر روش پرداخت آنلاین فعالی وجود ندارد.",
+    allowedVariables: [],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -296,4 +353,9 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "wallet_transactions", title: "تراکنش‌های کیف پول", text: "تراکنش‌های کیف پول 🏦" },
   { key: "back_to_support", title: "بازگشت به پشتیبانی", text: "بازگشت به پشتیبانی" },
   { key: "back_to_history", title: "بازگشت به سوابق", text: "بازگشت به سوابق" },
+  // Admin payment provider management (provider-management phase).
+  { key: "pm_enable", title: "فعال کردن روش پرداخت", text: "فعال کردن" },
+  { key: "pm_disable", title: "غیرفعال کردن روش پرداخت", text: "غیرفعال کردن" },
+  { key: "pm_settings", title: "تنظیمات روش پرداخت", text: "تنظیمات" },
+  { key: "pm_test", title: "تست اتصال روش پرداخت", text: "تست اتصال" },
 ];

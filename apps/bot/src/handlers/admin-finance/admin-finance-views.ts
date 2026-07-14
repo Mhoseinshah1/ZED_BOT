@@ -6,6 +6,7 @@ import {
   maskCardNumber,
   type CardGatewayWithCounts,
 } from "../../services/admin-payment-method.service.js";
+import type { ManagedProviderRow } from "../../services/admin-payment-provider.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { formatToman } from "../user-wallet/wallet-views.js";
 
@@ -39,6 +40,13 @@ export const FIN_CB = {
   settingsMaxTopup: "admin:finance:settings:max_topup",
   settingsTopupInstruction: "admin:finance:settings:topup_instruction",
   settingsPaymentNotice: "admin:finance:settings:payment_notice",
+  // Provider-management phase - <key> is ALWAYS the stable provider enum
+  // key (CARD_TO_CARD/WALLET/ZARINPAL/...), never a display name.
+  pmToggle: (key: string): string => `admin:fin:pm:t:${key}`,
+  pmToggleConfirm: (key: string, enable: boolean): string =>
+    `admin:fin:pm:t:${key}:${enable ? "on" : "off"}`,
+  pmSettings: (key: string): string => `admin:fin:pm:s:${key}`,
+  pmTest: (key: string): string => `admin:fin:pm:c:${key}`,
 } as const;
 
 export const FINANCE_LANDING_TEXT = "مالی 💎";
@@ -134,31 +142,115 @@ function limitLabel(value: number | null): string {
   return value === null ? "بدون محدودیت" : formatToman(value);
 }
 
-/** «روش‌های پرداخت 💳» summary - card-to-card status at a glance. */
-export function paymentMethodsText(gateways: CardGatewayWithCounts[]): string {
-  const lines = ["روش‌های پرداخت 💳", ""];
-  if (gateways.length === 0) {
-    lines.push("کارت‌به‌کارت: ساخته نشده ❌", "", "برای فعال‌سازی وارد بخش کارت‌به‌کارت شوید.");
-    return lines.join("\n");
-  }
-  for (const g of gateways) {
-    lines.push(
-      `کارت‌به‌کارت${gateways.length > 1 ? ` (${escapeHtml(g.name)})` : ""}: ${
-        g.isEnabled ? "روشن ✅" : "خاموش ⏸"
-      }`,
-      `کارت‌های فعال: ${g.activeCardCount} از ${g.totalCardCount}`,
-      `حداقل مبلغ: ${limitLabel(g.minAmountToman)} | حداکثر مبلغ: ${limitLabel(g.maxAmountToman)}`,
-      "",
-    );
-  }
-  return lines.join("\n").trimEnd();
+// --- payment provider management (provider-management phase) -------------------------
+
+/** Single render site - the Persian status words stay view constants. */
+const PROVIDER_ENABLED_LABEL = "فعال ✅";
+const PROVIDER_DISABLED_LABEL = "غیرفعال ❌";
+export const BACK_TO_FINANCE_LABEL = "بازگشت به مالی";
+export const PROVIDER_ENV_NOTE =
+  "مقادیر از متغیرهای محیطی سرور خوانده می‌شوند و از این بخش قابل ویرایش نیستند.";
+
+/** ButtonText-backed labels for the provider rows (pm_* keys). */
+export interface ProviderButtonLabels {
+  enable: string;
+  disable: string;
+  settings: string;
+  test: string;
 }
 
-export function paymentMethodsKeyboard(): InlineKeyboard {
+function formatCheckDate(date: Date): string {
+  return `${date.toISOString().replace("T", " ").slice(0, 16)} UTC`;
+}
+
+/** One provider's status section (shared by the list and detail pages). */
+export function providerSectionLines(row: ManagedProviderRow): string[] {
+  const lines = [
+    `💳 ${escapeHtml(row.displayName)}`,
+    `وضعیت: ${row.enabled ? PROVIDER_ENABLED_LABEL : PROVIDER_DISABLED_LABEL}`,
+    `نوع: ${escapeHtml(row.kindLabel)}`,
+  ];
+  if (row.lastCheckedAt !== null) {
+    lines.push(
+      `آخرین تست اتصال: ${row.healthStatus === "OK" ? "موفق ✅" : "ناموفق ❌"} (${formatCheckDate(row.lastCheckedAt)})`,
+    );
+  }
+  return lines;
+}
+
+/** «مدیریت روش‌های پرداخت» - header + one section per managed provider. */
+export function providerListText(header: string, rows: ManagedProviderRow[]): string {
+  const lines = [escapeHtml(header)];
+  for (const row of rows) {
+    lines.push("", ...providerSectionLines(row));
+  }
+  return lines.join("\n");
+}
+
+/**
+ * One row per provider, aligned with the message sections (same order):
+ * toggle | settings | connection test (when supported). Callback data
+ * carries the STABLE provider key, never the display name.
+ */
+export function providerListKeyboard(
+  rows: ManagedProviderRow[],
+  buttons: ProviderButtonLabels,
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  for (const row of rows) {
+    kb.text(row.enabled ? buttons.disable : buttons.enable, FIN_CB.pmToggle(row.providerKey));
+    kb.text(buttons.settings, FIN_CB.pmSettings(row.providerKey));
+    if (row.supportsConnectionTest) {
+      kb.text(buttons.test, FIN_CB.pmTest(row.providerKey));
+    }
+    kb.row();
+  }
+  kb.text(BACK_TO_FINANCE_LABEL, FIN_CB.root).row();
+  kb.text("بازگشت به پنل ادمین", CB.ADMIN_MENU);
+  return kb;
+}
+
+/** Enable/disable confirmation page: template question + the provider line. */
+export function providerToggleConfirmText(question: string, row: ManagedProviderRow): string {
+  return [...providerSectionLines(row), "", escapeHtml(question)].join("\n");
+}
+
+export function providerToggleConfirmKeyboard(
+  providerKey: string,
+  enable: boolean,
+): InlineKeyboard {
   return new InlineKeyboard()
-    .text("کارت‌به‌کارت 💳", FIN_CB.card)
+    .text("تایید", FIN_CB.pmToggleConfirm(providerKey, enable))
+    .text("انصراف", FIN_CB.methods)
     .row()
-    .text("بازگشت", FIN_CB.root);
+    .text(BACK_TO_FINANCE_LABEL, FIN_CB.root);
+}
+
+/**
+ * Read-only config-status page for env-configured providers: PRESENCE-ONLY
+ * lines (built by the service - never secret values) + the env note.
+ */
+export function providerConfigText(row: ManagedProviderRow): string {
+  return [
+    ...providerSectionLines(row),
+    "",
+    ...row.configLines.map((line) => escapeHtml(line)),
+    "",
+    PROVIDER_ENV_NOTE,
+  ].join("\n");
+}
+
+/** Back keyboard for provider sub-pages: to the list + to the finance landing. */
+export function providerBackKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("بازگشت", FIN_CB.methods)
+    .row()
+    .text(BACK_TO_FINANCE_LABEL, FIN_CB.root);
+}
+
+/** Connection-test result page: result template + the refreshed provider section. */
+export function providerTestResultText(resultText: string, row: ManagedProviderRow): string {
+  return [escapeHtml(resultText), "", ...providerSectionLines(row)].join("\n");
 }
 
 /** Shown when no CARD_TO_CARD gateway exists yet. */

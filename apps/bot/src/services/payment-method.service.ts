@@ -11,6 +11,8 @@ import {
   type UserGroup,
 } from "@zedbot/database";
 
+import { SUPPORTED_ONLINE_PROVIDERS } from "@zedbot/payments";
+
 import { buildGatewayManager, isOnlineProvider } from "./gateway-payment.service.js";
 
 // =============================================================================
@@ -71,6 +73,28 @@ export async function getAvailablePaymentMethods(
   return eligible.filter(
     (g) => !isOnlineProvider(g.type) || manager.get(g.type)?.isAvailable() === true,
   );
+}
+
+/**
+ * True when at least one ONLINE-provider gateway row exists but is switched
+ * off by the admin (isEnabled false) or its adapter is unavailable (env
+ * config / Stars rate missing). Drives the «روش پرداخت آنلاین فعالی وجود
+ * ندارد» empty state; an amount/group filter alone keeps the generic
+ * NO_METHODS_TEXT.
+ */
+export async function hasDormantOnlineGateways(): Promise<boolean> {
+  const rows = await prisma.paymentGateway.findMany({
+    where: { type: { in: [...SUPPORTED_ONLINE_PROVIDERS] } },
+    select: { type: true, isEnabled: true },
+  });
+  if (rows.length === 0) {
+    return false;
+  }
+  if (rows.some((row) => !row.isEnabled)) {
+    return true;
+  }
+  const manager = await buildGatewayManager();
+  return rows.some((row) => manager.get(row.type)?.isAvailable() !== true);
 }
 
 export async function getGatewayByShortId(shortId: string): Promise<PaymentGateway | null> {
