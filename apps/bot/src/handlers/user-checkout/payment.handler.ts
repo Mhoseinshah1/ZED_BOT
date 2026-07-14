@@ -31,6 +31,7 @@ import {
   getAvailablePaymentMethods,
   getGatewayByShortId,
   getPendingReviewPayment,
+  hasDormantOnlineGateways,
   pickCardAccountForGateway,
   submitReceipt,
 } from "../../services/payment-method.service.js";
@@ -94,7 +95,12 @@ export async function showPaymentMethods(
   }
   const gateways = await getAvailablePaymentMethods(user, checkout);
   if (gateways.length === 0) {
-    await safeEditOrReply(ctx, NO_METHODS_TEXT, paymentMethodsKeyboard(checkout, []));
+    // Provider-management phase: online gateway rows that exist but are
+    // admin-disabled (or adapter-unavailable) get the dedicated empty state.
+    const text = (await hasDormantOnlineGateways())
+      ? await getMessageTemplate("payment_no_online_methods_text")
+      : NO_METHODS_TEXT;
+    await safeEditOrReply(ctx, text, paymentMethodsKeyboard(checkout, []));
     return;
   }
   // Phase 22: operator notice under the method list (escaped inside the view).
@@ -143,6 +149,12 @@ paymentHandler.callbackQuery(/^user:pay:g:([0-9a-f-]+):([0-9a-f-]+)$/, async (ct
   const gateway = await getGatewayByShortId(ctx.match[2]);
   if (gateway === null) {
     await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+  // Provider-management phase: an admin-disabled provider can never be
+  // selected manually - stale buttons answer with the unavailable template.
+  if (!gateway.isEnabled) {
+    await safeAnswerCallback(ctx, await getMessageTemplate("payment_gateway_unavailable_text"));
     return;
   }
   // Re-validate eligibility so stale buttons cannot bypass the filters.
