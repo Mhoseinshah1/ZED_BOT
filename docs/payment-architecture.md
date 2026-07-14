@@ -59,10 +59,26 @@ Related documents: [zarinpal.md](zarinpal.md), [nowpayments.md](nowpayments.md),
 | `apps/bot/src/services/gateway-payment.service.ts` | Payment creation, `settleGatewayPayment` (the money gate), fulfillment dispatch, settlement sweep |
 | `apps/bot/src/handlers/stars-payment.handler.ts` | `pre_checkout_query` validation + `successful_payment` recording/settlement |
 | `apps/bot/src/handlers/admin-finance/payments-list.handler.ts` | Read-only admin payment browser (business fields only) |
+| `apps/bot/src/services/admin-payment-provider.service.ts` | Admin provider registry, bootstrap, enable/disable switch (config guard), connection tests |
+| `apps/bot/src/handlers/admin-finance/admin-finance.handler.ts` | Admin provider list/detail navigation (`payprov:*` routes) |
 
 `packages/payments` is **provider-pure**: it never imports the database and
 never throws for expected provider failures. Callers persist adapter results
 on `Payment` rows.
+
+## Admin provider management
+
+The admin layer above the gateways lives under پنل ادمین → «مالی 💎» →
+«روش‌های پرداخت 💳»: a compact provider **list** page (one button per
+provider with its live فعال/غیرفعال status) opening a dedicated **detail**
+page per provider with provider-specific fields and actions. Callbacks use
+the stable `payprov:view|toggle|settings|test:<PROVIDER_KEY>` identifiers —
+never display names — and enabling a provider re-validates its configuration
+first (an env-configured gateway with missing credentials cannot be
+enabled). Disabling only flips the visibility switch: no config, card
+account or `Payment` row is ever deleted, and in-flight external payments
+are not cancelled. Details: 
+[payment-provider-admin-management.md](payment-provider-admin-management.md).
 
 ## Database fields added (payment-gateway-system phase)
 

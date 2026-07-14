@@ -134,11 +134,21 @@ function clearProviderEnv(): void {
   clearGatewayManagerCache();
 }
 
-/** Working (fixture) Zarinpal env pointed at the mock - adapter available. */
+/** Working (fixture) Zarinpal env pointed at the mock - fully configured. */
 function setZarinpalEnv(): void {
   process.env.ZARINPAL_MERCHANT_ID = ZP_SECRET_MERCHANT_ID;
   process.env.ZARINPAL_CALLBACK_URL = "https://bot.example.com/payments/zarinpal/callback";
   process.env.ZARINPAL_BASE_URL = mockHost;
+  clearGatewayManagerCache();
+}
+
+/** Working (fixture) NOWPayments env pointed at the mock - fully configured. */
+function setNowPaymentsEnv(): void {
+  process.env.NOWPAYMENTS_API_KEY = NP_SECRET_API_KEY;
+  process.env.NOWPAYMENTS_IPN_SECRET = NP_SECRET_IPN;
+  process.env.NOWPAYMENTS_CALLBACK_URL = "https://bot.example.com/payments/nowpayments/ipn";
+  process.env.NOWPAYMENTS_TOMAN_PER_UNIT = "60000";
+  process.env.NOWPAYMENTS_BASE_URL = mockHost;
   clearGatewayManagerCache();
 }
 
@@ -314,10 +324,17 @@ describe("ADMIN ACCESS: provider routes live behind the admin auth gate (1-2)", 
     expect(appSrc).toMatch(/callbackQuery\(\/\^admin:\/, adminArea\.middleware\(\)\)/);
   });
 
-  it("2. every emitted admin:fin:pm: callback has a registered callbackQuery route", () => {
-    // Registered pm routes (regex sources) in the finance handler.
+  it("2. every emitted provider callback has a registered callbackQuery route", () => {
+    // payprov:* callbacks run through the SAME gated admin area.
+    expect(appSrc).toMatch(/callbackQuery\(\/\^payprov:\/, adminArea\.middleware\(\)\)/);
+
+    // Registered provider routes (regex sources) in the finance handler:
+    // the payprov navigation routes plus the pre-refactor admin:fin:pm
+    // aliases (stale buttons on old messages keep answering).
     const registered: string[] = [];
-    for (const match of handlerSrc.matchAll(/callbackQuery\(\s*\/\^(admin:fin:pm:[^/]+)\/,/g)) {
+    for (const match of handlerSrc.matchAll(
+      /callbackQuery\(\s*\/\^((?:admin:fin:pm|payprov):[^/]+)\/,/g,
+    )) {
       registered.push(match[1]);
     }
     expect(registered.sort()).toEqual([
@@ -325,20 +342,31 @@ describe("ADMIN ACCESS: provider routes live behind the admin auth gate (1-2)", 
       "admin:fin:pm:s:([A-Z_]+)$",
       "admin:fin:pm:t:([A-Z_]+)$",
       "admin:fin:pm:t:([A-Z_]+):(on|off)$",
+      "payprov:settings:([A-Z_]+)$",
+      "payprov:test:([A-Z_]+)$",
+      "payprov:toggle:([A-Z_]+)$",
+      "payprov:toggle:([A-Z_]+):(on|off)$",
+      "payprov:view:([A-Z_]+)$",
     ]);
     // Stable provider keys only: each route accepts the enum-key alphabet,
     // never free-form display names; the confirm route carries direction.
     for (const source of registered) {
       expect(source).toContain("([A-Z_]+)");
     }
-    expect(registered).toContain("admin:fin:pm:t:([A-Z_]+):(on|off)$");
+    expect(registered).toContain("payprov:toggle:([A-Z_]+):(on|off)$");
 
-    // Every pm callback the views can emit resolves to a registered route.
+    // Every provider callback the views can emit resolves to a registered
+    // route - the legacy admin:fin:pm builders are gone from the views.
     const emitted = new Set<string>();
-    for (const match of viewsSrc.matchAll(/`(admin:fin:pm:[a-z:]*)\$\{/g)) {
+    for (const match of viewsSrc.matchAll(/`((?:admin:fin:pm|payprov):[a-z:]*)\$\{/g)) {
       emitted.add(match[1]);
     }
-    expect([...emitted].sort()).toEqual(["admin:fin:pm:c:", "admin:fin:pm:s:", "admin:fin:pm:t:"]);
+    expect([...emitted].sort()).toEqual([
+      "payprov:settings:",
+      "payprov:test:",
+      "payprov:toggle:",
+      "payprov:view:",
+    ]);
     const prefixes = registered.map((source) => source.slice(0, source.search(/[([\\$?+*]/)));
     for (const prefix of emitted) {
       expect(
@@ -465,6 +493,16 @@ describe.runIf(hasDb)("ENABLE/DISABLE: setProviderEnabled with duplicate protect
     const row = await gatewayRowByType("ZARINPAL");
     expect(row?.isEnabled).toBe(false);
 
+    // The enable guard re-checks env config at action time - enabling with
+    // NO config is refused and flips nothing (spec: incomplete config).
+    expect(await setProviderEnabled("ZARINPAL", true, ADMIN_ID)).toEqual({
+      ok: false,
+      changed: false,
+      reason: "incomplete_config",
+    });
+    expect((await gatewayRowByType("ZARINPAL"))?.isEnabled).toBe(false);
+
+    setZarinpalEnv();
     const enabled = await setProviderEnabled("ZARINPAL", true, ADMIN_ID);
     expect(enabled).toEqual({ ok: true, changed: true });
     expect((await gatewayRowByType("ZARINPAL"))?.isEnabled).toBe(true);
@@ -579,16 +617,15 @@ describe.runIf(hasDb)("USER VISIBILITY: only enabled+configured providers reach 
     // empty state must use payment_no_online_methods_text.
     expect(await hasDormantOnlineGateways()).toBe(true);
 
-    // The adapter-unavailable branch: with EVERY online row enabled but no
-    // env config at all, the rows are still dormant (nothing selectable).
-    // Reset env + manager cache before the flips.
+    // The adapter-unavailable branch: enabled rows whose env config has
+    // been REMOVED are still dormant (nothing selectable). The enable
+    // guard blocks reaching this state through setProviderEnabled, so the
+    // rows are flipped directly - simulating config removed after enable.
     clearProviderEnv();
-    for (const type of ONLINE_TYPES) {
-      expect(await setProviderEnabled(type, true, ADMIN_ID)).toEqual({
-        ok: true,
-        changed: true,
-      });
-    }
+    await prisma.paymentGateway.updateMany({
+      where: { type: { in: ONLINE_TYPES } },
+      data: { isEnabled: true },
+    });
     expect(await hasDormantOnlineGateways()).toBe(true);
     // And none of them reaches the user's method list either.
     const methods = await getAvailablePaymentMethods(user, checkout);
@@ -596,7 +633,8 @@ describe.runIf(hasDb)("USER VISIBILITY: only enabled+configured providers reach 
       false,
     );
 
-    // Leave every online provider disabled for the following suites.
+    // Leave every online provider disabled for the following suites -
+    // disable is NEVER guarded by config, so the service switch works.
     for (const type of ONLINE_TYPES) {
       expect(await setProviderEnabled(type, false, ADMIN_ID)).toEqual({
         ok: true,
@@ -649,8 +687,7 @@ describe.runIf(hasDb)("SECURITY: presence-only markers and secret-free logs (13-
   });
 
   it("14. enable/disable + connection-test logs carry provider key and admin id only", async () => {
-    setSecretEnv();
-    process.env.NOWPAYMENTS_BASE_URL = mockHost; // keep the test offline
+    setNowPaymentsEnv(); // full config (enable guard) pointed at the mock
     const savedLogLevel = process.env.LOG_LEVEL;
     process.env.LOG_LEVEL = "info";
 
@@ -668,7 +705,7 @@ describe.runIf(hasDb)("SECURITY: presence-only markers and secret-free logs (13-
         ok: true,
         changed: true,
       });
-      expect((await testProviderConnection("NOWPAYMENTS")).ok).toBe(true);
+      expect((await testProviderConnection("NOWPAYMENTS")).status).toBe("OK");
       expect(await setProviderEnabled("NOWPAYMENTS", false, ADMIN_ID)).toEqual({
         ok: true,
         changed: true,
@@ -702,11 +739,11 @@ describe.runIf(hasDb)("SECURITY: presence-only markers and secret-free logs (13-
 // =============================================================================
 
 describe.runIf(hasDb)("CONNECTION TEST: probes + lastCheckedAt/healthStatus persistence (15-19)", () => {
-  it("15. NOWPayments GET /status 200 {message: OK} -> ok, healthStatus OK, lastCheckedAt set", async () => {
-    process.env.NOWPAYMENTS_BASE_URL = mockHost;
+  it("15. NOWPayments GET /status 200 {message: OK} -> OK, healthStatus OK, lastCheckedAt set", async () => {
+    setNowPaymentsEnv();
     const before = Date.now();
     const result = await testProviderConnection("NOWPAYMENTS");
-    expect(result).toEqual({ ok: true }); // never more than {ok} - no provider payloads
+    expect(result).toEqual({ status: "OK" }); // never more than the status - no provider payloads
     expect(mock.npStatusCalls).toBe(1);
 
     const row = await gatewayRowByType("NOWPAYMENTS");
@@ -715,22 +752,23 @@ describe.runIf(hasDb)("CONNECTION TEST: probes + lastCheckedAt/healthStatus pers
     expect(row?.lastCheckedAt?.getTime()).toBeGreaterThanOrEqual(before - 1000);
   });
 
-  it("16. unreachable NOWPayments host -> ok=false and FAILED persisted", async () => {
+  it("16. unreachable NOWPayments host -> FAILED persisted", async () => {
+    setNowPaymentsEnv();
     process.env.NOWPAYMENTS_BASE_URL = DEAD_HOST;
     const previous = (await gatewayRowByType("NOWPAYMENTS"))?.lastCheckedAt;
     const result = await testProviderConnection("NOWPAYMENTS");
-    expect(result).toEqual({ ok: false });
+    expect(result).toEqual({ status: "FAILED" });
 
     const row = await gatewayRowByType("NOWPAYMENTS");
     expect(row?.healthStatus).toBe("FAILED"); // the outcome, never the raw error
     expect(row?.lastCheckedAt?.getTime()).toBeGreaterThanOrEqual(previous?.getTime() ?? 0);
   });
 
-  it("17. Zarinpal structured error envelope on the dummy verify -> ok=true", async () => {
-    process.env.ZARINPAL_BASE_URL = mockHost;
+  it("17. Zarinpal structured error envelope on the dummy verify -> OK", async () => {
+    setZarinpalEnv();
     mock.zpVerifyMode = "error-envelope";
     const result = await testProviderConnection("ZARINPAL");
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ status: "OK" });
     expect(mock.zpVerifyCalls).toBe(1);
     // The probe is a WELL-FORMED DUMMY verify: fixed authority shape, tiny
     // amount - verify.json never creates anything server-side, and the
@@ -746,27 +784,34 @@ describe.runIf(hasDb)("CONNECTION TEST: probes + lastCheckedAt/healthStatus pers
     expect(row?.lastCheckedAt).not.toBeNull();
   });
 
-  it("18. Zarinpal non-JSON/HTML answer -> ok=false and FAILED persisted", async () => {
-    process.env.ZARINPAL_BASE_URL = mockHost;
+  it("18. Zarinpal non-JSON/HTML answer -> FAILED persisted", async () => {
+    setZarinpalEnv();
     mock.zpVerifyMode = "html";
     const result = await testProviderConnection("ZARINPAL");
-    expect(result).toEqual({ ok: false });
+    expect(result).toEqual({ status: "FAILED" });
     expect(mock.zpVerifyCalls).toBe(1);
 
     const row = await gatewayRowByType("ZARINPAL");
     expect(row?.healthStatus).toBe("FAILED");
   });
 
-  it("19. unsupported providers report failure with no request and no persistence", async () => {
+  it("19. unsupported/incomplete providers: no request, no persistence", async () => {
     // Guard against a regression ever reaching a real host.
     process.env.ZARINPAL_BASE_URL = DEAD_HOST;
     process.env.NOWPAYMENTS_BASE_URL = DEAD_HOST;
     const cardBefore = await gatewayRowByType("CARD_TO_CARD");
+    const zarinpalBefore = await gatewayRowByType("ZARINPAL");
 
-    expect(await testProviderConnection("CARD_TO_CARD")).toEqual({ ok: false });
-    expect(await testProviderConnection("WALLET")).toEqual({ ok: false });
-    expect(await testProviderConnection("TELEGRAM_STARS")).toEqual({ ok: false });
-    expect(await testProviderConnection("bogus")).toEqual({ ok: false });
+    // No meaningful test exists for these providers - UNSUPPORTED, and no
+    // fake test is ever invented for the wallet/card/stars pages.
+    expect(await testProviderConnection("CARD_TO_CARD")).toEqual({ status: "UNSUPPORTED" });
+    expect(await testProviderConnection("WALLET")).toEqual({ status: "UNSUPPORTED" });
+    expect(await testProviderConnection("TELEGRAM_STARS")).toEqual({ status: "UNSUPPORTED" });
+    expect(await testProviderConnection("bogus")).toEqual({ status: "UNSUPPORTED" });
+
+    // Supported provider with UNCONFIGURED env: INCOMPLETE - the probe is
+    // skipped and no misleading FAILED is persisted.
+    expect(await testProviderConnection("ZARINPAL")).toEqual({ status: "INCOMPLETE" });
 
     expect(mock.npStatusCalls).toBe(0);
     expect(mock.zpVerifyCalls).toBe(0);
@@ -774,6 +819,11 @@ describe.runIf(hasDb)("CONNECTION TEST: probes + lastCheckedAt/healthStatus pers
     expect(cardAfter?.healthStatus ?? null).toBe(cardBefore?.healthStatus ?? null);
     expect(cardAfter?.lastCheckedAt?.getTime() ?? null).toBe(
       cardBefore?.lastCheckedAt?.getTime() ?? null,
+    );
+    const zarinpalAfter = await gatewayRowByType("ZARINPAL");
+    expect(zarinpalAfter?.healthStatus).toBe(zarinpalBefore?.healthStatus);
+    expect(zarinpalAfter?.lastCheckedAt?.getTime()).toBe(
+      zarinpalBefore?.lastCheckedAt?.getTime(),
     );
   });
 });

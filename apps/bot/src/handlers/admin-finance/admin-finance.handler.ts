@@ -32,6 +32,7 @@ import {
   setProviderEnabled,
   testProviderConnection,
   type ManagedProviderRow,
+  type ProviderConnectionStatus,
 } from "../../services/admin-payment-provider.service.js";
 import {
   isWalletPaymentEnabled,
@@ -63,11 +64,13 @@ import {
   noGatewayKeyboard,
   paymentSettingsKeyboard,
   paymentSettingsText,
-  providerBackKeyboard,
+  providerActionResultText,
   providerConfigText,
+  providerDetailKeyboard,
+  providerDetailText,
   providerListKeyboard,
   providerListText,
-  providerTestResultText,
+  providerSettingsBackKeyboard,
   providerToggleConfirmKeyboard,
   providerToggleConfirmText,
   shortId,
@@ -277,19 +280,28 @@ adminFinanceHandler.callbackQuery(
   ),
 );
 
-// --- payment provider management (provider-management phase) ---------------------------
+// --- payment provider management (provider-navigation phase) ---------------------------
+//
+// Navigation: «روش‌های پرداخت» list (FIN_CB.methods) -> payprov:view:<KEY>
+// detail page -> toggle/settings/test actions. Every action re-renders the
+// DETAIL page so the admin always sees the fresh state. The pre-refactor
+// admin:fin:pm:{t,s,c} callbacks stay registered as aliases of the same
+// handlers - stale buttons on old messages keep answering.
 
-const DUPLICATE_ACTION_TEXT = "این عملیات قبلاً انجام شده است.";
 const TESTING_CONNECTION_TEXT = "در حال تست اتصال…";
 
 async function providerButtonLabels(): Promise<ProviderButtonLabels> {
-  const [enable, disable, settings, test] = await Promise.all([
-    getButtonText("pm_enable"),
-    getButtonText("pm_disable"),
-    getButtonText("pm_settings"),
-    getButtonText("pm_test"),
-  ]);
-  return { enable, disable, settings, test };
+  const [enable, disable, settings, settingsWallet, settingsCard, test, backProviders] =
+    await Promise.all([
+      getButtonText("pm_enable"),
+      getButtonText("pm_disable"),
+      getButtonText("pm_settings"),
+      getButtonText("pm_settings_wallet"),
+      getButtonText("pm_settings_card"),
+      getButtonText("pm_test"),
+      getButtonText("pm_back_providers"),
+    ]);
+  return { enable, disable, settings, settingsWallet, settingsCard, test, backProviders };
 }
 
 async function findManagedProvider(providerKey: string): Promise<ManagedProviderRow | null> {
@@ -297,14 +309,33 @@ async function findManagedProvider(providerKey: string): Promise<ManagedProvider
   return rows.find((row) => row.providerKey === providerKey) ?? null;
 }
 
-/** «مدیریت روش‌های پرداخت» - the provider list page (FIN_CB.methods). */
+/** «مدیریت روش‌های پرداخت 💳» - the compact provider LIST page. */
 async function renderProviderList(ctx: BotContext): Promise<void> {
-  const [rows, header, buttons] = await Promise.all([
+  const [rows, header, pickText] = await Promise.all([
     listManagedProviders(),
     getMessageTemplate("payment_methods_admin_header"),
+    getMessageTemplate("payment_provider_pick_text"),
+  ]);
+  await safeEditOrReply(ctx, providerListText(header, pickText), providerListKeyboard(rows), HTML);
+}
+
+/** One provider's DETAIL page, freshly loaded (optional result line on top). */
+async function renderProviderDetail(
+  ctx: BotContext,
+  providerKey: string,
+  resultText?: string,
+): Promise<void> {
+  const [row, buttons] = await Promise.all([
+    findManagedProvider(providerKey),
     providerButtonLabels(),
   ]);
-  await safeEditOrReply(ctx, providerListText(header, rows), providerListKeyboard(rows, buttons), HTML);
+  if (row === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  const text =
+    resultText === undefined ? providerDetailText(row) : providerActionResultText(resultText, row);
+  await safeEditOrReply(ctx, text, providerDetailKeyboard(row, buttons), HTML);
 }
 
 adminFinanceHandler.callbackQuery(FIN_CB.methods, async (ctx) => {
@@ -318,14 +349,23 @@ adminFinanceHandler.callbackQuery(FIN_CB.methods, async (ctx) => {
   await renderProviderList(ctx);
 });
 
-// Enable/disable: confirmation page first (the confirm callback carries the
-// intended direction, so a stale button can never flip the wrong way).
-adminFinanceHandler.callbackQuery(/^admin:fin:pm:t:([A-Z_]+)$/, async (ctx) => {
+adminFinanceHandler.callbackQuery(/^payprov:view:([A-Z_]+)$/, async (ctx) => {
   if (ctx.admin === null) {
     return;
   }
   clearAdminPaymentState(ctx);
-  const row = await findManagedProvider(ctx.match[1]);
+  await safeAnswerCallback(ctx);
+  await renderProviderDetail(ctx, ctx.match[1]);
+});
+
+// Enable/disable: confirmation page first (the confirm callback carries the
+// intended direction, so a stale button can never flip the wrong way).
+async function handleProviderToggleAsk(ctx: BotContext, providerKey: string): Promise<void> {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminPaymentState(ctx);
+  const row = await findManagedProvider(providerKey);
   if (row === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
@@ -341,41 +381,69 @@ adminFinanceHandler.callbackQuery(/^admin:fin:pm:t:([A-Z_]+)$/, async (ctx) => {
     providerToggleConfirmKeyboard(row.providerKey, enable),
     HTML,
   );
-});
+}
 
-adminFinanceHandler.callbackQuery(/^admin:fin:pm:t:([A-Z_]+):(on|off)$/, async (ctx) => {
+async function handleProviderToggleConfirm(
+  ctx: BotContext,
+  providerKey: string,
+  enable: boolean,
+): Promise<void> {
   if (ctx.admin === null) {
     return;
   }
   clearAdminPaymentState(ctx);
-  const enable = ctx.match[2] === "on";
-  const result = await setProviderEnabled(ctx.match[1], enable, ctx.admin.id);
+  const result = await setProviderEnabled(providerKey, enable, ctx.admin.id);
   if (!result.ok) {
+    if (result.reason === "incomplete_config") {
+      // Config re-checked at action time came back incomplete - explain and
+      // land back on the detail page (which shows what is missing).
+      const incompleteText = await getMessageTemplate("payment_provider_config_incomplete_text");
+      await safeAnswerCallback(ctx, incompleteText);
+      await renderProviderDetail(ctx, providerKey, incompleteText);
+      return;
+    }
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
   }
-  if (!result.changed) {
-    await safeAnswerCallback(ctx, DUPLICATE_ACTION_TEXT);
-  } else {
-    await safeAnswerCallback(
-      ctx,
-      await getMessageTemplate(
-        enable ? "payment_provider_enabled_text" : "payment_provider_disabled_text",
-      ),
-    );
-  }
-  await renderProviderList(ctx);
+  const resultText = await getMessageTemplate(
+    result.changed
+      ? enable
+        ? "payment_provider_enabled_text"
+        : "payment_provider_disabled_text"
+      : enable
+        ? "payment_provider_already_enabled_text"
+        : "payment_provider_already_disabled_text",
+  );
+  await safeAnswerCallback(ctx, resultText);
+  await renderProviderDetail(ctx, providerKey, resultText);
+}
+
+adminFinanceHandler.callbackQuery(/^payprov:toggle:([A-Z_]+)$/, async (ctx) => {
+  await handleProviderToggleAsk(ctx, ctx.match[1]);
 });
 
-// «تنظیمات»: CARD_TO_CARD -> the existing card-management page, WALLET ->
-// the existing wallet/payment settings page, online providers -> read-only
-// env-config status.
-adminFinanceHandler.callbackQuery(/^admin:fin:pm:s:([A-Z_]+)$/, async (ctx) => {
+adminFinanceHandler.callbackQuery(/^admin:fin:pm:t:([A-Z_]+)$/, async (ctx) => {
+  await handleProviderToggleAsk(ctx, ctx.match[1]);
+});
+
+adminFinanceHandler.callbackQuery(/^payprov:toggle:([A-Z_]+):(on|off)$/, async (ctx) => {
+  await handleProviderToggleConfirm(ctx, ctx.match[1], ctx.match[2] === "on");
+});
+
+adminFinanceHandler.callbackQuery(/^admin:fin:pm:t:([A-Z_]+):(on|off)$/, async (ctx) => {
+  await handleProviderToggleConfirm(ctx, ctx.match[1], ctx.match[2] === "on");
+});
+
+// «تنظیمات»: routes to the provider's EXISTING settings flow - CARD_TO_CARD
+// -> the card-management pages, WALLET -> the wallet/payment settings page,
+// online providers -> their read-only env-config status page. No generic
+// settings form exists.
+async function handleProviderSettings(ctx: BotContext, providerKey: string): Promise<void> {
   if (ctx.admin === null) {
     return;
   }
   clearAdminPaymentState(ctx);
-  const meta = managedProviderMeta(ctx.match[1]);
+  const meta = managedProviderMeta(providerKey);
   if (meta === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
@@ -389,38 +457,61 @@ adminFinanceHandler.callbackQuery(/^admin:fin:pm:s:([A-Z_]+)$/, async (ctx) => {
     await renderSettingsPage(ctx);
     return;
   }
-  const row = await findManagedProvider(meta.key);
+  const [row, buttons] = await Promise.all([findManagedProvider(meta.key), providerButtonLabels()]);
   if (row === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
   }
   await safeAnswerCallback(ctx);
-  await safeEditOrReply(ctx, providerConfigText(row), providerBackKeyboard(), HTML);
+  await safeEditOrReply(
+    ctx,
+    providerConfigText(row),
+    providerSettingsBackKeyboard(meta.key, buttons),
+    HTML,
+  );
+}
+
+adminFinanceHandler.callbackQuery(/^payprov:settings:([A-Z_]+)$/, async (ctx) => {
+  await handleProviderSettings(ctx, ctx.match[1]);
 });
 
-// «تست اتصال» (ZARINPAL/NOWPAYMENTS): popup first, then the result page with
-// the refreshed provider section.
-adminFinanceHandler.callbackQuery(/^admin:fin:pm:c:([A-Z_]+)$/, async (ctx) => {
+adminFinanceHandler.callbackQuery(/^admin:fin:pm:s:([A-Z_]+)$/, async (ctx) => {
+  await handleProviderSettings(ctx, ctx.match[1]);
+});
+
+// «تست اتصال» (ZARINPAL/NOWPAYMENTS only): popup first, then the refreshed
+// detail page with the result line. Result texts are templates - raw
+// provider errors never reach the admin.
+const TEST_RESULT_TEMPLATE: Record<Exclude<ProviderConnectionStatus, "UNSUPPORTED">, string> = {
+  OK: "payment_provider_test_ok_text",
+  FAILED: "payment_provider_test_failed_text",
+  INCOMPLETE: "payment_provider_test_incomplete_text",
+};
+
+async function handleProviderTest(ctx: BotContext, providerKey: string): Promise<void> {
   if (ctx.admin === null) {
     return;
   }
   clearAdminPaymentState(ctx);
-  const meta = managedProviderMeta(ctx.match[1]);
+  const meta = managedProviderMeta(providerKey);
   if (meta === null || !meta.supportsConnectionTest) {
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
   }
   await safeAnswerCallback(ctx, TESTING_CONNECTION_TEXT);
-  const { ok } = await testProviderConnection(meta.key);
-  const [row, resultText] = await Promise.all([
-    findManagedProvider(meta.key),
-    getMessageTemplate(ok ? "payment_provider_test_ok_text" : "payment_provider_test_failed_text"),
-  ]);
-  if (row === null) {
-    await safeEditOrReply(ctx, resultText, providerBackKeyboard());
-    return;
-  }
-  await safeEditOrReply(ctx, providerTestResultText(resultText, row), providerBackKeyboard(), HTML);
+  const { status } = await testProviderConnection(meta.key);
+  const resultText = await getMessageTemplate(
+    TEST_RESULT_TEMPLATE[status === "UNSUPPORTED" ? "FAILED" : status],
+  );
+  await renderProviderDetail(ctx, meta.key, resultText);
+}
+
+adminFinanceHandler.callbackQuery(/^payprov:test:([A-Z_]+)$/, async (ctx) => {
+  await handleProviderTest(ctx, ctx.match[1]);
+});
+
+adminFinanceHandler.callbackQuery(/^admin:fin:pm:c:([A-Z_]+)$/, async (ctx) => {
+  await handleProviderTest(ctx, ctx.match[1]);
 });
 
 // Card-to-card entry: none -> create prompt, one -> its page, many -> list.
