@@ -14,7 +14,11 @@ import {
   regenerateServiceSubscription,
   REGEN_SUCCESS_TEXT,
 } from "../../services/service-link.service.js";
-import { syncServiceFromPanel } from "../../services/service-sync.service.js";
+import {
+  serviceListSyncEnabled,
+  syncServiceForDisplay,
+  syncServiceFromPanel,
+} from "../../services/service-sync.service.js";
 import {
   buildTogglePreview,
   getToggleableServiceByShortId,
@@ -59,11 +63,15 @@ const HTML = { parseMode: "HTML" as const };
 export const servicesHandler = new Composer<BotContext>();
 
 /** Detail view; toggle/extra-volume/extra-time buttons only when allowed. */
-async function renderDetail(ctx: BotContext, service: Service): Promise<void> {
+async function renderDetail(
+  ctx: BotContext,
+  service: Service,
+  staleNotice: string | null = null,
+): Promise<void> {
   const actions = await resolveServiceDetailActions(service);
   await safeEditOrReply(
     ctx,
-    serviceDetailText(service),
+    serviceDetailText(service, staleNotice),
     serviceDetailKeyboard(service, actions),
     HTML,
   );
@@ -82,6 +90,16 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
     await safeEditOrReply(ctx, await getMessageTemplate("no_services_text"), kb);
     return;
   }
+  if (serviceListSyncEnabled()) {
+    // Opt-in list sync (service-live-sync phase): refresh the CURRENT page's
+    // rows concurrently, bounded by the same per-service display budget.
+    // Failures silently keep the stored row - the list never breaks.
+    pageData.services = await Promise.all(
+      pageData.services.map((service) =>
+        syncServiceForDisplay(service, user.id).then((display) => display.service),
+      ),
+    );
+  }
   await safeEditOrReply(ctx, "سرویس‌های من 🛍", serviceListKeyboard(pageData));
 }
 
@@ -94,6 +112,10 @@ servicesHandler.callbackQuery(/^user:svc:list:(\d+)$/, async (ctx) => {
   await renderList(ctx, Number.parseInt(ctx.match[1], 10));
 });
 
+// Service-live-sync phase: OPENING the detail page synchronizes from the
+// panel first (Load -> adapter -> normalize -> update row -> render). Fresh
+// rows (within the TTL) skip the panel; slow/unreachable panels fall back to
+// the stored values plus a safe Persian notice - the page always renders.
 servicesHandler.callbackQuery(/^user:svc:view:([0-9a-f-]+)$/, async (ctx) => {
   const user = ctx.dbUser;
   if (user === null) {
@@ -105,7 +127,8 @@ servicesHandler.callbackQuery(/^user:svc:view:([0-9a-f-]+)$/, async (ctx) => {
     return;
   }
   await safeAnswerCallback(ctx);
-  await renderDetail(ctx, service);
+  const display = await syncServiceForDisplay(service, user.id);
+  await renderDetail(ctx, display.service, display.notice);
 });
 
 // Phase 11: refresh now syncs from the PANEL (read-only). A failed sync

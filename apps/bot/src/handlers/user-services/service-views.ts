@@ -125,8 +125,13 @@ export function serviceListKeyboard(pageData: ServiceListPage): InlineKeyboard {
   return kb;
 }
 
-/** Detail text - stored DB values only (never note/failureReason/panel data). */
-export function serviceDetailText(service: Service): string {
+/**
+ * Detail text - the Service row's values only (never note/failureReason/raw
+ * panel data). With the live-sync phase the row is refreshed from the panel
+ * BEFORE rendering; staleNotice carries the safe Persian fallback line when
+ * that refresh could not deliver live data (stored values stay on screen).
+ */
+export function serviceDetailText(service: Service, staleNotice: string | null = null): string {
   const days = remainingDays(service.expiresAt);
   const unlimitedVolume = service.volumeBytes === 0n;
   const lines = [`🛍 <b>${escapeHtml(service.productNameSnapshot ?? service.username)}</b>`, ""];
@@ -158,6 +163,9 @@ export function serviceDetailText(service: Service): string {
     // Legacy per-inbound XUI service: says WHY the mutating buttons are
     // hidden (renew/extras/toggle/regenerate need the global-client model).
     lines.push("", XUI_LEGACY_SERVICE_TEXT);
+  }
+  if (staleNotice !== null && staleNotice !== "") {
+    lines.push("", `⚠️ ${escapeHtml(staleNotice)}`);
   }
   return lines.join("\n");
 }

@@ -353,6 +353,29 @@ export interface RegenerateSubscriptionInput {
 export type RegenerateSubscriptionResult = RenewServiceAccountResult;
 
 /**
+ * Traffic usage snapshot derived from one panel read (service-live-sync
+ * phase). `null` fields = the panel did not report that value (never
+ * invented); totalBytes/remainingBytes null while usedBytes is set can also
+ * mean unlimited - consumers needing the distinction use the full
+ * GetServiceAccountResult where omitted-vs-null is preserved.
+ */
+export interface ServiceTrafficUsage {
+  usedBytes: bigint | null;
+  totalBytes: bigint | null;
+  remainingBytes: bigint | null;
+}
+
+/**
+ * Subscription snapshot derived from one panel read (service-live-sync
+ * phase). `null`/empty = not reported by the panel - never invented.
+ */
+export interface ServiceSubscriptionInfo {
+  subscriptionUrl: string | null;
+  subscriptionToken: string | null;
+  configLinks: string[];
+}
+
+/**
  * Result of getServiceAccount. Optional fields are OMITTED (undefined) when
  * the panel did not report them - callers must not treat missing as zero.
  * `null` carries explicit meaning: totalBytes/remainingBytes null =
