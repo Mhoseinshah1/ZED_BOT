@@ -19,6 +19,7 @@ import {
   generatePanelUsername,
   type OrderForProvisioning,
 } from "./provisioning.service.js";
+import { parseNamingSnapshot } from "./service-naming.service.js";
 import {
   acquireServiceLock,
   isLockBackendAvailable,
@@ -134,7 +135,7 @@ async function findPurchaseAnchor(order: OrderForProvisioning): Promise<boolean>
   if (byOrder !== null) {
     return true;
   }
-  const username = generatePanelUsername(order.user.telegramId, order.id);
+  const username = reconciliationUsername(order);
   const byUsername = await prisma.service.findUnique({ where: { username } });
   if (
     byUsername !== null &&
@@ -280,13 +281,26 @@ async function adoptPanelAccount(
 }
 
 /** Anchor-less purchase: ask the panel whether the account really exists. */
+/**
+ * The EXACT identity an in-flight order's remote account carries (naming
+ * phase): the stored naming snapshot when the order has one, else the legacy
+ * deterministic generator. Reconciliation never recomputes an identity from
+ * current user/product data.
+ */
+function reconciliationUsername(order: OrderForProvisioning): string {
+  return (
+    parseNamingSnapshot(order.namingSnapshot)?.resolvedRemoteUsername ??
+    generatePanelUsername(order.user.telegramId, order.id)
+  );
+}
+
 async function reconcilePurchase(order: OrderForProvisioning): Promise<OrderOutcome> {
   const product = order.product;
   const panel = product?.panel ?? null;
   if (product === null || panel === null) {
     return deferOrder(order, "product/panel no longer resolvable - cannot verify panel state");
   }
-  const username = generatePanelUsername(order.user.telegramId, order.id);
+  const username = reconciliationUsername(order);
   // The SAME key the live provisioning pipeline holds: reconciliation can
   // never probe/adopt while the account is being created, and vice versa.
   // Contention means live work - defer immediately, never wait.

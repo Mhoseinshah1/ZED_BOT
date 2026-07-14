@@ -92,9 +92,30 @@ product detail page shows «اینباندها: نامعتبر ❌» with the of
 fix the selection via «ویرایش اینباندها» or restore the allowlist.
 
 **Orphaned XUI clients** - after an unverifiable compensating cleanup, one
-global client with a `zed_*` email may remain with no local Service. The
-log line documents the email; remove it in the panel's Clients page (one
-delete removes every inbound attachment).
+global client with no local Service may remain (legacy accounts carry the
+`zed_*` email; naming-phase accounts carry their strategy-resolved name -
+check the order's `namingSnapshot`). The log line documents the email;
+remove it in the panel's Clients page (one delete removes every inbound
+attachment).
+
+**Checkout answers «اطلاعات لازم برای این روش نام‌گذاری کامل نیست.»** -
+the panel's selected naming strategy needs a config field that is empty
+(`CUSTOM`/`CUSTOM_TEXT_*` need «متن دلخواه username»,
+`REPRESENTATIVE_TEXT_SEQUENCE` needs the representative prefix). Fill the
+field on the panel's «تنظیمات username» page - the page shows exactly
+which field is missing - and the products become purchasable again.
+
+**A paid order got a strategy-shaped name although the admin changed the
+strategy afterwards** - working as designed: the identity was captured in
+`Order.namingSnapshot` at first provisioning and is immutable. Strategy
+changes only affect NEW checkouts. See
+`docs/service-naming-strategies.md`.
+
+**Remote account name does not match the current strategy** - services
+created before the naming phase keep their historical
+`zed_<telegramId>_<orderShort>` names forever (their
+`namingStrategySnapshot` is null = LEGACY); nothing renames remote
+accounts.
 
 ## Verifying against a real staging panel
 

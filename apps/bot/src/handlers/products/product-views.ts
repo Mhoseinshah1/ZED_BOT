@@ -3,6 +3,7 @@ import { InlineKeyboard } from "grammy";
 
 import type { ProductAddState } from "../../core/session.js";
 import { categoryShortId } from "../../services/category.service.js";
+import { OTHER_POLICY_INFO } from "../../services/other-product-naming.service.js";
 import { panelShortId } from "../../services/panel.service.js";
 import { productShortId, type ProductWithRelations } from "../../services/product.service.js";
 import { escapeHtml } from "../../utils/html.js";
@@ -242,7 +243,12 @@ export function productDetailText(product: ProductWithRelations): string {
       `متن درخواست اطلاعات: ${escapeHtml(product.requiredUserInfoPromptText ?? "-")}`,
       `نوع تحویل: ${product.deliveryType === null ? "-" : DELIVERY_LABEL[product.deliveryType]}`,
       `استوک: ${product.stockEnabled ? "✅" : "❌"}`,
+      // Missing policy = the default ORDER_SHORT_ID (naming phase).
+      `روش نام‌گذاری محصول دیگر: ${OTHER_POLICY_INFO[product.otherNamingPolicy ?? "ORDER_SHORT_ID"].fa}`,
     );
+    if (product.otherNamingPolicy === "CUSTOM_TEMPLATE") {
+      lines.push(`قالب نام‌گذاری: ${escapeHtml(product.otherNamingTemplate ?? "-")}`);
+    }
   }
 
   lines.push(
@@ -295,6 +301,8 @@ export function productDetailKeyboard(
       .text("متن درخواست اطلاعات", pcb.fieldEdit(sid, "ruip"))
       .row()
       .text("نوع تحویل", pcb.pickDelivery(sid))
+      .text("روش نام‌گذاری محصول دیگر", pcb.pickNaming(sid))
+      .row()
       // Existing Fix B stock page - resolved by the same product short id.
       .text("مدیریت موجودی استاک 🎟", `admin:stock:p:${sid}`)
       .row();

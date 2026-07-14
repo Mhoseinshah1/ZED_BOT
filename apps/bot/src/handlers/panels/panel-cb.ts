@@ -31,6 +31,8 @@ export const cb = {
   testSettings: (sid: string): string => `admin:panel:ts:${sid}`,
   usernameSettings: (sid: string): string => `admin:panel:us:${sid}`,
   usernamePattern: (sid: string, index: number): string => `admin:panel:up:${sid}:${index}`,
+  // Naming phase: «پیش‌نمایش نام‌گذاری» - regenerates the sample preview.
+  usernamePreview: (sid: string): string => `admin:panel:unp:${sid}`,
   typeSettings: (sid: string): string => `admin:panel:cfg:${sid}`,
   fieldEdit: (sid: string, key: string): string => `admin:panel:fe:${sid}:${key}`,
   deleteAsk: (sid: string): string => `admin:panel:del:${sid}`,

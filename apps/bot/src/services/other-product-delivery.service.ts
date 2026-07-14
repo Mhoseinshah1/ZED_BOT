@@ -15,6 +15,10 @@ import { InlineKeyboard } from "grammy";
 import { CB } from "../core/callbacks.js";
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
+import {
+  DELIVERY_REFERENCE_LABEL,
+  ensureOrderDeliveryReference,
+} from "./other-product-naming.service.js";
 
 // =============================================================================
 // OTHER_PRODUCT manual delivery (Phase 23). After payment the PAID Order gets
@@ -104,6 +108,9 @@ export async function initManualDelivery(orderId: string): Promise<InitManualDel
   if (order.status !== OrderStatus.PAID && order.status !== OrderStatus.COMPLETED) {
     return { ok: false, error: `order status is ${order.status}` };
   }
+  // Naming phase: the delivery reference exists BEFORE the record enters the
+  // admin queue (CAS-persisted, never throws - naming cannot block the init).
+  await ensureOrderDeliveryReference(order.id);
   const requiresInfo = order.product.requiredUserInfoEnabled;
   const promptText = order.product.requiredUserInfoPromptText ?? null;
 
@@ -296,9 +303,10 @@ export const SEARCH_QUERY_MAX = 100;
 /**
  * Admin manual-order search (Phase 24), up to 10 results newest first.
  * A uuid-prefix-looking query matches the OtherProductOrder id OR the
- * parent Order id (startsWith); a numeric query matches the exact user
- * telegramId; free text matches username (without @) or product name,
- * both case-insensitive contains.
+ * parent Order id (startsWith); a reference-shaped query matches the exact
+ * parent-order deliveryReference; a numeric query matches the exact user
+ * telegramId; free text matches username (without @), product name or the
+ * parent-order deliveryReference, all case-insensitive contains.
  */
 export async function searchManualOrders(rawQuery: string): Promise<ManualOrderDetail[]> {
   const query = rawQuery.trim();
@@ -310,6 +318,10 @@ export async function searchManualOrders(rawQuery: string): Promise<ManualOrderD
     or.push({ id: { startsWith: query.toLowerCase() } });
     or.push({ order: { is: { id: { startsWith: query.toLowerCase() } } } });
   }
+  if (/^[a-z0-9-]{4,40}$/i.test(query)) {
+    // References are stored lowercase-normalized - exact match on the index.
+    or.push({ order: { is: { deliveryReference: query.toLowerCase() } } });
+  }
   if (/^\d{1,19}$/.test(query) && BigInt(query) <= 9_223_372_036_854_775_807n) {
     or.push({ user: { is: { telegramId: BigInt(query) } } });
   }
@@ -317,6 +329,9 @@ export async function searchManualOrders(rawQuery: string): Promise<ManualOrderD
   if (text !== "" && !/^\d+$/.test(text)) {
     or.push({ user: { is: { username: { contains: text, mode: "insensitive" } } } });
     or.push({ product: { is: { name: { contains: text, mode: "insensitive" } } } });
+    or.push({
+      order: { is: { deliveryReference: { contains: text, mode: "insensitive" } } },
+    });
   }
   if (or.length === 0) {
     return [];
@@ -350,14 +365,17 @@ export interface DeliverySendApi {
 }
 
 /** The message the buyer receives on delivery. */
-export function buildDeliveryUserMessage(productName: string, deliveryText: string): string {
-  return [
-    "محصول شما با موفقیت تحویل شد ✅",
-    "",
-    `محصول: ${escapeHtml(productName)}`,
-    "",
-    escapeHtml(deliveryText),
-  ].join("\n");
+export function buildDeliveryUserMessage(
+  productName: string,
+  deliveryText: string,
+  deliveryReference: string | null = null,
+): string {
+  const lines = ["محصول شما با موفقیت تحویل شد ✅", "", `محصول: ${escapeHtml(productName)}`];
+  if (deliveryReference !== null && deliveryReference !== "") {
+    lines.push(`${DELIVERY_REFERENCE_LABEL} <code>${escapeHtml(deliveryReference)}</code>`);
+  }
+  lines.push("", escapeHtml(deliveryText));
+  return lines.join("\n");
 }
 
 export type DeliverOutcome =
@@ -426,11 +444,15 @@ export async function deliverManualOrder(
     };
   }
 
-  // Step 2 - send. Only the claim winner ever reaches this line.
+  // Step 2 - send. Only the claim winner ever reaches this line. The
+  // delivery reference is resolved from order identifiers only - the
+  // delivery secret text never reaches the naming service, and a null
+  // reference never blocks the delivery.
+  const deliveryReference = await ensureOrderDeliveryReference(record.orderId);
   try {
     await api.sendMessage(
       record.user.telegramId.toString(),
-      buildDeliveryUserMessage(record.product.name, deliveryText),
+      buildDeliveryUserMessage(record.product.name, deliveryText, deliveryReference),
       { parse_mode: "HTML" },
     );
   } catch (err) {

@@ -132,6 +132,16 @@ enum OtherProductDeliveryType {
   STOCK_ITEM
 }
 
+// Naming phase: how the OTHER_PRODUCT delivery/order reference is built.
+// Order-facing identifiers ONLY - never stock content, never a Service row.
+enum OtherProductNamingPolicy {
+  ORDER_SHORT_ID
+  TELEGRAM_ID
+  TELEGRAM_USERNAME_WITH_FALLBACK
+  PRODUCT_CODE_AND_ORDER
+  CUSTOM_TEMPLATE
+}
+
 enum TrafficResetCycle {
   NO_RESET
   DAY
@@ -672,6 +682,11 @@ model Product {
   requiredUserInfoPromptText String?
   deliveryType               OtherProductDeliveryType?
   stockEnabled               Boolean                   @default(false)
+  // Naming phase: delivery-reference policy for OTHER_PRODUCT orders.
+  // Null = the ORDER_SHORT_ID default. The template is used only with
+  // CUSTOM_TEMPLATE and only supports the safe variable registry.
+  otherNamingPolicy          OtherProductNamingPolicy?
+  otherNamingTemplate        String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -815,6 +830,17 @@ model Order {
   panelNameSnapshot          String?
   locationSnapshot           String?
   categorySnapshot           String?
+  // Naming phase: the IMMUTABLE identity resolution for this order.
+  // SERVICE_PURCHASE: { strategy, version, resolvedRemoteUsername,
+  // resolvedDisplayName, sources } persisted exactly once BEFORE the first
+  // remote mutation - retries/reconciliation reuse it verbatim; mutable
+  // admin/user data can never rename a paid order. Null = legacy order
+  // (pre-naming-phase deterministic generator remains its identity).
+  namingSnapshot             Json?
+  // Naming phase (OTHER_PRODUCT): safe, deterministic user/admin-facing
+  // delivery reference - NEVER derived from stock content or secrets and
+  // NEVER an authorization mechanism. Null on legacy orders.
+  deliveryReference          String?
 
   rating        Int?
   failureReason String?
@@ -843,6 +869,7 @@ model Order {
   @@index([paymentId])
   @@index([panelId])
   @@index([checkoutSessionId])
+  @@index([deliveryReference])
   @@index([createdAt])
 }
 
@@ -1019,6 +1046,11 @@ model Service {
   panelType PanelType // snapshot of the panel type at creation
   username  String        @unique
   note      String?
+  // Naming phase: how `username` (the REMOTE technical identity) was
+  // resolved - { strategy, version, resolvedRemoteUsername,
+  // resolvedDisplayName }. Null = LEGACY (created before the naming phase);
+  // lifecycle operations always use the stored `username`, never recompute.
+  namingStrategySnapshot Json?
   status    ServiceStatus @default(CREATING)
 
   serviceLocation ServiceLocation @default(MULTI_LOCATION)

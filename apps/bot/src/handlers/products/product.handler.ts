@@ -29,6 +29,12 @@ import {
   setCategoryDisplayOrder,
   updateCategory,
 } from "../../services/category.service.js";
+import {
+  OTHER_NAMING_POLICIES,
+  OTHER_POLICY_INFO,
+  OTHER_TEMPLATE_INVALID_TEXT,
+  validateOtherNamingTemplate,
+} from "../../services/other-product-naming.service.js";
 import { getPanelByShortId } from "../../services/panel.service.js";
 import {
   createProductAtOrder,
@@ -41,6 +47,7 @@ import {
   updateProduct,
   type ProductWithRelations,
 } from "../../services/product.service.js";
+import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { pcb, PROD_CB } from "./product-cb.js";
 import {
@@ -590,6 +597,76 @@ productHandler.callbackQuery(/^admin:prod:setdlv:([^:]+):(M|S)$/, async (ctx) =>
   await showProductDetail(ctx, updated);
 });
 
+// --- other-product naming policy (naming phase) -----------------------------------------
+
+const NAMING_OTHER_ONLY_TEXT = "روش نام‌گذاری فقط برای محصولات دیگر است.";
+
+/** Selector page: the 5 policies (current marked with «• ») + template edit. */
+async function showNamingSelector(ctx: BotContext, product: ProductWithRelations): Promise<void> {
+  const sid = productShortId(product);
+  const current = product.otherNamingPolicy ?? "ORDER_SHORT_ID";
+  const kb = new InlineKeyboard();
+  OTHER_NAMING_POLICIES.forEach((policy, index) => {
+    kb.text(
+      `${policy === current ? "• " : ""}${OTHER_POLICY_INFO[policy].fa}`,
+      pcb.setNaming(sid, index),
+    ).row();
+  });
+  kb.text("ویرایش قالب نام‌گذاری", pcb.fieldEdit(sid, "ontpl")).row();
+  kb.text("بازگشت", pcb.view(sid));
+  const lines = [
+    "روش نام‌گذاری محصول دیگر را انتخاب کنید:",
+    "",
+    `روش فعلی: ${OTHER_POLICY_INFO[current].fa}`,
+    OTHER_POLICY_INFO[current].descriptionFa,
+  ];
+  if (current === "CUSTOM_TEMPLATE") {
+    lines.push(`قالب فعلی: ${escapeHtml(product.otherNamingTemplate ?? "-")}`);
+  }
+  await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
+}
+
+productHandler.callbackQuery(/^admin:prod:naming:(.+)$/, async (ctx) => {
+  const product = await resolveProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  if (product.type !== "OTHER_PRODUCT") {
+    await safeAnswerCallback(ctx, NAMING_OTHER_ONLY_TEXT);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await showNamingSelector(ctx, product);
+});
+
+productHandler.callbackQuery(/^admin:prod:setnp:([^:]+):([0-4])$/, async (ctx) => {
+  const product = await resolveProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  if (product.type !== "OTHER_PRODUCT") {
+    await safeAnswerCallback(ctx, NAMING_OTHER_ONLY_TEXT);
+    return;
+  }
+  const policy = OTHER_NAMING_POLICIES[Number.parseInt(ctx.match[2], 10)];
+  const updated = await updateProduct(product.id, { otherNamingPolicy: policy });
+  await safeAnswerCallback(ctx, "روش نام‌گذاری با موفقیت ذخیره شد ✅");
+  if (
+    policy === "CUSTOM_TEMPLATE" &&
+    (updated.otherNamingTemplate === null || updated.otherNamingTemplate === "")
+  ) {
+    // CUSTOM_TEMPLATE without a stored template falls back to the default
+    // reference at delivery time - ask for the template right away.
+    clearProductFlows(ctx);
+    ctx.session.currentFlow = "product:edit";
+    ctx.session.temp.editingProductId = updated.id;
+    ctx.session.temp.editingProductField = "ontpl";
+    await safeEditOrReply(ctx, PRODUCT_TEXT_FIELDS.ontpl.prompt, cancelKeyboard());
+    return;
+  }
+  await showNamingSelector(ctx, updated);
+});
+
 // --- product text-field edits ---------------------------------------------------------
 
 const PRODUCT_TEXT_FIELDS: Record<
@@ -605,6 +682,11 @@ const PRODUCT_TEXT_FIELDS: Record<
     prompt: "این محصول در جایگاه چندم نمایش داده شود؟ عدد بفرستید یا برای انتهای لیست 0 بفرستید.",
   },
   ruip: { prompt: "متنی که بعد از پرداخت از کاربر پرسیده می‌شود را وارد کنید.", otherOnly: true },
+  ontpl: {
+    prompt:
+      "قالب نام‌گذاری را وارد کنید. متغیرهای مجاز: {order_short_id} {telegram_id} {telegram_username} {user_short_id} {product_name} {date}",
+    otherOnly: true,
+  },
   inb: {
     prompt:
       "شناسه‌های اینباند این محصول را وارد کنید (زیرمجموعه‌ای از اینباندهای مجاز پنل، مثال: 3,5).\n" +
@@ -1195,6 +1277,15 @@ async function handleProductEditText(ctx: BotContext, text: string): Promise<voi
       return;
     }
     await finishProductEdit(ctx, productId, { requiredUserInfoPromptText: value });
+    return;
+  }
+  if (fieldKey === "ontpl") {
+    // Strict variable registry - invalid templates are rejected, never saved.
+    if (!validateOtherNamingTemplate(value).ok) {
+      await safeReply(ctx, OTHER_TEMPLATE_INVALID_TEXT);
+      return;
+    }
+    await finishProductEdit(ctx, productId, { otherNamingTemplate: value });
     return;
   }
 

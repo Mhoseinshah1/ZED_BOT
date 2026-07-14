@@ -6,6 +6,7 @@ import {
   ServiceStatus,
   WalletTransactionSource,
   WalletTransactionType,
+  type CheckoutSession,
   type Order,
   type Panel,
   type Product,
@@ -23,6 +24,11 @@ import {
   parsePanelInboundIds,
   resolveProductInboundIds,
 } from "./panel-readiness.service.js";
+import {
+  ensureOrderNamingSnapshot,
+  parseNamingSnapshot,
+  type NamingConfigSnapshot,
+} from "./service-naming.service.js";
 import {
   acquireServiceLock,
   SERVICE_LOCK_BUSY_TEXT,
@@ -81,12 +87,16 @@ export type ProvisionOutcome =
 export type OrderForProvisioning = Order & {
   user: User;
   product: (Product & { panel: Panel | null }) | null;
+  checkoutSession?: CheckoutSession | null;
 };
 
 /**
- * Deterministic, panel-safe username: zed_<telegramId>_<orderShortId>,
- * lowercase [a-z0-9_], shortened via the telegramId's last 8 digits when it
- * would exceed 32 chars. Same order always yields the same username.
+ * LEGACY deterministic username: zed_<telegramId>_<orderShortId>, lowercase
+ * [a-z0-9_], shortened via the telegramId's last 8 digits when it would
+ * exceed 32 chars. Naming phase: NEW orders resolve their identity from the
+ * admin-selected strategy via the Order.namingSnapshot instead - this
+ * generator remains ONLY as the identity of pre-naming-phase orders, so
+ * their reconciliation/recovery keeps probing the exact historical name.
  */
 export function generatePanelUsername(telegramId: bigint, orderId: string): string {
   const orderShort = orderId.replace(/-/g, "").slice(0, 8).toLowerCase();
@@ -96,6 +106,34 @@ export function generatePanelUsername(telegramId: bigint, orderId: string): stri
     username = `zed_${tg.slice(-8)}_${orderShort}`;
   }
   return username.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+}
+
+/**
+ * Naming config captured on the checkout's productSnapshot at checkout time
+ * (naming phase). Null for legacy checkouts - resolution then falls back to
+ * the panel's CURRENT config, exactly once, before the first remote call.
+ */
+export function checkoutNamingCapture(
+  checkout: CheckoutSession | null | undefined,
+): NamingConfigSnapshot | null {
+  const snapshot = checkout?.productSnapshot;
+  if (snapshot === null || snapshot === undefined || typeof snapshot !== "object") {
+    return null;
+  }
+  const record = snapshot as Record<string, unknown>;
+  if (typeof record.namingStrategy !== "string") {
+    return null;
+  }
+  return {
+    strategy: record.namingStrategy as NamingConfigSnapshot["strategy"],
+    customText: typeof record.namingCustomText === "string" ? record.namingCustomText : null,
+    randomLength:
+      typeof record.namingRandomLength === "number" ? record.namingRandomLength : null,
+    representativePrefix:
+      typeof record.namingRepresentativePrefix === "string"
+        ? record.namingRepresentativePrefix
+        : null,
+  };
 }
 
 /**
@@ -180,7 +218,7 @@ export async function provisionPaidOrder(orderId: string): Promise<ProvisionOutc
   // Pre-lock reads only feed the lock key (deterministic username + panel).
   const head = (await prisma.order.findUnique({
     where: { id: orderId },
-    include: { user: true, product: { include: { panel: true } } },
+    include: { user: true, product: { include: { panel: true } }, checkoutSession: true },
   })) as OrderForProvisioning | null;
   if (head === null) {
     return { ok: false, refunded: false, error: "سفارش یافت نشد." };
@@ -191,7 +229,31 @@ export async function provisionPaidOrder(orderId: string): Promise<ProvisionOutc
     // shared-state protection - delegate to the unguarded body.
     return provisionPaidOrderUnlocked(orderId, null);
   }
-  const username = generatePanelUsername(head.user.telegramId, head.id);
+  // Naming phase: the lock key derives from the order's IMMUTABLE identity.
+  // Stored snapshot first; a PAID order without one gets it resolved and
+  // persisted exactly once RIGHT HERE - before any lock or remote call.
+  // Non-PAID legacy in-flight orders keep the historical generator so their
+  // reconciliation probes the exact name their remote account carries.
+  let username: string;
+  const storedIdentity = parseNamingSnapshot(head.namingSnapshot);
+  if (storedIdentity !== null) {
+    username = storedIdentity.resolvedRemoteUsername;
+  } else if (head.status === OrderStatus.PAID) {
+    const ensured = await ensureOrderNamingSnapshot(
+      head,
+      headPanel,
+      checkoutNamingCapture(head.checkoutSession),
+    );
+    if (!ensured.ok) {
+      // Definite pre-remote failure (incomplete naming config): nothing was
+      // attempted on the panel, so the existing FAIL+refund semantics apply.
+      const refunded = await failOrderWithRefund(head, ensured.error);
+      return { ok: false, refunded, error: ensured.safeUserMessage };
+    }
+    username = ensured.identity.resolvedRemoteUsername;
+  } else {
+    username = generatePanelUsername(head.user.telegramId, head.id);
+  }
   const acquisition = await acquireServiceLock(
     serviceProvisioningLockKey(headPanel.id, username),
   );
@@ -218,7 +280,7 @@ async function provisionPaidOrderUnlocked(
 ): Promise<ProvisionOutcome> {
   const order = (await prisma.order.findUnique({
     where: { id: orderId },
-    include: { user: true, product: { include: { panel: true } } },
+    include: { user: true, product: { include: { panel: true } }, checkoutSession: true },
   })) as OrderForProvisioning | null;
   if (order === null) {
     return { ok: false, refunded: false, error: "سفارش یافت نشد." };
@@ -308,7 +370,18 @@ async function provisionPaidOrderUnlocked(
   const volumeBytes = volumeGb > 0 ? BigInt(volumeGb) * 1024n * 1024n * 1024n : null;
   const now = new Date();
   const expiresAt = durationDays > 0 ? new Date(now.getTime() + durationDays * 86_400_000) : null;
-  const username = generatePanelUsername(order.user.telegramId, order.id);
+  // Naming phase: the snapshot IS the identity - the locked wrapper ensured
+  // it for PAID orders; this re-check keeps any other entry path honest.
+  const naming = await ensureOrderNamingSnapshot(
+    order,
+    panel,
+    checkoutNamingCapture(order.checkoutSession),
+  );
+  if (!naming.ok) {
+    const refunded = await failOrderWithRefund(order, naming.error);
+    return { ok: false, refunded, error: naming.safeUserMessage };
+  }
+  const username = naming.identity.resolvedRemoteUsername;
   const note = `zedbot order:${order.id.slice(0, 8)} tg:${order.user.telegramId}`;
 
   let created: CreateServiceAccountResult;
@@ -393,6 +466,14 @@ async function provisionPaidOrderUnlocked(
           panelType: panel.type,
           username: created.username ?? username,
           note,
+          // Naming phase: how this username was resolved (strategy, version,
+          // resolved values). Lifecycle ops always use the stored username.
+          namingStrategySnapshot: {
+            strategy: naming.identity.strategy,
+            version: naming.identity.version,
+            resolvedRemoteUsername: naming.identity.resolvedRemoteUsername,
+            resolvedDisplayName: naming.identity.resolvedDisplayName,
+          },
           status: ServiceStatus.ACTIVE,
           serviceLocation: product.serviceLocation ?? ServiceLocation.MULTI_LOCATION,
           productNameSnapshot: order.productNameSnapshot ?? product.name,

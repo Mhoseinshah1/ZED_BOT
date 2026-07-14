@@ -20,6 +20,13 @@ import {
 } from "../../services/panel-readiness.service.js";
 import { resolveXuiAuthMode } from "../../services/panel-adapter-factory.js";
 import { resolveProductInboundIds } from "../../services/panel-readiness.service.js";
+import {
+  NAMING_INCOMPLETE_TEXT,
+  NAMING_SAVED_TEXT,
+  namingConfigFromPanel,
+  previewNamingStrategy,
+  validateNamingConfig,
+} from "../../services/service-naming.service.js";
 import { normalizePanelBaseUrl } from "../../utils/url.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { cb, PANEL_CB } from "./panel-cb.js";
@@ -352,7 +359,7 @@ panelHandler.callbackQuery(/^admin:panel:up:([^:]+):(-?\d+)$/, async (ctx) => {
   if (index < 0) {
     // Open the selector.
     await safeAnswerCallback(ctx);
-    await safeEditOrReply(ctx, "روش ساخت username را انتخاب کنید:", usernamePatternKeyboard(panel));
+    await safeEditOrReply(ctx, "روش نام‌گذاری سرویس را انتخاب کنید:", usernamePatternKeyboard(panel));
     return;
   }
   const pattern = USERNAME_PATTERNS[index];
@@ -361,8 +368,32 @@ panelHandler.callbackQuery(/^admin:panel:up:([^:]+):(-?\d+)$/, async (ctx) => {
     return;
   }
   const updated = await updatePanel(panel.id, { usernamePatternType: pattern });
-  await safeAnswerCallback(ctx, "روش ساخت username بروزرسانی شد ✅");
+  // Naming phase: saving is acknowledged; an incomplete config is called
+  // out immediately (and checkout stays blocked until it is completed).
+  const validation = validateNamingConfig(namingConfigFromPanel(updated));
+  await safeAnswerCallback(
+    ctx,
+    validation.ok ? NAMING_SAVED_TEXT : `${NAMING_SAVED_TEXT} ${NAMING_INCOMPLETE_TEXT}`,
+  );
   const view = panelPageView(updated, "username");
+  await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
+});
+
+// Naming phase: «پیش‌نمایش نام‌گذاری» - re-renders the page with a freshly
+// generated sample (random strategies produce a new sample every press).
+// Uses safe sample context only: no order, no counter reservation, no
+// remote client.
+panelHandler.callbackQuery(/^admin:panel:unp:(.+)$/, async (ctx) => {
+  const panel = await resolvePanel(ctx, ctx.match[1]);
+  if (panel === null) {
+    return;
+  }
+  const preview = previewNamingStrategy(panel, panel.usernamePatternType);
+  await safeAnswerCallback(
+    ctx,
+    preview.ok ? `نمونه نام ساخته‌شده:\n${preview.preview}` : preview.preview,
+  );
+  const view = panelPageView(panel, "username");
   await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
 });
 

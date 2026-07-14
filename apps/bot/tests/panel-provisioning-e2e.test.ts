@@ -16,7 +16,6 @@ import {
   provisionPaidOrder,
   PROVISION_UNKNOWN_OUTCOME_TEXT,
   REFUND_PROVISIONING_REASON,
-  generatePanelUsername,
 } from "../src/services/provisioning.service.js";
 
 // =============================================================================
@@ -467,6 +466,24 @@ async function createPaidChain(
   return order.id;
 }
 
+
+/**
+ * The order's ACTUAL resolved identity (naming phase): provisioning persists
+ * it on Order.namingSnapshot before the first remote call, so tests read it
+ * back instead of predicting a name from user/order data.
+ */
+async function resolvedUsername(orderId: string): Promise<string> {
+  const order = await prisma.order.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { namingSnapshot: true },
+  });
+  const snapshot = order.namingSnapshot as { resolvedRemoteUsername?: string } | null;
+  if (snapshot?.resolvedRemoteUsername === undefined) {
+    throw new Error("order has no naming snapshot");
+  }
+  return snapshot.resolvedRemoteUsername;
+}
+
 async function refundCount(orderId: string): Promise<number> {
   return prisma.walletTransaction.count({
     where: { relatedOrderId: orderId, reason: REFUND_PROVISIONING_REASON },
@@ -477,9 +494,8 @@ describe.runIf(hasDeps)("E2E provisioning (Marzban)", () => {
   it("provisions a PAID order end to end, idempotent on retry", async () => {
     const user = await createUser();
     const orderId = await createPaidChain(user, marzbanProductId);
-    const username = generatePanelUsername(user.telegramId, orderId);
-
     const outcome = await provisionPaidOrder(orderId);
+    const username = await resolvedUsername(orderId);
     expect(outcome.ok).toBe(true);
 
     // Remote mock account exists with the sold values.
@@ -533,9 +549,8 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
   it("provisions a PAID order end to end, idempotent on retry", async () => {
     const user = await createUser();
     const orderId = await createPaidChain(user, xuiProductId);
-    const username = generatePanelUsername(user.telegramId, orderId);
-
     const outcome = await provisionPaidOrder(orderId);
+    const username = await resolvedUsername(orderId);
     expect(outcome.ok).toBe(true);
 
     // ONE global client with the sold values (bytes + ms), email = username
@@ -595,9 +610,8 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
   it("provisions end to end in API_TOKEN mode, idempotent on retry", async () => {
     const user = await createUser();
     const orderId = await createPaidChain(user, xuiTokenProductId);
-    const username = generatePanelUsername(user.telegramId, orderId);
-
     const outcome = await provisionPaidOrder(orderId);
+    const username = await resolvedUsername(orderId);
     expect(outcome.ok).toBe(true);
 
     const remote = xuiClients.find((c) => c.email === username);
@@ -619,9 +633,8 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
   it("attaches the global client ONLY to the product-selected inbound subset", async () => {
     const user = await createUser();
     const orderId = await createPaidChain(user, xuiSubsetProductId);
-    const username = generatePanelUsername(user.telegramId, orderId);
-
     const outcome = await provisionPaidOrder(orderId);
+    const username = await resolvedUsername(orderId);
     expect(outcome.ok).toBe(true);
 
     // Panel allowlist is [1, 2]; the product selected [2] - and ONLY [2]
@@ -636,9 +649,8 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
   it("inherits the panel's full allowlist when the product selects nothing", async () => {
     const user = await createUser();
     const orderId = await createPaidChain(user, xuiInheritProductId);
-    const username = generatePanelUsername(user.telegramId, orderId);
-
     const outcome = await provisionPaidOrder(orderId);
+    const username = await resolvedUsername(orderId);
     expect(outcome.ok).toBe(true);
     const remote = xuiClients.find((c) => c.email === username);
     expect(remote?.inboundIds?.slice().sort()).toEqual([1, 2]);
@@ -650,13 +662,13 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
     const user = await createUser();
     // Sold entitlement snapshotted at checkout: inbound [2].
     const orderId = await createPaidChain(user, xuiSubsetProductId, { inboundIdsSnapshot: [2] });
-    const username = generatePanelUsername(user.telegramId, orderId);
 
     // The admin edits the product AFTER payment: selection becomes [1].
     await prisma.product.update({ where: { id: xuiSubsetProductId }, data: { inboundIds: [1] } });
     try {
       const outcome = await provisionPaidOrder(orderId);
       expect(outcome.ok).toBe(true);
+      const username = await resolvedUsername(orderId);
       // The paid order's entitlement is unchanged: attached to [2], not [1].
       const remote = xuiClients.find((c) => c.email === username);
       expect(remote?.inboundIds).toEqual([2]);
@@ -711,9 +723,8 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
     // and the panel is never touched.
     const user = await createUser();
     const orderId = await createPaidChain(user, xuiViolatingProductId);
-    const username = generatePanelUsername(user.telegramId, orderId);
-
     const outcome = await provisionPaidOrder(orderId);
+    const username = await resolvedUsername(orderId);
     expect(outcome.ok).toBe(false);
     expect(outcome.ok === false && outcome.refunded).toBe(true);
     const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });

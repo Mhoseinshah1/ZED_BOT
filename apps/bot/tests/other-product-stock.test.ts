@@ -164,15 +164,21 @@ describe.runIf(hasDb)("OTHER_PRODUCT stock auto-delivery (Phase 25)", () => {
     expect(calls[0].text).toContain("سفارش شما آماده شد ✅");
     expect(calls[0].text).toContain(stockProduct.name);
     expect(calls[0].text).toContain(`OLD-${runTag}`); // oldest first, full content
+    // Naming phase: the reference comes from order identifiers, NEVER content.
+    expect(calls[0].text).toContain(
+      `شناسه تحویل: <code>ord-${order.id.replace(/-/g, "").slice(0, 8)}</code>`,
+    );
 
     const item = await prisma.otherProductStockItem.findUniqueOrThrow({ where: { id: older.id } });
     expect(item.status).toBe("DELIVERED");
     expect(item.deliveredOrderId).toBe(order.id);
     expect(item.deliveredToUserId).toBe(user.id);
     expect(item.deliveredAt).not.toBeNull();
-    expect(
-      (await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status,
-    ).toBe("COMPLETED");
+    const completedOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(completedOrder.status).toBe("COMPLETED");
+    expect(completedOrder.deliveryReference).toBe(
+      `ord-${order.id.replace(/-/g, "").slice(0, 8)}`,
+    );
 
     // No Service and no manual-delivery record for a successful auto-delivery.
     expect(await prisma.service.count({ where: { userId: user.id } })).toBe(0);

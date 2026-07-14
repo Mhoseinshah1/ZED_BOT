@@ -46,6 +46,8 @@ export const pcb = {
   toggleUserInfo: (sid: string): string => `admin:prod:rui:${sid}`,
   pickDelivery: (sid: string): string => `admin:prod:dlv:${sid}`,
   setDelivery: (sid: string, d: string): string => `admin:prod:setdlv:${sid}:${d}`,
+  pickNaming: (sid: string): string => `admin:prod:naming:${sid}`,
+  setNaming: (sid: string, index: number): string => `admin:prod:setnp:${sid}:${index}`,
 
   // Add-wizard step callbacks
   flowPanel: (panelSid: string): string => `admin:prod:f:pnl:${panelSid}`,

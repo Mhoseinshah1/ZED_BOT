@@ -18,6 +18,7 @@ import {
   type ManualOrderFilter,
   type ManualOrdersPage,
 } from "../../services/other-product-delivery.service.js";
+import { DELIVERY_REFERENCE_LABEL } from "../../services/other-product-naming.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 
@@ -306,6 +307,9 @@ function detailText(record: ManualOrderDetail): string {
     `📦 <b>سفارش دستی ${escapeHtml(manualOrderShortId(record))}</b>`,
     "",
     `سفارش (Order): <code>${escapeHtml(record.order.id.slice(0, 8))}</code> | وضعیت: ${orderStatusLabel(record.order.status)}`,
+    ...(record.order.deliveryReference !== null && record.order.deliveryReference !== ""
+      ? [`${DELIVERY_REFERENCE_LABEL} <code>${escapeHtml(record.order.deliveryReference)}</code>`]
+      : []),
     `وضعیت تحویل: ${statusLabel(record.status)}`,
     `محصول: ${escapeHtml(record.product.name)}`,
     `دسته‌بندی: ${escapeHtml(record.product.category.name)}`,
