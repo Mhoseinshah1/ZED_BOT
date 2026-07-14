@@ -40,13 +40,24 @@ export const FIN_CB = {
   settingsMaxTopup: "admin:finance:settings:max_topup",
   settingsTopupInstruction: "admin:finance:settings:topup_instruction",
   settingsPaymentNotice: "admin:finance:settings:payment_notice",
-  // Provider-management phase - <key> is ALWAYS the stable provider enum
-  // key (CARD_TO_CARD/WALLET/ZARINPAL/...), never a display name.
-  pmToggle: (key: string): string => `admin:fin:pm:t:${key}`,
-  pmToggleConfirm: (key: string, enable: boolean): string =>
-    `admin:fin:pm:t:${key}:${enable ? "on" : "off"}`,
-  pmSettings: (key: string): string => `admin:fin:pm:s:${key}`,
-  pmTest: (key: string): string => `admin:fin:pm:c:${key}`,
+} as const;
+
+/**
+ * Payment provider navigation callbacks. <key> is ALWAYS the stable provider
+ * enum key (CARD_TO_CARD/WALLET/ZARINPAL/NOWPAYMENTS/TELEGRAM_STARS), never
+ * a display name - renaming a provider can never break these. The longest
+ * emitted value (payprov:toggle:TELEGRAM_STARS:off, 33 bytes) stays far
+ * under Telegram's 64-byte callback-data limit. The pre-refactor
+ * admin:fin:pm:{t,s,c}:<key> routes stay registered in the handler so stale
+ * buttons keep answering, but are never emitted anymore.
+ */
+export const PROV_CB = {
+  view: (key: string): string => `payprov:view:${key}`,
+  toggle: (key: string): string => `payprov:toggle:${key}`,
+  toggleConfirm: (key: string, enable: boolean): string =>
+    `payprov:toggle:${key}:${enable ? "on" : "off"}`,
+  settings: (key: string): string => `payprov:settings:${key}`,
+  test: (key: string): string => `payprov:test:${key}`,
 } as const;
 
 export const FINANCE_LANDING_TEXT = "مالی 💎";
@@ -142,86 +153,139 @@ function limitLabel(value: number | null): string {
   return value === null ? "بدون محدودیت" : formatToman(value);
 }
 
-// --- payment provider management (provider-management phase) -------------------------
+// --- payment provider management (provider-navigation phase) -------------------------
 
 /** Single render site - the Persian status words stay view constants. */
 const PROVIDER_ENABLED_LABEL = "فعال ✅";
 const PROVIDER_DISABLED_LABEL = "غیرفعال ❌";
+const PROVIDER_READY_LABEL = "آماده ✅";
+const PROVIDER_NOT_READY_LABEL = "ناقص ❌";
+const PROVIDER_NEVER_TESTED_LABEL = "بررسی نشده";
 export const BACK_TO_FINANCE_LABEL = "بازگشت به مالی";
 export const PROVIDER_ENV_NOTE =
   "مقادیر از متغیرهای محیطی سرور خوانده می‌شوند و از این بخش قابل ویرایش نیستند.";
 
-/** ButtonText-backed labels for the provider rows (pm_* keys). */
+/** ButtonText-backed labels for the provider pages (pm_* keys). */
 export interface ProviderButtonLabels {
   enable: string;
   disable: string;
   settings: string;
+  settingsWallet: string;
+  settingsCard: string;
   test: string;
+  backProviders: string;
 }
 
 function formatCheckDate(date: Date): string {
   return `${date.toISOString().replace("T", " ").slice(0, 16)} UTC`;
 }
 
-/** One provider's status section (shared by the list and detail pages). */
-export function providerSectionLines(row: ManagedProviderRow): string[] {
-  const lines = [
-    `💳 ${escapeHtml(row.displayName)}`,
-    `وضعیت: ${row.enabled ? PROVIDER_ENABLED_LABEL : PROVIDER_DISABLED_LABEL}`,
-    `نوع: ${escapeHtml(row.kindLabel)}`,
-  ];
-  if (row.lastCheckedAt !== null) {
-    lines.push(
-      `آخرین تست اتصال: ${row.healthStatus === "OK" ? "موفق ✅" : "ناموفق ❌"} (${formatCheckDate(row.lastCheckedAt)})`,
-    );
-  }
-  return lines;
+function providerStatusLabel(enabled: boolean): string {
+  return enabled ? PROVIDER_ENABLED_LABEL : PROVIDER_DISABLED_LABEL;
 }
 
-/** «مدیریت روش‌های پرداخت» - header + one section per managed provider. */
-export function providerListText(header: string, rows: ManagedProviderRow[]): string {
-  const lines = [escapeHtml(header)];
+/** Compact list page: template header + template pick line - nothing else. */
+export function providerListText(header: string, pickText: string): string {
+  return `${escapeHtml(header)}\n\n${escapeHtml(pickText)}`;
+}
+
+/** List-button label: emoji + display name + LIVE status. Label only - the
+ * callback data is always PROV_CB.view(stable key). */
+export function providerListButtonLabel(row: ManagedProviderRow): string {
+  return `${row.listEmoji} ${row.displayName} — ${providerStatusLabel(row.enabled)}`;
+}
+
+/**
+ * ONE button per provider (no per-provider action buttons on the list) plus
+ * the back-to-finance row. Callback data carries the STABLE provider key.
+ */
+export function providerListKeyboard(rows: ManagedProviderRow[]): InlineKeyboard {
+  const kb = new InlineKeyboard();
   for (const row of rows) {
-    lines.push("", ...providerSectionLines(row));
+    kb.text(providerListButtonLabel(row), PROV_CB.view(row.providerKey)).row();
+  }
+  kb.text(BACK_TO_FINANCE_LABEL, FIN_CB.root);
+  return kb;
+}
+
+/** Detail-page header lines shared with the confirmation page. */
+function providerHeadingLines(row: ManagedProviderRow): string[] {
+  return [
+    `${row.listEmoji} ${escapeHtml(row.displayName)}`,
+    "",
+    `وضعیت: ${providerStatusLabel(row.enabled)}`,
+    `نوع: ${escapeHtml(row.kindLabel)}`,
+    `آمادگی استفاده: ${row.configured ? PROVIDER_READY_LABEL : PROVIDER_NOT_READY_LABEL}`,
+  ];
+}
+
+/**
+ * Dedicated provider detail page: heading + presence-only config lines (the
+ * service never puts secret values in them) + the last connection test for
+ * testable providers («بررسی نشده» before the first run). Every field always
+ * has a value - no empty lines.
+ */
+export function providerDetailText(row: ManagedProviderRow): string {
+  const lines = providerHeadingLines(row);
+  if (row.configLines.length > 0) {
+    lines.push("", ...row.configLines.map((line) => escapeHtml(line)));
+  }
+  if (row.supportsConnectionTest) {
+    lines.push(
+      "",
+      row.lastCheckedAt === null
+        ? `آخرین تست اتصال: ${PROVIDER_NEVER_TESTED_LABEL}`
+        : `آخرین تست اتصال: ${row.healthStatus === "OK" ? "موفق ✅" : "ناموفق ❌"} (${formatCheckDate(row.lastCheckedAt)})`,
+    );
   }
   return lines.join("\n");
 }
 
+/** Provider-specific «تنظیمات» label (wallet/card have their own flows). */
+function providerSettingsLabel(row: ManagedProviderRow, buttons: ProviderButtonLabels): string {
+  if (row.providerKey === "WALLET") {
+    return buttons.settingsWallet;
+  }
+  if (row.providerKey === "CARD_TO_CARD") {
+    return buttons.settingsCard;
+  }
+  return buttons.settings;
+}
+
 /**
- * One row per provider, aligned with the message sections (same order):
- * toggle | settings | connection test (when supported). Callback data
- * carries the STABLE provider key, never the display name.
+ * Detail-page actions: ONE toggle matching the current state, the
+ * provider-specific settings entry, the connection test only where a
+ * meaningful test exists, and always the back-to-list row.
  */
-export function providerListKeyboard(
-  rows: ManagedProviderRow[],
+export function providerDetailKeyboard(
+  row: ManagedProviderRow,
   buttons: ProviderButtonLabels,
 ): InlineKeyboard {
-  const kb = new InlineKeyboard();
-  for (const row of rows) {
-    kb.text(row.enabled ? buttons.disable : buttons.enable, FIN_CB.pmToggle(row.providerKey));
-    kb.text(buttons.settings, FIN_CB.pmSettings(row.providerKey));
-    if (row.supportsConnectionTest) {
-      kb.text(buttons.test, FIN_CB.pmTest(row.providerKey));
-    }
-    kb.row();
+  const kb = new InlineKeyboard()
+    .text(row.enabled ? buttons.disable : buttons.enable, PROV_CB.toggle(row.providerKey))
+    .row()
+    .text(providerSettingsLabel(row, buttons), PROV_CB.settings(row.providerKey))
+    .row();
+  if (row.supportsConnectionTest) {
+    kb.text(buttons.test, PROV_CB.test(row.providerKey)).row();
   }
-  kb.text(BACK_TO_FINANCE_LABEL, FIN_CB.root).row();
-  kb.text("بازگشت به پنل ادمین", CB.ADMIN_MENU);
+  kb.text(buttons.backProviders, FIN_CB.methods);
   return kb;
 }
 
-/** Enable/disable confirmation page: template question + the provider line. */
+/** Enable/disable confirmation page: the provider heading + the question. */
 export function providerToggleConfirmText(question: string, row: ManagedProviderRow): string {
-  return [...providerSectionLines(row), "", escapeHtml(question)].join("\n");
+  return [...providerHeadingLines(row), "", escapeHtml(question)].join("\n");
 }
 
+/** «انصراف» returns to the provider's detail page, never to a dead end. */
 export function providerToggleConfirmKeyboard(
   providerKey: string,
   enable: boolean,
 ): InlineKeyboard {
   return new InlineKeyboard()
-    .text("تایید", FIN_CB.pmToggleConfirm(providerKey, enable))
-    .text("انصراف", FIN_CB.methods)
+    .text("تایید", PROV_CB.toggleConfirm(providerKey, enable))
+    .text("انصراف", PROV_CB.view(providerKey))
     .row()
     .text(BACK_TO_FINANCE_LABEL, FIN_CB.root);
 }
@@ -232,7 +296,7 @@ export function providerToggleConfirmKeyboard(
  */
 export function providerConfigText(row: ManagedProviderRow): string {
   return [
-    ...providerSectionLines(row),
+    ...providerHeadingLines(row),
     "",
     ...row.configLines.map((line) => escapeHtml(line)),
     "",
@@ -240,17 +304,20 @@ export function providerConfigText(row: ManagedProviderRow): string {
   ].join("\n");
 }
 
-/** Back keyboard for provider sub-pages: to the list + to the finance landing. */
-export function providerBackKeyboard(): InlineKeyboard {
+/** Back keyboard for provider sub-pages: to the detail page + to the list. */
+export function providerSettingsBackKeyboard(
+  providerKey: string,
+  buttons: ProviderButtonLabels,
+): InlineKeyboard {
   return new InlineKeyboard()
-    .text("بازگشت", FIN_CB.methods)
+    .text("بازگشت", PROV_CB.view(providerKey))
     .row()
-    .text(BACK_TO_FINANCE_LABEL, FIN_CB.root);
+    .text(buttons.backProviders, FIN_CB.methods);
 }
 
-/** Connection-test result page: result template + the refreshed provider section. */
-export function providerTestResultText(resultText: string, row: ManagedProviderRow): string {
-  return [escapeHtml(resultText), "", ...providerSectionLines(row)].join("\n");
+/** Action-result page: result line on top of the refreshed detail page. */
+export function providerActionResultText(resultText: string, row: ManagedProviderRow): string {
+  return `${escapeHtml(resultText)}\n\n${providerDetailText(row)}`;
 }
 
 /** Shown when no CARD_TO_CARD gateway exists yet. */
@@ -258,7 +325,7 @@ export function noGatewayKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("ساخت روش کارت‌به‌کارت ✅", FIN_CB.addGateway)
     .row()
-    .text("بازگشت", FIN_CB.methods);
+    .text("بازگشت", PROV_CB.view("CARD_TO_CARD"));
 }
 
 export function gatewayListKeyboard(gateways: CardGatewayWithCounts[]): InlineKeyboard {
@@ -269,7 +336,7 @@ export function gatewayListKeyboard(gateways: CardGatewayWithCounts[]): InlineKe
       FIN_CB.gateway(shortId(g)),
     ).row();
   }
-  kb.text("بازگشت", FIN_CB.methods);
+  kb.text("بازگشت", PROV_CB.view("CARD_TO_CARD"));
   return kb;
 }
 
@@ -310,7 +377,7 @@ export function gatewayKeyboard(gateway: CardGatewayWithCounts): InlineKeyboard 
     .row()
     .text("مدیریت کارت‌ها 💳", FIN_CB.accounts(gsid))
     .row()
-    .text("بازگشت", FIN_CB.methods);
+    .text("بازگشت", PROV_CB.view("CARD_TO_CARD"));
 }
 
 /** Card list under one gateway - masked numbers only. */

@@ -40,7 +40,9 @@ export interface ManagedProviderMeta {
   key: ManagedProviderKey;
   /** Default Persian display name (PaymentGateway.name for real providers). */
   displayName: string;
-  /** Persian «نوع» label rendered on the admin list. */
+  /** List-button emoji - purely visual, never part of callback data. */
+  listEmoji: string;
+  /** Persian «نوع» label rendered on the provider detail page. */
   kindLabel: string;
   supportsConnectionTest: boolean;
   /**
@@ -48,6 +50,12 @@ export interface ManagedProviderMeta {
    * (payment-settings.service), not by a PaymentGateway row.
    */
   virtual: boolean;
+  /**
+   * Enabling requires a complete configuration. Only set for providers whose
+   * config lives OUTSIDE this admin page (env/pricing settings): an admin can
+   * fix card/wallet config right here, so those stay switchable.
+   */
+  requireConfigToEnable: boolean;
 }
 
 /** Managed providers in admin display order. */
@@ -55,37 +63,47 @@ export const MANAGED_PROVIDERS: readonly ManagedProviderMeta[] = [
   {
     key: "CARD_TO_CARD",
     displayName: "کارت‌به‌کارت",
-    kindLabel: "کارت‌به‌کارت",
+    listEmoji: "💳",
+    kindLabel: "پرداخت دستی با رسید",
     supportsConnectionTest: false,
     virtual: false,
+    requireConfigToEnable: false,
   },
   {
     key: "WALLET",
-    displayName: "پرداخت با کیف پول",
-    kindLabel: "کیف پول",
+    displayName: "کیف پول",
+    listEmoji: "🏦",
+    kindLabel: "پرداخت از موجودی داخلی کاربر",
     supportsConnectionTest: false,
     virtual: true,
+    requireConfigToEnable: false,
   },
   {
     key: "ZARINPAL",
     displayName: "زرین‌پال",
+    listEmoji: "🇮🇷",
     kindLabel: "پرداخت آنلاین ریالی",
     supportsConnectionTest: true,
     virtual: false,
+    requireConfigToEnable: true,
   },
   {
     key: "NOWPAYMENTS",
     displayName: "پرداخت کریپتویی",
+    listEmoji: "🪙",
     kindLabel: "پرداخت کریپتویی",
     supportsConnectionTest: true,
     virtual: false,
+    requireConfigToEnable: true,
   },
   {
     key: "TELEGRAM_STARS",
     displayName: "پرداخت با Telegram Stars",
-    kindLabel: "پرداخت با Telegram Stars",
+    listEmoji: "⭐",
+    kindLabel: "پرداخت داخل تلگرام",
     supportsConnectionTest: false,
     virtual: false,
+    requireConfigToEnable: true,
   },
 ];
 
@@ -152,6 +170,7 @@ export interface ManagedProviderRow {
   providerKey: ManagedProviderKey;
   gatewayId?: string;
   displayName: string;
+  listEmoji: string;
   enabled: boolean;
   kindLabel: string;
   configured: boolean;
@@ -196,6 +215,88 @@ function formatTomanValue(value: number): string {
   return `${value.toLocaleString("en-US")} تومان`;
 }
 
+const ON_LABEL = "فعال ✅";
+const OFF_LABEL = "غیرفعال ❌";
+
+interface ProviderConfigStatus {
+  configured: boolean;
+  /** PRESENCE-ONLY Persian lines - never actual secret values. */
+  configLines: string[];
+}
+
+/**
+ * One provider's configuration readiness, RE-FETCHED from its source of
+ * truth on every call (env config readers / pricing setting / card count).
+ * Shared by the detail pages and the enable guard, and PRESENCE-ONLY: no
+ * merchant id, API key, IPN secret or bot token ever leaves this function.
+ */
+async function providerConfigStatus(
+  meta: ManagedProviderMeta,
+  gateway: PaymentGateway | null,
+): Promise<ProviderConfigStatus> {
+  if (meta.key === "WALLET") {
+    // The top-up limits are operator-set AMOUNTS (non-secret) - shown as-is.
+    const limits = await walletTopupLimits();
+    return {
+      configured: true,
+      configLines: [
+        `حداقل/حداکثر شارژ: ${formatTomanValue(limits.minToman)} / ${formatTomanValue(limits.maxToman)}`,
+      ],
+    };
+  }
+  if (meta.key === "CARD_TO_CARD") {
+    const activeCards =
+      gateway === null
+        ? 0
+        : await prisma.cardToCardAccount.count({
+            where: { gatewayId: gateway.id, isActive: true },
+          });
+    return { configured: activeCards > 0, configLines: [`کارت‌های فعال: ${activeCards}`] };
+  }
+  if (meta.key === "ZARINPAL") {
+    const config = zarinpalConfigFromEnv();
+    const merchantSet = isSet(config.merchantId);
+    const callbackSet = isSet(config.callbackUrl);
+    return {
+      configured: merchantSet && callbackSet,
+      configLines: [
+        `Merchant ID: ${presence(merchantSet)}`,
+        `Callback: ${presence(callbackSet)}`,
+        `Sandbox: ${config.sandbox ? ON_LABEL : OFF_LABEL}`,
+      ],
+    };
+  }
+  if (meta.key === "NOWPAYMENTS") {
+    const config = nowpaymentsConfigFromEnv();
+    const apiKeySet = isSet(config.apiKey);
+    const ipnSecretSet = isSet(config.ipnSecret);
+    const callbackSet = isSet(config.callbackUrl);
+    const rateSet = config.tomanPerUnit > 0;
+    return {
+      configured: apiKeySet && ipnSecretSet && callbackSet && rateSet,
+      configLines: [
+        `API Key: ${presence(apiKeySet)}`,
+        `IPN Secret: ${presence(ipnSecretSet)}`,
+        `Callback: ${presence(callbackSet)}`,
+        `نرخ تبدیل: ${presence(rateSet)}`,
+        `Sandbox: ${config.sandbox ? ON_LABEL : OFF_LABEL}`,
+      ],
+    };
+  }
+  // TELEGRAM_STARS: env switch + the StarsPricingSetting manual rate. The
+  // payment unit is fixed by the Bot API; the bot token itself never appears.
+  const config = telegramStarsConfigFromEnv();
+  const rateSet = await starsRateConfigured();
+  return {
+    configured: config.enabled && rateSet,
+    configLines: [
+      `اتصال ربات: ${config.enabled ? ON_LABEL : OFF_LABEL}`,
+      "واحد پرداخت: XTR",
+      `نرخ ستاره: ${presence(rateSet)}`,
+    ],
+  };
+}
+
 /**
  * All managed providers (real gateway rows + the virtual wallet) with their
  * enabled state and presence-only configuration status.
@@ -204,21 +305,19 @@ export async function listManagedProviders(): Promise<ManagedProviderRow[]> {
   const rows: ManagedProviderRow[] = [];
   for (const meta of MANAGED_PROVIDERS) {
     if (meta.virtual) {
-      // WALLET: backed by the wallet_payment_enabled Setting. The top-up
-      // limits are operator-set AMOUNTS (non-secret) - values are shown.
-      const [enabled, limits] = await Promise.all([
+      // WALLET: backed by the wallet_payment_enabled Setting.
+      const [enabled, status] = await Promise.all([
         isWalletPaymentEnabled(),
-        walletTopupLimits(),
+        providerConfigStatus(meta, null),
       ]);
       rows.push({
         providerKey: meta.key,
         displayName: meta.displayName,
+        listEmoji: meta.listEmoji,
         enabled,
         kindLabel: meta.kindLabel,
-        configured: true,
-        configLines: [
-          `حداقل/حداکثر شارژ: ${formatTomanValue(limits.minToman)} / ${formatTomanValue(limits.maxToman)}`,
-        ],
+        configured: status.configured,
+        configLines: status.configLines,
         supportsConnectionTest: meta.supportsConnectionTest,
         lastCheckedAt: null,
         healthStatus: null,
@@ -227,54 +326,13 @@ export async function listManagedProviders(): Promise<ManagedProviderRow[]> {
     }
 
     const gateway = await gatewayRowFor(meta.key);
-    let configured = false;
-    let configLines: string[] = [];
-    if (meta.key === "CARD_TO_CARD") {
-      const activeCards =
-        gateway === null
-          ? 0
-          : await prisma.cardToCardAccount.count({
-              where: { gatewayId: gateway.id, isActive: true },
-            });
-      configured = activeCards > 0;
-      configLines = [`کارت‌های فعال: ${activeCards}`];
-    } else if (meta.key === "ZARINPAL") {
-      const config = zarinpalConfigFromEnv();
-      const merchantSet = isSet(config.merchantId);
-      const callbackSet = isSet(config.callbackUrl);
-      configured = merchantSet && callbackSet;
-      configLines = [
-        `Merchant ID: ${presence(merchantSet)}`,
-        `Callback: ${presence(callbackSet)}`,
-      ];
-    } else if (meta.key === "NOWPAYMENTS") {
-      const config = nowpaymentsConfigFromEnv();
-      const apiKeySet = isSet(config.apiKey);
-      const ipnSecretSet = isSet(config.ipnSecret);
-      const callbackSet = isSet(config.callbackUrl);
-      const rateSet = config.tomanPerUnit > 0;
-      configured = apiKeySet && ipnSecretSet && callbackSet && rateSet;
-      configLines = [
-        `API Key: ${presence(apiKeySet)}`,
-        `IPN Secret: ${presence(ipnSecretSet)}`,
-        `Callback: ${presence(callbackSet)}`,
-        `نرخ تبدیل: ${presence(rateSet)}`,
-      ];
-    } else {
-      // TELEGRAM_STARS: env switch + the StarsPricingSetting manual rate.
-      const config = telegramStarsConfigFromEnv();
-      const rateSet = await starsRateConfigured();
-      configured = config.enabled && rateSet;
-      configLines = [
-        `Telegram Stars: ${config.enabled ? "فعال ✅" : "غیرفعال ❌"}`,
-        `نرخ ستاره: ${presence(rateSet)}`,
-      ];
-    }
+    const { configured, configLines } = await providerConfigStatus(meta, gateway);
 
     rows.push({
       providerKey: meta.key,
       ...(gateway === null ? {} : { gatewayId: gateway.id }),
       displayName: gateway?.name ?? meta.displayName,
+      listEmoji: meta.listEmoji,
       enabled: gateway?.isEnabled ?? false,
       kindLabel: meta.kindLabel,
       configured,
@@ -291,6 +349,8 @@ export interface SetProviderEnabledResult {
   ok: boolean;
   /** false = the provider was already in the requested state (duplicate). */
   changed: boolean;
+  /** Set when ok=false and the cause is a known, reportable condition. */
+  reason?: "incomplete_config";
 }
 
 /**
@@ -298,7 +358,14 @@ export interface SetProviderEnabledResult {
  * writer; real providers flip their gateway row with a compare-and-set
  * updateMany, so a duplicate action (already in the requested state, e.g. a
  * double click or stale confirmation) reports {ok: true, changed: false}.
- * Logs only the provider type key and the acting admin id.
+ *
+ * ENABLE GUARD: providers whose configuration lives outside this page
+ * (env/pricing - requireConfigToEnable) re-check their config at action time
+ * and refuse to enable while it is incomplete. Disable is never guarded, and
+ * disabling deletes NOTHING: config rows, card accounts and Payment records
+ * all stay untouched - the provider merely disappears from user selection.
+ *
+ * Logs only the provider type key, the action and the acting admin id.
  */
 export async function setProviderEnabled(
   providerKey: string,
@@ -323,6 +390,16 @@ export async function setProviderEnabled(
   const gateway = await gatewayRowFor(meta.key);
   if (gateway === null) {
     return { ok: false, changed: false };
+  }
+  if (enabled && meta.requireConfigToEnable) {
+    const status = await providerConfigStatus(meta, gateway);
+    if (!status.configured) {
+      logger.info("payment provider enable blocked (incomplete config)", {
+        provider: meta.key,
+        adminId,
+      });
+      return { ok: false, changed: false, reason: "incomplete_config" };
+    }
   }
   const updated = await prisma.paymentGateway.updateMany({
     where: { id: gateway.id, isEnabled: !enabled },
@@ -403,34 +480,49 @@ async function testZarinpalConnection(): Promise<boolean> {
   }
 }
 
+export type ProviderConnectionStatus = "OK" | "FAILED" | "INCOMPLETE" | "UNSUPPORTED";
+
 export interface ProviderConnectionResult {
-  ok: boolean;
+  status: ProviderConnectionStatus;
 }
 
 /**
  * Tests one provider's connectivity and persists lastCheckedAt/healthStatus
- * ("OK"/"FAILED") on its gateway row. Unsupported providers report failure
- * without any request or persistence. Never throws; never surfaces raw
- * provider errors.
+ * ("OK"/"FAILED") on its gateway row. Providers with no meaningful test
+ * report UNSUPPORTED without any request or persistence; an incomplete
+ * configuration reports INCOMPLETE without firing a request (nothing useful
+ * can be probed and no misleading FAILED is persisted). Never throws; never
+ * surfaces raw provider errors.
  */
 export async function testProviderConnection(
   providerKey: string,
 ): Promise<ProviderConnectionResult> {
   const meta = managedProviderMeta(providerKey);
   if (meta === null || !meta.supportsConnectionTest) {
-    return { ok: false };
+    return { status: "UNSUPPORTED" };
+  }
+  const gateway = await gatewayRowFor(meta.key);
+  const configStatus = await providerConfigStatus(meta, gateway);
+  if (!configStatus.configured) {
+    logger.info("payment provider connection test", {
+      provider: meta.key,
+      status: "INCOMPLETE",
+    });
+    return { status: "INCOMPLETE" };
   }
   const ok =
     meta.key === "NOWPAYMENTS"
       ? await testNowPaymentsConnection()
       : await testZarinpalConnection();
-  const gateway = await gatewayRowFor(meta.key);
   if (gateway !== null) {
     await prisma.paymentGateway.update({
       where: { id: gateway.id },
       data: { lastCheckedAt: new Date(), healthStatus: ok ? "OK" : "FAILED" },
     });
   }
-  logger.info("payment provider connection test", { provider: meta.key, ok });
-  return { ok };
+  logger.info("payment provider connection test", {
+    provider: meta.key,
+    status: ok ? "OK" : "FAILED",
+  });
+  return { status: ok ? "OK" : "FAILED" };
 }

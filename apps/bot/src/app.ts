@@ -148,6 +148,10 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
+  // Payment provider pages (provider-navigation phase) use the stable
+  // payprov:* callbacks - same gated admin area, so a non-admin (or a
+  // forged callback) is denied by adminAuthMiddleware before any handler.
+  bot.callbackQuery(/^payprov:/, adminArea.middleware());
 
   // Flow input router. Receipt upload accepts text/photo/document; the admin
   // reject-reason flow and discount entry are text-only; panel/product/category

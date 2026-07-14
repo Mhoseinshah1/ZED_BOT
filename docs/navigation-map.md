@@ -138,7 +138,9 @@ receipts list — reachable via مالی), plus the placeholders
 | page | buttons |
 | --- | --- |
 | landing (`admin:finance`) | رسیدهای تاییدنشده 💵 » `admin:receipts` / روش‌های پرداخت 💳 · تنظیمات کیف پول و پرداخت 🏦 / مدیریت کیف پول کاربران 👤 » `admin:users` · گزارش مالی 📊 » `admin:fin:reports` / بازگشت به پنل ادمین |
-| روش‌های پرداخت » کارت‌به‌کارت | gateway list » gateway page (toggle, min/max *(flows)*, instruction, کارت‌ها » accounts » add *(flow)* / toggle w/ confirm) — backs » `admin:finance` |
+| مدیریت روش‌های پرداخت 💳 (`admin:finance:methods`, provider LIST) | ONE button per provider `{emoji} {name} — {فعال ✅/غیرفعال ❌}` » `payprov:view:<KEY>` (KEY ∈ CARD_TO_CARD/WALLET/ZARINPAL/NOWPAYMENTS/TELEGRAM_STARS) / بازگشت به مالی |
+| provider DETAIL (`payprov:view:<KEY>`) | فعال کردن *or* غیرفعال کردن » `payprov:toggle:<KEY>` (confirm page » `payprov:toggle:<KEY>:on\|off`, انصراف » detail) / تنظیمات » `payprov:settings:<KEY>` / تست اتصال » `payprov:test:<KEY>` (ZARINPAL·NOWPAYMENTS only) / بازگشت به روش‌های پرداخت |
+| تنظیمات per provider | CARD_TO_CARD » card gateway page (toggle, min/max *(flows)*, instruction, کارت‌ها » accounts » add *(flow)* / toggle w/ confirm) — backs » `payprov:view:CARD_TO_CARD` · WALLET » تنظیمات کیف پول و پرداخت · online providers » read-only env-config page — back » detail |
 | تنظیمات کیف پول و پرداخت | toggles · min/max/instruction/notice *(flows)* · بازگشت » `admin:finance` |
 | گزارش مالی 📊 | ranges » dashboard · آخرین پرداخت‌ها 💳 / آخرین سفارش‌ها 🧾 (paged » details » receipt review / manual order) · بازگشت به مالی |
 

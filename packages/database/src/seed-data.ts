@@ -256,7 +256,7 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     key: "payment_gateway_unavailable_text",
     title: "پیام در دسترس نبودن درگاه پرداخت",
     category: "payment",
-    defaultContent: "این روش پرداخت موقتاً در دسترس نیست. لطفاً روش دیگری را انتخاب کنید.",
+    defaultContent: "این روش پرداخت در حال حاضر فعال نیست.",
     allowedVariables: [],
   },
   // --- admin payment provider management (provider-management phase) ---------------
@@ -264,7 +264,14 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     key: "payment_methods_admin_header",
     title: "عنوان مدیریت روش‌های پرداخت",
     category: "payment",
-    defaultContent: "مدیریت روش‌های پرداخت",
+    defaultContent: "مدیریت روش‌های پرداخت 💳",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_provider_pick_text",
+    title: "راهنمای انتخاب روش پرداخت در پنل ادمین",
+    category: "payment",
+    defaultContent: "روش پرداخت موردنظر را انتخاب کنید.",
     allowedVariables: [],
   },
   {
@@ -296,6 +303,27 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     allowedVariables: [],
   },
   {
+    key: "payment_provider_already_enabled_text",
+    title: "پیام فعال بودن قبلی روش پرداخت",
+    category: "payment",
+    defaultContent: "این روش پرداخت از قبل فعال است.",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_provider_already_disabled_text",
+    title: "پیام غیرفعال بودن قبلی روش پرداخت",
+    category: "payment",
+    defaultContent: "این روش پرداخت از قبل غیرفعال است.",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_provider_config_incomplete_text",
+    title: "پیام ناقص بودن تنظیمات هنگام فعال‌سازی",
+    category: "payment",
+    defaultContent: "تنظیمات این درگاه کامل نیست و امکان فعال‌سازی آن وجود ندارد.",
+    allowedVariables: [],
+  },
+  {
     key: "payment_provider_test_ok_text",
     title: "پیام موفقیت تست اتصال",
     category: "payment",
@@ -310,10 +338,17 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     allowedVariables: [],
   },
   {
-    key: "payment_no_online_methods_text",
-    title: "پیام نبود روش پرداخت آنلاین فعال",
+    key: "payment_provider_test_incomplete_text",
+    title: "پیام ناقص بودن تنظیمات هنگام تست اتصال",
     category: "payment",
-    defaultContent: "در حال حاضر روش پرداخت آنلاین فعالی وجود ندارد.",
+    defaultContent: "تنظیمات این درگاه ناقص است.",
+    allowedVariables: [],
+  },
+  {
+    key: "payment_no_online_methods_text",
+    title: "پیام نبود روش پرداخت فعال",
+    category: "payment",
+    defaultContent: "در حال حاضر روش پرداخت فعالی وجود ندارد. لطفاً با پشتیبانی تماس بگیرید.",
     allowedVariables: [],
   },
 ];
@@ -357,5 +392,8 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "pm_enable", title: "فعال کردن روش پرداخت", text: "فعال کردن" },
   { key: "pm_disable", title: "غیرفعال کردن روش پرداخت", text: "غیرفعال کردن" },
   { key: "pm_settings", title: "تنظیمات روش پرداخت", text: "تنظیمات" },
+  { key: "pm_settings_wallet", title: "تنظیمات کیف پول", text: "تنظیمات کیف پول" },
+  { key: "pm_settings_card", title: "تنظیمات کارت‌به‌کارت", text: "تنظیمات کارت‌به‌کارت" },
   { key: "pm_test", title: "تست اتصال روش پرداخت", text: "تست اتصال" },
+  { key: "pm_back_providers", title: "بازگشت به روش‌های پرداخت", text: "بازگشت به روش‌های پرداخت" },
 ];
