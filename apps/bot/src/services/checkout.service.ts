@@ -48,6 +48,17 @@ export function buildProductSnapshot(
     requiredUserInfoEnabled: product.requiredUserInfoEnabled,
     requiredUserInfoPromptText: product.requiredUserInfoPromptText,
     deliveryType: product.deliveryType,
+    // Naming phase: the admin-selected naming strategy + its config,
+    // captured NOW - the paid order's identity resolves from this capture,
+    // so later panel-config edits never rename a paid entitlement.
+    ...(product.type === "SERVICE_PRODUCT" && product.panel !== null
+      ? {
+          namingStrategy: product.panel.usernamePatternType,
+          namingCustomText: product.panel.usernameCustomText,
+          namingRandomLength: product.panel.usernameRandomLength,
+          namingRepresentativePrefix: product.panel.representativeUsernamePrefix,
+        }
+      : {}),
     originalPriceToman: draft.originalPriceToman,
     discountCode: draft.discountCode ?? null,
     discountAmountToman: draft.discountAmountToman,

@@ -28,6 +28,11 @@ import { validateDiscountCode } from "../../services/discount.service.js";
 import { getPendingReviewPayment } from "../../services/payment-method.service.js";
 import { getProductByShortId, type ProductWithRelations } from "../../services/product.service.js";
 import {
+  NAMING_INCOMPLETE_TEXT,
+  namingConfigFromPanel,
+  validateNamingConfig,
+} from "../../services/service-naming.service.js";
+import {
   buildServiceInfoMessage,
   PROVISION_FAILED_USER_TEXT,
   provisionPaidOrder,
@@ -451,6 +456,17 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
     }
   } else {
     draft.finalPriceToman = product.priceToman;
+  }
+
+  // Naming phase gate: a strategy whose required config is missing blocks
+  // checkout BEFORE any payment - the user is never charged for an order
+  // whose identity cannot be resolved.
+  if (product.type === "SERVICE_PRODUCT" && product.panel !== null) {
+    const naming = validateNamingConfig(namingConfigFromPanel(product.panel));
+    if (!naming.ok) {
+      await safeAnswerCallback(ctx, NAMING_INCOMPLETE_TEXT);
+      return;
+    }
   }
 
   try {

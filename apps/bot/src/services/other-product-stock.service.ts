@@ -14,6 +14,10 @@ import { InlineKeyboard } from "grammy";
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import type { DeliverySendApi } from "./other-product-delivery.service.js";
+import {
+  DELIVERY_REFERENCE_LABEL,
+  ensureOrderDeliveryReference,
+} from "./other-product-naming.service.js";
 import { deleteSetting, getSetting, setSetting } from "./settings.service.js";
 
 // =============================================================================
@@ -618,15 +622,22 @@ export async function notifyAdminsAboutStockAlert(
 
 // --- auto-delivery -------------------------------------------------------------------------
 
-/** The message the buyer receives; the content is HTML-escaped, never a file. */
-export function buildStockDeliveryMessage(productName: string, content: string): string {
-  return [
-    "سفارش شما آماده شد ✅",
-    "",
-    `محصول: ${escapeHtml(productName)}`,
-    "",
-    `<code>${escapeHtml(content)}</code>`,
-  ].join("\n");
+/**
+ * The message the buyer receives; the content is HTML-escaped, never a file.
+ * The delivery reference is NEVER computed from the stock content - it comes
+ * from the naming service (order identifiers only).
+ */
+export function buildStockDeliveryMessage(
+  productName: string,
+  content: string,
+  deliveryReference: string | null = null,
+): string {
+  const lines = ["سفارش شما آماده شد ✅", "", `محصول: ${escapeHtml(productName)}`];
+  if (deliveryReference !== null && deliveryReference !== "") {
+    lines.push(`${DELIVERY_REFERENCE_LABEL} <code>${escapeHtml(deliveryReference)}</code>`);
+  }
+  lines.push("", `<code>${escapeHtml(content)}</code>`);
+  return lines.join("\n");
 }
 
 export type AutoDeliverOutcome =
@@ -704,6 +715,11 @@ export async function autoDeliverStockOrder(
     return { status: "NOT_ELIGIBLE" };
   }
 
+  // Naming phase: the delivery reference is resolved BEFORE any claim so a
+  // naming problem can never reserve stock; a null result never blocks the
+  // delivery (defensive), and the reference is never derived from content.
+  const deliveryReference = await ensureOrderDeliveryReference(orderId);
+
   // Idempotency: an item already tied to this order wins over a new claim.
   const existing = await prisma.otherProductStockItem.findFirst({
     where: { deliveredOrderId: order.id, status: { in: ["RESERVED", "DELIVERED"] } },
@@ -743,7 +759,7 @@ export async function autoDeliverStockOrder(
   try {
     await api.sendMessage(
       order.user.telegramId.toString(),
-      buildStockDeliveryMessage(order.product.name, content),
+      buildStockDeliveryMessage(order.product.name, content, deliveryReference),
       { parse_mode: "HTML" },
     );
   } catch (err) {

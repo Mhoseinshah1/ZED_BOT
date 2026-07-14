@@ -17,6 +17,7 @@ import {
   type UserPaymentRow,
 } from "../../services/user-history.service.js";
 import { listWalletTransactions } from "../../services/wallet.service.js";
+import { DELIVERY_REFERENCE_LABEL } from "../../services/other-product-naming.service.js";
 import { transactionHistoryText } from "../user-wallet/wallet-views.js";
 import {
   deriveUserOrderStatus,
@@ -131,6 +132,9 @@ async function renderDetail(ctx: BotContext, row: UserOtherProductOrderRow): Pro
     `سفارش 🧾 <code>${orderShortId(row)}</code>`,
     "",
     `محصول: ${escapeHtml(orderProductName(row))}`,
+    ...(row.deliveryReference !== null && row.deliveryReference !== ""
+      ? [`${DELIVERY_REFERENCE_LABEL} <code>${escapeHtml(row.deliveryReference)}</code>`]
+      : []),
     `مبلغ: ${formatToman(row.finalPriceToman)}`,
     `وضعیت: ${USER_ORDER_STATUS_LABEL[status]}`,
     `تاریخ ثبت: ${row.createdAt.toISOString().slice(0, 10)}`,
@@ -344,6 +348,10 @@ async function renderHistoryOrderDetail(
   ];
   if (productName !== null && productName !== "") {
     lines.push(`محصول: ${escapeHtml(productName)}`);
+  }
+  // Only ever set for OTHER_PRODUCT orders (the naming phase).
+  if (order.deliveryReference !== null && order.deliveryReference !== "") {
+    lines.push(`${DELIVERY_REFERENCE_LABEL} <code>${escapeHtml(order.deliveryReference)}</code>`);
   }
   lines.push(
     `مبلغ: ${formatToman(order.finalPriceToman)}`,

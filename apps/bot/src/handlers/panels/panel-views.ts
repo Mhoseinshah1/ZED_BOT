@@ -6,6 +6,13 @@ import { fieldsForPage, togglesForPage, type PanelPage } from "./panel-fields.js
 import { panelCapabilityStatusLines } from "../../services/panel-readiness.service.js";
 import { panelShortId } from "../../services/panel.service.js";
 import { resolveXuiAuthMode } from "../../services/panel-adapter-factory.js";
+import {
+  NAMING_INCOMPLETE_TEXT,
+  namingConfigFromPanel,
+  previewNamingStrategy,
+  USERNAME_STRATEGY_INFO,
+  validateNamingConfig,
+} from "../../services/service-naming.service.js";
 import { escapeHtml } from "../../utils/html.js";
 
 const STATUS_EMOJI: Record<PanelStatus, string> = {
@@ -248,13 +255,17 @@ export const USERNAME_PATTERNS = [
   "REPRESENTATIVE_TEXT_SEQUENCE",
 ] as const;
 
-/** The username-settings page adds a pattern-type selector above the fields. */
+/**
+ * Naming phase: the selector shows the PERSIAN strategy labels; callback
+ * data stays the stable strategy INDEX into USERNAME_PATTERNS - labels are
+ * cosmetic and can never redirect a selection.
+ */
 export function usernamePatternKeyboard(panel: Panel): InlineKeyboard {
   const sid = panelShortId(panel);
   const kb = new InlineKeyboard();
   USERNAME_PATTERNS.forEach((pattern, index) => {
     const mark = panel.usernamePatternType === pattern ? "• " : "";
-    kb.text(`${mark}${pattern}`, cb.usernamePattern(sid, index)).row();
+    kb.text(`${mark}${USERNAME_STRATEGY_INFO[pattern].fa}`, cb.usernamePattern(sid, index)).row();
   });
   kb.text("بازگشت", cb.usernameSettings(sid));
   return kb;
@@ -281,8 +292,27 @@ export function panelPageView(
 
   const lines = [`<b>${PAGE_TITLE[page]}</b> — ${escapeHtml(panel.name)}`, ""];
   if (page === "username") {
-    lines.push(`روش فعلی ساخت username: ${panel.usernamePatternType}`, "");
-    kb.text("تغییر روش ساخت username", cb.usernamePattern(sid, -1)).row();
+    // Naming phase: «روش نام‌گذاری سرویس» - current strategy (Persian),
+    // semantics, required fields, fallback and a live sample preview.
+    const info = USERNAME_STRATEGY_INFO[panel.usernamePatternType];
+    const validation = validateNamingConfig(namingConfigFromPanel(panel));
+    const preview = previewNamingStrategy(panel, panel.usernamePatternType);
+    lines.push(
+      "روش نام‌گذاری سرویس",
+      "",
+      `روش فعلی:\n${info.fa}`,
+      `توضیح: ${info.descriptionFa}`,
+      ...(info.requiresFa.length > 0 ? [`فیلدهای موردنیاز: ${info.requiresFa.join("، ")}`] : []),
+      "جایگزین بدون نام کاربری تلگرام: u + آیدی عددی",
+      `حداکثر طول نام: 32 نویسه (برش با پسوند شناسه سفارش)`,
+      "",
+      validation.ok
+        ? `نمونه نام ساخته‌شده:\n<code>${escapeHtml(preview.preview)}</code>`
+        : `⚠️ ${NAMING_INCOMPLETE_TEXT} (${validation.missingFa.join("، ")})`,
+      "",
+    );
+    kb.text("تغییر روش نام‌گذاری", cb.usernamePattern(sid, -1)).row();
+    kb.text("پیش‌نمایش نام‌گذاری", cb.usernamePreview(sid)).row();
   }
   for (const field of fields) {
     lines.push(`• ${field.label}: ${formatValue(panel[field.column])}`);

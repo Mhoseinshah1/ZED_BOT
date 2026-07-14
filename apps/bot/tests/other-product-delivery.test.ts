@@ -134,6 +134,15 @@ describe.runIf(hasDb)("OTHER_PRODUCT manual delivery (Phase 23)", () => {
     }
     expect(await prisma.otherProductOrder.count({ where: { orderId: infoOrder.id } })).toBe(1);
 
+    // Naming phase: the delivery reference exists BEFORE the admin queue
+    // (default ORDER_SHORT_ID policy) and a repeated init never changes it.
+    expect(
+      (await prisma.order.findUniqueOrThrow({ where: { id: plainOrder.id } })).deliveryReference,
+    ).toBe(`ord-${plainOrder.id.replace(/-/g, "").slice(0, 8)}`);
+    expect(
+      (await prisma.order.findUniqueOrThrow({ where: { id: infoOrder.id } })).deliveryReference,
+    ).toBe(`ord-${infoOrder.id.replace(/-/g, "").slice(0, 8)}`);
+
     // Never a Service, never provisioning.
     expect(await prisma.service.count({ where: { userId: user.id } })).toBe(0);
   });
@@ -198,6 +207,10 @@ describe.runIf(hasDb)("OTHER_PRODUCT manual delivery (Phase 23)", () => {
     expect(calls[0].text).toContain("محصول شما با موفقیت تحویل شد ✅");
     expect(calls[0].text).toContain(plainProduct.name);
     expect(calls[0].text).toContain("کد گیفت کارت: ABCD-1234");
+    // Naming phase: the message carries the persisted delivery reference.
+    expect(calls[0].text).toContain(
+      `شناسه تحویل: <code>ord-${order.id.replace(/-/g, "").slice(0, 8)}</code>`,
+    );
 
     const record = await prisma.otherProductOrder.findUniqueOrThrow({
       where: { id: init.record.id },

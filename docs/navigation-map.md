@@ -193,6 +193,8 @@ on the users landing / admin menu).
 | root (`admin:panels`) | لیست پنل‌ها 🧾 · افزودن پنل ➕ / پنل‌های فعال ✅ · غیرفعال ⏸ (`admin:panels:ls:<a|i>:<page>`) / بازگشت به پنل ادمین |
 | lists (paged) | rows (icon, name, type, hostname) » detail · بازگشت به مدیریت پنل‌ها |
 | panel detail | تست اتصال 🩺 · وضعیت / ویرایش نام/آدرس / اطلاعات ورود 🔑 (set/not-set only) · محصولات متصل 🛍 » `admin:panel:prods:<sid>` / feature/pricing/test/username/cfg pages / حذف (soft) / بازگشت به لیست پنل‌ها (same filter/page) / بازگشت به مدیریت پنل‌ها |
+| روش نام‌گذاری سرویس (`admin:panel:us:<sid>`, naming phase) | روش فعلی (Persian label) + description + نمونه نام ساخته‌شده / تغییر روش نام‌گذاری » selector (`admin:panel:up:<sid>:<0-7>`, Persian labels, back » `admin:panel:us`) / پیش‌نمایش نام‌گذاری » `admin:panel:unp:<sid>` / field edits (متن دلخواه، طول تصادفی، …) / بازگشت |
+| روش نام‌گذاری محصول دیگر (`admin:prod:naming:<sid>`, OTHER_PRODUCT only) | 5 policies » `admin:prod:setnp:<sid>:<0-4>` · ویرایش قالب نام‌گذاری *(flow, strict variable registry)* · بازگشت — the delivery reference «شناسه تحویل» then appears on delivery messages, admin manual-order details, user order/history details and «جستجوی سفارش» |
 
 ### Other admin sections (unchanged)
 

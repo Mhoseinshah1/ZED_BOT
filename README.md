@@ -257,6 +257,12 @@ Panel integrations have since been implemented (see
   API are detected and blocked as unsupported —
   `docs/xui-global-client-lifecycle.md`
 
+Remote identities are resolved by the admin-selected per-panel naming
+strategy (eight strategies, immutable per-order snapshots, deterministic
+retries/reconciliation) — `docs/service-naming-strategies.md`,
+`docs/provisioning-idempotency.md`. OTHER_PRODUCT orders get safe
+deterministic delivery references — `docs/other-product-naming.md`.
+
 ### Persian bot copy
 
 All Telegram-visible user and admin texts are Persian and aligned with the
