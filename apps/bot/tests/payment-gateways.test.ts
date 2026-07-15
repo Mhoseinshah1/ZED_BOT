@@ -1077,16 +1077,19 @@ describe.runIf(hasDb)("SECURITY: replay and tamper resistance (22-23, E2E)", () 
     });
 
     // Telegram redelivers successful_payment updates: record twice...
+    // (charge ids land in the per-provider-unique externalTransactionId, so
+    // they must be run-unique or reruns would be refused as replays)
+    const chargeId = `stars-charge-${runTag}`;
     await recordProviderSuccessFromBot(payment.id, {
-      transactionId: "stars-charge-0001",
+      transactionId: chargeId,
       sanitizedPayload: { currency: "XTR", total_amount: stars },
     });
     const afterFirst = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
     expect(afterFirst.providerStatus).toBe("SUCCESS");
     expect(afterFirst.verifiedAt).not.toBeNull();
-    expect(afterFirst.externalTransactionId).toBe("stars-charge-0001");
+    expect(afterFirst.externalTransactionId).toBe(chargeId);
     await recordProviderSuccessFromBot(payment.id, {
-      transactionId: "stars-charge-0001",
+      transactionId: chargeId,
       sanitizedPayload: { currency: "XTR", total_amount: stars },
     });
     const afterSecond = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });

@@ -4,6 +4,7 @@ import {
   OrderType,
   PaymentGatewayType,
   PaymentPurpose,
+  PaymentSettlementStatus,
   PaymentStatus,
   Prisma,
   prisma,
@@ -11,6 +12,7 @@ import {
   WalletTransactionSource,
   WalletTransactionType,
   type CheckoutSession,
+  type FinancialReconciliationCase,
   type Order,
   type Payment,
   type PaymentGateway as PaymentGatewayRow,
@@ -28,6 +30,11 @@ import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { claimDiscountUsage } from "./discount.service.js";
+import {
+  findCaseForDuplicatePayment,
+  notifyDuplicateSuccessCase,
+  recordDuplicateSuccess,
+} from "./financial-reconciliation.service.js";
 import {
   buildExtraTimeSuccessMessage,
   executeExtraTimeOrder,
@@ -432,17 +439,32 @@ export async function recordProviderSuccessFromBot(
   const merged = JSON.parse(
     JSON.stringify({ ...payloadRecord(payment), ...(event.sanitizedPayload ?? {}) }),
   ) as Prisma.InputJsonValue;
-  await prisma.payment.update({
-    where: { id: payment.id },
-    data: {
-      providerStatus: "SUCCESS",
-      callbackPayload: merged,
-      ...(payment.verifiedAt === null ? { verifiedAt: now } : {}),
-      ...(event.transactionId !== undefined && event.transactionId !== ""
-        ? { externalTransactionId: event.transactionId }
-        : {}),
-    },
-  });
+  try {
+    await prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        providerStatus: "SUCCESS",
+        callbackPayload: merged,
+        ...(payment.verifiedAt === null ? { verifiedAt: now } : {}),
+        ...(event.transactionId !== undefined && event.transactionId !== ""
+          ? { externalTransactionId: event.transactionId }
+          : {}),
+      },
+    });
+  } catch (err) {
+    // P0 settlement phase: @@unique(provider, externalTransactionId) - the
+    // same external charge can never be attached to a SECOND local payment.
+    // A replayed/forged event reusing another payment's transaction id is
+    // refused entirely: no SUCCESS is recorded on reused evidence.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      logger.warn("provider success refused - transaction id already attached elsewhere", {
+        paymentId: payment.id,
+        provider: payment.provider,
+      });
+      return;
+    }
+    throw err;
+  }
   const isExpired = payment.expiresAt !== null && payment.expiresAt.getTime() < now.getTime();
   if (!isExpired) {
     await prisma.payment.updateMany({
@@ -463,6 +485,19 @@ export type SettleOutcome =
   | { kind: "already"; payment: Payment; order: Order | null; purpose: PaymentPurpose }
   | { kind: "pending" }
   | { kind: "failed"; status: PaymentStatus }
+  /**
+   * P0 settlement phase: the provider collected real money but ANOTHER
+   * payment owns this checkout's settlement. Non-retryable locally - the
+   * duplicate is filed as a FinancialReconciliationCase (created=true only
+   * on the filing call, so callers notify exactly once). Provider SUCCESS
+   * stays recorded; nothing was provisioned/credited for this payment.
+   */
+  | {
+      kind: "duplicate";
+      payment: Payment;
+      reconciliationCase: FinancialReconciliationCase;
+      created: boolean;
+    }
   | { kind: "error"; error: string };
 
 /** Thrown when the settlement CAS matched 0 rows - a concurrent settle won. */
@@ -476,6 +511,20 @@ class AbortToAlready extends Error {
 class SettleAbort extends Error {
   constructor(readonly reason: string) {
     super(`settlement aborted: ${reason}`);
+  }
+}
+
+/**
+ * Thrown when the checkout claim shows ANOTHER payment (or a pre-claim-era
+ * settlement) owns the checkout: the current payment is a real duplicate
+ * successful charge and must go to financial review.
+ */
+class DuplicateSuccess extends Error {
+  constructor(
+    readonly ownerPaymentId: string | null,
+    readonly checkoutStatus: CheckoutStatus,
+  ) {
+    super("checkout settlement is owned by another payment");
   }
 }
 
@@ -505,6 +554,31 @@ function snapshotIntArray(snapshot: Record<string, unknown>, key: string): numbe
   }
   const ids = value.filter((v): v is number => typeof v === "number" && Number.isInteger(v));
   return ids.length > 0 ? ids : null;
+}
+
+/**
+ * P0 settlement phase: order creation with the unique-constraint backstop.
+ * A P2002 on Order.checkoutSessionId means a concurrent transaction created
+ * the checkout's order first - re-read the winner, verify it belongs to the
+ * same checkout and user, and reuse it. No second order, no raw error.
+ */
+async function createOrderIdempotent(
+  tx: Prisma.TransactionClient,
+  checkoutSessionId: string,
+  userId: string,
+  data: Prisma.OrderUncheckedCreateInput,
+): Promise<{ order: Order; created: boolean }> {
+  try {
+    return { order: await tx.order.create({ data }), created: true };
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      const winner = await tx.order.findFirst({ where: { checkoutSessionId } });
+      if (winner !== null && winner.userId === userId) {
+        return { order: winner, created: false };
+      }
+    }
+    throw err;
+  }
 }
 
 /** "already" outcome: the payment settled before - load its order. */
@@ -571,6 +645,31 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
     // Manual-review rows never settle here.
     return { kind: "error", error: "payment is in manual review" };
   }
+  // P0 settlement phase: a payment already filed for duplicate review is
+  // terminal locally - return its existing case idempotently, never retry
+  // provisioning/credits, never re-verify at the provider.
+  if (payment.settlementStatus === PaymentSettlementStatus.DUPLICATE_SUCCESS_REVIEW) {
+    const existingCase = await findCaseForDuplicatePayment(payment.id);
+    if (existingCase !== null) {
+      return { kind: "duplicate", payment, reconciliationCase: existingCase, created: false };
+    }
+    // Marker without a case (crash between the two writes is impossible -
+    // they share a transaction - but stay defensive): file it now.
+    const record = await recordDuplicateSuccess({
+      checkoutSessionId: checkout.id,
+      duplicatePaymentId: payment.id,
+      primaryPaymentId: null,
+      userId: payment.userId,
+      expectedAmountToman: payment.amountToman,
+      safeReason: "duplicate review marker found without a case - refiled",
+    });
+    return {
+      kind: "duplicate",
+      payment,
+      reconciliationCase: record.reconciliationCase,
+      created: record.created,
+    };
+  }
 
   if (payment.providerStatus !== "SUCCESS") {
     // Zarinpal fallback: the redirect may have been lost - verify on demand.
@@ -626,30 +725,59 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
   const snapshot = (checkout.productSnapshot ?? {}) as Record<string, unknown>;
   try {
     const order = await prisma.$transaction(async (tx) => {
-      // (a) The exactly-once gate: only the first settle flips the payment.
+      // (a) THE ATOMIC CROSS-PROVIDER CLAIM (P0 settlement phase): the
+      // checkout - not the payment - is the financial gate. Exactly one
+      // Payment can ever set settledByPaymentId (compare-and-set on NULL),
+      // so two provider successes can never both settle one checkout.
+      const claimed = await tx.checkoutSession.updateMany({
+        where: {
+          id: checkout.id,
+          settledByPaymentId: null,
+          status: CheckoutStatus.PENDING,
+        },
+        data: { settledByPaymentId: payment.id, status: CheckoutStatus.PAID, paidAt: now },
+      });
+      if (claimed.count === 0) {
+        const fresh = await tx.checkoutSession.findUnique({
+          where: { id: checkout.id },
+          select: { settledByPaymentId: true, status: true },
+        });
+        if (fresh === null) {
+          throw new SettleAbort("checkout disappeared during settlement");
+        }
+        if (fresh.settledByPaymentId !== payment.id) {
+          // Another payment (or a pre-claim-era/legacy path) owns this
+          // checkout - the current provider SUCCESS is a real duplicate.
+          throw new DuplicateSuccess(fresh.settledByPaymentId, fresh.status);
+        }
+        // This payment already owns the checkout (crash-recovery retry):
+        // fall through - every step below is idempotent for the owner.
+      }
+
+      // (b) Owner-only payment flip: PENDING/PROCESSING -> APPROVED plus the
+      // LOCAL settlement marker. count 0 = the same payment finished in a
+      // concurrent call - resolve to "already".
       const flipped = await tx.payment.updateMany({
         where: {
           id: payment.id,
           status: { in: [PaymentStatus.PENDING, PaymentStatus.PROCESSING] },
         },
-        data: { status: PaymentStatus.APPROVED, paidAt: now, reviewedAt: now },
+        data: {
+          status: PaymentStatus.APPROVED,
+          paidAt: now,
+          reviewedAt: now,
+          settlementStatus: PaymentSettlementStatus.SETTLED,
+          settledAt: now,
+        },
       });
       if (flipped.count === 0) {
         throw new AbortToAlready();
       }
 
-      // (b) Checkout flip - count 0 means another payment already paid it.
-      const checkoutFlipped = await tx.checkoutSession.updateMany({
-        where: { id: checkout.id, status: CheckoutStatus.PENDING },
-        data: { status: CheckoutStatus.PAID, paidAt: now },
-      });
-
       // (c) Wallet top-up: mirror approveWalletTopup - balance moves exactly
       // once (guarded by relatedPaymentId + reason), no Order, no discount.
+      // Checkout ownership is already guaranteed by the claim above.
       if (payment.purpose === PaymentPurpose.WALLET_CHARGE) {
-        if (checkoutFlipped.count === 0) {
-          throw new SettleAbort("wallet top-up checkout is not PENDING");
-        }
         const existingTx = await tx.walletTransaction.findFirst({
           where: { relatedPaymentId: payment.id, reason: WALLET_TOPUP_REASON },
         });
@@ -682,46 +810,47 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
         return null;
       }
 
-      // (d) Order payment: one PAID Order per checkout, exactly like the
-      // receipt approval - an existing order is reused, never duplicated;
-      // user stats move only with the (single) creation.
+      // (d) Order payment: one PAID Order per checkout - the claim makes
+      // this payment the only allowed creator; the Order.checkoutSessionId
+      // unique constraint is the defense-in-depth backstop (a P2002 race
+      // resolves idempotently to the winner row).
       const orderType = resolveOrderType(checkout, snapshot);
       let order = await tx.order.findFirst({
         where: { checkoutSessionId: checkout.id },
         orderBy: { createdAt: "asc" },
       });
-      if (checkoutFlipped.count === 0 && order === null) {
-        throw new SettleAbort("checkout is not PENDING and has no order to reuse");
-      }
+      let orderCreated = false;
       if (order === null) {
-        order = await tx.order.create({
-          data: {
-            userId: checkout.userId,
-            checkoutSessionId: checkout.id,
-            type: orderType,
-            status: OrderStatus.PAID,
-            productId: checkout.productId,
-            serviceId: checkout.serviceId,
-            paymentId: payment.id,
-            originalPriceToman: checkout.originalPriceToman,
-            discountAmountToman: checkout.discountAmountToman,
-            finalPriceToman: checkout.finalPriceToman,
-            discountCodeId: checkout.discountCodeId,
-            productNameSnapshot: snapshotString(snapshot, "productName"),
-            productDescriptionSnapshot: snapshotString(snapshot, "invoiceDescription"),
-            productPriceSnapshot: snapshotInt(snapshot, "originalPriceToman"),
-            durationDaysSnapshot: snapshotInt(snapshot, "durationDays"),
-            volumeGbSnapshot: snapshotInt(snapshot, "volumeGb"),
-            ...(snapshotIntArray(snapshot, "inboundIds") !== null
-              ? { inboundIdsSnapshot: snapshotIntArray(snapshot, "inboundIds") as number[] }
-              : {}),
-            panelNameSnapshot: snapshotString(snapshot, "panelName"),
-            locationSnapshot:
-              snapshot.allLocations === true ? "ALL" : snapshotString(snapshot, "serviceLocation"),
-            categorySnapshot: snapshotString(snapshot, "categoryName"),
-            paidAt: now,
-          },
+        const result = await createOrderIdempotent(tx, checkout.id, checkout.userId, {
+          userId: checkout.userId,
+          checkoutSessionId: checkout.id,
+          type: orderType,
+          status: OrderStatus.PAID,
+          productId: checkout.productId,
+          serviceId: checkout.serviceId,
+          paymentId: payment.id,
+          originalPriceToman: checkout.originalPriceToman,
+          discountAmountToman: checkout.discountAmountToman,
+          finalPriceToman: checkout.finalPriceToman,
+          discountCodeId: checkout.discountCodeId,
+          productNameSnapshot: snapshotString(snapshot, "productName"),
+          productDescriptionSnapshot: snapshotString(snapshot, "invoiceDescription"),
+          productPriceSnapshot: snapshotInt(snapshot, "originalPriceToman"),
+          durationDaysSnapshot: snapshotInt(snapshot, "durationDays"),
+          volumeGbSnapshot: snapshotInt(snapshot, "volumeGb"),
+          ...(snapshotIntArray(snapshot, "inboundIds") !== null
+            ? { inboundIdsSnapshot: snapshotIntArray(snapshot, "inboundIds") as number[] }
+            : {}),
+          panelNameSnapshot: snapshotString(snapshot, "panelName"),
+          locationSnapshot:
+            snapshot.allLocations === true ? "ALL" : snapshotString(snapshot, "serviceLocation"),
+          categorySnapshot: snapshotString(snapshot, "categoryName"),
+          paidAt: now,
         });
+        order = result.order;
+        orderCreated = result.created;
+      }
+      if (orderCreated) {
         await tx.payment.update({
           where: { id: payment.id },
           data: { orderId: order.id },
@@ -779,10 +908,13 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
     });
 
     const settled = await prisma.payment.findUnique({ where: { id: payment.id } });
+    // Audit trail: this payment claimed and settled the checkout.
     logger.info("gateway payment settled", {
       paymentId: payment.id,
       provider: payment.provider,
       purpose: payment.purpose,
+      checkoutSessionId: checkout.id,
+      settledByPaymentId: payment.id,
       orderId: order?.id ?? null,
       amountToman: payment.amountToman,
     });
@@ -802,6 +934,29 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
         return { kind: "failed", status: fresh.status };
       }
       return { kind: "pending" };
+    }
+    if (err instanceof DuplicateSuccess) {
+      // Losing path (atomic): mark the LOCAL duplicate state + file exactly
+      // one reconciliation case. Provider SUCCESS and Payment.status are
+      // untouched - the external charge stays truthfully recorded.
+      const record = await recordDuplicateSuccess({
+        checkoutSessionId: checkout.id,
+        duplicatePaymentId: payment.id,
+        primaryPaymentId: err.ownerPaymentId,
+        userId: payment.userId,
+        expectedAmountToman: payment.amountToman,
+        safeReason:
+          err.ownerPaymentId !== null
+            ? "duplicate provider success: checkout already settled by another payment"
+            : `checkout not claimable (status ${err.checkoutStatus}) with no recorded owner`,
+      });
+      const fresh = await prisma.payment.findUnique({ where: { id: payment.id } });
+      return {
+        kind: "duplicate",
+        payment: fresh ?? payment,
+        reconciliationCase: record.reconciliationCase,
+        created: record.created,
+      };
     }
     if (err instanceof SettleAbort) {
       logger.error("gateway settlement aborted", {
@@ -1043,6 +1198,10 @@ export async function runGatewaySettlementSweep(api: DeliverySendApi): Promise<v
         provider: { in: ONLINE_PROVIDER_TYPES },
         providerStatus: "SUCCESS",
         status: { in: [PaymentStatus.PENDING, PaymentStatus.PROCESSING] },
+        // P0 settlement phase: duplicate-review rows are locally terminal -
+        // retrying them would loop forever (their checkout belongs to
+        // another payment). The reconciliation queue owns them now.
+        settlementStatus: PaymentSettlementStatus.UNSETTLED,
       },
       orderBy: { createdAt: "asc" },
       take: SWEEP_BATCH_SIZE,
@@ -1052,6 +1211,10 @@ export async function runGatewaySettlementSweep(api: DeliverySendApi): Promise<v
       const outcome = await settleGatewayPayment(row.id);
       if (outcome.kind === "settled" || outcome.kind === "already") {
         await fulfillSettledGatewayOrder(api, outcome);
+      } else if (outcome.kind === "duplicate" && outcome.created) {
+        // Notify exactly once - the case is already committed, so a crashed
+        // notification is retried by the admin queue, never by re-filing.
+        await notifyDuplicateSuccessCase(api, outcome.reconciliationCase, outcome.payment);
       }
     }
 

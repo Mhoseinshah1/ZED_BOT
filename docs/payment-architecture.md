@@ -6,7 +6,8 @@ separate from money movement, and settlement happens **exactly once** no
 matter how many callbacks, button mashes, replays or sweeps arrive.
 
 Related documents: [zarinpal.md](zarinpal.md), [nowpayments.md](nowpayments.md),
-[telegram-stars.md](telegram-stars.md), [payment-lifecycle.md](payment-lifecycle.md).
+[telegram-stars.md](telegram-stars.md), [payment-lifecycle.md](payment-lifecycle.md),
+[cross-provider-checkout-settlement.md](cross-provider-checkout-settlement.md).
 
 ## Layered design
 
@@ -91,7 +92,8 @@ On `Payment`:
 | `externalReference` | Provider-side payment/invoice reference when distinct from `authority` |
 | `providerStatus` | The **normalized provider outcome** recorded by verified callbacks/webhooks (`SUCCESS`, `PROCESSING`, `FAILED`, `EXPIRED`, `CANCELLED`) |
 | `verifiedAt` | Set exactly once, on the first recorded provider SUCCESS — stable across replays |
-| `externalTransactionId` | Final settlement reference (Zarinpal `ref_id`, NOWPayments `payment_id`, Telegram charge id) |
+| `externalTransactionId` | Final settlement reference (Zarinpal `ref_id`, NOWPayments `payment_id`, Telegram charge id) — `@@unique(provider, externalTransactionId)`: one local payment per external transaction |
+| `settlementStatus` | The **local settlement truth** (P0 settlement phase), separate from the provider outcome: `UNSETTLED` / `SETTLED` (this payment owns its checkout's settlement) / `DUPLICATE_SUCCESS_REVIEW` (provider SUCCESS but another payment owns the checkout — filed for financial review). Plus `settledAt` and the safe `settlementReason` marker |
 
 `PaymentStatus` gained `PROCESSING` (user came back from the gateway /
 provider event in flight) and `CANCELLED` (user cancelled at the gateway).
@@ -131,17 +133,35 @@ verification resolves it.
   «بررسی وضعیت پرداخت ♻️» button, the Stars `successful_payment` handler and
   the background sweep.
 
+## Cross-provider settlement ownership
+
+One checkout can hold payments at several providers, and more than one of
+them can genuinely succeed. The checkout — not the payment — is therefore
+the financial gate: `CheckoutSession.settledByPaymentId` (unique, written
+by a compare-and-set on NULL) records **the one payment allowed to move
+money** for that checkout. The settlement transaction claims it first;
+a payment that finds the checkout owned by someone else is a real
+duplicate charge and is filed as a `FinancialReconciliationCase`
+(`settlementStatus = DUPLICATE_SUCCESS_REVIEW`) instead of settling —
+never refunded or credited automatically. Full design, crash windows and
+idempotency rules:
+[cross-provider-checkout-settlement.md](cross-provider-checkout-settlement.md);
+the review queue: [financial-reconciliation.md](financial-reconciliation.md).
+
 ## Exactly-once design (the CAS chain)
 
 Settlement is one transaction whose first statement is a compare-and-set:
 
-1. **Payment CAS — the gate.** `updateMany` moves `Payment.status`
-   PENDING/PROCESSING → APPROVED. Matching 0 rows means another settle won
-   (or the payment is terminal): the caller resolves to an idempotent
-   "already" outcome. Only the CAS winner proceeds.
-2. **Checkout CAS.** `CheckoutSession` PENDING → PAID. 0 rows here with no
-   existing order aborts the transaction (another payment already paid this
-   checkout).
+1. **Checkout claim — the cross-provider gate.** `updateMany` sets
+   `settledByPaymentId` + PENDING → PAID, filtered on
+   `settledByPaymentId IS NULL`. 0 rows → re-read: same owner resumes
+   idempotently (crash recovery); another owner → the payment is a
+   duplicate success and goes to financial review (see above), the
+   transaction rolls back.
+2. **Owner-only payment CAS.** `updateMany` moves `Payment.status`
+   PENDING/PROCESSING → APPROVED (+ `settlementStatus = SETTLED`).
+   Matching 0 rows means the same payment settled in a concurrent call:
+   the caller resolves to an idempotent "already" outcome.
 3. **Purpose-specific money move.**
    - `WALLET_CHARGE`: balance increment + one `WalletTransaction`, guarded
      by `relatedPaymentId` + reason — a replay finds the existing ledger row
@@ -167,7 +187,9 @@ short-circuits, and a manual-review (`PENDING_REVIEW`) exclusion.
 `runGatewaySettlementSweep()` (one run per minute, `startGatewaySettlementLoop`):
 
 1. **Pass 1:** settle + fulfill payments whose provider SUCCESS was recorded
-   but never settled (bot was down, user never pressed the button).
+   but never settled (bot was down, user never pressed the button). Selects
+   `settlementStatus = UNSETTLED` only — duplicate-review rows are locally
+   terminal and never re-swept.
 2. **Pass 2 (crash recovery):** re-fulfill APPROVED order payments whose
    order stayed PAID ≥ 2 minutes (settled but fulfillment crashed).
    Fulfillment executors are CAS-claimed/idempotent, so repeats are safe.

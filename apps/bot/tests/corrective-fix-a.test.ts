@@ -72,8 +72,9 @@ describe("admin root / finance nesting (Fix A)", () => {
       [CB.ADMIN_RECEIPTS],
       [FIN_CB.methods, FIN_CB.settings],
       [CB.ADMIN_USERS, "admin:fin:reports"],
-      // Gateway phase: the read-only payments list row sits above the back row.
-      ["admin:fin:pay:all:1"],
+      // Gateway/settlement phase: the read-only payments list + reconciliation
+      // row sits above the back row.
+      ["admin:fin:pay:all:1", "admin:fin:recon"],
       [CB.ADMIN_MENU],
     ]);
     const labels = rows(kb).flat();

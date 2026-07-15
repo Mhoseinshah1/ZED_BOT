@@ -161,6 +161,27 @@ enum DiscountAppliesTo {
   BOTH
 }
 
+// P0 settlement phase: a Payment's LOCAL settlement truth, kept strictly
+// separate from the provider outcome (providerStatus). A payment whose
+// provider confirmed SUCCESS but whose checkout was already settled by
+// ANOTHER payment becomes DUPLICATE_SUCCESS_REVIEW - provider truth is
+// never downgraded.
+enum PaymentSettlementStatus {
+  UNSETTLED
+  SETTLED
+  DUPLICATE_SUCCESS_REVIEW
+}
+
+enum FinancialReconciliationType {
+  DUPLICATE_CHECKOUT_PAYMENT
+}
+
+enum FinancialReconciliationStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+}
+
 enum CheckoutStatus {
   PENDING
   PAID
@@ -740,7 +761,10 @@ model DiscountCodeUsage {
   user              User             @relation(fields: [userId], references: [id])
   orderId           String?
   order             Order?           @relation(fields: [orderId], references: [id])
-  checkoutSessionId String?
+  // P0 settlement phase: a checkout's discount is consumable at most ONCE -
+  // DB-enforced (nullable unique; legacy usages without a checkout keep
+  // working). Racing claims surface as P2002 and resolve idempotently.
+  checkoutSessionId String?          @unique
   checkoutSession   CheckoutSession? @relation(fields: [checkoutSessionId], references: [id])
   amountToman       Int
   createdAt         DateTime         @default(now())
@@ -771,6 +795,13 @@ model CheckoutSession {
   discountCodeId      String?
   discountCode        DiscountCode?   @relation(fields: [discountCodeId], references: [id])
   status              CheckoutStatus  @default(PENDING)
+  // P0 settlement phase: THE atomic cross-provider settlement claim. The
+  // one Payment allowed to create the Order / credit the wallet for this
+  // checkout - written by a compare-and-set (settledByPaymentId IS NULL),
+  // so two provider successes can never both settle. Unique: one payment
+  // can own at most one checkout. Null on legacy/ambiguous rows.
+  settledByPaymentId  String?         @unique
+  settledByPayment    Payment?        @relation("CheckoutSettledBy", fields: [settledByPaymentId], references: [id])
   expiresAt           DateTime
   paidAt              DateTime?
   completedAt         DateTime?
@@ -795,7 +826,11 @@ model Order {
   id                String           @id @default(uuid())
   userId            String
   user              User             @relation(fields: [userId], references: [id])
-  checkoutSessionId String?
+  // P0 settlement phase: DB-enforced one Order per Checkout (defense in
+  // depth under the settledByPaymentId claim). Nullable unique - legacy
+  // orders without a checkout are unaffected; racing creates surface as
+  // P2002 and are resolved idempotently by re-reading the winner.
+  checkoutSessionId String?          @unique
   checkoutSession   CheckoutSession? @relation(fields: [checkoutSessionId], references: [id])
   type              OrderType
   status            OrderStatus      @default(PENDING_PAYMENT)
@@ -956,6 +991,14 @@ model Payment {
   externalTransactionId String?
   callbackPayload       Json?
   idempotencyKey        String?         @unique
+  // P0 settlement phase: LOCAL settlement truth, separate from the provider
+  // outcome. SETTLED = this payment owns its checkout's settlement;
+  // DUPLICATE_SUCCESS_REVIEW = provider SUCCESS but another payment owns the
+  // checkout (filed as a FinancialReconciliationCase). settlementReason is a
+  // short SAFE English marker - never raw provider payloads.
+  settlementStatus      PaymentSettlementStatus @default(UNSETTLED)
+  settledAt             DateTime?
+  settlementReason      String?
   expiresAt             DateTime?
   paidAt                DateTime?
   reviewedAt            DateTime?
@@ -967,6 +1010,7 @@ model Payment {
   receipts           ManualReceipt[]
   walletTransactions WalletTransaction[] @relation("PaymentWalletTransactions")
   primaryForOrders   Order[]             @relation("OrderPrimaryPayment")
+  settledCheckout    CheckoutSession?    @relation("CheckoutSettledBy")
 
   @@index([userId])
   @@index([status])
@@ -976,7 +1020,42 @@ model Payment {
   @@index([externalTransactionId])
   @@index([provider, status])
   @@index([externalReference])
+  @@index([settlementStatus])
   @@index([createdAt])
+  // One external provider transaction can settle at most one local Payment.
+  // Provider-scoped: transaction ids are not globally unique across
+  // providers. Postgres treats NULLs as distinct, so legacy/pending rows
+  // without an external id are unaffected.
+  @@unique([provider, externalTransactionId])
+}
+
+// P0 settlement phase: persistent financial-review queue. One case per
+// duplicate successful Payment (duplicatePaymentId unique - repeated
+// settlement attempts converge on the same case). primaryPaymentId is null
+// only when a legacy checkout was settled before ownership was recorded.
+// safeReason carries a short English marker, never provider payloads.
+model FinancialReconciliationCase {
+  id                 String                        @id @default(uuid())
+  type               FinancialReconciliationType
+  status             FinancialReconciliationStatus @default(OPEN)
+
+  checkoutSessionId  String
+  primaryPaymentId   String?
+  duplicatePaymentId String                        @unique
+
+  userId              String
+  expectedAmountToman Int
+
+  safeReason        String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  resolvedAt        DateTime?
+  resolvedByAdminId String?
+
+  @@index([status, createdAt])
+  @@index([checkoutSessionId])
+  @@index([primaryPaymentId])
+  @@index([userId])
 }
 
 model ManualReceipt {

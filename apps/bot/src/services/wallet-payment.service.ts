@@ -210,7 +210,17 @@ async function executeWalletOrderPayment(
           paidAt: now,
           callbackPayload: { method: "WALLET" },
           idempotencyKey: args.idempotencyKey,
+          // P0 settlement phase: the wallet payment settles its own
+          // freshly-created checkout in this same transaction.
+          settlementStatus: "SETTLED",
+          settledAt: now,
         },
+      });
+      // P0 settlement phase: record the settlement OWNER - a later gateway
+      // success against this checkout is a duplicate, never a re-settle.
+      await tx.checkoutSession.update({
+        where: { id: checkout.id },
+        data: { settledByPaymentId: payment.id },
       });
 
       const order = await tx.order.create({

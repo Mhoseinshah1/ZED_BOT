@@ -85,6 +85,8 @@ export function financeLandingKeyboard(): InlineKeyboard {
     .row()
     // Gateway phase: read-only payment browser (all statuses/providers).
     .text("لیست پرداخت‌ها 💳", "admin:fin:pay:all:1")
+    // Settlement phase: read-only reconciliation queue (OWNER-only pages).
+    .text("تطبیق مالی ⚖️", "admin:fin:recon")
     .row()
     .text("بازگشت به پنل ادمین", CB.ADMIN_MENU);
 }
