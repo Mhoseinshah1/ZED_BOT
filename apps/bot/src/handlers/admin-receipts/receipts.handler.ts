@@ -5,17 +5,7 @@ import { Composer, InlineKeyboard } from "grammy";
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
-import {
-  initManualDelivery,
-  notifyAdminsAboutManualOrder,
-  userInfoButtonKeyboard,
-  userInfoPromptText,
-  WAITING_DELIVERY_USER_TEXT,
-} from "../../services/other-product-delivery.service.js";
-import {
-  autoDeliverStockOrder,
-  notifyAdminsAboutStockAlert,
-} from "../../services/other-product-stock.service.js";
+import { dispatchPaidOrderFulfillment } from "../../services/order-fulfillment.service.js";
 import {
   getPaymentByShortId,
   listPendingReviewPayments,
@@ -23,27 +13,6 @@ import {
   type PaymentWithRelations,
 } from "../../services/payment-method.service.js";
 import {
-  buildServiceInfoMessage,
-  PROVISION_FAILED_USER_TEXT,
-  provisionPaidOrder,
-} from "../../services/provisioning.service.js";
-import {
-  buildExtraTimeSuccessMessage,
-  executeExtraTimeOrder,
-  EXTRA_TIME_FAILED_USER_TEXT,
-} from "../../services/extra-time.service.js";
-import {
-  buildExtraVolumeSuccessMessage,
-  executeExtraVolumeOrder,
-  EXTRA_VOLUME_FAILED_USER_TEXT,
-} from "../../services/extra-volume.service.js";
-import {
-  buildRenewalSuccessMessage,
-  executeRenewalOrder,
-  RENEWAL_FAILED_USER_TEXT,
-} from "../../services/service-renewal.service.js";
-import {
-  approvalUserNotice,
   approveReceiptPayment,
   REJECT_REASON_MAX,
   rejectionUserNotice,
@@ -154,169 +123,100 @@ async function notifyUserSafe(
   }
 }
 
-/**
- * Phase 17: synchronous extra-time application right after an EXTRA_TIME
- * approval. The executor owns the FAILED + refund path.
- */
-async function runExtraTimeAfterApproval(
-  ctx: BotContext,
-  orderId: string,
-  user: User,
-): Promise<void> {
-  try {
-    const outcome = await executeExtraTimeOrder(orderId);
-    if (outcome.ok) {
-      await notifyUserSafe(
-        ctx,
-        user,
-        buildExtraTimeSuccessMessage(outcome.service, outcome.addedDays),
-        "HTML",
-      );
-      await safeReply(ctx, "زمان سرویس افزایش یافت ✅", backKeyboard(ctx));
-      return;
-    }
-    if (outcome.refunded) {
-      await notifyUserSafe(ctx, user, EXTRA_TIME_FAILED_USER_TEXT);
-      await safeReply(
-        ctx,
-        "افزایش زمان ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
-        backKeyboard(ctx),
-      );
-      return;
-    }
-    await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.EXTRA_TIME));
-    await safeReply(ctx, outcome.error, backKeyboard(ctx));
-  } catch (err) {
-    logger.error("extra time after approval crashed", { orderId, error: errorMessage(err) });
-    await safeReply(
-      ctx,
-      "خطایی در افزایش زمان سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
-      backKeyboard(ctx),
-    );
-  }
-}
+/** Admin-facing outcome lines per service-type fulfillment op. */
+const SERVICE_ADMIN_TEXTS = {
+  provision: {
+    ok: "سرویس ساخته شد ✅",
+    refunded: "ساخت سرویس ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
+  },
+  renew: {
+    ok: "سرویس تمدید شد ✅",
+    refunded: "تمدید سرویس ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
+  },
+  extra_volume: {
+    ok: "حجم سرویس افزایش یافت ✅",
+    refunded: "افزایش حجم ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
+  },
+  extra_time: {
+    ok: "زمان سرویس افزایش یافت ✅",
+    refunded: "افزایش زمان ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
+  },
+} as const;
 
 /**
- * Phase 16: synchronous extra-volume application right after an EXTRA_VOLUME
- * approval. The executor owns the FAILED + refund path.
+ * Post-approval fulfillment through the UNIFIED dispatcher (shared with the
+ * wallet and gateway payment paths - the user-facing notifications live
+ * there). This helper only renders the ADMIN-side outcome summary; failures
+ * never roll back the already-committed approval.
  */
-async function runExtraVolumeAfterApproval(
+async function runFulfillmentAfterApproval(
   ctx: BotContext,
   orderId: string,
   user: User,
+  fallbackAdminMessage: string,
 ): Promise<void> {
-  try {
-    const outcome = await executeExtraVolumeOrder(orderId);
-    if (outcome.ok) {
-      await notifyUserSafe(
-        ctx,
-        user,
-        buildExtraVolumeSuccessMessage(outcome.service, outcome.addedVolumeGb),
-        "HTML",
-      );
-      await safeReply(ctx, "حجم سرویس افزایش یافت ✅", backKeyboard(ctx));
-      return;
-    }
-    if (outcome.refunded) {
-      await notifyUserSafe(ctx, user, EXTRA_VOLUME_FAILED_USER_TEXT);
+  const dispatch = await dispatchPaidOrderFulfillment(ctx.api, orderId, {
+    source: "RECEIPT",
+    user,
+  });
+  if (dispatch.kind === "SERVICE") {
+    const texts = SERVICE_ADMIN_TEXTS[dispatch.op];
+    if (dispatch.ok) {
+      await safeReply(ctx, texts.ok, backKeyboard(ctx));
+    } else if (dispatch.refunded) {
+      await safeReply(ctx, texts.refunded, backKeyboard(ctx));
+    } else {
       await safeReply(
         ctx,
-        "افزایش حجم ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
+        dispatch.error ?? "وضعیت سفارش را از بخش سفارش‌ها بررسی کنید.",
+        backKeyboard(ctx),
+      );
+    }
+    return;
+  }
+  if (dispatch.kind === "OTHER_PRODUCT") {
+    if (dispatch.auto === "DELIVERED" || dispatch.auto === "ALREADY_DELIVERED") {
+      await safeEditOrReply(
+        ctx,
+        "رسید تایید شد ✅\n\nسفارش استاک به صورت خودکار تحویل شد 🎟",
         backKeyboard(ctx),
       );
       return;
     }
-    await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.EXTRA_VOLUME));
-    await safeReply(ctx, outcome.error, backKeyboard(ctx));
-  } catch (err) {
-    logger.error("extra volume after approval crashed", { orderId, error: errorMessage(err) });
-    await safeReply(
-      ctx,
-      "خطایی در افزایش حجم سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
-      backKeyboard(ctx),
-    );
-  }
-}
-
-/**
- * Phase 12: synchronous renewal right after a SERVICE_RENEWAL approval. The
- * renewal service owns the FAILED + refund path; this only relays outcomes.
- */
-async function runRenewalAfterApproval(
-  ctx: BotContext,
-  orderId: string,
-  user: User,
-): Promise<void> {
-  try {
-    const outcome = await executeRenewalOrder(orderId);
-    if (outcome.ok) {
-      await notifyUserSafe(ctx, user, buildRenewalSuccessMessage(outcome.service), "HTML");
-      await safeReply(ctx, "سرویس تمدید شد ✅", backKeyboard(ctx));
-      return;
-    }
-    if (outcome.refunded) {
-      await notifyUserSafe(ctx, user, RENEWAL_FAILED_USER_TEXT);
-      await safeReply(
+    if (dispatch.manual === null || !dispatch.manual.ok || dispatch.manual.recordShortId === null) {
+      await safeEditOrReply(
         ctx,
-        "تمدید سرویس ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
+        "رسید تایید شد ✅\n\nسفارش ثبت شد اما ساخت سفارش دستی با خطا مواجه شد؛ از بخش سفارش‌های دستی پیگیری کنید.",
         backKeyboard(ctx),
       );
       return;
     }
-    await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.SERVICE_RENEWAL));
-    await safeReply(ctx, outcome.error, backKeyboard(ctx));
-  } catch (err) {
-    logger.error("renewal after approval crashed", { orderId, error: errorMessage(err) });
-    await safeReply(
+    await safeEditOrReply(
       ctx,
-      "خطایی در تمدید سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
-      backKeyboard(ctx),
+      [
+        "رسید تایید شد ✅",
+        "",
+        ...(dispatch.auto === "SEND_FAILED"
+          ? ["⚠️ تحویل خودکار ناموفق شد؛ سفارش برای تحویل دستی ثبت شد."]
+          : dispatch.auto === "NO_STOCK"
+            ? ["🚨 موجودی محصول تمام شده و سفارش برای تحویل دستی ثبت شد."]
+            : ["سفارش دستی ساخته شد 📦"]),
+        dispatch.manual.requiresInfo
+          ? "از کاربر اطلاعات موردنیاز خواسته شد."
+          : "سفارش آماده تحویل است.",
+      ].join("\n"),
+      new InlineKeyboard()
+        .text("مشاهده سفارش 📦", `admin:mo:view:${dispatch.manual.recordShortId}`)
+        .row()
+        .text("بازگشت به لیست رسیدها", rcb.list(receiptListPage(ctx)))
+        .row()
+        .text("بازگشت به مالی", CB.ADMIN_FINANCE),
     );
+    return;
   }
-}
-
-/**
- * Phase 9: synchronous provisioning right after a SERVICE_PURCHASE approval.
- * The provisioning service owns the FAILED + refund path; this only relays
- * the outcome to the user and the admin (raw adapter errors never leave the
- * logs).
- */
-async function runProvisioningAfterApproval(
-  ctx: BotContext,
-  orderId: string,
-  user: User,
-): Promise<void> {
-  try {
-    const outcome = await provisionPaidOrder(orderId);
-    if (outcome.ok) {
-      await notifyUserSafe(ctx, user, buildServiceInfoMessage(outcome.service), "HTML");
-      await safeReply(ctx, "سرویس ساخته شد ✅", backKeyboard(ctx));
-      return;
-    }
-    if (outcome.refunded) {
-      await notifyUserSafe(ctx, user, PROVISION_FAILED_USER_TEXT);
-      await safeReply(
-        ctx,
-        "ساخت سرویس ناموفق بود و مبلغ به کیف پول کاربر برگشت داده شد.",
-        backKeyboard(ctx),
-      );
-      return;
-    }
-    // Refused without refund (already provisioning, already failed, ...):
-    // the payment stays approved, so tell the user that much.
-    await notifyUserSafe(ctx, user, approvalUserNotice(OrderType.SERVICE_PURCHASE));
-    await safeReply(ctx, outcome.error, backKeyboard(ctx));
-  } catch (err) {
-    logger.error("provisioning after approval crashed", {
-      orderId,
-      error: errorMessage(err),
-    });
-    await safeReply(
-      ctx,
-      "خطایی در ساخت سرویس رخ داد. وضعیت سفارش را بررسی کنید.",
-      backKeyboard(ctx),
-    );
-  }
+  // NONE: unsupported type (user already notified by the dispatcher) or a
+  // crashed dispatch (logged there) - show the caller's fallback summary.
+  await safeEditOrReply(ctx, fallbackAdminMessage, backKeyboard(ctx));
 }
 
 export const receiptsHandler = new Composer<BotContext>();
@@ -659,144 +559,37 @@ receiptsHandler.callbackQuery(/^admin:rec:ap:([0-9a-f-]+):yes$/, async (ctx) => 
       orderId: result.order.id,
       adminId: admin.id,
     });
+    // The per-type "started" notice keeps the admin informed while the
+    // dispatcher runs; OTHER_PRODUCT renders its full summary at the end.
     if (result.orderType === OrderType.SERVICE_PURCHASE) {
-      // Phase 9: provision the PAID order right away (synchronously).
       await safeEditOrReply(
         ctx,
         "رسید تایید شد ✅\n\nسفارش ساخته شد.\nساخت سرویس شروع شد.",
         backKeyboard(ctx),
       );
-      await runProvisioningAfterApproval(ctx, result.order.id, result.user);
-      return;
-    }
-    if (result.orderType === OrderType.SERVICE_RENEWAL) {
-      // Phase 12: renew the existing panel account + Service right away.
+    } else if (result.orderType === OrderType.SERVICE_RENEWAL) {
       await safeEditOrReply(
         ctx,
         "رسید تایید شد ✅\n\nسفارش ساخته شد.\nتمدید سرویس شروع شد.",
         backKeyboard(ctx),
       );
-      await runRenewalAfterApproval(ctx, result.order.id, result.user);
-      return;
-    }
-    if (result.orderType === OrderType.EXTRA_VOLUME) {
-      // Phase 16: apply the purchased volume right away.
+    } else if (result.orderType === OrderType.EXTRA_VOLUME) {
       await safeEditOrReply(
         ctx,
         "رسید تایید شد ✅\n\nسفارش ساخته شد.\nافزایش حجم سرویس شروع شد.",
         backKeyboard(ctx),
       );
-      await runExtraVolumeAfterApproval(ctx, result.order.id, result.user);
-      return;
-    }
-    if (result.orderType === OrderType.EXTRA_TIME) {
-      // Phase 17: apply the purchased time right away.
+    } else if (result.orderType === OrderType.EXTRA_TIME) {
       await safeEditOrReply(
         ctx,
         "رسید تایید شد ✅\n\nسفارش ساخته شد.\nافزایش زمان سرویس شروع شد.",
         backKeyboard(ctx),
       );
-      await runExtraTimeAfterApproval(ctx, result.order.id, result.user);
-      return;
     }
-    if (result.orderType === OrderType.OTHER_PRODUCT) {
-      // Phase 25: stock-eligible products (deliveryType STOCK_ITEM or
-      // stockEnabled, without required user info) auto-deliver from the
-      // encrypted inventory. NOT_ELIGIBLE / NO_STOCK / SEND_FAILED fall
-      // through to the Phase 23 manual path below.
-      const auto = await autoDeliverStockOrder(ctx.api, result.order.id);
-      if (auto.status === "DELIVERED" || auto.status === "ALREADY_DELIVERED") {
-        // Phase 28: warn active admins when this delivery left the stock low
-        // or empty. Fresh deliveries only (an ALREADY_DELIVERED repeat did
-        // not change the count); never throws, never affects the delivery.
-        if (auto.status === "DELIVERED") {
-          await notifyAdminsAboutStockAlert(ctx.api, {
-            productId: auto.item.productId,
-            orderId: result.order.id,
-          });
-        }
-        await safeEditOrReply(
-          ctx,
-          "رسید تایید شد ✅\n\nسفارش استاک به صورت خودکار تحویل شد 🎟",
-          backKeyboard(ctx),
-        );
-        return;
-      }
-      if (auto.status === "NO_STOCK") {
-        await notifyUserSafe(
-          ctx,
-          result.user,
-          "پرداخت شما تایید شد ✅\nموجودی این محصول به پایان رسیده است و سفارش برای تحویل دستی ثبت شد.",
-        );
-      } else if (auto.status === "SEND_FAILED") {
-        // The user received NO content (send failed before finalize), so the
-        // manual fallback is safe - admins get an explicit warning below.
-        logger.warn("stock auto-delivery failed; falling back to manual", {
-          orderId: result.order.id,
-        });
-      }
-      // Phase 23: initialize the manual-delivery record (no provisioning,
-      // no panel, no Service). The user is asked for required info when the
-      // product needs it, otherwise waits for admin delivery.
-      const init = await initManualDelivery(result.order.id);
-      if (!init.ok) {
-        logger.error("manual delivery init after approval failed", {
-          orderId: result.order.id,
-          error: init.error,
-        });
-        await notifyUserSafe(ctx, result.user, approvalUserNotice(result.orderType));
-        await safeEditOrReply(
-          ctx,
-          "رسید تایید شد ✅\n\nسفارش ثبت شد اما ساخت سفارش دستی با خطا مواجه شد؛ از بخش سفارش‌های دستی پیگیری کنید.",
-          backKeyboard(ctx),
-        );
-        return;
-      }
-      if (init.requiresInfo) {
-        await notifyUserSafe(
-          ctx,
-          result.user,
-          `رسید پرداخت شما تایید شد ✅\n\n${userInfoPromptText(init.promptText)}`,
-          undefined,
-          userInfoButtonKeyboard(result.order.id),
-        );
-      } else {
-        // The NO_STOCK fallback already told the user (exhausted-stock notice).
-        if (auto.status !== "NO_STOCK") {
-          await notifyUserSafe(
-            ctx,
-            result.user,
-            `رسید پرداخت شما تایید شد ✅\n\n${WAITING_DELIVERY_USER_TEXT}`,
-          );
-        }
-        // Ready for delivery right away - tell the active admins.
-        await notifyAdminsAboutManualOrder(ctx.api, init.record);
-      }
-      await safeEditOrReply(
-        ctx,
-        [
-          "رسید تایید شد ✅",
-          "",
-          ...(auto.status === "SEND_FAILED"
-            ? ["⚠️ تحویل خودکار ناموفق شد؛ سفارش برای تحویل دستی ثبت شد."]
-            : auto.status === "NO_STOCK"
-              ? ["🚨 موجودی محصول تمام شده و سفارش برای تحویل دستی ثبت شد."]
-              : ["سفارش دستی ساخته شد 📦"]),
-          init.requiresInfo
-            ? "از کاربر اطلاعات موردنیاز خواسته شد."
-            : "سفارش آماده تحویل است.",
-        ].join("\n"),
-        new InlineKeyboard()
-          .text("مشاهده سفارش 📦", `admin:mo:view:${init.record.id.slice(0, 8)}`)
-          .row()
-          .text("بازگشت به لیست رسیدها", rcb.list(receiptListPage(ctx)))
-          .row()
-          .text("بازگشت به مالی", CB.ADMIN_FINANCE),
-      );
-      return;
-    }
-    await notifyUserSafe(ctx, result.user, approvalUserNotice(result.orderType));
-    await safeEditOrReply(ctx, result.message, backKeyboard(ctx));
+    // Money already committed by approveReceiptPayment - fulfillment goes
+    // through the UNIFIED dispatcher shared with wallet and gateway payments
+    // (stock/manual delivery for OTHER_PRODUCT, executors for services).
+    await runFulfillmentAfterApproval(ctx, result.order.id, result.user, result.message);
   } catch (err) {
     logger.error("receipt approval failed", { paymentId: payment.id, error: errorMessage(err) });
     await safeAnswerCallback(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.");

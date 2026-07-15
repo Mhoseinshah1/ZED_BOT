@@ -167,11 +167,10 @@ export function preInvoiceKeyboard(
   walletPaymentEnabled = true,
 ): InlineKeyboard {
   const kb = new InlineKeyboard().text("پرداخت / تایید خرید ✅", CO_CB.CONTINUE).row();
-  if (
-    walletPaymentEnabled &&
-    draft.flowType === "SERVICE_PRODUCT" &&
-    walletPayAvailable(user, draft.finalPriceToman)
-  ) {
+  // Other-product-wallet phase: the wallet button is offered for BOTH product
+  // types (SERVICE_PRODUCT and OTHER_PRODUCT) - availability depends only on
+  // the operator kill-switch and a sufficient balance.
+  if (walletPaymentEnabled && walletPayAvailable(user, draft.finalPriceToman)) {
     kb.text("پرداخت با کیف پول 🏦", CO_CB.WALLET).row();
   }
   if (draft.discountCode === undefined) {

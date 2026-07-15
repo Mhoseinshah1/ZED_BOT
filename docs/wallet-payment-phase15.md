@@ -14,8 +14,10 @@ screens in `apps/bot/src/handlers/user-checkout/` and
 
 «پرداخت با کیف پول 🏦» appears on a pre-invoice ONLY when:
 
-- purchase: draft `flowType = SERVICE_PRODUCT`, `finalPriceToman > 0`, and
-  `user.balanceToman >= finalPriceToman`;
+- purchase: `finalPriceToman > 0` and `user.balanceToman >=
+  finalPriceToman` (both `SERVICE_PRODUCT` and — since the
+  other-product-wallet phase, see
+  `docs/other-product-wallet-fulfillment.md` — `OTHER_PRODUCT` drafts);
 - renewal: `finalPriceToman > 0` and `user.balanceToman >=
   finalPriceToman`.
 

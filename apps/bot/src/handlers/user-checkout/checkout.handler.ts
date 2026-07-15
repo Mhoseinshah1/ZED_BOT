@@ -32,11 +32,7 @@ import {
   namingConfigFromPanel,
   validateNamingConfig,
 } from "../../services/service-naming.service.js";
-import {
-  buildServiceInfoMessage,
-  PROVISION_FAILED_USER_TEXT,
-  provisionPaidOrder,
-} from "../../services/provisioning.service.js";
+import { dispatchPaidOrderFulfillment } from "../../services/order-fulfillment.service.js";
 import {
   payPurchaseDraftWithWallet,
   WALLET_PAYMENT_DONE_TEXT,
@@ -361,7 +357,9 @@ checkoutHandler.callbackQuery(CO_CB.WALLET, async (ctx) => {
     await renderPreInvoice(ctx, true);
     return;
   }
-  if (draft.flowType !== "SERVICE_PRODUCT" || !walletPayAvailable(user, draft.finalPriceToman)) {
+  // Other-product-wallet phase: both product types pay here; only the
+  // balance still gates the button.
+  if (!walletPayAvailable(user, draft.finalPriceToman)) {
     await safeAnswerCallback(ctx, "موجودی کیف پول کافی نیست.");
     await renderPreInvoice(ctx, true);
     return;
@@ -400,15 +398,15 @@ checkoutHandler.callbackQuery(CO_CB.WALLET_CONFIRM, async (ctx) => {
     await safeAnswerCallback(ctx, "پرداخت شد ✅");
     await safeEditOrReply(ctx, WALLET_PAYMENT_DONE_TEXT, backKeyboard(CB.USER_MENU));
 
-    // Immediate provisioning through the unchanged Phase 9 pipeline.
-    const outcome = await provisionPaidOrder(result.order.id);
-    if (outcome.ok) {
-      await safeReply(ctx, buildServiceInfoMessage(outcome.service), backKeyboard(CB.USER_MENU), HTML);
-    } else if (outcome.refunded) {
-      await safeReply(ctx, PROVISION_FAILED_USER_TEXT, backKeyboard(CB.USER_MENU));
-    } else {
-      await safeReply(ctx, "پرداخت انجام شد و سفارش شما در حال آماده‌سازی است.", backKeyboard(CB.USER_MENU));
-    }
+    // Money committed above - fulfillment goes through the UNIFIED dispatcher
+    // (same as gateway settlements and receipt approvals): provisioning for
+    // service products, stock/manual delivery for other products. Exactly one
+    // dispatch per payment - the alreadyPaid replay path above never reaches
+    // this line.
+    await dispatchPaidOrderFulfillment(ctx.api, result.order.id, {
+      source: "WALLET",
+      user,
+    });
   } catch (err) {
     logger.error("wallet purchase payment failed", { error: errorMessage(err) });
     await safeAnswerCallback(ctx);

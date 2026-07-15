@@ -13,15 +13,13 @@ import {
 import type { ExtraTimeDraft } from "../../core/session.js";
 import { validateDiscountCode } from "../../services/discount.service.js";
 import {
-  buildExtraTimeSuccessMessage,
   createExtraTimeCheckout,
-  executeExtraTimeOrder,
   extraTimePackages,
-  EXTRA_TIME_FAILED_USER_TEXT,
   getExtraTimeServiceByShortId,
   isExtraTimePackageValid,
   listExtraTimeServices,
 } from "../../services/extra-time.service.js";
+import { dispatchPaidOrderFulfillment } from "../../services/order-fulfillment.service.js";
 import { getProductByShortId } from "../../services/product.service.js";
 import { getButtonText } from "../../services/text.service.js";
 import {
@@ -261,19 +259,12 @@ extraTimeHandler.callbackQuery(etcb.walletConfirm, async (ctx) => {
     await safeAnswerCallback(ctx, "پرداخت شد ✅");
     await safeEditOrReply(ctx, WALLET_PAYMENT_DONE_TEXT, menuKeyboard());
 
-    const outcome = await executeExtraTimeOrder(result.order.id);
-    if (outcome.ok) {
-      await safeReply(
-        ctx,
-        buildExtraTimeSuccessMessage(outcome.service, outcome.addedDays),
-        menuKeyboard(),
-        HTML,
-      );
-    } else if (outcome.refunded) {
-      await safeReply(ctx, EXTRA_TIME_FAILED_USER_TEXT, menuKeyboard());
-    } else {
-      await safeReply(ctx, "پرداخت انجام شد و افزایش زمان سرویس شما در حال انجام است.", menuKeyboard());
-    }
+    // Money committed above - the UNIFIED post-payment dispatcher applies
+    // the time and notifies the user (shared with gateway/receipt paths).
+    await dispatchPaidOrderFulfillment(ctx.api, result.order.id, {
+      source: "WALLET",
+      user,
+    });
   } catch (err) {
     logger.error("wallet extra-time payment failed", { error: errorMessage(err) });
     await safeAnswerCallback(ctx);
