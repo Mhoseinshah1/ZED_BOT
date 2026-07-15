@@ -352,6 +352,17 @@ per-provider details in [`docs/zarinpal.md`](docs/zarinpal.md),
 [`docs/telegram-stars.md`](docs/telegram-stars.md) and the end-to-end state
 machine in [`docs/payment-lifecycle.md`](docs/payment-lifecycle.md).
 
+Settlement is atomic across providers: each checkout has exactly one
+settlement owner (`CheckoutSession.settledByPaymentId`, DB-enforced), so two
+provider successes can never both settle one pre-invoice — the second
+success is filed for financial review instead of double-charging or getting
+stuck. The design, crash windows and idempotency rules are documented in
+[`docs/cross-provider-checkout-settlement.md`](docs/cross-provider-checkout-settlement.md),
+with the review queue and migration audit queries in
+[`docs/financial-reconciliation.md`](docs/financial-reconciliation.md) and
+the DB-enforced invariants in
+[`docs/database-invariants.md`](docs/database-invariants.md).
+
 ### Database migrations
 
 Migrations live in `packages/database/prisma/migrations` and are applied

@@ -40,6 +40,14 @@ function nextInvoiceId(): number {
   return invoiceBase * 10_000 + ++seq;
 }
 
+// Provider transaction ids (Zarinpal ref_id, NOWPayments payment_id) land in
+// Payment.externalTransactionId, which is UNIQUE per provider - so they must
+// be run-unique too, or reruns against the same database would be refused as
+// replayed evidence.
+function nextExternalId(): number {
+  return invoiceBase * 10_000 + ++seq;
+}
+
 // --- stateful Zarinpal verify mock -----------------------------------------------------
 
 const zpMock = {
@@ -47,14 +55,14 @@ const zpMock = {
   verifyBodies: [] as Array<Record<string, unknown>>,
   /** 100 = verified now, 101 = already verified, other = failure code. */
   verifyCode: 100,
-  verifyRefId: 424242,
+  verifyRefId: nextExternalId(),
 };
 
 function resetMockFlags(): void {
   zpMock.verifyCalls = 0;
   zpMock.verifyBodies = [];
   zpMock.verifyCode = 100;
-  zpMock.verifyRefId = 424242;
+  zpMock.verifyRefId = nextExternalId();
 }
 
 let server: http.Server;
@@ -179,7 +187,7 @@ function finishedBody(payment: Payment, overrides: Record<string, unknown> = {})
     payment_status: "finished",
     order_id: payment.id,
     invoice_id: Number(payment.externalReference),
-    payment_id: 500_000 + ++seq,
+    payment_id: nextExternalId(),
     price_amount: 12.5,
     pay_currency: "trx",
     actually_paid: 300,

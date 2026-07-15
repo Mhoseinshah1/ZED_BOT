@@ -75,18 +75,35 @@ async function recordProviderOutcome(
     return "ignored";
   }
   const now = new Date();
-  await prisma.payment.update({
-    where: { id: payment.id },
-    data: {
-      providerStatus: event.status,
-      callbackPayload: toJsonValue(event.sanitizedPayload),
-      ...(event.status === "SUCCESS" && payment.verifiedAt === null ? { verifiedAt: now } : {}),
-      ...(event.transactionId !== undefined ? { externalTransactionId: event.transactionId } : {}),
-      ...(payment.externalReference === null && event.externalReference !== undefined
-        ? { externalReference: event.externalReference }
-        : {}),
-    },
-  });
+  try {
+    await prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        providerStatus: event.status,
+        callbackPayload: toJsonValue(event.sanitizedPayload),
+        ...(event.status === "SUCCESS" && payment.verifiedAt === null ? { verifiedAt: now } : {}),
+        ...(event.transactionId !== undefined
+          ? { externalTransactionId: event.transactionId }
+          : {}),
+        ...(payment.externalReference === null && event.externalReference !== undefined
+          ? { externalReference: event.externalReference }
+          : {}),
+      },
+    });
+  } catch (err) {
+    // (provider, externalTransactionId) is unique: the same external charge
+    // can never be attached to a SECOND local payment. A replayed/forged
+    // event reusing another payment's transaction id is refused entirely -
+    // no SUCCESS is recorded on this row and nothing is downgraded.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      logger.warn("provider event refused - transaction id already attached elsewhere", {
+        paymentId: payment.id,
+        provider: payment.provider,
+      });
+      return "ignored";
+    }
+    throw err;
+  }
   const isExpired = payment.expiresAt !== null && payment.expiresAt.getTime() < now.getTime();
   const nextStatus = STATUS_TRANSITIONS[event.status];
   if (!isExpired && nextStatus !== null) {

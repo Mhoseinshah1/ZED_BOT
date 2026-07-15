@@ -8,6 +8,7 @@ import { attachUserMiddleware } from "./middlewares/attach-user.middleware.js";
 import { rateLimitMiddleware } from "./middlewares/rate-limit.middleware.js";
 import { userAccessMiddleware } from "./middlewares/user-access.middleware.js";
 import { adminHandler } from "./handlers/admin.handler.js";
+import { financialReconciliationHandler } from "./handlers/admin-finance/financial-reconciliation.handler.js";
 import { financialReportsHandler } from "./handlers/admin-finance/financial-reports.handler.js";
 import { paymentsListHandler } from "./handlers/admin-finance/payments-list.handler.js";
 import {
@@ -134,6 +135,9 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(financialReportsHandler);
   // Gateway phase: read-only payments list («لیست پرداخت‌ها 💳»).
   adminArea.use(paymentsListHandler);
+  // Settlement phase: read-only, OWNER-only reconciliation queue
+  // («تطبیق مالی ⚖️»).
+  adminArea.use(financialReconciliationHandler);
   adminArea.use(manualOrdersHandler);
   adminArea.use(stockHandler);
   // Phase 32: support tickets («تیکت‌های پشتیبانی 🎫»).

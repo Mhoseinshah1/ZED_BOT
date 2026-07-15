@@ -253,6 +253,10 @@ export async function approveReceiptPayment(
           paidAt: now,
           reviewedAt: now,
           reviewedByAdminId: admin.id,
+          // P0 settlement phase: the approved receipt payment owns its
+          // checkout's settlement (claimed in the checkout flip below).
+          settlementStatus: "SETTLED",
+          settledAt: now,
         },
       });
       if (flipped.count === 0) {
@@ -274,9 +278,12 @@ export async function approveReceiptPayment(
         throw new ReviewAbortError(NO_PENDING_RECEIPT);
       }
 
+      // P0 settlement phase: the approval also records the settlement OWNER
+      // (settledByPaymentId) so a later gateway success on the same checkout
+      // is classified as a duplicate instead of double-settling.
       const checkoutFlipped = await tx.checkoutSession.updateMany({
-        where: { id: checkout.id, status: CheckoutStatus.PENDING },
-        data: { status: CheckoutStatus.PAID, paidAt: now },
+        where: { id: checkout.id, status: CheckoutStatus.PENDING, settledByPaymentId: null },
+        data: { status: CheckoutStatus.PAID, paidAt: now, settledByPaymentId: payment.id },
       });
       if (checkoutFlipped.count === 0) {
         throw new ReviewAbortError(CHECKOUT_NOT_PENDING);
@@ -401,6 +408,10 @@ async function approveWalletTopup(
           paidAt: now,
           reviewedAt: now,
           reviewedByAdminId: admin.id,
+          // P0 settlement phase: the approved receipt payment owns its
+          // checkout's settlement (claimed in the checkout flip below).
+          settlementStatus: "SETTLED",
+          settledAt: now,
         },
       });
       if (flipped.count === 0) {
@@ -417,9 +428,12 @@ async function approveWalletTopup(
       if (receiptsFlipped.count === 0) {
         throw new ReviewAbortError(NO_PENDING_RECEIPT);
       }
+      // P0 settlement phase: the approval also records the settlement OWNER
+      // (settledByPaymentId) so a later gateway success on the same checkout
+      // is classified as a duplicate instead of double-settling.
       const checkoutFlipped = await tx.checkoutSession.updateMany({
-        where: { id: checkout.id, status: CheckoutStatus.PENDING },
-        data: { status: CheckoutStatus.PAID, paidAt: now },
+        where: { id: checkout.id, status: CheckoutStatus.PENDING, settledByPaymentId: null },
+        data: { status: CheckoutStatus.PAID, paidAt: now, settledByPaymentId: payment.id },
       });
       if (checkoutFlipped.count === 0) {
         throw new ReviewAbortError(CHECKOUT_NOT_PENDING);

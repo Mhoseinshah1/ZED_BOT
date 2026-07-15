@@ -31,6 +31,22 @@ unmapped events held for review). `providerStatus=SUCCESS` with
 `status=PENDING/PROCESSING` means "verified, not yet settled" — the sweep or
 the user's check button finishes the job. `verifiedAt` is set exactly once.
 
+### The duplicate-success path (P0 settlement phase)
+
+A third axis, `Payment.settlementStatus` (`UNSETTLED` / `SETTLED` /
+`DUPLICATE_SUCCESS_REVIEW`), records the **local** settlement truth. When a
+provider SUCCESS arrives for a checkout that another payment already
+settled (`CheckoutSession.settledByPaymentId` owned by someone else), the
+payment gets `settlementStatus=DUPLICATE_SUCCESS_REVIEW` — **terminal
+locally**: `providerStatus` stays SUCCESS (never downgraded),
+`Payment.status` stays PENDING/PROCESSING, but the row never settles, the
+sweep skips it (pass 1 filters on `settlementStatus=UNSETTLED`), and
+retries idempotently return its `FinancialReconciliationCase`. The
+reconciliation queue owns it from there — no automatic refund, no
+automatic wallet credit. See
+[cross-provider-checkout-settlement.md](cross-provider-checkout-settlement.md)
+and [financial-reconciliation.md](financial-reconciliation.md).
+
 ## Per-method lifecycle
 
 ### Wallet (balance spend)
@@ -96,13 +112,17 @@ checkout PENDING → Payment PENDING (payload zedbot:pay:<id>, stars stored)
 ```
 settleGatewayPayment:
   terminal? APPROVED → "already"; FAILED/EXPIRED/CANCELLED/REJECTED/DELETED → "failed"
+  settlementStatus DUPLICATE_SUCCESS_REVIEW → "duplicate" (existing case, terminal locally)
   providerStatus != SUCCESS?  Zarinpal → verify now; others → "pending"
   amount guard: payment.amount == payable == checkout.finalPriceToman, else "error"
   ONE transaction:
-    CAS payment PENDING/PROCESSING → APPROVED   (losers → "already")
-    CAS checkout PENDING → PAID
+    CLAIM checkout: CAS settledByPaymentId NULL + PENDING → this payment + PAID
+      (owned by another payment → duplicate success: mark DUPLICATE_SUCCESS_REVIEW
+       + file ONE FinancialReconciliationCase, outside this rolled-back tx)
+    CAS payment PENDING/PROCESSING → APPROVED + SETTLED   (losers → "already")
     WALLET_CHARGE: credit balance + one WalletTransaction (guarded by relatedPaymentId)
-    ORDER_PAYMENT: create-or-reuse ONE Order PAID + user stats (on create only)
+    ORDER_PAYMENT: create-or-reuse ONE Order PAID (unique checkoutSessionId backstop)
+                   + user stats (on create only)
     discount claim (failure flags the order, never rolls back external money)
 ```
 
@@ -119,6 +139,10 @@ delivery) and sends the user's success text.
   the API routes must never produce it.
 - `providerStatus` never downgrades from `SUCCESS`; a `FAILED`/`EXPIRED`
   event after `SUCCESS` is ignored (replay protection).
+- **A checkout settles at most once.** A second provider SUCCESS against an
+  owned checkout goes to financial review (`DUPLICATE_SUCCESS_REVIEW`) —
+  never a second order, credit or settlement, and never an automatic
+  refund.
 - Rows whose provider ever reported SUCCESS are never recycled by the
   retry/revive path.
 - An expired payment's status is not moved by late provider events (the

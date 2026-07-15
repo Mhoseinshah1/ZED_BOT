@@ -17,6 +17,10 @@ import {
   settleGatewayPayment,
   storedStarsAmount,
 } from "../services/gateway-payment.service.js";
+import {
+  DUPLICATE_SUCCESS_USER_TEXT,
+  notifyDuplicateSuccessCase,
+} from "../services/financial-reconciliation.service.js";
 import { getMessageTemplate } from "../services/text.service.js";
 import { safeReply } from "../utils/safe-reply.js";
 
@@ -138,6 +142,16 @@ starsPaymentHandler.on("message:successful_payment", async (ctx) => {
       // harmless and honest.
       await fulfillSettledGatewayOrder(ctx.api, outcome);
       await safeReply(ctx, await getMessageTemplate("payment_success_text"));
+      return;
+    }
+    // P0 settlement phase: Stars collected the payment but another payment
+    // owns the checkout - financial review, never a second settlement.
+    if (outcome.kind === "duplicate") {
+      if (outcome.created) {
+        await notifyDuplicateSuccessCase(ctx.api, outcome.reconciliationCase, outcome.payment);
+      } else {
+        await safeReply(ctx, DUPLICATE_SUCCESS_USER_TEXT);
+      }
       return;
     }
     logger.error("stars successful_payment settlement did not settle", {

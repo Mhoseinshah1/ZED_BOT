@@ -234,8 +234,9 @@ describe("main menus and landing pages (exact approved labels)", () => {
       ["رسیدهای تاییدنشده 💵"],
       ["روش‌های پرداخت 💳", "تنظیمات کیف پول و پرداخت 🏦"],
       ["مدیریت کیف پول کاربران 👤", "گزارش مالی 📊"],
-      // Gateway phase: read-only payments list row above the back row.
-      ["لیست پرداخت‌ها 💳"],
+      // Gateway/settlement phase: read-only payments list + reconciliation
+      // row above the back row.
+      ["لیست پرداخت‌ها 💳", "تطبیق مالی ⚖️"],
       ["بازگشت به پنل ادمین"],
     ]);
   });

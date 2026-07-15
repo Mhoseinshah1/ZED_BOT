@@ -26,6 +26,10 @@ import {
   isOnlineProvider,
   settleGatewayPayment,
 } from "../../services/gateway-payment.service.js";
+import {
+  DUPLICATE_SUCCESS_USER_TEXT,
+  notifyDuplicateSuccessCase,
+} from "../../services/financial-reconciliation.service.js";
 import { paymentPageNotice } from "../../services/payment-settings.service.js";
 import {
   getAvailablePaymentMethods,
@@ -317,6 +321,19 @@ paymentHandler.callbackQuery(/^user:pay:chk:([0-9a-f-]+)$/, async (ctx) => {
   }
   if (outcome.kind === "pending") {
     await safeAnswerCallback(ctx, await getMessageTemplate("payment_pending_text"));
+    return;
+  }
+  // P0 settlement phase: the provider charge succeeded but another payment
+  // already settled this checkout - show the financial-review notice; the
+  // case was committed by the settle call. Admins are alerted exactly once.
+  if (outcome.kind === "duplicate") {
+    await safeAnswerCallback(ctx);
+    if (outcome.created) {
+      await notifyDuplicateSuccessCase(ctx.api, outcome.reconciliationCase, outcome.payment, {
+        skipUser: true, // the pressed-button message below IS the user notice
+      });
+    }
+    await safeEditOrReply(ctx, DUPLICATE_SUCCESS_USER_TEXT, menuKeyboard());
     return;
   }
   if (outcome.kind === "failed") {
