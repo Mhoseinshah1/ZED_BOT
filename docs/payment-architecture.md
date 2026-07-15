@@ -57,7 +57,8 @@ Related documents: [zarinpal.md](zarinpal.md), [nowpayments.md](nowpayments.md),
 | `packages/payments/src/manager.ts` | `PaymentGatewayManager` registry + `buildDefaultManager()` (env-configured) |
 | `packages/payments/src/http.ts` | Timeouts, safe JSON reading, secret-free error formatting |
 | `apps/api/src/payment-routes.ts` | `GET /payments/zarinpal/callback`, `POST /payments/nowpayments/ipn` — verify + record only |
-| `apps/bot/src/services/gateway-payment.service.ts` | Payment creation, `settleGatewayPayment` (the money gate), fulfillment dispatch, settlement sweep |
+| `apps/bot/src/services/gateway-payment.service.ts` | Payment creation, `settleGatewayPayment` (the money gate), settlement sweep |
+| `apps/bot/src/services/order-fulfillment.service.ts` | `dispatchPaidOrderFulfillment` — the ONE post-commit fulfillment dispatch shared by wallet, receipt-approval and gateway payments (all five order types; OTHER_PRODUCT = stock auto-delivery → manual queue with required-info gating; idempotent, `created`-gated notifications) |
 | `apps/bot/src/handlers/stars-payment.handler.ts` | `pre_checkout_query` validation + `successful_payment` recording/settlement |
 | `apps/bot/src/handlers/admin-finance/payments-list.handler.ts` | Read-only admin payment browser (business fields only) |
 | `apps/bot/src/services/admin-payment-provider.service.ts` | Admin provider registry, bootstrap, enable/disable switch (config guard), connection tests |

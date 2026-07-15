@@ -20,11 +20,7 @@ import {
   listRenewableServices,
   renewalPlansForPanel,
 } from "../../services/renewal-checkout.service.js";
-import {
-  buildRenewalSuccessMessage,
-  executeRenewalOrder,
-  RENEWAL_FAILED_USER_TEXT,
-} from "../../services/service-renewal.service.js";
+import { dispatchPaidOrderFulfillment } from "../../services/order-fulfillment.service.js";
 import { getButtonText } from "../../services/text.service.js";
 import {
   payRenewalDraftWithWallet,
@@ -261,15 +257,12 @@ renewalHandler.callbackQuery(rncb.walletConfirm, async (ctx) => {
     await safeAnswerCallback(ctx, "پرداخت شد ✅");
     await safeEditOrReply(ctx, WALLET_PAYMENT_DONE_TEXT, menuKeyboard());
 
-    // Immediate renewal through the unchanged Phase 12 pipeline.
-    const outcome = await executeRenewalOrder(result.order.id);
-    if (outcome.ok) {
-      await safeReply(ctx, buildRenewalSuccessMessage(outcome.service), menuKeyboard(), HTML);
-    } else if (outcome.refunded) {
-      await safeReply(ctx, RENEWAL_FAILED_USER_TEXT, menuKeyboard());
-    } else {
-      await safeReply(ctx, "پرداخت انجام شد و تمدید سرویس شما در حال انجام است.", menuKeyboard());
-    }
+    // Money committed above - renewal runs through the UNIFIED post-payment
+    // dispatcher shared with the gateway and receipt paths.
+    await dispatchPaidOrderFulfillment(ctx.api, result.order.id, {
+      source: "WALLET",
+      user,
+    });
   } catch (err) {
     logger.error("wallet renewal payment failed", { error: errorMessage(err) });
     await safeAnswerCallback(ctx);

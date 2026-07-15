@@ -1,7 +1,6 @@
 import {
   CheckoutStatus,
   OrderStatus,
-  OrderType,
   PaymentGatewayType,
   PaymentPurpose,
   PaymentSettlementStatus,
@@ -35,39 +34,9 @@ import {
   notifyDuplicateSuccessCase,
   recordDuplicateSuccess,
 } from "./financial-reconciliation.service.js";
-import {
-  buildExtraTimeSuccessMessage,
-  executeExtraTimeOrder,
-  EXTRA_TIME_FAILED_USER_TEXT,
-} from "./extra-time.service.js";
-import {
-  buildExtraVolumeSuccessMessage,
-  executeExtraVolumeOrder,
-  EXTRA_VOLUME_FAILED_USER_TEXT,
-} from "./extra-volume.service.js";
-import {
-  initManualDelivery,
-  notifyAdminsAboutManualOrder,
-  userInfoButtonKeyboard,
-  userInfoPromptText,
-  WAITING_DELIVERY_USER_TEXT,
-  type DeliverySendApi,
-} from "./other-product-delivery.service.js";
-import {
-  autoDeliverStockOrder,
-  notifyAdminsAboutStockAlert,
-} from "./other-product-stock.service.js";
-import {
-  buildServiceInfoMessage,
-  PROVISION_FAILED_USER_TEXT,
-  provisionPaidOrder,
-} from "./provisioning.service.js";
-import { approvalUserNotice, resolveOrderType } from "./receipt-review.service.js";
-import {
-  buildRenewalSuccessMessage,
-  executeRenewalOrder,
-  RENEWAL_FAILED_USER_TEXT,
-} from "./service-renewal.service.js";
+import { dispatchPaidOrderFulfillment } from "./order-fulfillment.service.js";
+import { type DeliverySendApi } from "./other-product-delivery.service.js";
+import { resolveOrderType } from "./receipt-review.service.js";
 import { getMessageTemplate } from "./text.service.js";
 import { WALLET_TOPUP_REASON } from "./wallet-topup.service.js";
 
@@ -995,8 +964,9 @@ async function sendSafe(
 
 /**
  * Post-settlement fulfillment: wallet top-ups get their success notice;
- * orders dispatch to the SAME executors the admin receipt approval uses
- * (all CAS-claimed / idempotent, so repeats are safe). Never throws.
+ * orders go through the UNIFIED post-payment dispatcher shared with the
+ * wallet and receipt-approval paths (all executors CAS-claimed / idempotent,
+ * so repeats are safe). Never throws.
  */
 export async function fulfillSettledGatewayOrder(
   api: DeliverySendApi,
@@ -1011,7 +981,6 @@ export async function fulfillSettledGatewayOrder(
     if (user === null) {
       return;
     }
-    const chatId = user.telegramId.toString();
 
     if (outcome.purpose === PaymentPurpose.WALLET_CHARGE) {
       const text = [
@@ -1020,7 +989,7 @@ export async function fulfillSettledGatewayOrder(
         `مبلغ شارژ: ${formatToman(payment.amountToman)}`,
         `موجودی جدید: ${formatToman(user.balanceToman)}`,
       ].join("\n");
-      await sendSafe(api, chatId, text);
+      await sendSafe(api, user.telegramId.toString(), text);
       return;
     }
 
@@ -1029,132 +998,7 @@ export async function fulfillSettledGatewayOrder(
       logger.error("gateway fulfillment has no order", { paymentId: payment.id });
       return;
     }
-
-    if (order.type === OrderType.SERVICE_PURCHASE) {
-      const result = await provisionPaidOrder(order.id);
-      if (result.ok) {
-        await sendSafe(api, chatId, buildServiceInfoMessage(result.service), {
-          parse_mode: "HTML",
-        });
-        return;
-      }
-      if (result.refunded) {
-        await sendSafe(api, chatId, PROVISION_FAILED_USER_TEXT);
-        return;
-      }
-      await sendSafe(api, chatId, approvalUserNotice(OrderType.SERVICE_PURCHASE));
-      return;
-    }
-
-    if (order.type === OrderType.SERVICE_RENEWAL) {
-      const result = await executeRenewalOrder(order.id);
-      if (result.ok) {
-        await sendSafe(api, chatId, buildRenewalSuccessMessage(result.service), {
-          parse_mode: "HTML",
-        });
-        return;
-      }
-      if (result.refunded) {
-        await sendSafe(api, chatId, RENEWAL_FAILED_USER_TEXT);
-        return;
-      }
-      await sendSafe(api, chatId, approvalUserNotice(OrderType.SERVICE_RENEWAL));
-      return;
-    }
-
-    if (order.type === OrderType.EXTRA_VOLUME) {
-      const result = await executeExtraVolumeOrder(order.id);
-      if (result.ok) {
-        await sendSafe(
-          api,
-          chatId,
-          buildExtraVolumeSuccessMessage(result.service, result.addedVolumeGb),
-          { parse_mode: "HTML" },
-        );
-        return;
-      }
-      if (result.refunded) {
-        await sendSafe(api, chatId, EXTRA_VOLUME_FAILED_USER_TEXT);
-        return;
-      }
-      await sendSafe(api, chatId, approvalUserNotice(OrderType.EXTRA_VOLUME));
-      return;
-    }
-
-    if (order.type === OrderType.EXTRA_TIME) {
-      const result = await executeExtraTimeOrder(order.id);
-      if (result.ok) {
-        await sendSafe(api, chatId, buildExtraTimeSuccessMessage(result.service, result.addedDays), {
-          parse_mode: "HTML",
-        });
-        return;
-      }
-      if (result.refunded) {
-        await sendSafe(api, chatId, EXTRA_TIME_FAILED_USER_TEXT);
-        return;
-      }
-      await sendSafe(api, chatId, approvalUserNotice(OrderType.EXTRA_TIME));
-      return;
-    }
-
-    if (order.type === OrderType.OTHER_PRODUCT) {
-      // Same dispatch as the receipt approval: stock auto-delivery first,
-      // manual delivery as the fallback.
-      const auto = await autoDeliverStockOrder(api, order.id);
-      if (auto.status === "DELIVERED") {
-        await notifyAdminsAboutStockAlert(api, {
-          productId: auto.item.productId,
-          orderId: order.id,
-        });
-        return;
-      }
-      if (auto.status === "ALREADY_DELIVERED") {
-        return;
-      }
-      if (auto.status === "NO_STOCK") {
-        await sendSafe(
-          api,
-          chatId,
-          "پرداخت شما تایید شد ✅\nموجودی این محصول به پایان رسیده است و سفارش برای تحویل دستی ثبت شد.",
-        );
-      } else if (auto.status === "SEND_FAILED") {
-        // The user received NO content (send failed before finalize), so the
-        // manual fallback is safe.
-        logger.warn("stock auto-delivery failed; falling back to manual", {
-          orderId: order.id,
-        });
-      }
-      const init = await initManualDelivery(order.id);
-      if (!init.ok) {
-        logger.error("manual delivery init after gateway settlement failed", {
-          orderId: order.id,
-          error: init.error,
-        });
-        await sendSafe(api, chatId, approvalUserNotice(OrderType.OTHER_PRODUCT));
-        return;
-      }
-      if (!init.created) {
-        // Repeat fulfillment (sweep/replay): the record and its notices
-        // already exist - never spam the user or the admins again.
-        return;
-      }
-      if (init.requiresInfo) {
-        await sendSafe(
-          api,
-          chatId,
-          `پرداخت شما تایید شد ✅\n\n${userInfoPromptText(init.promptText)}`,
-          { reply_markup: userInfoButtonKeyboard(order.id) },
-        );
-        return;
-      }
-      if (auto.status !== "NO_STOCK") {
-        await sendSafe(api, chatId, `پرداخت شما تایید شد ✅\n\n${WAITING_DELIVERY_USER_TEXT}`);
-      }
-      await notifyAdminsAboutManualOrder(api, init.record);
-      return;
-    }
-
-    await sendSafe(api, chatId, approvalUserNotice(order.type));
+    await dispatchPaidOrderFulfillment(api, order.id, { source: "GATEWAY", user });
   } catch (err) {
     logger.error("gateway fulfillment crashed", { error: errorMessage(err) });
   }

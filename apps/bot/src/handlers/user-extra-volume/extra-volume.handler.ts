@@ -13,15 +13,13 @@ import {
 import type { ExtraVolumeDraft } from "../../core/session.js";
 import { validateDiscountCode } from "../../services/discount.service.js";
 import {
-  buildExtraVolumeSuccessMessage,
   createExtraVolumeCheckout,
-  executeExtraVolumeOrder,
   extraVolumePackages,
-  EXTRA_VOLUME_FAILED_USER_TEXT,
   getExtraVolumeServiceByShortId,
   isExtraVolumePackageValid,
   listExtraVolumeServices,
 } from "../../services/extra-volume.service.js";
+import { dispatchPaidOrderFulfillment } from "../../services/order-fulfillment.service.js";
 import { getProductByShortId } from "../../services/product.service.js";
 import { getButtonText } from "../../services/text.service.js";
 import {
@@ -261,19 +259,12 @@ extraVolumeHandler.callbackQuery(evcb.walletConfirm, async (ctx) => {
     await safeAnswerCallback(ctx, "پرداخت شد ✅");
     await safeEditOrReply(ctx, WALLET_PAYMENT_DONE_TEXT, menuKeyboard());
 
-    const outcome = await executeExtraVolumeOrder(result.order.id);
-    if (outcome.ok) {
-      await safeReply(
-        ctx,
-        buildExtraVolumeSuccessMessage(outcome.service, outcome.addedVolumeGb),
-        menuKeyboard(),
-        HTML,
-      );
-    } else if (outcome.refunded) {
-      await safeReply(ctx, EXTRA_VOLUME_FAILED_USER_TEXT, menuKeyboard());
-    } else {
-      await safeReply(ctx, "پرداخت انجام شد و افزایش حجم سرویس شما در حال انجام است.", menuKeyboard());
-    }
+    // Money committed above - the UNIFIED post-payment dispatcher applies
+    // the volume and notifies the user (shared with gateway/receipt paths).
+    await dispatchPaidOrderFulfillment(ctx.api, result.order.id, {
+      source: "WALLET",
+      user,
+    });
   } catch (err) {
     logger.error("wallet extra-volume payment failed", { error: errorMessage(err) });
     await safeAnswerCallback(ctx);

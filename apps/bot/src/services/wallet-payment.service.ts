@@ -355,7 +355,18 @@ async function executeWalletOrderPayment(
   }
 }
 
-/** Wallet payment for a SERVICE_PRODUCT purchase pre-invoice draft. */
+/**
+ * Wallet payment for a product-purchase pre-invoice draft. Supports BOTH
+ * product types (other-product-wallet phase):
+ *   SERVICE_PRODUCT -> OrderType.SERVICE_PURCHASE (provisioned later)
+ *   OTHER_PRODUCT   -> OrderType.OTHER_PRODUCT   (manual/stock delivery)
+ * Nothing from the session is trusted: the product is reloaded with its
+ * relations and visibility / active state / price / discount / final amount
+ * are recomputed here. Delivery requirements and stock configuration are
+ * snapshot via buildProductSnapshot and re-read fresh from the Product row
+ * by the post-commit fulfillment dispatch - the wallet transaction itself
+ * never provisions, never sends and never touches stock.
+ */
 export async function payPurchaseDraftWithWallet(
   user: User,
   draft: CheckoutDraft,
@@ -369,7 +380,7 @@ export async function payPurchaseDraftWithWallet(
   });
   if (
     product === null ||
-    product.type !== "SERVICE_PRODUCT" ||
+    (product.type !== "SERVICE_PRODUCT" && product.type !== "OTHER_PRODUCT") ||
     !isProductVisible(product, user.group) ||
     (draft.panelId !== undefined && product.panelId !== draft.panelId)
   ) {
@@ -403,7 +414,8 @@ export async function payPurchaseDraftWithWallet(
     finalPriceToman,
   });
   return executeWalletOrderPayment(user, {
-    orderType: OrderType.SERVICE_PURCHASE,
+    orderType:
+      product.type === "OTHER_PRODUCT" ? OrderType.OTHER_PRODUCT : OrderType.SERVICE_PURCHASE,
     product,
     serviceId: null,
     snapshot,
