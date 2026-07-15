@@ -98,12 +98,50 @@ export function serviceConfigLinks(service: Service): string[] {
   return service.configLinks.filter((l): l is string => typeof l === "string" && l !== "");
 }
 
+/** Safe fallback when no account identity is stored (defensive - `username` is required). */
+export const UNNAMED_SERVICE_TEXT = "سرویس بدون نام";
+
+/**
+ * The customer's VPN ACCOUNT identity (account-display phase) - what the
+ * panel actually created, resolved in priority order:
+ *
+ *   1. Service.username - the stored remote identity for BOTH panels (the
+ *      Marzban username / the XUI global-client email; the naming-phase
+ *      snapshot's resolvedRemoteUsername is persisted here). The schema has
+ *      no separate remoteUsername/panelUsername columns - this IS that field.
+ *   2. XUI stored client identity from the sync-refreshed remoteMetadata
+ *      (client email) when the username is somehow empty.
+ *   3. «سرویس بدون نام».
+ *
+ * NEVER the product name, category, volume/duration specs, or any secret
+ * (remoteClientId - the XUI UUID/Trojan password - is deliberately excluded).
+ */
+export function serviceAccountLabel(service: Service): string {
+  const username = service.username.trim();
+  if (username !== "") {
+    return username;
+  }
+  const metadata = service.remoteMetadata as {
+    email?: unknown;
+    clients?: Array<{ email?: unknown }>;
+  } | null;
+  const storedEmail =
+    typeof metadata?.email === "string" && metadata.email !== ""
+      ? metadata.email
+      : Array.isArray(metadata?.clients) &&
+          typeof metadata.clients[0]?.email === "string" &&
+          metadata.clients[0].email !== ""
+        ? metadata.clients[0].email
+        : null;
+  return storedEmail ?? UNNAMED_SERVICE_TEXT;
+}
+
+/**
+ * Account-display phase: the list shows the ACCOUNT username + status - the
+ * identity the panel created - never product names or volume/duration specs.
+ */
 function listButtonLabel(service: Service): string {
-  const name = service.productNameSnapshot ?? service.username;
-  const days = remainingDays(service.expiresAt);
-  const time = days === null ? "نامحدود" : `${days} روز`;
-  const volume = service.volumeBytes === 0n ? "نامحدود" : `${formatGb(service.remainingBytes)}GB`;
-  return `${statusEmoji(service.status)} ${name} | ${time} | ${volume}`;
+  return `${serviceAccountLabel(service)} ${statusEmoji(service.status)}`;
 }
 
 export function serviceListKeyboard(pageData: ServiceListPage): InlineKeyboard {
@@ -134,13 +172,17 @@ export function serviceListKeyboard(pageData: ServiceListPage): InlineKeyboard {
 export function serviceDetailText(service: Service, staleNotice: string | null = null): string {
   const days = remainingDays(service.expiresAt);
   const unlimitedVolume = service.volumeBytes === 0n;
-  const lines = [`🛍 <b>${escapeHtml(service.productNameSnapshot ?? service.username)}</b>`, ""];
+  // Account-display phase: the header IS the account identity - the username
+  // created on the panel - never the product name. Specs follow as fields.
+  const lines = [
+    `نام سرویس: <code>${escapeHtml(serviceAccountLabel(service))}</code>`,
+    "",
+  ];
   if (service.productNameSnapshot !== null) {
     lines.push(`نام محصول: ${escapeHtml(service.productNameSnapshot)}`);
   }
   lines.push(
     `وضعیت: ${statusLabel(service.status)}`,
-    `نام سرویس: <code>${escapeHtml(service.username)}</code>`,
     `لوکیشن / پنل: ${escapeHtml(locationLabel(service.serviceLocation))} — ${escapeHtml(service.panelNameSnapshot ?? "-")}`,
     "",
     `ترافیک کل: ${unlimitedVolume ? "نامحدود" : `${formatGb(service.volumeBytes)} گیگابایت`}`,
