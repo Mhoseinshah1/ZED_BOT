@@ -20,9 +20,10 @@ export const PLACEHOLDER_TEXT = "این بخش هنوز فعال نشده است
 // (keyboards/user-main.keyboard.ts) until their real flows land. The
 // callbacks stay registered here ONLY so buttons on old Telegram messages
 // keep answering instead of dead-ending.
+// user:free_test left this list in the free-trial phase - the real trial
+// flow (handlers/user-free-trial) owns CB.USER_FREE_TEST now.
 const USER_SECTIONS: Array<{ callback: string; buttonKey: string }> = [
   { callback: CB.USER_REFERRAL, buttonKey: "referral" },
-  { callback: CB.USER_FREE_TEST, buttonKey: "free_test" },
   { callback: CB.USER_WHEEL, buttonKey: "lucky_wheel" },
   { callback: CB.USER_TUTORIALS, buttonKey: "tutorials" },
   { callback: CB.USER_PRICING, buttonKey: "pricing" },

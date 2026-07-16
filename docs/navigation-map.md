@@ -42,19 +42,21 @@ Legend: `»` opens page · *(flow)* switches to a text-input flow.
 
 `user:menu` and `common:back` both re-render the main menu.
 
-## User main menu (4 rows, ButtonText-backed)
+## User main menu (4 rows + conditional trial row, ButtonText-backed)
 
 | row | button → callback |
 | --- | --- |
 | 1 | خرید اشتراک 🔐 → `user:buy` (**LOCKED**) · تمدید سرویس ♻️ → `user:renew` |
 | 2 | سرویس‌های من 🛍 → `user:services` · کیف پول + شارژ 🏦 → `user:wallet` |
 | 3 | محصولات دیگر 🛍 → `user:other_products` (**LOCKED**, separate) · سفارش‌های من 🧾 → `user:orders` |
+| 3½ (conditional) | اکانت تست رایگان 🎁 → `user:free_test` — rendered ONLY when free trials are globally enabled AND ≥ 1 trial-ready panel exists (feature-gated, never a placeholder) |
 | 4 | پشتیبانی ☎️ → `user:support` |
 
 Hidden until implemented (callbacks still answered with the placeholder
-page for old keyboards): `user:referral`, `user:free_test`,
+page for old keyboards): `user:referral`,
 `user:lucky_wheel`, `user:tutorials`, `user:pricing`,
-`user:representative_request`.
+`user:representative_request`. `user:free_test` left this list in the
+free-trial phase — it is now the real trial flow above.
 
 ### خرید اشتراک — LOCKED flow (documented only)
 
@@ -107,6 +109,18 @@ payment. After approval: stock auto-delivery or the manual path;
 | پرداخت‌ها (paged, empty = `no_payments_text`) | rows » payment detail (returns to same page) |
 | تراکنش‌های کیف پول (from history) | paged, empty = `wallet_empty_transactions_text`; backs » history landing (the wallet's own tx page keeps its wallet backs) |
 | محصولات دیگر list (empty = `no_other_product_orders_text`) | Phase 29 list/detail unchanged (delivered content for the owner only) |
+
+### اکانت تست رایگان 🎁 (free-trial phase)
+
+| page | buttons |
+| --- | --- |
+| panel list (`user:free_test`, header «🎁 اکانت تست رایگان») | one per trial-ready panel «{لوکیشن} — تست {مدت} / {حجم}» » `user:ft:p:<sid>` · بازگشت به منوی اصلی |
+| confirmation (`user:ft:p:<sid>`, specs + rules line + optional `free_trial_notice_text`) | دریافت اکانت تست ✅ » `user:ft:go:<sid>` / بازگشت » `user:free_test` |
+| claim result (`user:ft:go:<sid>`) | success » مشاهده سرویس (`user:svc:view:<sid>`) · بازگشت به منوی اصلی — denial/uncertain » بازگشت به منوی اصلی |
+
+Every step re-checks eligibility server-side; short ids resolve only
+over the current trial-ready panel set. See
+`docs/free-trial-architecture.md`.
 
 ### پشتیبانی 🎫 (Fix D)
 
@@ -195,7 +209,9 @@ on the users landing / admin menu).
 | --- | --- |
 | root (`admin:panels`) | لیست پنل‌ها 🧾 · افزودن پنل ➕ / پنل‌های فعال ✅ · غیرفعال ⏸ (`admin:panels:ls:<a|i>:<page>`) / بازگشت به پنل ادمین |
 | lists (paged) | rows (icon, name, type, hostname) » detail · بازگشت به مدیریت پنل‌ها |
-| panel detail | تست اتصال 🩺 · وضعیت / ویرایش نام/آدرس / اطلاعات ورود 🔑 (set/not-set only) · محصولات متصل 🛍 » `admin:panel:prods:<sid>` / feature/pricing/test/username/cfg pages / حذف (soft) / بازگشت به لیست پنل‌ها (same filter/page) / بازگشت به مدیریت پنل‌ها |
+| panel detail | تست اتصال 🩺 · وضعیت / ویرایش نام/آدرس / اطلاعات ورود 🔑 (set/not-set only) · محصولات متصل 🛍 » `admin:panel:prods:<sid>` / feature/pricing/username/cfg pages · **اکانت تست 🎁 » `admin:panel:trial:<sid>`** / حذف (soft) / بازگشت به لیست پنل‌ها (same filter/page) / بازگشت به مدیریت پنل‌ها |
+| اکانت تست 🎁 (`admin:panel:trial:<sid>`, **OWNER-only** — every trial route; non-OWNER admins get a safe toast, never data; legacy `admin:panel:ts:<sid>` renders the same page) | فعال کردن / غیرفعال کردن » two-step confirm `admin:panel:tren:<sid>` / `admin:panel:trdis:<sid>` (» `…:yes`, انصراف » trial page; enable re-validates config first) / تنظیم مدت (`fe:<sid>:tdm`) · تنظیم حجم (`fe:<sid>:tvm`) / تنظیم اینباندهای تست (`fe:<sid>:tib`, XUI only) · ظرفیت تست (`fe:<sid>:tmc`) / ✅\|❌ غیرفعال‌سازی خودکار بعد از انقضا (`tg:<sid>:tade`) / پیش‌نمایش نام » `admin:panel:trpn:<sid>` · آمار اکانت‌های تست » `admin:panel:trst:<sid>` / بازگشت به جزئیات پنل |
+| آمار اکانت‌های تست (`admin:panel:trst:<sid>`, counters/dates only) | بازگشت » `admin:panel:trial:<sid>` |
 | روش نام‌گذاری سرویس (`admin:panel:us:<sid>`, naming phase) | روش فعلی (Persian label) + description + نمونه نام ساخته‌شده / تغییر روش نام‌گذاری » selector (`admin:panel:up:<sid>:<0-7>`, Persian labels, back » `admin:panel:us`) / پیش‌نمایش نام‌گذاری » `admin:panel:unp:<sid>` / field edits (متن دلخواه، طول تصادفی، …) / بازگشت |
 | روش نام‌گذاری محصول دیگر (`admin:prod:naming:<sid>`, OTHER_PRODUCT only) | 5 policies » `admin:prod:setnp:<sid>:<0-4>` · ویرایش قالب نام‌گذاری *(flow, strict variable registry)* · بازگشت — the delivery reference «شناسه تحویل» then appears on delivery messages, admin manual-order details, user order/history details and «جستجوی سفارش» |
 

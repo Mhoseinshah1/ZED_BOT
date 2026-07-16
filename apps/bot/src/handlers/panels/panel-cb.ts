@@ -28,7 +28,18 @@ export const cb = {
   features: (sid: string): string => `admin:panel:feat:${sid}`,
   toggle: (sid: string, key: string): string => `admin:panel:tg:${sid}:${key}`,
   pricing: (sid: string): string => `admin:panel:price:${sid}`,
+  // Legacy test-settings entry. The route stays registered and renders the
+  // NEW trial page so stale «تنظیمات تست» buttons keep working.
   testSettings: (sid: string): string => `admin:panel:ts:${sid}`,
+  // Free-trial admin page (OWNER-only) + its two-step enable/disable
+  // confirmations, the name preview and the per-panel trial statistics.
+  trial: (sid: string): string => `admin:panel:trial:${sid}`,
+  trialEnableAsk: (sid: string): string => `admin:panel:tren:${sid}`,
+  trialEnableConfirm: (sid: string): string => `admin:panel:tren:${sid}:yes`,
+  trialDisableAsk: (sid: string): string => `admin:panel:trdis:${sid}`,
+  trialDisableConfirm: (sid: string): string => `admin:panel:trdis:${sid}:yes`,
+  trialNamePreview: (sid: string): string => `admin:panel:trpn:${sid}`,
+  trialStats: (sid: string): string => `admin:panel:trst:${sid}`,
   usernameSettings: (sid: string): string => `admin:panel:us:${sid}`,
   usernamePattern: (sid: string, index: number): string => `admin:panel:up:${sid}:${index}`,
   // Naming phase: «پیش‌نمایش نام‌گذاری» - regenerates the sample preview.

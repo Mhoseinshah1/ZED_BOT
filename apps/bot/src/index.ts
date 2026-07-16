@@ -4,6 +4,7 @@ import { errorMessage } from "@zedbot/shared";
 import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
+import { startFreeTrialLoop } from "./services/free-trial.service.js";
 import { startGatewaySettlementLoop } from "./services/gateway-payment.service.js";
 import {
   RECOVERY_RECHECK_DELAY_MS,
@@ -66,6 +67,11 @@ async function run(botToken: string): Promise<void> {
   // and re-fulfill settled-but-unfulfilled orders. Errors are logged inside;
   // the loop never throws and its timers never keep the process alive.
   startGatewaySettlementLoop(bot.api);
+
+  // Free-trial sweep: expire finished trials, reconcile uncertain
+  // provisioning outcomes (exact username + ownership marker) and escalate
+  // stale claims to manual review. Same never-throws loop contract.
+  startFreeTrialLoop(bot.api);
 
   await bot.start({
     onStart: (botInfo) => {

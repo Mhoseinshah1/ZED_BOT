@@ -178,6 +178,11 @@ export function serviceDetailText(service: Service, staleNotice: string | null =
     `نام سرویس: <code>${escapeHtml(serviceAccountLabel(service))}</code>`,
     "",
   ];
+  // Free-trial phase: trial services are explicitly marked on the detail
+  // page (they never render paid-lifecycle buttons).
+  if (service.source === "FREE_TRIAL") {
+    lines.push("نوع سرویس:\nاکانت تست رایگان");
+  }
   if (service.productNameSnapshot !== null) {
     lines.push(`نام محصول: ${escapeHtml(service.productNameSnapshot)}`);
   }

@@ -3,6 +3,12 @@ import { InlineKeyboard } from "grammy";
 
 import { cb, PANEL_CB } from "./panel-cb.js";
 import { fieldsForPage, togglesForPage, type PanelPage } from "./panel-fields.js";
+import {
+  formatTrialDuration,
+  formatTrialTraffic,
+  type TrialPanelAssessment,
+  type TrialPanelStats,
+} from "../../services/free-trial.service.js";
 import { panelCapabilityStatusLines } from "../../services/panel-readiness.service.js";
 import { panelShortId } from "../../services/panel.service.js";
 import { resolveXuiAuthMode } from "../../services/panel-adapter-factory.js";
@@ -197,7 +203,7 @@ export function panelDetailKeyboard(
     .text("قابلیت‌ها", cb.features(sid))
     .row()
     .text("قیمت‌ها 💵", cb.pricing(sid))
-    .text("تنظیمات تست 🧪", cb.testSettings(sid))
+    .text("اکانت تست 🎁", cb.trial(sid))
     .row()
     .text("تنظیمات username", cb.usernameSettings(sid))
     .text("تنظیمات پنل ⚙️", cb.typeSettings(sid))
@@ -229,6 +235,8 @@ const PAGE_TITLE: Record<PanelPage, string> = {
   features: "قابلیت‌ها 🛠",
   pricing: "قیمت‌ها 💵",
   test: "تنظیمات تست 🧪",
+  // The trial page renders through panelTrialText, never panelPageView.
+  trial: "اکانت تست 🎁",
   username: "تنظیمات username",
   cfg: "تنظیمات پنل ⚙️",
 };
@@ -321,4 +329,127 @@ export function panelPageView(
   kb.text("بازگشت", cb.view(sid));
 
   return { text: lines.join("\n"), keyboard: kb };
+}
+
+// --- Free-trial admin page (OWNER-only; the gate lives in panel.handler) -----
+
+export const TRIAL_NOT_SET_TEXT = "تنظیم نشده";
+export const TRIAL_ENABLE_ASK_TEXT =
+  "آیا از فعال کردن اکانت تست برای این پنل مطمئن هستید؟";
+export const TRIAL_DISABLE_ASK_TEXT =
+  "آیا از غیرفعال کردن اکانت تست برای این پنل مطمئن هستید؟";
+export const TRIAL_ENABLED_TEXT = "اکانت تست برای این پنل فعال شد ✅";
+export const TRIAL_DISABLED_TEXT = "اکانت تست برای این پنل غیرفعال شد.";
+export const TRIAL_CONFIG_INCOMPLETE_TEXT = "تنظیمات اکانت تست این پنل کامل نیست.";
+
+/**
+ * The «اکانت تست 🎁» detail page. Pure: assessment/stats come from the
+ * handler (assessTrialPanelConfig / trialStatsForPanel). Renders config and
+ * counters ONLY - never credentials, subscription URLs or claim payloads.
+ */
+export function panelTrialText(
+  panel: Panel,
+  assessment: TrialPanelAssessment,
+  stats: TrialPanelStats,
+): string {
+  const duration =
+    panel.testDurationMinutes !== null && panel.testDurationMinutes > 0
+      ? formatTrialDuration(panel.testDurationMinutes)
+      : TRIAL_NOT_SET_TEXT;
+  const traffic =
+    panel.testVolumeMb !== null && panel.testVolumeMb > 0
+      ? formatTrialTraffic(panel.testVolumeMb)
+      : TRIAL_NOT_SET_TEXT;
+  const capacity = `${stats.capacityUsed}${stats.capacityLimit !== null ? ` / ${stats.capacityLimit}` : ""}`;
+  return [
+    "🎁 تنظیمات اکانت تست",
+    "",
+    "پنل:",
+    escapeHtml(panel.name),
+    "",
+    "وضعیت:",
+    panel.testEnabled ? "فعال ✅" : "غیرفعال ❌",
+    "",
+    "مدت تست:",
+    duration,
+    "",
+    "حجم تست:",
+    traffic,
+    "",
+    "تعداد تست‌های فعال:",
+    capacity,
+    "",
+    "آمادگی ساخت:",
+    assessment.ok ? "آماده ✅" : "ناقص ❌",
+  ].join("\n");
+}
+
+/** Trial-page keyboard: rows of <= 2, every callback far under 64 bytes. */
+export function panelTrialKeyboard(panel: Panel): InlineKeyboard {
+  const sid = panelShortId(panel);
+  const kb = new InlineKeyboard()
+    .text(
+      panel.testEnabled ? "غیرفعال کردن" : "فعال کردن",
+      panel.testEnabled ? cb.trialDisableAsk(sid) : cb.trialEnableAsk(sid),
+    )
+    .row()
+    .text("تنظیم مدت", cb.fieldEdit(sid, "tdm"))
+    .text("تنظیم حجم", cb.fieldEdit(sid, "tvm"))
+    .row();
+  if (panel.type === "XUI") {
+    kb.text("تنظیم اینباندهای تست", cb.fieldEdit(sid, "tib"));
+  }
+  kb.text("ظرفیت تست", cb.fieldEdit(sid, "tmc")).row();
+  kb.text(
+    `${panel.testAutoDisableAfterExpiry ? "✅" : "❌"} غیرفعال‌سازی خودکار بعد از انقضا`,
+    cb.toggle(sid, "tade"),
+  ).row();
+  kb.text("پیش‌نمایش نام", cb.trialNamePreview(sid))
+    .text("آمار اکانت‌های تست", cb.trialStats(sid))
+    .row();
+  kb.text("بازگشت به جزئیات پنل", cb.view(sid));
+  return kb;
+}
+
+/** Two-step enable confirmation (same shape as the delete flow). */
+export function trialEnableAskView(panel: Panel): { text: string; keyboard: InlineKeyboard } {
+  const sid = panelShortId(panel);
+  return {
+    text: TRIAL_ENABLE_ASK_TEXT,
+    keyboard: new InlineKeyboard()
+      .text("بله، فعال کن", cb.trialEnableConfirm(sid))
+      .row()
+      .text("انصراف", cb.trial(sid)),
+  };
+}
+
+/** Two-step disable confirmation. Disabling never touches existing claims. */
+export function trialDisableAskView(panel: Panel): { text: string; keyboard: InlineKeyboard } {
+  const sid = panelShortId(panel);
+  return {
+    text: TRIAL_DISABLE_ASK_TEXT,
+    keyboard: new InlineKeyboard()
+      .text("بله، غیرفعال کن", cb.trialDisableConfirm(sid))
+      .row()
+      .text("انصراف", cb.trial(sid)),
+  };
+}
+
+/** «آمار اکانت‌های تست»: counters and dates only - no URLs, no credentials. */
+export function panelTrialStatsText(panel: Panel, stats: TrialPanelStats): string {
+  return [
+    "📊 آمار اکانت‌های تست",
+    "",
+    "پنل:",
+    escapeHtml(panel.name),
+    "",
+    `کل تست‌ها: ${stats.total}`,
+    `فعال: ${stats.active}`,
+    `در حال ساخت: ${stats.provisioning}`,
+    `منقضی‌شده: ${stats.expired}`,
+    `ناموفق/لغوشده: ${stats.failed}`,
+    `نیازمند بررسی: ${stats.manualReview}`,
+    `آخرین ساخت: ${stats.lastCreatedAt === null ? "-" : stats.lastCreatedAt.toISOString().replace("T", " ").slice(0, 16)}`,
+    `ظرفیت: ${stats.capacityLimit === null ? `${stats.capacityUsed} (بدون سقف)` : `${stats.capacityUsed} / ${stats.capacityLimit}`}`,
+  ].join("\n");
 }
