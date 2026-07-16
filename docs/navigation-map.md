@@ -58,6 +58,15 @@ page for old keyboards): `user:referral`,
 `user:representative_request`. `user:free_test` left this list in the
 free-trial phase — it is now the real trial flow above.
 
+**Keyboard mode (menu-keyboard-mode phase):** the table above is the
+`INLINE` (default) rendering. When the admin selects `REPLY` mode
+(«تنظیمات عمومی ⚙️ → نوع نمایش منوی کاربر»), the SAME rows/labels render
+as a persistent reply keyboard, and the row labels arrive as **message
+text** routed by the shared dispatcher
+(`apps/bot/src/handlers/user-menu-actions.ts`) to the same section
+entries the callbacks above use — exact current-label match only, active
+flows and commands keep priority. See `docs/user-menu-keyboard-modes.md`.
+
 ### خرید اشتراک — LOCKED flow (documented only)
 
 `user:buy` » panel list » categories » products » pre-invoice (discount
@@ -221,4 +230,19 @@ on the users landing / admin menu).
 - **پیام همگانی 📣** — draft *(flow)* » audience » preview » test/start.
 - **تنظیمات عمومی ⚙️** — مدیریت متن‌ها ✍️ (templates/buttons list » edit
   *(flows)* / reset). The four wallet template keys are editable here.
+  Plus the user menu-keyboard-mode page (see the table below and
+  `docs/user-menu-keyboard-modes.md`).
 - **گزارشات / بکاپ 🛡** — health, backups (OWNER), restore help.
+
+### تنظیمات عمومی ⚙️ → نوع نمایش منوی کاربر (menu-keyboard-mode phase)
+
+| page | buttons |
+| --- | --- |
+| mode page (`admin:menu_mode`, shows «نوع فعلی» via `MENU_MODE_LABELS`) | دکمه شیشه‌ای » `admin:menu_mode:ask:inline` · دکمه معمولی » `admin:menu_mode:ask:reply` / بازگشت به تنظیمات عمومی » `admin:general_settings` |
+| confirm (`admin:menu_mode:ask:<inline\|reply>`; selecting the active mode only toasts «این نوع نمایش از قبل فعال است.») | تایید ✅ » `admin:menu_mode:set:<inline\|reply>` / انصراف » `admin:menu_mode` |
+| apply (`admin:menu_mode:set:<inline\|reply>`) | toast «نوع نمایش منوی کاربر با موفقیت تغییر کرد ✅» (or the «از قبل فعال» toast) » re-renders `admin:menu_mode` |
+
+In `REPLY` mode the user main-menu row labels arrive as **text** (reply
+buttons carry no callback data) and are routed by the shared dispatcher
+in `apps/bot/src/handlers/user-menu-actions.ts` to the same section
+entries as the inline callbacks.
