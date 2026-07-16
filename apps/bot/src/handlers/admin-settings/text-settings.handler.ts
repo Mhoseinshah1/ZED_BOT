@@ -16,6 +16,13 @@ import {
   updateButtonText,
   updateMessageTemplateContent,
 } from "../../services/admin-text-settings.service.js";
+import { logger } from "../../core/logger.js";
+import {
+  getUserMenuMode,
+  MENU_MODE_LABELS,
+  setUserMenuMode,
+  type UserMenuMode,
+} from "../../services/menu-mode.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 
@@ -37,6 +44,11 @@ const BUTTON_FLOW = "admin_texts:button";
 const TX_CB = {
   settings: CB.ADMIN_GENERAL_SETTINGS,
   texts: "admin:texts",
+  // Menu-keyboard-mode phase: user main-menu keyboard mode page. Stable
+  // identifiers - behavior never derives from the visible Persian labels.
+  menuMode: "admin:menu_mode",
+  menuModeAsk: (mode: "inline" | "reply"): string => `admin:menu_mode:ask:${mode}`,
+  menuModeSet: (mode: "inline" | "reply"): string => `admin:menu_mode:set:${mode}`,
   cancel: "admin:texts:cancel",
   templates: (page: number): string => `admin:texts:templates:${page}`,
   buttons: (page: number): string => `admin:texts:buttons:${page}`,
@@ -70,9 +82,85 @@ async function renderSettingsLanding(ctx: BotContext): Promise<void> {
   const kb = new InlineKeyboard()
     .text("مدیریت متن‌ها ✍️", TX_CB.texts)
     .row()
+    .text("نوع نمایش منوی کاربر", TX_CB.menuMode)
+    .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
   await safeEditOrReply(ctx, "تنظیمات عمومی ⚙️\n\nیک بخش را انتخاب کنید:", kb);
 }
+
+// --- user main-menu keyboard mode (menu-keyboard-mode phase) -------------------------------
+
+const MENU_MODE_CONFIRM_TEXTS: Record<UserMenuMode, string> = {
+  INLINE: "آیا منوی کاربر به حالت دکمه‌های شیشه‌ای داخل پیام تغییر کند؟",
+  REPLY: "آیا منوی کاربر به حالت دکمه‌های معمولی پایین صفحه تغییر کند؟",
+};
+const MENU_MODE_CHANGED_OK_TEXT = "نوع نمایش منوی کاربر با موفقیت تغییر کرد ✅";
+const MENU_MODE_ALREADY_TEXT = "این نوع نمایش از قبل فعال است.";
+
+function parseModeParam(raw: string): UserMenuMode {
+  return raw === "reply" ? "REPLY" : "INLINE";
+}
+
+async function renderMenuModePage(ctx: BotContext): Promise<void> {
+  await safeAnswerCallback(ctx);
+  const mode = await getUserMenuMode();
+  const kb = new InlineKeyboard()
+    .text("دکمه شیشه‌ای", TX_CB.menuModeAsk("inline"))
+    .text("دکمه معمولی", TX_CB.menuModeAsk("reply"))
+    .row()
+    .text("بازگشت به تنظیمات عمومی", TX_CB.settings);
+  await safeEditOrReply(
+    ctx,
+    `نوع نمایش منوی کاربر\n\nنوع فعلی:\n${MENU_MODE_LABELS[mode]}`,
+    kb,
+  );
+}
+
+adminTextSettingsHandler.callbackQuery(TX_CB.menuMode, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  await renderMenuModePage(ctx);
+});
+
+adminTextSettingsHandler.callbackQuery(/^admin:menu_mode:ask:(inline|reply)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  const target = parseModeParam(ctx.match[1]);
+  if ((await getUserMenuMode()) === target) {
+    await safeAnswerCallback(ctx, MENU_MODE_ALREADY_TEXT);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    MENU_MODE_CONFIRM_TEXTS[target],
+    new InlineKeyboard()
+      .text("تایید ✅", TX_CB.menuModeSet(ctx.match[1] as "inline" | "reply"))
+      .row()
+      .text("انصراف", TX_CB.menuMode),
+  );
+});
+
+adminTextSettingsHandler.callbackQuery(/^admin:menu_mode:set:(inline|reply)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  const target = parseModeParam(ctx.match[1]);
+  if ((await getUserMenuMode()) === target) {
+    await safeAnswerCallback(ctx, MENU_MODE_ALREADY_TEXT);
+    await renderMenuModePage(ctx);
+    return;
+  }
+  await setUserMenuMode(target);
+  logger.info("user menu keyboard mode changed", {
+    adminId: ctx.admin.id,
+    mode: target,
+  });
+  await safeAnswerCallback(ctx, MENU_MODE_CHANGED_OK_TEXT);
+  await renderMenuModePage(ctx);
+});
 
 async function renderTextsLanding(ctx: BotContext): Promise<void> {
   clearAdminTextSettingsState(ctx);

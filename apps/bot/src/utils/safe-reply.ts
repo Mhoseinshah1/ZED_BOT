@@ -1,5 +1,5 @@
 import { errorMessage } from "@zedbot/shared";
-import type { InlineKeyboard } from "grammy";
+import type { InlineKeyboard, Keyboard } from "grammy";
 
 import type { BotContext } from "../core/context.js";
 import { logger } from "../core/logger.js";
@@ -37,6 +37,24 @@ export async function safeReply(
     await ctx.reply(text, buildOther(keyboard, options));
   } catch (err) {
     logger.debug("reply failed", { error: errorMessage(err) });
+  }
+}
+
+/**
+ * Replies with an arbitrary reply markup (reply keyboards, keyboard
+ * removal) without ever throwing. Reply keyboards cannot be applied via
+ * editMessageText, so menu-keyboard-mode sends always go through a fresh
+ * reply - this is the one helper that accepts non-inline markup.
+ */
+export async function safeReplyWithMarkup(
+  ctx: BotContext,
+  text: string,
+  replyMarkup: Keyboard | InlineKeyboard | { remove_keyboard: true },
+): Promise<void> {
+  try {
+    await ctx.reply(text, { reply_markup: replyMarkup });
+  } catch (err) {
+    logger.debug("reply with markup failed", { error: errorMessage(err) });
   }
 }
 

@@ -1,8 +1,6 @@
 import { InlineKeyboard } from "grammy";
 
-import { CB } from "../core/callbacks.js";
-import { isFreeTrialVisible } from "../services/free-trial.service.js";
-import { getButtonText } from "../services/text.service.js";
+import { buildUserMainMenuDefinition } from "./user-menu-definition.js";
 
 /**
  * Main user menu - button texts come from the database (operator-editable
@@ -26,30 +24,11 @@ import { getButtonText } from "../services/text.service.js";
  *    never merged into the subscription purchase.
  */
 export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
-  const [buy, renew, services, wallet, otherProducts, myOrders, support, trialVisible] =
-    await Promise.all([
-      getButtonText("buy_subscription"),
-      getButtonText("renew_service"),
-      getButtonText("my_services"),
-      getButtonText("wallet"),
-      getButtonText("other_products"),
-      getButtonText("my_orders"),
-      getButtonText("support"),
-      isFreeTrialVisible(),
-    ]);
-
-  const kb = new InlineKeyboard()
-    .text(buy, CB.USER_BUY)
-    .text(renew, CB.USER_RENEW)
-    .row()
-    .text(services, CB.USER_SERVICES)
-    .text(wallet, CB.USER_WALLET)
-    .row()
-    .text(otherProducts, CB.USER_OTHER_PRODUCTS)
-    .text(myOrders, CB.USER_ORDERS)
-    .row();
-  if (trialVisible) {
-    kb.text(await getButtonText("free_test"), CB.USER_FREE_TEST).row();
-  }
-  return kb.text(support, CB.USER_SUPPORT);
+  // Menu-keyboard-mode phase: rendered from the ONE shared menu definition
+  // (rows/labels/visibility identical to the reply-keyboard mode); the
+  // approved inline layout and stable callbacks are unchanged.
+  const rows = await buildUserMainMenuDefinition();
+  return new InlineKeyboard(
+    rows.map((row) => row.map((button) => InlineKeyboard.text(button.label, button.callback))),
+  );
 }

@@ -59,7 +59,7 @@ function menuKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("بازگشت به منو", CB.USER_MENU);
 }
 
-async function renderRenewableList(ctx: BotContext, page: number): Promise<void> {
+export async function renderRenewableList(ctx: BotContext, page: number): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     return;

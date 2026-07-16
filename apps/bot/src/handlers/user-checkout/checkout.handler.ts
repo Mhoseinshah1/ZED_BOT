@@ -145,7 +145,7 @@ async function renderCategoriesForPanel(ctx: BotContext, panelId: string): Promi
   await safeEditOrReply(ctx, PICK_CATEGORY_TEXT, kb);
 }
 
-async function startBuyFlow(ctx: BotContext): Promise<void> {
+export async function startBuyFlow(ctx: BotContext): Promise<void> {
   clearCheckoutState(ctx);
   const panels = await purchasablePanels();
   if (panels.length === 0) {
@@ -249,7 +249,7 @@ checkoutHandler.callbackQuery(
 
 // --- Other products flow --------------------------------------------------------------
 
-checkoutHandler.callbackQuery(CO_CB.OTHER, async (ctx) => {
+export async function openOtherProductsSection(ctx: BotContext): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     return;
@@ -267,7 +267,9 @@ checkoutHandler.callbackQuery(CO_CB.OTHER, async (ctx) => {
     "دسته‌بندی را انتخاب کنید:",
     categoryListKeyboard(categories, (catSid) => ccb.otherCategory(catSid), CB.USER_MENU),
   );
-});
+}
+
+checkoutHandler.callbackQuery(CO_CB.OTHER, openOtherProductsSection);
 
 checkoutHandler.callbackQuery(/^user:op:cat:([0-9a-f-]+)$/, async (ctx) => {
   const user = ctx.dbUser;

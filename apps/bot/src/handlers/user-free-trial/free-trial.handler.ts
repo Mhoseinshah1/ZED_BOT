@@ -65,7 +65,7 @@ export const freeTrialHandler = new Composer<BotContext>();
 
 // --- entry: availability + eligibility + panel list ------------------------------------------
 
-freeTrialHandler.callbackQuery(ftCb.root, async (ctx) => {
+export async function openFreeTrialSection(ctx: BotContext): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     await safeAnswerCallback(ctx);
@@ -102,7 +102,9 @@ freeTrialHandler.callbackQuery(ftCb.root, async (ctx) => {
     await safeAnswerCallback(ctx);
     await safeReply(ctx, TRIAL_TEMP_UNAVAILABLE_TEXT, backToMenuKeyboard());
   }
-});
+}
+
+freeTrialHandler.callbackQuery(ftCb.root, openFreeTrialSection);
 
 // --- confirmation page --------------------------------------------------------------------------
 

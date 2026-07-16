@@ -161,6 +161,12 @@ export interface AdminUserWalletDraft {
 export interface SessionData {
   currentFlow: string | null;
   lastMenu: string | null;
+  /**
+   * Menu-keyboard-mode phase: true after the persistent REPLY main menu was
+   * delivered to this user. Lets the INLINE mode remove the stale reply
+   * keyboard exactly once after an admin switches modes (quiet transition).
+   */
+  replyMenuKeyboardActive?: boolean;
   temp: {
     panelAdd?: PanelAddState;
     // Panel id being edited via a text-input step.

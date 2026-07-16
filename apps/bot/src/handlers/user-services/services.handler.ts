@@ -77,7 +77,7 @@ async function renderDetail(
   );
 }
 
-async function renderList(ctx: BotContext, page: number): Promise<void> {
+export async function renderServicesList(ctx: BotContext, page: number): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     return;
@@ -104,12 +104,12 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
 }
 
 servicesHandler.callbackQuery(CB.USER_SERVICES, async (ctx) => {
-  await renderList(ctx, 1);
+  await renderServicesList(ctx, 1);
   ctx.session.lastMenu = CB.USER_SERVICES;
 });
 
 servicesHandler.callbackQuery(/^user:svc:list:(\d+)$/, async (ctx) => {
-  await renderList(ctx, Number.parseInt(ctx.match[1], 10));
+  await renderServicesList(ctx, Number.parseInt(ctx.match[1], 10));
 });
 
 // Service-live-sync phase: OPENING the detail page synchronizes from the
