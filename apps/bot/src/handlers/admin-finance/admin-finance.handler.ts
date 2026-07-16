@@ -166,7 +166,8 @@ async function renderAccountsPage(ctx: BotContext, gatewaySid: string): Promise<
   );
 }
 
-adminFinanceHandler.callbackQuery(FIN_CB.root, async (ctx) => {
+/** Finance landing - shared by the inline callback and the reply-menu router. */
+export async function renderFinanceLanding(ctx: BotContext): Promise<void> {
   if (ctx.admin === null) {
     return;
   }
@@ -174,7 +175,9 @@ adminFinanceHandler.callbackQuery(FIN_CB.root, async (ctx) => {
   await safeAnswerCallback(ctx);
   await safeEditOrReply(ctx, FINANCE_LANDING_TEXT, financeLandingKeyboard());
   ctx.session.lastMenu = FIN_CB.root;
-});
+}
+
+adminFinanceHandler.callbackQuery(FIN_CB.root, renderFinanceLanding);
 
 // --- payment/wallet settings (Phase 22) -----------------------------------------------
 

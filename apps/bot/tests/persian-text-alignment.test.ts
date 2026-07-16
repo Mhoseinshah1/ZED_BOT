@@ -143,6 +143,13 @@ const ALL_ACTIONS: ServiceDetailActions = {
 
 const fakeUser = { balanceToman: 200_000 } as unknown as User;
 
+// buildAdminMainKeyboard is admin-scoped since the admin-menu-keyboard-mode
+// phase: a minimal ACTIVE admin renders the full approved menu (labels come
+// from the ButtonText registry with in-code seed fallbacks, so no DB needed).
+const activeAdmin = { isActive: true } as unknown as Parameters<
+  typeof buildAdminMainKeyboard
+>[0];
+
 const fakeProduct = {
   id: "11112222-3333-4444-5555-666677778888",
   name: "پلن طلایی",
@@ -214,8 +221,8 @@ describe("main menus and landing pages (exact approved labels)", () => {
     ]);
   });
 
-  it("admin main menu: exact labels", () => {
-    expect(labels(buildAdminMainKeyboard())).toEqual([
+  it("admin main menu: exact labels", async () => {
+    expect(labels(await buildAdminMainKeyboard(activeAdmin))).toEqual([
       "مالی 💎",
       "مدیریت کاربران 👤",
       "مدیریت محصولات/پلن‌ها 📦",
@@ -684,7 +691,7 @@ describe("callback data stays within Telegram's 64-byte limit", () => {
   it("user main, admin main, finance, service detail and wallet keyboards", async () => {
     const keyboards = [
       await buildUserMainKeyboard(),
-      buildAdminMainKeyboard(),
+      await buildAdminMainKeyboard(activeAdmin),
       financeLandingKeyboard(),
       serviceDetailKeyboard(fakeService(), ALL_ACTIONS),
       walletMainKeyboard(),

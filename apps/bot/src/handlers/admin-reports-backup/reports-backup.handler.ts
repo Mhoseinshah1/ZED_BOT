@@ -46,7 +46,7 @@ function isOwner(ctx: BotContext): boolean {
   return ctx.admin?.role === "OWNER";
 }
 
-async function renderLanding(ctx: BotContext): Promise<void> {
+export async function renderLanding(ctx: BotContext): Promise<void> {
   await safeAnswerCallback(ctx);
   const kb = new InlineKeyboard()
     .text("وضعیت سیستم 🩺", RB_CB.health)

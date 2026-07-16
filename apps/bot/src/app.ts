@@ -85,6 +85,7 @@ import { starsPaymentHandler } from "./handlers/stars-payment.handler.js";
 import { startHandler } from "./handlers/start.handler.js";
 import { termsHandler } from "./handlers/terms.handler.js";
 import { freeTrialHandler } from "./handlers/user-free-trial/free-trial.handler.js";
+import { adminMenuTextRouter } from "./handlers/admin-menu-actions.js";
 import { userMenuTextRouter } from "./handlers/user-menu-actions.js";
 import { userPlaceholdersHandler } from "./handlers/user-placeholders.handler.js";
 import { safeAnswerCallback } from "./utils/safe-reply.js";
@@ -226,10 +227,14 @@ export function createBot(token: string): Bot<BotContext> {
     await adminFlowText.middleware()(ctx, next);
   });
 
-  // Menu-keyboard-mode phase: reply-keyboard main-menu text routing. Runs
-  // AFTER the flow dispatcher above, so every active conversational flow has
-  // already consumed its text; inside, it only acts in REPLY mode on exact
-  // current main-menu labels (commands and arbitrary text fall through).
+  // Menu-keyboard-mode phases: reply-keyboard main-menu text routing. Both
+  // routers run AFTER the flow dispatcher above, so every active
+  // conversational flow has already consumed its text; inside, each only
+  // acts in ITS OWN REPLY mode on exact current main-menu labels (commands
+  // and arbitrary text fall through). The admin router runs first - the
+  // approved priority is command -> flow -> admin action -> user action ->
+  // fallback - and denies unauthorized senders of admin labels itself.
+  bot.on("message:text", adminMenuTextRouter.middleware());
   bot.on("message:text", userMenuTextRouter.middleware());
 
   // User area: /menu + user:* / common:* callbacks behind the access gates.

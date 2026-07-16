@@ -236,17 +236,20 @@ on the users landing / admin menu).
   `docs/free-trial-admin-management.md`).
 - **گزارشات / بکاپ 🛡** — health, backups (OWNER), restore help.
 
-### تنظیمات عمومی ⚙️ → نوع نمایش منوی کاربر (menu-keyboard-mode phase)
+### تنظیمات عمومی ⚙️ → نوع نمایش منوها (menu-keyboard-mode phases)
 
 | page | buttons |
 | --- | --- |
-| mode page (`admin:menu_mode`, shows «نوع فعلی» via `MENU_MODE_LABELS`) | دکمه شیشه‌ای » `admin:menu_mode:ask:inline` · دکمه معمولی » `admin:menu_mode:ask:reply` / بازگشت به تنظیمات عمومی » `admin:general_settings` |
-| confirm (`admin:menu_mode:ask:<inline\|reply>`; selecting the active mode only toasts «این نوع نمایش از قبل فعال است.») | تایید ✅ » `admin:menu_mode:set:<inline\|reply>` / انصراف » `admin:menu_mode` |
-| apply (`admin:menu_mode:set:<inline\|reply>`) | toast «نوع نمایش منوی کاربر با موفقیت تغییر کرد ✅» (or the «از قبل فعال» toast) » re-renders `admin:menu_mode` |
+| overview (`admin:menu_mode`, shows the CURRENT mode of both menus via `MENU_MODE_LABELS`) | تنظیم منوی کاربران » `admin:menu_mode:user` / تنظیم منوی ادمین » `admin:menu_mode:admin` / بازگشت به تنظیمات عمومی » `admin:general_settings` |
+| scope page (`admin:menu_mode:<user\|admin>`, shows «نوع فعلی») | دکمه شیشه‌ای » `admin:menu_mode:ask:<scope>:inline` · دکمه معمولی » `admin:menu_mode:ask:<scope>:reply` / بازگشت » `admin:menu_mode` |
+| confirm (`admin:menu_mode:ask:<scope>:<inline\|reply>`; selecting the active mode only toasts «این نوع نمایش از قبل فعال است.») | تایید ✅ » `admin:menu_mode:set:<scope>:<inline\|reply>` / انصراف » `admin:menu_mode:<scope>` |
+| apply (`admin:menu_mode:set:<scope>:<inline\|reply>`) | toast «نوع نمایش منوی کاربر/ادمین با موفقیت تغییر کرد ✅» (or the «از قبل فعال» toast) » re-renders the scope page |
 
-In `REPLY` mode the user main-menu row labels arrive as **text** (reply
-buttons carry no callback data) and are routed by the shared dispatcher
-in `apps/bot/src/handlers/user-menu-actions.ts` to the same section
+In `REPLY` mode the main-menu row labels arrive as **text** (reply
+buttons carry no callback data) and are routed by the shared dispatchers
+— `apps/bot/src/handlers/admin-menu-actions.ts` first (denies
+unauthorized senders of admin labels), then
+`apps/bot/src/handlers/user-menu-actions.ts` — to the same section
 entries as the inline callbacks.
 
 ### تنظیمات عمومی ⚙️ → تنظیمات اکانت تست 🎁 (**OWNER-only**, free-trial-button-visibility fix)

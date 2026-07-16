@@ -1,6 +1,7 @@
 import { prisma, type ButtonText, type MessageTemplate } from "@zedbot/database";
 
 import { logger } from "../core/logger.js";
+import { ADMIN_MAIN_MENU_BUTTON_KEYS } from "../keyboards/admin-menu-definition.js";
 import { MAIN_MENU_BUTTON_KEYS } from "../keyboards/user-menu-definition.js";
 import { validateTemplateContentVariables } from "./template-variables.js";
 import { clearTextCache } from "./text.service.js";
@@ -162,9 +163,36 @@ export async function getButtonTextByShortId(shortId: string): Promise<ButtonTex
   return matches.length === 1 ? matches[0] : null;
 }
 
-/** Reply-keyboard routing safety: two main-menu labels must never collide. */
+/** Reply-keyboard routing safety: two labels of ONE menu must never collide. */
 export const DUPLICATE_MAIN_MENU_LABEL_TEXT =
-  "این متن دکمه با یکی دیگر از دکمه‌های منوی اصلی یکسان است.";
+  "این متن دکمه با یکی دیگر از دکمه‌های همین منو یکسان است.";
+
+/**
+ * The main-menu label scopes (menu-keyboard-mode phases): duplicates are
+ * rejected WITHIN one menu - the user main menu and the admin main menu are
+ * separate reply-routing contexts, so the same label may exist in both.
+ */
+const MAIN_MENU_LABEL_SCOPES: string[][] = [MAIN_MENU_BUTTON_KEYS, ADMIN_MAIN_MENU_BUTTON_KEYS];
+
+/** null when `clean` is a safe label for `key`, else the refusal message. */
+async function findMainMenuLabelClash(key: string, clean: string): Promise<string | null> {
+  for (const scopeKeys of MAIN_MENU_LABEL_SCOPES) {
+    if (!scopeKeys.includes(key)) {
+      continue;
+    }
+    const clash = await prisma.buttonText.findFirst({
+      where: {
+        key: { in: scopeKeys.filter((other) => other !== key) },
+        currentText: clean,
+      },
+      select: { id: true },
+    });
+    if (clash !== null) {
+      return DUPLICATE_MAIN_MENU_LABEL_TEXT;
+    }
+  }
+  return null;
+}
 
 /** New currentText for an EDITABLE button; clears the text cache. */
 export async function updateButtonText(
@@ -176,20 +204,14 @@ export async function updateButtonText(
   if (clean.length < BUTTON_TEXT_MIN || clean.length > BUTTON_TEXT_MAX) {
     return { ok: false, safeMessage: INVALID_BUTTON_TEXT_TEXT };
   }
-  // Menu-keyboard-mode phase: reply-keyboard routing resolves incoming text
-  // against the CURRENT main-menu labels, so a main-menu label may never
-  // equal another main-menu button's label (ambiguous navigation).
+  // Menu-keyboard-mode phases: reply-keyboard routing resolves incoming text
+  // against the CURRENT labels of each main menu, so a main-menu label may
+  // never equal another label of the SAME menu (ambiguous navigation).
   const editing = await prisma.buttonText.findUnique({ where: { id } });
-  if (editing !== null && MAIN_MENU_BUTTON_KEYS.includes(editing.key)) {
-    const clash = await prisma.buttonText.findFirst({
-      where: {
-        key: { in: MAIN_MENU_BUTTON_KEYS.filter((key) => key !== editing.key) },
-        currentText: clean,
-      },
-      select: { id: true },
-    });
-    if (clash !== null) {
-      return { ok: false, safeMessage: DUPLICATE_MAIN_MENU_LABEL_TEXT };
+  if (editing !== null) {
+    const clashMessage = await findMainMenuLabelClash(editing.key, clean);
+    if (clashMessage !== null) {
+      return { ok: false, safeMessage: clashMessage };
     }
   }
   const updated = await prisma.buttonText.updateMany({

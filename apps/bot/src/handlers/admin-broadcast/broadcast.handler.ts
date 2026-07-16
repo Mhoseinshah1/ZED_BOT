@@ -76,7 +76,7 @@ export function clearAdminBroadcastState(ctx: BotContext): void {
   delete ctx.session.temp.adminBroadcastDraft;
 }
 
-async function renderLanding(ctx: BotContext): Promise<void> {
+export async function renderLanding(ctx: BotContext): Promise<void> {
   clearAdminBroadcastState(ctx);
   await safeAnswerCallback(ctx);
   const kb = new InlineKeyboard()

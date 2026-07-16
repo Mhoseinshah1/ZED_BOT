@@ -51,14 +51,22 @@ export async function showUserMenu(ctx: BotContext): Promise<void> {
     if (ctx.callbackQuery !== undefined) {
       await safeAnswerCallback(ctx);
     }
+    // Sending the user reply keyboard REPLACES whatever persistent keyboard
+    // is on screen (including the admin one) - no removal message needed.
     await safeReplyWithMarkup(ctx, text, await buildUserMainReplyKeyboard());
     ctx.session.replyMenuKeyboardActive = true;
+    ctx.session.adminReplyMenuKeyboardActive = false;
   } else {
-    // Quiet one-time transition: users who still carry the old persistent
-    // reply keyboard get it removed before the inline menu renders.
-    if (ctx.session.replyMenuKeyboardActive === true) {
+    // Quiet one-time transition: chats that still carry a stale persistent
+    // reply keyboard (user OR admin menu) get it removed before the inline
+    // menu renders.
+    if (
+      ctx.session.replyMenuKeyboardActive === true ||
+      ctx.session.adminReplyMenuKeyboardActive === true
+    ) {
       await safeReplyWithMarkup(ctx, MENU_MODE_CHANGED_TEXT, { remove_keyboard: true });
       ctx.session.replyMenuKeyboardActive = false;
+      ctx.session.adminReplyMenuKeyboardActive = false;
     }
     const keyboard = await buildUserMainKeyboard();
     if (ctx.callbackQuery !== undefined) {
