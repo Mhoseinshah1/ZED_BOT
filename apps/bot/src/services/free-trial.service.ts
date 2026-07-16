@@ -484,13 +484,20 @@ async function insertClaim(user: User, panel: Panel): Promise<FreeTrialClaim> {
     const limit = panel.testMaxConcurrentAccounts;
     const lost = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`zedbot-free-trial-panel:${panel.id}`}))`;
-      const winners = await tx.freeTrialClaim.findMany({
-        where: capacityWhere(panel.id, now),
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-        take: limit,
-        select: { id: true },
+      // Decision-order capacity, NOT createdAt order: deciders serialize on
+      // the panel advisory lock and each one self-cancels iff the OTHER
+      // capacity-consuming claims already fill the limit. Age-based winner
+      // selection is unsafe here - since the claim insert moved into a
+      // multi-statement transaction (entitlement reservation), an OLDER
+      // claim can become visible only after a younger claim's capacity
+      // check ran, and both would then consider themselves winners. With
+      // the others-count rule every prior decision is visible to the next
+      // decider (commits release the xact lock), so the cap can never be
+      // exceeded.
+      const others = await tx.freeTrialClaim.count({
+        where: { AND: [capacityWhere(panel.id, now), { id: { not: claim.id } }] },
       });
-      if (winners.some((w) => w.id === claim.id)) {
+      if (others < limit) {
         return false;
       }
       await tx.freeTrialClaim.updateMany({
