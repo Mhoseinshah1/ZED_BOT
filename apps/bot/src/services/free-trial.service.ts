@@ -80,6 +80,8 @@ const SWEEP_BATCH = 20;
 export const TRIAL_ALREADY_USED_TEXT = "شما قبلاً از اکانت تست رایگان استفاده کرده‌اید.";
 export const TRIAL_IN_PROGRESS_TEXT = "در حال حاضر ساخت اکانت تست شما در حال انجام است.";
 export const TRIAL_NO_PANEL_TEXT = "در حال حاضر پنل فعالی برای ارائه اکانت تست وجود ندارد.";
+/** Shown when the GLOBAL switch is off (distinct from "no ready panel"). */
+export const TRIAL_GLOBALLY_DISABLED_TEXT = "اکانت تست رایگان در حال حاضر غیرفعال است.";
 export const TRIAL_TEMP_UNAVAILABLE_TEXT =
   "ساخت اکانت تست موقتاً امکان‌پذیر نیست. لطفاً کمی بعد دوباره تلاش کنید.";
 export const TRIAL_NO_PURCHASE_ONLY_TEXT =
@@ -201,21 +203,145 @@ export async function countActiveTrialsForPanel(panelId: string): Promise<number
   return prisma.freeTrialClaim.count({ where: capacityWhere(panelId, new Date()) });
 }
 
-/** Trial-enabled panels whose configuration is complete, user-sortable. */
-export async function listTrialReadyPanels(): Promise<Panel[]> {
-  const panels = await prisma.panel.findMany({
+// --- shared availability (ONE policy for user menu, panel list and admin diagnostics) ---------
+
+/** A trial-enabled panel that is NOT ready, with its safe reason codes. */
+export interface TrialPanelDiagnostic {
+  panel: Panel;
+  /** assessTrialPanelConfig codes, or "capacity-full" when only capacity blocks. */
+  reasons: string[];
+}
+
+interface TrialPanelClassification {
+  /** ACTIVE + testEnabled panels, user-sortable. */
+  candidates: Panel[];
+  /** Complete config AND free capacity - claimable RIGHT NOW. */
+  ready: Panel[];
+  /** Candidates that are not ready (config incomplete or capacity full). */
+  incomplete: TrialPanelDiagnostic[];
+}
+
+/**
+ * The single classifier every trial-availability surface derives from: the
+ * user main-menu button, the user panel list and the admin diagnostics page
+ * all share this exact policy. Capacity counts toward readiness: a panel
+ * whose testMaxConcurrentAccounts is exhausted is NOT ready (reason code
+ * "capacity-full") even when its configuration is complete.
+ */
+async function classifyTrialPanels(): Promise<TrialPanelClassification> {
+  const candidates = await prisma.panel.findMany({
     where: { status: PanelStatus.ACTIVE, testEnabled: true },
     orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
   });
-  return panels.filter((panel) => assessTrialPanelConfig(panel).ok);
+  const ready: Panel[] = [];
+  const incomplete: TrialPanelDiagnostic[] = [];
+  for (const panel of candidates) {
+    const reasons = [...assessTrialPanelConfig(panel).reasons];
+    if (reasons.length === 0 && panel.testMaxConcurrentAccounts !== null) {
+      const used = await countActiveTrialsForPanel(panel.id);
+      if (used >= panel.testMaxConcurrentAccounts) {
+        reasons.push("capacity-full");
+      }
+    }
+    if (reasons.length === 0) {
+      ready.push(panel);
+    } else {
+      incomplete.push({ panel, reasons });
+    }
+  }
+  return { candidates, ready, incomplete };
+}
+
+/** Trial panels a user may claim on RIGHT NOW (complete config + capacity). */
+export async function listTrialReadyPanels(): Promise<Panel[]> {
+  return (await classifyTrialPanels()).ready;
+}
+
+/** Trial-enabled panels that are NOT ready, with safe reason codes (admin diagnostics). */
+export async function listTrialIncompletePanels(): Promise<TrialPanelDiagnostic[]> {
+  return (await classifyTrialPanels()).incomplete;
+}
+
+export type FreeTrialMenuReason =
+  | "AVAILABLE"
+  | "GLOBAL_DISABLED"
+  | "NO_READY_PANEL"
+  | "NO_VALID_XUI_INBOUND"
+  | "PANEL_CONFIG_INCOMPLETE";
+
+export interface FreeTrialMenuAvailability {
+  visible: boolean;
+  globallyEnabled: boolean;
+  readyPanelCount: number;
+  incompletePanelCount: number;
+  reason: FreeTrialMenuReason;
+}
+
+const XUI_INBOUND_REASONS = new Set([
+  "trial-inbounds-missing",
+  "trial-inbounds-outside-allowlist",
+]);
+
+/**
+ * Why the user main-menu trial button is (in)visible - shared by the menu
+ * renderer and the OWNER admin diagnostics page. Panel counts are always
+ * computed (the admin page needs them even while globally disabled).
+ */
+export async function getFreeTrialMenuAvailability(): Promise<FreeTrialMenuAvailability> {
+  const globallyEnabled = await isFreeTrialEnabled();
+  const { candidates, ready, incomplete } = await classifyTrialPanels();
+  let reason: FreeTrialMenuReason;
+  if (!globallyEnabled) {
+    reason = "GLOBAL_DISABLED";
+  } else if (ready.length > 0) {
+    reason = "AVAILABLE";
+  } else if (candidates.length === 0) {
+    reason = "NO_READY_PANEL";
+  } else if (
+    incomplete.every((entry) => entry.reasons.every((code) => XUI_INBOUND_REASONS.has(code)))
+  ) {
+    reason = "NO_VALID_XUI_INBOUND";
+  } else {
+    reason = "PANEL_CONFIG_INCOMPLETE";
+  }
+  return {
+    visible: globallyEnabled && ready.length > 0,
+    globallyEnabled,
+    readyPanelCount: ready.length,
+    incompletePanelCount: incomplete.length,
+    reason,
+  };
 }
 
 /** True when the main-menu trial button should be rendered at all. */
 export async function isFreeTrialVisible(): Promise<boolean> {
-  if (!(await isFreeTrialEnabled())) {
-    return false;
+  return (await getFreeTrialMenuAvailability()).visible;
+}
+
+/**
+ * Safe Persian sentence for a per-panel trial problem code (admin
+ * diagnostics). NEVER exposes URLs, credentials or raw errors; unknown
+ * codes collapse into the generic "not ready" sentence.
+ */
+export function trialPanelProblemLabel(reasonCode: string): string {
+  switch (reasonCode) {
+    case "panel-not-active":
+      return "پنل غیرفعال است.";
+    case "trial-duration-missing":
+      return "مدت تست معتبر نیست.";
+    case "trial-traffic-missing":
+      return "حجم تست معتبر نیست.";
+    case "trial-inbounds-missing":
+      return "اینباند تست XUI انتخاب نشده است.";
+    case "trial-inbounds-outside-allowlist":
+      return "اینباند انتخاب‌شده دیگر معتبر نیست.";
+    case "capacity-full":
+      return "ظرفیت اکانت‌های تست تکمیل شده است.";
+    default:
+      // provisioning-readiness-failed / create-capability-missing /
+      // naming-config-incomplete / panel-config-incomplete / anything else.
+      return "پنل برای ساخت سرویس آماده نیست.";
   }
-  return (await listTrialReadyPanels()).length > 0;
 }
 
 // --- eligibility ------------------------------------------------------------------------------

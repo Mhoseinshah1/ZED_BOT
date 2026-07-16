@@ -1,4 +1,9 @@
-import { getBooleanSetting, getSetting, setSetting } from "./settings.service.js";
+import {
+  compareAndSetBooleanSetting,
+  getBooleanSetting,
+  getSetting,
+  setSetting,
+} from "./settings.service.js";
 
 // =============================================================================
 // Free-trial global settings (free-trial phase). Same pattern as
@@ -22,6 +27,19 @@ export async function isFreeTrialEnabled(): Promise<boolean> {
 
 export async function setFreeTrialEnabled(enabled: boolean): Promise<void> {
   await setSetting(FREE_TRIAL_ENABLED_KEY, enabled ? "true" : "false", "BOOLEAN");
+}
+
+/**
+ * Atomic flip used by the admin enable/disable confirmations: applies ONLY
+ * while the stored value still equals `expected`, so a stale confirmation
+ * (or two racing admins) can never double-apply a transition. Returns false
+ * when the state already moved on.
+ */
+export async function compareAndSetFreeTrialEnabled(
+  expected: boolean,
+  next: boolean,
+): Promise<boolean> {
+  return compareAndSetBooleanSetting(FREE_TRIAL_ENABLED_KEY, expected, next);
 }
 
 /** Lifetime policy: one trial per user across the whole bot (default). */

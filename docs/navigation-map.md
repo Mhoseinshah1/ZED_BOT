@@ -49,7 +49,7 @@ Legend: `»` opens page · *(flow)* switches to a text-input flow.
 | 1 | خرید اشتراک 🔐 → `user:buy` (**LOCKED**) · تمدید سرویس ♻️ → `user:renew` |
 | 2 | سرویس‌های من 🛍 → `user:services` · کیف پول + شارژ 🏦 → `user:wallet` |
 | 3 | محصولات دیگر 🛍 → `user:other_products` (**LOCKED**, separate) · سفارش‌های من 🧾 → `user:orders` |
-| 3½ (conditional) | اکانت تست رایگان 🎁 → `user:free_test` — rendered ONLY when free trials are globally enabled AND ≥ 1 trial-ready panel exists (feature-gated, never a placeholder) |
+| 3½ (conditional) | اکانت تست رایگان 🎁 → `user:free_test` — rendered ONLY when free trials are globally enabled AND ≥ 1 trial-ready panel exists — ready includes free capacity (`getFreeTrialMenuAvailability`, the same shared policy the admin «تنظیمات اکانت تست 🎁» diagnostics page reads; feature-gated, never a placeholder) |
 | 4 | پشتیبانی ☎️ → `user:support` |
 
 Hidden until implemented (callbacks still answered with the placeholder
@@ -230,8 +230,10 @@ on the users landing / admin menu).
 - **پیام همگانی 📣** — draft *(flow)* » audience » preview » test/start.
 - **تنظیمات عمومی ⚙️** — مدیریت متن‌ها ✍️ (templates/buttons list » edit
   *(flows)* / reset). The four wallet template keys are editable here.
-  Plus the user menu-keyboard-mode page (see the table below and
-  `docs/user-menu-keyboard-modes.md`).
+  Plus the user menu-keyboard-mode page and the global free-trial page
+  «تنظیمات اکانت تست 🎁» (see the tables below,
+  `docs/user-menu-keyboard-modes.md` and
+  `docs/free-trial-admin-management.md`).
 - **گزارشات / بکاپ 🛡** — health, backups (OWNER), restore help.
 
 ### تنظیمات عمومی ⚙️ → نوع نمایش منوی کاربر (menu-keyboard-mode phase)
@@ -246,3 +248,16 @@ In `REPLY` mode the user main-menu row labels arrive as **text** (reply
 buttons carry no callback data) and are routed by the shared dispatcher
 in `apps/bot/src/handlers/user-menu-actions.ts` to the same section
 entries as the inline callbacks.
+
+### تنظیمات عمومی ⚙️ → تنظیمات اکانت تست 🎁 (**OWNER-only**, free-trial-button-visibility fix)
+
+The global free-trial switch + the diagnostics that explain the user
+button's visibility (one shared policy with the user menu — see
+`docs/free-trial-admin-management.md` for texts and flows):
+
+| page | buttons |
+| --- | --- |
+| «🎁 تنظیمات اکانت تست رایگان» (`admin:trial_settings`; global status, ready/incomplete panel counts, user-button visibility + exact hidden reason) | فعال کردن تست رایگان » `admin:trial_settings:en` *(while disabled; refuses with zero ready panels)* **or** غیرفعال کردن تست رایگان » `admin:trial_settings:dis` *(while enabled)* / مشاهده پنل‌های آماده » `admin:trial_settings:ready` / مشاهده پنل‌های ناقص » `admin:trial_settings:inc` / بروزرسانی وضعیت ♻️ » `admin:trial_settings` / بازگشت به تنظیمات عمومی » `admin:general_settings` |
+| enable/disable confirm (`admin:trial_settings:en` / `…:dis`) | تایید ✅ » `admin:trial_settings:en:yes` / `…:dis:yes` *(re-checks state + readiness, compare-and-set flip)* / انصراف » `admin:trial_settings` |
+| «پنل‌های آماده تست ✅» (`admin:trial_settings:ready`; name/type/«مدت تست»/«حجم تست» only) | تنظیمات پنل 🎁 » `admin:panel:trial:<sid>` per panel / بازگشت » `admin:trial_settings` |
+| «پنل‌های فعال ولی ناقص ❌» (`admin:trial_settings:inc`; safe «مشکل: …» sentence per panel, no secrets/raw errors) | تنظیمات پنل 🎁 » `admin:panel:trial:<sid>` per panel / بازگشت » `admin:trial_settings` |

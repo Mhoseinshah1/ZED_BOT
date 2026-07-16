@@ -35,7 +35,17 @@ overwritten (see `docs/text-system.md`).
   conditionally (feature enabled + ≥ 1 trial-ready panel — see
   `docs/free-trial-architecture.md`). Its seeded default was updated from
   the literal-brace placeholder «اشتراک رایگان {تست}»; operator-customized
-  labels are, as always, untouched by the seed.
+  labels are, as always, untouched by the seed. The
+  free-trial-button-visibility fix reuses this SAME key for both keyboard
+  modes — no duplicate entry was added, edited labels keep routing to the
+  stable `FREE_TRIAL` action, and behavior never binds to the visible
+  Persian text.
+- Admin-page button labels («تنظیمات اکانت تست 🎁», «فعال کردن تست
+  رایگان», «غیرفعال کردن تست رایگان», «مشاهده پنل‌های آماده», «مشاهده
+  پنل‌های ناقص», «بروزرسانی وضعیت ♻️» and the rest of the admin tree) are
+  code-level constants bound to stable callback ids, NOT registry rows —
+  the registry deliberately covers only user-facing buttons, and no
+  equivalent admin keys existed to reuse.
 
 | Key | Title | Default (Persian) | Editable |
 | --- | --- | --- | --- |
