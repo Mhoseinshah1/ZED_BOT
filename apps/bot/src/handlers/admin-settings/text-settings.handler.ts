@@ -1,8 +1,9 @@
-import { type ButtonText, type MessageTemplate } from "@zedbot/database";
+import { type ButtonText, type MessageTemplate, type Panel } from "@zedbot/database";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
+import { logger } from "../../core/logger.js";
 import {
   BUTTON_TEXT_MAX,
   getButtonTextByShortId,
@@ -16,15 +17,31 @@ import {
   updateButtonText,
   updateMessageTemplateContent,
 } from "../../services/admin-text-settings.service.js";
-import { logger } from "../../core/logger.js";
+import {
+  compareAndSetFreeTrialEnabled,
+  isFreeTrialEnabled,
+} from "../../services/free-trial-settings.service.js";
+import {
+  formatTrialDuration,
+  formatTrialTraffic,
+  getFreeTrialMenuAvailability,
+  listTrialIncompletePanels,
+  listTrialReadyPanels,
+  trialPanelProblemLabel,
+  type FreeTrialMenuAvailability,
+  type FreeTrialMenuReason,
+  type TrialPanelDiagnostic,
+} from "../../services/free-trial.service.js";
 import {
   getUserMenuMode,
   MENU_MODE_LABELS,
   setUserMenuMode,
   type UserMenuMode,
 } from "../../services/menu-mode.service.js";
+import { clearSettingsCache } from "../../services/settings.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
+import { cb as panelCb } from "../panels/panel-cb.js";
 
 // =============================================================================
 // «تنظیمات عمومی ⚙️» -> «مدیریت متن‌ها ✍️» (Phase 34) - the real general-
@@ -83,6 +100,8 @@ async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     .text("مدیریت متن‌ها ✍️", TX_CB.texts)
     .row()
     .text("نوع نمایش منوی کاربر", TX_CB.menuMode)
+    .row()
+    .text("تنظیمات اکانت تست 🎁", TRIAL_SETTINGS_CB.root)
     .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
   await safeEditOrReply(ctx, "تنظیمات عمومی ⚙️\n\nیک بخش را انتخاب کنید:", kb);
@@ -533,4 +552,336 @@ adminTextSettingsTextHandler.on("message:text", async (ctx, next) => {
 
   clearAdminTextSettingsState(ctx);
   await safeReply(ctx, DRAFT_EXPIRED_TEXT);
+});
+
+// =============================================================================
+// «تنظیمات اکانت تست 🎁» - the GLOBAL free-trial admin page (OWNER-only,
+// fix/free-trial-button-visibility). One shared availability policy
+// (getFreeTrialMenuAvailability / listTrialReadyPanels /
+// listTrialIncompletePanels) drives the user menu button, the user panel
+// list AND this diagnostics page - the page can therefore explain exactly
+// why the user button is hidden. Config/counters only: never panel URLs,
+// credentials or raw provider errors.
+// =============================================================================
+
+export const TRIAL_SETTINGS_CB = {
+  root: "admin:trial_settings",
+  enable: "admin:trial_settings:en",
+  enableYes: "admin:trial_settings:en:yes",
+  disable: "admin:trial_settings:dis",
+  disableYes: "admin:trial_settings:dis:yes",
+  ready: "admin:trial_settings:ready",
+  incomplete: "admin:trial_settings:inc",
+} as const;
+
+/** Same OWNER gate copy pattern as financial reconciliation (RBAC gap). */
+export const TRIAL_SETTINGS_OWNER_ONLY_TOAST =
+  "دسترسی به این بخش فقط برای مالک مجموعه فعال است.";
+export const TRIAL_SETTINGS_ALREADY_ENABLED_TEXT = "اکانت تست رایگان از قبل فعال است.";
+export const TRIAL_SETTINGS_ALREADY_DISABLED_TEXT = "اکانت تست رایگان از قبل غیرفعال است.";
+export const TRIAL_SETTINGS_NO_READY_PANEL_TEXT =
+  "امکان فعال‌سازی وجود ندارد؛ ابتدا تنظیمات اکانت تست حداقل یک پنل را کامل کنید.";
+export const TRIAL_SETTINGS_ENABLE_ASK_TEXT =
+  "آیا از فعال کردن اکانت تست رایگان برای کاربران مطمئن هستید؟";
+export const TRIAL_SETTINGS_DISABLE_ASK_TEXT =
+  "آیا از غیرفعال کردن اکانت تست رایگان برای کاربران مطمئن هستید؟";
+export const TRIAL_SETTINGS_ENABLED_TOAST = "اکانت تست رایگان برای کاربران فعال شد ✅";
+export const TRIAL_SETTINGS_DISABLED_TOAST = "اکانت تست رایگان برای کاربران غیرفعال شد.";
+export const TRIAL_READY_EMPTY_TEXT = "هیچ پنل آماده‌ای وجود ندارد.";
+export const TRIAL_INCOMPLETE_EMPTY_TEXT = "پنل ناقصی وجود ندارد.";
+
+/** Why the user button is hidden, per shared availability reason. */
+export const TRIAL_HIDDEN_REASON_TEXT: Record<
+  Exclude<FreeTrialMenuReason, "AVAILABLE">,
+  string
+> = {
+  GLOBAL_DISABLED: "تست رایگان به‌صورت سراسری غیرفعال است.",
+  NO_READY_PANEL: "هیچ پنل آماده‌ای برای ساخت اکانت تست وجود ندارد.",
+  PANEL_CONFIG_INCOMPLETE: "تنظیمات پنل‌های تست کامل نیست.",
+  NO_VALID_XUI_INBOUND: "هیچ اینباند معتبری برای تست XUI انتخاب نشده است.",
+};
+
+/** The diagnostics page text (pure - exact layout locked by tests). */
+export function trialSettingsPageText(availability: FreeTrialMenuAvailability): string {
+  const lines = [
+    "🎁 تنظیمات اکانت تست رایگان",
+    "",
+    "وضعیت سراسری:",
+    availability.globallyEnabled ? "فعال ✅" : "غیرفعال ❌",
+    "",
+    "پنل‌های آماده تست:",
+    String(availability.readyPanelCount),
+    "",
+    "پنل‌های فعال ولی ناقص:",
+    String(availability.incompletePanelCount),
+    "",
+    "وضعیت نمایش دکمه کاربر:",
+    availability.visible ? "نمایش داده می‌شود ✅" : "مخفی است ❌",
+  ];
+  if (!availability.visible && availability.reason !== "AVAILABLE") {
+    lines.push("", "علت مخفی بودن دکمه:", TRIAL_HIDDEN_REASON_TEXT[availability.reason]);
+  }
+  return lines.join("\n");
+}
+
+/** The diagnostics page keyboard (pure). */
+export function trialSettingsPageKeyboard(
+  availability: FreeTrialMenuAvailability,
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  if (availability.globallyEnabled) {
+    kb.text("غیرفعال کردن تست رایگان", TRIAL_SETTINGS_CB.disable).row();
+  } else {
+    kb.text("فعال کردن تست رایگان", TRIAL_SETTINGS_CB.enable).row();
+  }
+  return kb
+    .text("مشاهده پنل‌های آماده", TRIAL_SETTINGS_CB.ready)
+    .row()
+    .text("مشاهده پنل‌های ناقص", TRIAL_SETTINGS_CB.incomplete)
+    .row()
+    .text("بروزرسانی وضعیت ♻️", TRIAL_SETTINGS_CB.root)
+    .row()
+    .text("بازگشت به تنظیمات عمومی", TX_CB.settings);
+}
+
+/** Safe panel-type label - never the base URL or credentials. */
+function trialPanelTypeLabel(panel: Panel): string {
+  return panel.type === "MARZBAN" ? "Marzban" : "XUI";
+}
+
+/** «مشاهده پنل‌های آماده» page (pure): name/type/quota only + panel links. */
+export function trialReadyListView(panels: Panel[]): {
+  text: string;
+  keyboard: InlineKeyboard;
+} {
+  const blocks = ["پنل‌های آماده تست ✅"];
+  const kb = new InlineKeyboard();
+  if (panels.length === 0) {
+    blocks.push("", TRIAL_READY_EMPTY_TEXT);
+  }
+  for (const panel of panels) {
+    blocks.push(
+      "",
+      [
+        `✅ ${panel.name}`,
+        `نوع: ${trialPanelTypeLabel(panel)}`,
+        `مدت تست: ${formatTrialDuration(panel.testDurationMinutes ?? 0)}`,
+        `حجم تست: ${formatTrialTraffic(panel.testVolumeMb ?? 0)}`,
+      ].join("\n"),
+    );
+    kb.text("تنظیمات پنل 🎁", panelCb.trial(panel.id.slice(0, 8))).row();
+  }
+  kb.text("بازگشت", TRIAL_SETTINGS_CB.root);
+  return { text: blocks.join("\n"), keyboard: kb };
+}
+
+/** «مشاهده پنل‌های ناقص» page (pure): name + safe problem label only. */
+export function trialIncompleteListView(entries: TrialPanelDiagnostic[]): {
+  text: string;
+  keyboard: InlineKeyboard;
+} {
+  const blocks = ["پنل‌های فعال ولی ناقص ❌"];
+  const kb = new InlineKeyboard();
+  if (entries.length === 0) {
+    blocks.push("", TRIAL_INCOMPLETE_EMPTY_TEXT);
+  }
+  for (const { panel, reasons } of entries) {
+    blocks.push(
+      "",
+      [
+        `❌ ${panel.name}`,
+        `مشکل: ${trialPanelProblemLabel(reasons[0] ?? "panel-config-incomplete")}`,
+      ].join("\n"),
+    );
+    kb.text("تنظیمات پنل 🎁", panelCb.trial(panel.id.slice(0, 8))).row();
+  }
+  kb.text("بازگشت", TRIAL_SETTINGS_CB.root);
+  return { text: blocks.join("\n"), keyboard: kb };
+}
+
+/**
+ * OWNER gate (local copy of the financial-reconciliation gate - centralized
+ * RBAC is a documented separate task). Any active non-OWNER admin gets only
+ * the safe toast and never any trial data.
+ */
+async function requireOwner(ctx: BotContext): Promise<boolean> {
+  if (ctx.admin === null) {
+    return false;
+  }
+  if (ctx.admin.role === "OWNER") {
+    return true;
+  }
+  await safeAnswerCallback(ctx, TRIAL_SETTINGS_OWNER_ONLY_TOAST);
+  return false;
+}
+
+async function renderTrialSettingsPage(ctx: BotContext, toast?: string): Promise<void> {
+  const availability = await getFreeTrialMenuAvailability();
+  await safeAnswerCallback(ctx, toast);
+  await safeEditOrReply(
+    ctx,
+    trialSettingsPageText(availability),
+    trialSettingsPageKeyboard(availability),
+  );
+}
+
+adminTextSettingsHandler.callbackQuery(TRIAL_SETTINGS_CB.root, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null || !(await requireOwner(ctx))) {
+    return;
+  }
+  const availability = await getFreeTrialMenuAvailability();
+  logger.info("trial diagnostics viewed", {
+    adminId: admin.id,
+    action: "free-trial-diagnostics-view",
+    readyPanelCount: availability.readyPanelCount,
+    result: availability.reason,
+  });
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    trialSettingsPageText(availability),
+    trialSettingsPageKeyboard(availability),
+  );
+});
+
+adminTextSettingsHandler.callbackQuery(TRIAL_SETTINGS_CB.enable, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null || !(await requireOwner(ctx))) {
+    return;
+  }
+  if (await isFreeTrialEnabled()) {
+    await renderTrialSettingsPage(ctx, TRIAL_SETTINGS_ALREADY_ENABLED_TEXT);
+    return;
+  }
+  const availability = await getFreeTrialMenuAvailability();
+  if (availability.readyPanelCount === 0) {
+    await safeAnswerCallback(ctx, TRIAL_SETTINGS_NO_READY_PANEL_TEXT);
+    await safeEditOrReply(
+      ctx,
+      `${trialSettingsPageText(availability)}\n\n${TRIAL_SETTINGS_NO_READY_PANEL_TEXT}`,
+      trialSettingsPageKeyboard(availability),
+    );
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    TRIAL_SETTINGS_ENABLE_ASK_TEXT,
+    new InlineKeyboard()
+      .text("تایید ✅", TRIAL_SETTINGS_CB.enableYes)
+      .row()
+      .text("انصراف", TRIAL_SETTINGS_CB.root),
+  );
+});
+
+adminTextSettingsHandler.callbackQuery(TRIAL_SETTINGS_CB.enableYes, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null || !(await requireOwner(ctx))) {
+    return;
+  }
+  // The confirmation may be stale - re-check EVERYTHING before flipping.
+  if (await isFreeTrialEnabled()) {
+    await renderTrialSettingsPage(ctx, TRIAL_SETTINGS_ALREADY_ENABLED_TEXT);
+    return;
+  }
+  const availability = await getFreeTrialMenuAvailability();
+  if (availability.readyPanelCount === 0) {
+    await safeAnswerCallback(ctx, TRIAL_SETTINGS_NO_READY_PANEL_TEXT);
+    await safeEditOrReply(
+      ctx,
+      `${trialSettingsPageText(availability)}\n\n${TRIAL_SETTINGS_NO_READY_PANEL_TEXT}`,
+      trialSettingsPageKeyboard(availability),
+    );
+    return;
+  }
+  // Compare-and-set: a stale confirmation (or a racing admin) loses the
+  // transition and gets the idempotent "already enabled" answer instead.
+  if (!(await compareAndSetFreeTrialEnabled(false, true))) {
+    logger.info("free trial global enable lost the race", {
+      adminId: admin.id,
+      action: "free-trial-global-enable",
+      result: "already-enabled",
+    });
+    await renderTrialSettingsPage(ctx, TRIAL_SETTINGS_ALREADY_ENABLED_TEXT);
+    return;
+  }
+  clearSettingsCache();
+  logger.info("free trial globally enabled", {
+    adminId: admin.id,
+    action: "free-trial-global-enable",
+    readyPanelCount: availability.readyPanelCount,
+    result: "enabled",
+  });
+  await renderTrialSettingsPage(ctx, TRIAL_SETTINGS_ENABLED_TOAST);
+});
+
+adminTextSettingsHandler.callbackQuery(TRIAL_SETTINGS_CB.disable, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null || !(await requireOwner(ctx))) {
+    return;
+  }
+  if (!(await isFreeTrialEnabled())) {
+    await renderTrialSettingsPage(ctx, TRIAL_SETTINGS_ALREADY_DISABLED_TEXT);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    TRIAL_SETTINGS_DISABLE_ASK_TEXT,
+    new InlineKeyboard()
+      .text("تایید ✅", TRIAL_SETTINGS_CB.disableYes)
+      .row()
+      .text("انصراف", TRIAL_SETTINGS_CB.root),
+  );
+});
+
+adminTextSettingsHandler.callbackQuery(TRIAL_SETTINGS_CB.disableYes, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null || !(await requireOwner(ctx))) {
+    return;
+  }
+  if (!(await isFreeTrialEnabled())) {
+    await renderTrialSettingsPage(ctx, TRIAL_SETTINGS_ALREADY_DISABLED_TEXT);
+    return;
+  }
+  // The Setting flip ONLY (compare-and-set): panels, claims and provisioned
+  // accounts stay untouched - disabling stops NEW claims; expiry stays with
+  // the sweep.
+  if (!(await compareAndSetFreeTrialEnabled(true, false))) {
+    logger.info("free trial global disable lost the race", {
+      adminId: admin.id,
+      action: "free-trial-global-disable",
+      result: "already-disabled",
+    });
+    await renderTrialSettingsPage(ctx, TRIAL_SETTINGS_ALREADY_DISABLED_TEXT);
+    return;
+  }
+  clearSettingsCache();
+  logger.info("free trial globally disabled", {
+    adminId: admin.id,
+    action: "free-trial-global-disable",
+    result: "disabled",
+  });
+  await renderTrialSettingsPage(ctx, TRIAL_SETTINGS_DISABLED_TOAST);
+});
+
+adminTextSettingsHandler.callbackQuery(TRIAL_SETTINGS_CB.ready, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null || !(await requireOwner(ctx))) {
+    return;
+  }
+  const view = trialReadyListView(await listTrialReadyPanels());
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(ctx, view.text, view.keyboard);
+});
+
+adminTextSettingsHandler.callbackQuery(TRIAL_SETTINGS_CB.incomplete, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null || !(await requireOwner(ctx))) {
+    return;
+  }
+  const view = trialIncompleteListView(await listTrialIncompletePanels());
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(ctx, view.text, view.keyboard);
 });

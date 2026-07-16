@@ -268,7 +268,14 @@ claim one real trial account per the operator's policy — an atomic,
 DB-guarded `FreeTrialClaim` entitlement that provisions a real panel
 account and a real local Service with **zero payment-system writes**
 (no orders, payments, wallet or referral effects). Admins configure and
-monitor trials per panel (OWNER-only page). Design in
+monitor trials per panel (OWNER-only page) and flip the global switch
+from «تنظیمات عمومی ⚙️ → تنظیمات اکانت تست 🎁», which also shows exactly
+why the user button is hidden (ready/incomplete panel diagnostics). The
+user main-menu button «اکانت تست رایگان 🎁» renders — in both keyboard
+modes — only while the feature is globally enabled AND at least one
+trial-ready panel (config complete, free capacity, valid XUI trial
+inbounds) exists; it never appears as a dead placeholder, and stale
+callbacks are re-checked server-side. Design in
 `docs/free-trial-architecture.md`, operator guide in
 `docs/free-trial-admin-management.md`, threat model in
 `docs/free-trial-security.md`.

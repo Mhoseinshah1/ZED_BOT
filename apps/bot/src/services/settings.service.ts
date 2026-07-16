@@ -1,4 +1,4 @@
-import { prisma, type SettingType } from "@zedbot/database";
+import { Prisma, prisma, type SettingType } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
@@ -32,6 +32,9 @@ export async function getSetting(key: string, fallback = ""): Promise<string> {
   }
 }
 
+/** The exact truthy set getBooleanSetting accepts (case-insensitive). */
+const TRUTHY_SETTING_VALUES = ["true", "1", "yes"];
+
 /** Boolean settings: "true" / "1" / "yes" are truthy (case-insensitive). */
 export async function getBooleanSetting(key: string, fallback: boolean): Promise<boolean> {
   const raw = (await getSetting(key, "")).toLowerCase();
@@ -52,6 +55,51 @@ export async function setSetting(key: string, value: string, type: SettingType):
     create: { key, value, type },
   });
   cache.set(key, { value, at: Date.now() });
+}
+
+/**
+ * Atomic compare-and-set for a boolean Setting: flips the row to `next`
+ * ONLY while its current boolean interpretation (absent row = false, same
+ * truthy set as getBooleanSetting) still equals `expected`. Every branch is
+ * a single conditional statement - there is no read-check-write window, so
+ * two racing admins can never both "win" the same transition. Returns false
+ * when the stored state moved on (stale confirmation).
+ */
+export async function compareAndSetBooleanSetting(
+  key: string,
+  expected: boolean,
+  next: boolean,
+): Promise<boolean> {
+  const value = next ? "true" : "false";
+  const truthy = { in: TRUTHY_SETTING_VALUES, mode: Prisma.QueryMode.insensitive };
+  if (expected) {
+    const updated = await prisma.setting.updateMany({
+      where: { key, value: truthy },
+      data: { value, type: "BOOLEAN" },
+    });
+    if (updated.count === 0) {
+      return false; // absent or already falsy - not the expected "enabled"
+    }
+  } else {
+    const updated = await prisma.setting.updateMany({
+      where: { key, NOT: { value: truthy } },
+      data: { value, type: "BOOLEAN" },
+    });
+    if (updated.count === 0) {
+      // No falsy row: the key is absent (create claims the transition) or a
+      // concurrent writer already enabled it (unique violation = CAS lost).
+      try {
+        await prisma.setting.create({ data: { key, value, type: "BOOLEAN" } });
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          return false;
+        }
+        throw err;
+      }
+    }
+  }
+  cache.set(key, { value, at: Date.now() });
+  return true;
 }
 
 /**

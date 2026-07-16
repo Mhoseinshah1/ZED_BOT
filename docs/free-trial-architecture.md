@@ -269,10 +269,41 @@ user's entitlement.
 
 The main-menu button «اکانت تست رایگان 🎁» (`ButtonText` key `free_test`,
 callback `user:free_test`) renders **only** when
-`isFreeTrialVisible()` — the global switch is on AND at least one
-trial-ready panel exists (`listTrialReadyPanels`: `ACTIVE` +
-`testEnabled` + `assessTrialPanelConfig` passes). A fully operational
-section or no button at all — never a visible placeholder.
+`isFreeTrialVisible()`. Since the shared availability policy landed,
+that is a thin view over **`getFreeTrialMenuAvailability()`** — the ONE
+classifier consumed by the user menu (both the inline keyboard and the
+reply-keyboard mode render from the same `user-menu-definition.ts`
+rows), the user panel list and the OWNER admin diagnostics page
+(«تنظیمات اکانت تست 🎁» under «تنظیمات عمومی ⚙️»). It returns a
+structured result:
+
+```ts
+interface FreeTrialMenuAvailability {
+  visible: boolean;          // globallyEnabled && readyPanelCount > 0
+  globallyEnabled: boolean;  // Setting free_trial_enabled (default false)
+  readyPanelCount: number;   // claimable RIGHT NOW
+  incompletePanelCount: number;
+  reason:
+    | "AVAILABLE"
+    | "GLOBAL_DISABLED"
+    | "NO_READY_PANEL"          // no ACTIVE + testEnabled candidates at all
+    | "NO_VALID_XUI_INBOUND"    // every incomplete candidate blocks on XUI inbounds
+    | "PANEL_CONFIG_INCOMPLETE";
+}
+```
+
+"Ready" means `ACTIVE` + `testEnabled` + `assessTrialPanelConfig` passes
+**and free capacity remains** (`testMaxConcurrentAccounts` exhaustion is
+the `capacity-full` reason code): a full panel drops out of the count,
+so the button can never open onto an immediately-denied flow. There is
+deliberately no readiness cache — the classifier reads the database per
+render, so per-panel trial edits, readiness-test results and
+active/inactive flips apply to the very next menu render without a bot
+restart; the global switch sits in the 30s settings cache, which the
+admin enable/disable flow clears on every flip. A fully operational
+section or no button at all — never a visible placeholder. The button's
+visibility check is global-only by design (the approved UX): per-user
+eligibility runs when the button is pressed, not when it is rendered.
 
 Flow: button → eligibility check → panel/location list
 (`user:ft:p:<sid>`, label = `testLocation ?? name` + duration/traffic) →
@@ -293,6 +324,16 @@ Denial texts (verbatim service constants): «شما قبلاً از اکانت �
 شوید.» · «ظرفیت اکانت تست این لوکیشن تکمیل شده است. لطفاً بعداً تلاش
 کنید.»
 
+**Forged/stale callbacks are harmless by construction.** Button
+visibility is presentation only: a user replaying an old `user:free_test`
+callback (or an old reply-keyboard label) hits the same entry, which
+re-checks the global switch first — a globally disabled feature answers
+the dedicated «اکانت تست رایگان در حال حاضر غیرفعال است.» (never the
+misleading no-panel text) — then re-checks eligibility, panel readiness
+(«در حال حاضر پنل فعالی برای ارائه اکانت تست وجود ندارد.» when nothing is
+ready), and finally capacity + claim uniqueness inside the atomic
+`claimFreeTrial` transaction.
+
 ## Remaining limitations
 
 - **Channel-membership check inherits the force-join placeholder**: with
@@ -310,6 +351,9 @@ Denial texts (verbatim service constants): «شما قبلاً از اکانت �
   when the panel opts into `testAutoDisableAfterExpiry` (and never
   deleted — `deleteService` is not a supported service operation for
   either panel family).
-- Global trial settings are `Setting` rows with code-level fallbacks;
-  they are not seeded and have no dedicated Telegram settings page yet
-  (the per-panel page is the admin surface).
+- Global trial settings are `Setting` rows with code-level fallbacks and
+  are not seeded — `free_trial_enabled` stays `false` on fresh AND
+  existing installations until an OWNER explicitly enables it from
+  «تنظیمات عمومی ⚙️ → تنظیمات اکانت تست 🎁» (see
+  `docs/free-trial-admin-management.md`); the other global keys have no
+  Telegram page yet.

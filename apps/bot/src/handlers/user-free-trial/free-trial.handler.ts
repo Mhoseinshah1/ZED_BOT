@@ -16,6 +16,7 @@ import {
   formatTrialDuration,
   formatTrialTraffic,
   listTrialReadyPanels,
+  TRIAL_GLOBALLY_DISABLED_TEXT,
   TRIAL_NO_PANEL_TEXT,
   TRIAL_TEMP_UNAVAILABLE_TEXT,
   TRIAL_UNCERTAIN_TEXT,
@@ -65,6 +66,12 @@ export const freeTrialHandler = new Composer<BotContext>();
 
 // --- entry: availability + eligibility + panel list ------------------------------------------
 
+/**
+ * The «اکانت تست رایگان 🎁» section entry - the inline callback route AND
+ * the reply-keyboard FREE_TRIAL action both land here. Also driven directly
+ * by tests with a forged/stale callback: a globally disabled feature answers
+ * the dedicated disabled text - never the misleading "no active panel" text.
+ */
 export async function openFreeTrialSection(ctx: BotContext): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
@@ -74,7 +81,7 @@ export async function openFreeTrialSection(ctx: BotContext): Promise<void> {
   try {
     if (!(await isFreeTrialEnabled())) {
       await safeAnswerCallback(ctx);
-      await safeEditOrReply(ctx, TRIAL_NO_PANEL_TEXT, backToMenuKeyboard());
+      await safeEditOrReply(ctx, TRIAL_GLOBALLY_DISABLED_TEXT, backToMenuKeyboard());
       return;
     }
     const eligibility = await checkTrialEligibility(user);
