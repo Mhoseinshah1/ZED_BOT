@@ -91,6 +91,12 @@ even when entered from a service detail (kept deliberately — documented in
 | detail (`user:svc:view:<sid>`) | بروزرسانی اطلاعات ♻️ · لینک اشتراک 🔗 · کانفیگ‌ها 📄 · تغییر لینک اشتراک 🔄 (»confirm) · **تمدید سرویس ♻️ » `user:renew:svc:<sid>` (Fix A, when renewable)** · خرید حجم اضافه ➕ » `user:ev:svc:<sid>` · خرید زمان اضافه ⏳ » `user:et:svc:<sid>` · خاموش/روشن کردن سرویس (»confirm) · بازگشت به لیست · بازگشت به منوی اصلی |
 | toggle / regen confirms | تایید ✅ · انصراف » detail |
 
+Trial-lifecycle phase: `FREE_TRIAL` services render the SAME per-action
+buttons as paid ones — each is decided by panel capability/state, remote
+model, status and quota (`resolveServiceDetailActions`), never by
+`source`; the detail text carries «نوع سرویس: اکانت تست رایگان» /
+«شروع‌شده با اکانت تست». See `docs/free-trial-lifecycle.md`.
+
 ### کیف پول + شارژ (Fix A layout)
 
 | page | buttons |
@@ -198,10 +204,20 @@ on the users landing / admin menu).
 | --- | --- |
 | landing (`admin:users`) | جستجوی کاربر 🔎 *(flow)* / کاربران اخیر 🕘 · مسدود 🚫 / فعال ✅ · غیرفعال ⏸ (`admin:users:ls:<r|b|a|d>:<page>`) / بازگشت به پنل ادمین |
 | filtered lists (paged) | rows » `admin:users:view:<sid>` · pagination · بازگشت |
-| user detail | کیف پول 💰 · سرویس‌ها 🛍 / سفارش‌ها 🧾 · پرداخت‌ها 💳 / مسدود 🚫 یا رفع مسدودی ✅ (»confirm) / بازگشت به رسید 🧾 (Fix B context) / بازگشت به نتایج یا لیست (same filter/page) / بازگشت به مدیریت کاربران / منوی ادمین |
+| user detail | کیف پول 💰 · سرویس‌ها 🛍 / سفارش‌ها 🧾 · پرداخت‌ها 💳 / **مدیریت اکانت تست 🎁 » `admin:users:trial:<sid>` (trial-entitlement phase, table below)** / مسدود 🚫 یا رفع مسدودی ✅ (»confirm) / بازگشت به رسید 🧾 (Fix B context) / بازگشت به نتایج یا لیست (same filter/page) / بازگشت به مدیریت کاربران / منوی ادمین |
 | wallet page | افزایش ➕ · کاهش ➖ *(Phase 20 confirmed flow)* / تاریخچه تراکنش‌ها 📋 (paged) / backs |
 | services/orders sub-pages (paged, read-only) | text rows · pagination · بازگشت به کاربر |
 | payments sub-page (paged) | rows » `admin:rec:view:<sid>` (Fix B detail) · بازگشت به کاربر |
+
+#### مدیریت اکانت تست 🎁 (`admin:users:trial:<sid>`, trial-entitlement phase; any admin, OWNER-only where marked)
+
+| page | buttons |
+| --- | --- |
+| «🎁 مدیریت اکانت تست کاربر» (summary: used/remaining, active trial, provisioning, last trial, cooldown end, access state, claim/grant counters, converted count — no secrets) | افزودن سهمیه تست » `admin:users:trial:g:<sid>` *(scope » count » expiry » reason flows, confirm » `…:gok`)* · تنظیم تعداد تست باقی‌مانده » `…:sr:<sid>` (**OWNER**, *(count » reason flows, confirm » `…:srok`)*) / ریست دسترسی تست » `…:rs:<sid>` *(reason flow, confirm » `…:rsok`)* · لغو دسترسی تست » `…:rv:<sid>` *(reason flow, confirm » `…:rvok`)* / رفع محدودیت زمانی » `…:cc:<sid>` (»confirm `…:ccok:<sid>`) · تنظیم محدودیت زمانی » `…:sc:<sid>` *(days » reason flows, confirm » `…:scok`)* / مسدودسازی موقت تست » `…:dn:<sid>` *(days » reason flows, confirm » `…:dnok`)* / مشاهده تاریخچه تست‌ها » `…:hist:<sid>:1` · مشاهده سرویس‌های تست » `…:svc:<sid>:1` / بازگشت به جزئیات کاربر » `admin:users:view:<sid>` |
+| grant scope/panel picker | همه پنل‌ها » `…:gall` · پنل مشخص » `…:gp:<sid>:1` (paged ACTIVE panels » `…:gpanel:<psid>`) · انصراف » `…:cxl:<sid>` |
+| grant expiry choice | بدون تاریخ انقضا » `…:gexp:none` · اعتبار برای چند روز » `…:gexp:days` *(days flow)* · انصراف |
+| تاریخچه تست‌ها (`…:hist:<sid>:<page>`, 5/page: id, panel, status, frozen username, dates, «منبع سهمیه») | per undecided claim (**OWNER only**, PROVISIONING/MANUAL_REVIEW): تطبیق مجدد با پنل » `…:rec:<sid>:<cid>` · تایید ساخته‌شدن تست » `…:fc:<sid>:<cid>` · تایید ساخته‌نشدن تست / لغو و آزادسازی سهمیه » `…:fn:<sid>:<cid>` *(force warning + reason flow, confirm » `…:fok`)* / pagination / بازگشت » `admin:users:trial:<sid>` |
+| سرویس‌های تست (`…:svc:<sid>:<page>`, read-only: username, status, expiry, «تبدیل‌شده به سرویس فعال» marker) | pagination / بازگشت » `admin:users:trial:<sid>` |
 
 ### مدیریت محصولات و پلن‌ها 🛍 (Fix C)
 
@@ -260,7 +276,18 @@ button's visibility (one shared policy with the user menu — see
 
 | page | buttons |
 | --- | --- |
-| «🎁 تنظیمات اکانت تست رایگان» (`admin:trial_settings`; global status, ready/incomplete panel counts, user-button visibility + exact hidden reason) | فعال کردن تست رایگان » `admin:trial_settings:en` *(while disabled; refuses with zero ready panels)* **or** غیرفعال کردن تست رایگان » `admin:trial_settings:dis` *(while enabled)* / مشاهده پنل‌های آماده » `admin:trial_settings:ready` / مشاهده پنل‌های ناقص » `admin:trial_settings:inc` / بروزرسانی وضعیت ♻️ » `admin:trial_settings` / بازگشت به تنظیمات عمومی » `admin:general_settings` |
+| «🎁 تنظیمات اکانت تست رایگان» (`admin:trial_settings`; global status, ready/incomplete panel counts, user-button visibility + exact hidden reason) | فعال کردن تست رایگان » `admin:trial_settings:en` *(while disabled; refuses with zero ready panels)* **or** غیرفعال کردن تست رایگان » `admin:trial_settings:dis` *(while enabled)* / مشاهده پنل‌های آماده » `admin:trial_settings:ready` / مشاهده پنل‌های ناقص » `admin:trial_settings:inc` / کمپین ریست اکانت تست » `admin:trialent:camp:new` / مدیریت سهمیه‌ها و ریست‌ها » `admin:trialent:dash` / بروزرسانی وضعیت ♻️ » `admin:trial_settings` / بازگشت به تنظیمات عمومی » `admin:general_settings` |
 | enable/disable confirm (`admin:trial_settings:en` / `…:dis`) | تایید ✅ » `admin:trial_settings:en:yes` / `…:dis:yes` *(re-checks state + readiness, compare-and-set flip)* / انصراف » `admin:trial_settings` |
 | «پنل‌های آماده تست ✅» (`admin:trial_settings:ready`; name/type/«مدت تست»/«حجم تست» only) | تنظیمات پنل 🎁 » `admin:panel:trial:<sid>` per panel / بازگشت » `admin:trial_settings` |
 | «پنل‌های فعال ولی ناقص ❌» (`admin:trial_settings:inc`; safe «مشکل: …» sentence per panel, no secrets/raw errors) | تنظیمات پنل 🎁 » `admin:panel:trial:<sid>` per panel / بازگشت » `admin:trial_settings` |
+
+### تنظیمات اکانت تست 🎁 → مدیریت سهمیه‌ها و ریست‌ها + کمپین‌ها (**OWNER-only**, trial-entitlement phase; namespace `admin:trialent:`)
+
+| page | buttons |
+| --- | --- |
+| «مدیریت سهمیه‌ها و ریست‌ها 🎁» (`admin:trialent:dash`; indexed metrics: active grants/users, expiring 7-day window, claims by status, converted services, campaign counts, failed recipients) | جستجوی کاربر » `admin:trialent:search` *(reuses the `admin_users:search` flow)* / کمپین ریست تست » `admin:trialent:camp:new` / کمپین‌ها » `admin:trialent:camps:1` / سهمیه‌های در حال انقضا » `admin:trialent:exp:1` / موارد نیازمند بررسی » `admin:trialent:rev:1` / بروزرسانی ♻️ » `admin:trialent:dash` / بازگشت » `admin:trial_settings` |
+| سهمیه‌های در حال انقضا (`admin:trialent:exp:<page>`, ACTIVE grants expiring inside 7 days) · موارد نیازمند بررسی (`admin:trialent:rev:<page>`, MANUAL_REVIEW + PROVISIONING claims older than 15 min) | pagination / بازگشت » `admin:trialent:dash` |
+| کمپین‌ها 🎁 (`admin:trialent:camps:<page>`) | one row per campaign (short id · status · date) » `admin:trialent:camp:v:<sid>` · pagination · بازگشت » `admin:trialent:dash` |
+| campaign detail (`admin:trialent:camp:v:<sid>`; status + total/granted/skipped/failed/processed counters) | بروزرسانی ♻️ » same / مشاهده موارد ردشده » `admin:trialent:camp:sk:<sid>:1` / مشاهده خطاها » `admin:trialent:camp:fl:<sid>:1` / لغو کمپین » `admin:trialent:camp:cx:<sid>` (»confirm «بله، لغو کمپین» » `…:cx:<sid>:yes`; only DRAFT/PREVIEWED/QUEUED/RUNNING) / کمپین‌ها » `admin:trialent:camps:1` / بازگشت » `admin:trialent:dash` |
+| campaign builder («کمپین ریست اکانت تست 🎁», `admin:trialent:camp:new`) | 8 audience buttons » `admin:trialent:camp:aud:<KIND>` *(date flow for REGISTERED_BEFORE/AFTER, telegram-id-list flow for SELECTED_USERS — max 500 lines)* » allowance *(flow)* » expiry: بدون تاریخ انقضا » `admin:trialent:camp:exp:none` · اعتبار برای چند روز » `…:exp:days` *(flow)* » notify: بدون ارسال پیام / ارسال پیام به کاربر » `admin:trialent:camp:notify:no\|yes` » include: رد شدن / شامل شدن کاربران دارای سهمیه » `admin:trialent:camp:inc:no\|yes` » reason *(flow)* » preview |
+| campaign preview («🎁 پیش‌نمایش کمپین ریست تست», estimated audience + rules + reason) | شروع کمپین ✅ » `admin:trialent:camp:startask` (final warning » ادامه ✅ » `admin:trialent:camp:typed` » typed-confirmation *(flow: exact `RESET TRIAL`)*) / ویرایش تنظیمات » `admin:trialent:camp:edit` *(cancels the persisted draft, restarts)* / لغو » `admin:trialent:camp:abort` / بازگشت » `admin:trial_settings` |

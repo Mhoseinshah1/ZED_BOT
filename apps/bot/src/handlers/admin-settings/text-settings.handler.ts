@@ -44,6 +44,12 @@ import { clearSettingsCache } from "../../services/settings.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { cb as panelCb } from "../panels/panel-cb.js";
+import {
+  TRIAL_ENT_CAMPAIGN_START_CB,
+  TRIAL_ENT_DASHBOARD_CB,
+  trialEntitlementsHandler,
+  trialEntitlementsTextHandler,
+} from "./trial-entitlements.handler.js";
 
 // =============================================================================
 // «تنظیمات عمومی ⚙️» -> «مدیریت متن‌ها ✍️» (Phase 34) - the real general-
@@ -717,6 +723,10 @@ export function trialSettingsPageKeyboard(
     .row()
     .text("مشاهده پنل‌های ناقص", TRIAL_SETTINGS_CB.incomplete)
     .row()
+    .text("کمپین ریست اکانت تست", TRIAL_ENT_CAMPAIGN_START_CB)
+    .row()
+    .text("مدیریت سهمیه‌ها و ریست‌ها", TRIAL_ENT_DASHBOARD_CB)
+    .row()
     .text("بروزرسانی وضعیت ♻️", TRIAL_SETTINGS_CB.root)
     .row()
     .text("بازگشت به تنظیمات عمومی", TX_CB.settings);
@@ -963,3 +973,10 @@ adminTextSettingsHandler.callbackQuery(TRIAL_SETTINGS_CB.incomplete, async (ctx)
   await safeAnswerCallback(ctx);
   await safeEditOrReply(ctx, view.text, view.keyboard);
 });
+
+// Trial-entitlement phase: OWNER-only campaign builder («کمپین ریست اکانت
+// تست») and quota/reset dashboard («مدیریت سهمیه‌ها و ریست‌ها») live behind
+// this trial-settings page; their composers mount here so the admin area
+// picks them up without app.ts changes.
+adminTextSettingsHandler.use(trialEntitlementsHandler);
+adminTextSettingsTextHandler.use(trialEntitlementsTextHandler);

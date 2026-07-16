@@ -2,6 +2,7 @@ import { OrderType, prisma, type Order, type User } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
+import { TRIAL_CONVERTED_USER_TEXT } from "./trial-conversion.service.js";
 import {
   buildExtraTimeSuccessMessage,
   executeExtraTimeOrder,
@@ -240,6 +241,12 @@ export async function dispatchPaidOrderFulfillment(
         await sendSafe(api, chatId, buildRenewalSuccessMessage(result.service), {
           parse_mode: "HTML",
         });
+        if (result.trialConverted === true) {
+          // Trial-lifecycle phase: the ONE operation that converted the
+          // trial sends the one-time notice (idempotent replays return
+          // alreadyApplied and never re-enter this branch).
+          await sendSafe(api, chatId, TRIAL_CONVERTED_USER_TEXT);
+        }
         return { kind: "SERVICE", op: "renew", ok: true, refunded: false, error: null };
       }
       await sendSafe(
@@ -265,6 +272,9 @@ export async function dispatchPaidOrderFulfillment(
           buildExtraVolumeSuccessMessage(result.service, result.addedVolumeGb),
           { parse_mode: "HTML" },
         );
+        if (result.trialConverted === true) {
+          await sendSafe(api, chatId, TRIAL_CONVERTED_USER_TEXT);
+        }
         return { kind: "SERVICE", op: "extra_volume", ok: true, refunded: false, error: null };
       }
       await sendSafe(
@@ -287,6 +297,9 @@ export async function dispatchPaidOrderFulfillment(
         await sendSafe(api, chatId, buildExtraTimeSuccessMessage(result.service, result.addedDays), {
           parse_mode: "HTML",
         });
+        if (result.trialConverted === true) {
+          await sendSafe(api, chatId, TRIAL_CONVERTED_USER_TEXT);
+        }
         return { kind: "SERVICE", op: "extra_time", ok: true, refunded: false, error: null };
       }
       await sendSafe(

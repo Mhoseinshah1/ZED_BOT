@@ -109,6 +109,16 @@ provisioning-relevant panel field resets the persisted readiness result,
 and an explicitly failed «تست اتصال» blocks trials exactly as it blocks
 sales. See `docs/free-trial-architecture.md`.
 
+**Origin never gates capability** (trial-lifecycle phase):
+`Service.source` (`PAID` / `FREE_TRIAL` / `ADMIN_CREATED`) records how a
+service was created and is deliberately absent from every capability
+decision. A `FREE_TRIAL` service passes through exactly the same
+per-action gates as a paid one — adapter capability, panel state, the
+XUI remote-model gate, service status and quota shape
+(`resolveServiceDetailActions`); business policy lives in the per-action
+eligibility checks, never in a source check. See
+`docs/free-trial-lifecycle.md`.
+
 ## Outcome model (provisioning flow safety)
 
 `createServiceAccount` results distinguish four outcomes:

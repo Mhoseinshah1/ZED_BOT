@@ -12,7 +12,15 @@ Source of truth:
 `panel-views.ts` / `panel-fields.ts` / `panel-cb.ts` (the per-panel page),
 `apps/bot/src/services/free-trial.service.ts`
 (`getFreeTrialMenuAvailability`, `assessTrialPanelConfig`,
-`trialStatsForPanel`).
+`trialStatsForPanel`),
+`apps/bot/src/services/free-trial-admin.service.ts` (per-user admin
+mutations + audit),
+`apps/bot/src/handlers/admin-users/trial-management.handler.ts` (the
+per-user «مدیریت اکانت تست 🎁» page) and
+`apps/bot/src/handlers/admin-settings/trial-entitlements.handler.ts`
+(quota dashboard + campaign builder). Companions:
+`docs/free-trial-entitlements.md` (allowance model),
+`docs/free-trial-campaigns.md` (bulk campaigns).
 
 ## Global settings (Setting registry)
 
@@ -32,6 +40,7 @@ page yet.
 | `free_trial_require_no_previous_purchase` | BOOLEAN | `false` | When on, users with any successful paid order (`paidOrdersCount > 0`) are denied. |
 | `free_trial_require_channel_membership` | BOOLEAN | `false` | When on, trial claims additionally require the forced-join membership gate. Inherits the current force-join placeholder behavior (no real `getChatMember` yet — see limitations). |
 | `free_trial_notice_text` | STRING | `""` | Optional operator notice appended to the user's trial confirmation page. |
+| `free_trial_default_allowance` | NUMBER | unset (`""`) | Trial-entitlement phase: explicit DEFAULT allowance per user. Unset preserves the legacy semantics exactly (once-per-user on → 1, off → unlimited); a per-user override wins over it. See `docs/free-trial-entitlements.md`. |
 
 Per-panel readiness gates on top of these — the global switch alone never
 makes a trial available.
@@ -68,6 +77,8 @@ Keyboard (stable callbacks, never derived from the Persian labels):
 | غیرفعال کردن تست رایگان (only while enabled) | `admin:trial_settings:dis` | two-step confirm («آیا از غیرفعال کردن اکانت تست رایگان برای کاربران مطمئن هستید؟» » `…:dis:yes`) |
 | مشاهده پنل‌های آماده | `admin:trial_settings:ready` | safe ready-panel list (name, type, «مدت تست», «حجم تست») + a «تنظیمات پنل 🎁» link per panel to its existing trial page |
 | مشاهده پنل‌های ناقص | `admin:trial_settings:inc` | per-panel safe problem sentence (`trialPanelProblemLabel`) + the same per-panel link |
+| کمپین ریست اکانت تست | `admin:trialent:camp:new` | the OWNER-only campaign builder (see `docs/free-trial-campaigns.md`) |
+| مدیریت سهمیه‌ها و ریست‌ها | `admin:trialent:dash` | the OWNER-only quota/reset dashboard (below) |
 | بروزرسانی وضعیت ♻️ | `admin:trial_settings` | recompute + re-render |
 | بازگشت به تنظیمات عمومی | `admin:general_settings` | back |
 
@@ -181,10 +192,95 @@ only: total claims, `ACTIVE`, in-flight (`CLAIMED` + `PROVISIONING`),
 capacity used vs. cap («بدون سقف» when uncapped). No URLs, no
 credentials, no per-user listings.
 
+## Per-user page — «مدیریت اکانت تست 🎁» (trial-entitlement phase)
+
+Path: **پنل ادمین → مدیریت کاربران 👤 → جزئیات کاربر →
+«مدیریت اکانت تست 🎁»** (`admin:users:trial:<sid>`). Any active admin may
+open it; two operations inside are OWNER-only (marked below). The page
+(«🎁 مدیریت اکانت تست کاربر») renders `trialManagementSummary`: used
+count, remaining («نامحدود» for the unlimited legacy default), active
+trial / provisioning flags, last trial date, cooldown end, access state
+(«مجاز»/«غیرمجاز»), claim counters by status, converted-service count
+and grant counters (فعال/منقضی/لغوشده) — **no subscription URLs, tokens
+or remote client ids are ever rendered**.
+
+Every mutation flows through `free-trial-admin.service.ts` (validation +
+apply + audit); the handler only renders, collects input and confirms.
+Drafts live in the session with a one-shot nonce as idempotency key and
+are **consumed before the mutation runs** — a double-clicked
+confirmation finds no draft, and the nonce-keyed `idempotencyKey`
+absorbs retried deliveries.
+
+| Button | Callback | Flow |
+| --- | --- | --- |
+| افزودن سهمیه تست | `admin:users:trial:g:<sid>` | scope («همه پنل‌ها» / «پنل مشخص» → ACTIVE panel picker) → count (1–100) → expiry («بدون تاریخ انقضا» / «اعتبار برای چند روز» → days 1–365) → mandatory reason (3–500 chars) → confirm (`…:gok`). Creates one `ADMIN_GRANT` entitlement, key `trial-grant:<nonce>` |
+| تنظیم تعداد تست باقی‌مانده (**OWNER**) | `admin:users:trial:sr:<sid>` | shows the current remaining → new value (0–100) → reason → confirm (`…:srok`). `setEffectiveRemaining`: revokes every usable remainder (rows keep historical values), pins the default pool via the per-user override, and grants one fresh `ADMIN_RESET` row carrying the new remaining; key `trial-setrem:<nonce>`. Success «تعداد تست باقی‌مانده کاربر بروزرسانی شد ✅» |
+| ریست دسترسی تست | `admin:users:trial:rs:<sid>` | reason → confirm text «با ریست دسترسی، تاریخچه قبلی حذف نمی‌شود و کاربر دوباره امکان دریافت تست خواهد داشت.\n\nادامه می‌دهید؟» (`…:rsok`). Clears the admin barriers + waives the cooldown + grants fresh allowance (`trial-reset:<nonce>`); **refused while a live/manual-review claim exists** with «برای این کاربر یک درخواست تست در حال پردازش یا بررسی است. ابتدا وضعیت آن را مشخص کنید.». Never touches history or remote accounts |
+| لغو دسترسی تست | `admin:users:trial:rv:<sid>` | reason → confirm «آیا دسترسی این کاربر به دریافت اکانت تست لغو شود؟» (`…:rvok`). Sets `freeTrialRevokedAt` — blocks FUTURE claims only |
+| رفع محدودیت زمانی | `admin:users:trial:cc:<sid>` | confirm-only («محدودیت زمانی دریافت تست این کاربر برداشته شود؟» → `…:ccok:<sid>`); clears the custom barrier AND waives the setting-computed cooldown |
+| تنظیم محدودیت زمانی | `admin:users:trial:sc:<sid>` | days from now (1–365) → reason → confirm (`…:scok`) — hard per-user cooldown |
+| مسدودسازی موقت تست | `admin:users:trial:dn:<sid>` | days → reason → confirm (`…:dnok`) — temporary denial with its own user-facing message |
+| مشاهده تاریخچه تست‌ها | `admin:users:trial:hist:<sid>:<page>` | paginated claims (5/page): short id, panel, status, frozen username, dates and «منبع سهمیه» (پیش‌فرض / ادمین / کمپین / جبران). OWNER-only force buttons per undecided claim (below) |
+| مشاهده سرویس‌های تست | `admin:users:trial:svc:<sid>:<page>` | read-only `FREE_TRIAL` services: username, status, expiry and the «تبدیل‌شده به سرویس فعال» marker for converted ones — no links/tokens |
+| بازگشت به جزئیات کاربر | `admin:users:view:<sid>` | back |
+
+Persian/Arabic digits are normalized on every numeric input; commands
+(`/…`) cancel any pending flow; «انصراف» (`admin:users:trial:cxl:<sid>`)
+drops the draft and re-renders the page.
+
+## Force resolution (OWNER)
+
+For claims stuck in `PROVISIONING`/`MANUAL_REVIEW`
+(`FORCE_RESOLVABLE_STATUSES`), the history page offers OWNER-only
+buttons per claim:
+
+| Button | Callback | Effect |
+| --- | --- | --- |
+| تطبیق مجدد با پنل | `admin:users:trial:rec:<sid>:<cid>` | runs `reconcileTrialClaim` and toasts the outcome: «اکانت روی پنل تایید شد و سرویس ثبت شد ✅» (APPLIED) / «اکانت روی پنل یافت نشد؛ درخواست ناموفق شد و سهمیه آزاد شد.» (NOT_APPLIED) / «نتیجه هنوز نامشخص است. بعداً دوباره تلاش کنید.» (UNKNOWN) |
+| تایید ساخته‌شدن تست | `admin:users:trial:fc:<sid>:<cid>` | `forceClaimCreated` — runs the reconciler, which verifies the account on the panel by its frozen username; when found, the Service is persisted and the claim activates (allowance stays consumed). **Nothing is forced blindly** when the panel does not report the account |
+| تایید ساخته‌نشدن تست / لغو و آزادسازی سهمیه | `admin:users:trial:fn:<sid>:<cid>` | `forceClaimNotCreated` — cancels the claim (`forced-not-created`) and releases its allowance exactly once; success «درخواست لغو شد و سهمیه آزاد شد ✅» |
+
+Both force flows show the mandated warning before the mandatory reason
+and confirmation (`…:fok`): «نتیجه ساخت این اکانت تست قطعی نیست.\n\n
+آزادسازی سهمیه ممکن است باعث ساخته‌شدن بیش از یک اکانت تست شود. فقط پس
+از بررسی پنل ادامه دهید.» (`TRIAL_FORCE_WARNING_TEXT`). Automatic
+reconciliation is always attempted/offered first.
+
+## Quota dashboard — «مدیریت سهمیه‌ها و ریست‌ها» (OWNER)
+
+Path: **تنظیمات عمومی ⚙️ → تنظیمات اکانت تست 🎁 →
+«مدیریت سهمیه‌ها و ریست‌ها»** (`admin:trialent:dash`), OWNER-only (every
+route in the namespace). Indexed metrics only — counts and `groupBy`,
+never full per-user table scans and never credentials/tokens/URLs:
+active grants, users with active grants, grants expiring in the next 7
+days, claims by status, converted trial services, running/completed
+campaigns and failed campaign recipients.
+
+| Button | Callback | Action |
+| --- | --- | --- |
+| جستجوی کاربر | `admin:trialent:search` | reuses the existing admin-users search flow verbatim (lands on the user profile → «مدیریت اکانت تست 🎁») |
+| کمپین ریست تست | `admin:trialent:camp:new` | campaign builder (`docs/free-trial-campaigns.md`) |
+| کمپین‌ها | `admin:trialent:camps:1` | paginated campaign list » detail (progress counters, skipped/failed recipient pages, cancel with confirmation) |
+| سهمیه‌های در حال انقضا | `admin:trialent:exp:1` | ACTIVE grants expiring inside the 7-day window (user telegram id, remaining, expiry) |
+| موارد نیازمند بررسی | `admin:trialent:rev:1` | `MANUAL_REVIEW` + `PROVISIONING` claims older than 15 minutes |
+| بروزرسانی ♻️ | `admin:trialent:dash` | recompute |
+| بازگشت | `admin:trial_settings` | back to the trial-settings page |
+
 ## Audit log
 
-Every trial-config mutation writes a structured audit line via the app
-logger with **safe fields only**:
+**Trial-entitlement phase: admin trial mutations are the first real
+`AuditLog` writers.** `writeTrialAudit` records one row per mutation
+(actor telegram id, action, entity type/id, safe before/after metadata —
+never secrets, links, tokens or raw panel data); an audit failure is
+logged and swallowed, never breaking the already-committed mutation.
+Actions: `trial.allowance.granted`, `trial.remaining.set`,
+`trial.access.reset`, `trial.access.revoked`, `trial.cooldown.cleared`,
+`trial.cooldown.set`, `trial.denial.set`,
+`trial.claim.forced_not_created`, `trial.claim.forced_created`,
+`trial.campaign.created` / `previewed` / `started` / `cancelled`.
+
+Trial-config mutations additionally keep their structured audit lines
+via the app logger with **safe fields only**:
 
 | Event | Fields |
 | --- | --- |
@@ -198,7 +294,7 @@ logger with **safe fields only**:
 
 - Only `free_trial_enabled` has a Telegram editing page; the other global
   keys (cooldown, once-per-user, purchase/membership requirements, notice
-  text) remain operator-set Setting rows.
+  text, default allowance) remain operator-set Setting rows.
 - `free_trial_require_channel_membership` inherits the force-join
   placeholder until real `getChatMember` verification lands.
 - Manual-review escalations DM active OWNER admins directly (LogTopic

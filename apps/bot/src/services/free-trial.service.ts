@@ -14,13 +14,15 @@ import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import {
-  freeTrialCooldownDays,
-  freeTrialRequiresChannelMembership,
-  freeTrialRequiresNoPreviousPurchase,
-  isFreeTrialEnabled,
-  isFreeTrialOncePerUser,
-} from "./free-trial-settings.service.js";
-import { getBooleanSetting } from "./settings.service.js";
+  computeTrialEligibility,
+  releaseClaimAllowance,
+  reserveTrialAllowance,
+  TRIAL_ALREADY_USED_TEXT as ENTITLEMENT_ALREADY_USED_TEXT,
+  TRIAL_IN_PROGRESS_TEXT as ENTITLEMENT_IN_PROGRESS_TEXT,
+  type TrialDenialReason,
+  expireTrialEntitlements,
+} from "./free-trial-entitlement.service.js";
+import { isFreeTrialEnabled } from "./free-trial-settings.service.js";
 import type { DeliverySendApi } from "./other-product-delivery.service.js";
 import {
   buildAdapterForPanel,
@@ -77,8 +79,10 @@ const SWEEP_BATCH = 20;
 
 // --- Persian texts (task-mandated, verbatim) -----------------------------------------------
 
-export const TRIAL_ALREADY_USED_TEXT = "شما قبلاً از اکانت تست رایگان استفاده کرده‌اید.";
-export const TRIAL_IN_PROGRESS_TEXT = "در حال حاضر ساخت اکانت تست شما در حال انجام است.";
+// Trial-entitlement phase: the already-used / in-progress texts moved into
+// the entitlement policy module (one-directional dependency); re-exported
+// here so existing imports keep working.
+export { TRIAL_ALREADY_USED_TEXT, TRIAL_IN_PROGRESS_TEXT } from "./free-trial-entitlement.service.js";
 export const TRIAL_NO_PANEL_TEXT = "در حال حاضر پنل فعالی برای ارائه اکانت تست وجود ندارد.";
 /** Shown when the GLOBAL switch is off (distinct from "no ready panel"). */
 export const TRIAL_GLOBALLY_DISABLED_TEXT = "اکانت تست رایگان در حال حاضر غیرفعال است.";
@@ -350,72 +354,42 @@ export type TrialEligibility =
   | { ok: true }
   | { ok: false; code: string; text: string };
 
-/** Claim statuses that consume the user's lifetime entitlement. */
-const CONSUMING_STATUSES: FreeTrialClaimStatus[] = [
-  FreeTrialClaimStatus.CLAIMED,
-  FreeTrialClaimStatus.PROVISIONING,
-  FreeTrialClaimStatus.ACTIVE,
-  FreeTrialClaimStatus.MANUAL_REVIEW,
-  FreeTrialClaimStatus.EXPIRED,
-];
+/** Legacy machine codes for each entitlement denial reason (logs/tests). */
+const DENIAL_CODES: Record<TrialDenialReason, string> = {
+  GLOBAL_DISABLED: "globally-disabled",
+  USER_BLOCKED: "user-not-active",
+  ACTIVE_CLAIM: "claim-in-progress",
+  NO_ALLOWANCE: "no-allowance",
+  COOLDOWN: "cooldown",
+  PREVIOUS_PURCHASE: "has-purchase",
+  MEMBERSHIP_REQUIRED: "membership-required",
+  PANEL_NOT_ALLOWED: "panel-not-allowed",
+  ENTITLEMENT_EXPIRED: "entitlement-expired",
+  ADMIN_DENIED: "admin-denied",
+};
 
 /**
- * Full user-level eligibility (global settings + history). Panel-level
- * availability/capacity is checked separately (and re-checked inside the
- * claim transaction - this function alone is never trusted for the claim).
+ * Full user-level eligibility - delegates to the ONE shared entitlement
+ * calculator (trial-entitlement phase) and adapts its result to the
+ * engine's historical {ok, code, text} shape. Panel-level availability/
+ * capacity is checked separately, and the claim transaction re-checks the
+ * barriers and makes the allowance reservation - this function alone is
+ * never trusted for the claim.
  */
-export async function checkTrialEligibility(user: User): Promise<TrialEligibility> {
-  if (user.status !== UserStatus.ACTIVE) {
-    return { ok: false, code: "user-not-active", text: TRIAL_TEMP_UNAVAILABLE_TEXT };
+export async function checkTrialEligibility(
+  user: User,
+  options: { panelId?: string } = {},
+): Promise<TrialEligibility> {
+  const result = await computeTrialEligibility(user, options);
+  if (result.eligible) {
+    return { ok: true };
   }
-  if (!(await isFreeTrialEnabled())) {
-    return { ok: false, code: "globally-disabled", text: TRIAL_NO_PANEL_TEXT };
-  }
-  const live = await prisma.freeTrialClaim.findFirst({
-    where: { userId: user.id, status: { in: LIVE_CLAIM_STATUSES } },
-    select: { id: true },
-  });
-  if (live !== null) {
-    return { ok: false, code: "claim-in-progress", text: TRIAL_IN_PROGRESS_TEXT };
-  }
-  const activeTrial = await prisma.freeTrialClaim.findFirst({
-    where: { userId: user.id, status: FreeTrialClaimStatus.ACTIVE },
-    select: { id: true },
-  });
-  if (activeTrial !== null) {
-    return { ok: false, code: "trial-active", text: TRIAL_ALREADY_USED_TEXT };
-  }
-  const consumed = await prisma.freeTrialClaim.findFirst({
-    where: { userId: user.id, status: { in: CONSUMING_STATUSES } },
-    orderBy: { createdAt: "desc" },
-  });
-  if (consumed !== null) {
-    if (await isFreeTrialOncePerUser()) {
-      return { ok: false, code: "already-used", text: TRIAL_ALREADY_USED_TEXT };
-    }
-    const cooldown = await freeTrialCooldownDays();
-    if (cooldown !== null) {
-      const nextAllowed = consumed.createdAt.getTime() + cooldown * 86_400_000;
-      if (nextAllowed > Date.now()) {
-        return { ok: false, code: "cooldown", text: TRIAL_ALREADY_USED_TEXT };
-      }
-    }
-  }
-  if (await freeTrialRequiresNoPreviousPurchase()) {
-    if (user.paidOrdersCount > 0) {
-      return { ok: false, code: "has-purchase", text: TRIAL_NO_PURCHASE_ONLY_TEXT };
-    }
-  }
-  if (await freeTrialRequiresChannelMembership()) {
-    // Delegates to the existing force-join gate state: real getChatMember
-    // verification is a documented later phase; a user without bypass while
-    // forced-join is on is treated as unverified for trials.
-    const forceJoinOn = await getBooleanSetting("force_join_enabled", false);
-    if (forceJoinOn && !user.forceJoinBypass) {
-      return { ok: false, code: "membership-required", text: TRIAL_MEMBERSHIP_REQUIRED_TEXT };
-    }
-  }
-  return { ok: true };
+  const reason = result.denialReason ?? "NO_ALLOWANCE";
+  const code =
+    reason === "ACTIVE_CLAIM" && result.denialText === ENTITLEMENT_ALREADY_USED_TEXT
+      ? "trial-active"
+      : DENIAL_CODES[reason];
+  return { ok: false, code, text: result.denialText ?? TRIAL_TEMP_UNAVAILABLE_TEXT };
 }
 
 // --- claim + provisioning ----------------------------------------------------------------------
@@ -436,51 +410,72 @@ class TrialDenied extends Error {
 
 /**
  * The atomic claim, insert-first: the partial unique index IS the
- * concurrency guard (twenty simultaneous confirms -> one insert, nineteen
- * instant P2002 denials with no transaction pile-up on the pool). Capacity
- * is then decided deterministically in a TINY transaction under a per-panel
- * advisory lock: the oldest claims within the limit win; a losing insert
- * cancels ITSELF - over-allocation is impossible.
+ * concurrency guard (twenty simultaneous confirms -> one insert inside its
+ * transaction, nineteen instant P2002 aborts with no long lock waits).
+ * Trial-entitlement phase: the SAME transaction re-checks the admin
+ * barriers on a fresh user row and reserves exactly one allowance unit
+ * (conditional UPDATE ... WHERE consumed < allowance under a per-user
+ * advisory lock) - the claim row is the reservation receipt, so a rollback
+ * releases everything together. Capacity is then decided deterministically
+ * in a TINY transaction under a per-panel advisory lock: the oldest claims
+ * within the limit win; a losing insert cancels ITSELF and returns its
+ * allowance unit - over-allocation is impossible.
  */
 async function insertClaim(user: User, panel: Panel): Promise<FreeTrialClaim> {
   const now = new Date();
-  // Policy gate. Concurrent duplicates cannot slip through it - they collide
-  // on the unique index below regardless of what this read saw.
-  const consumed = await prisma.freeTrialClaim.findFirst({
-    where: { userId: user.id, status: { in: CONSUMING_STATUSES } },
-    orderBy: { createdAt: "desc" },
-  });
-  if (consumed !== null) {
-    if (consumed.status !== FreeTrialClaimStatus.EXPIRED) {
-      throw new TrialDenied("claim-in-progress", TRIAL_IN_PROGRESS_TEXT);
-    }
-    if (await isFreeTrialOncePerUser()) {
-      throw new TrialDenied("already-used", TRIAL_ALREADY_USED_TEXT);
-    }
-    const cooldown = await freeTrialCooldownDays();
-    if (
-      cooldown !== null &&
-      consumed.createdAt.getTime() + cooldown * 86_400_000 > now.getTime()
-    ) {
-      throw new TrialDenied("cooldown", TRIAL_ALREADY_USED_TEXT);
-    }
-  }
-
   let claim: FreeTrialClaim;
   try {
-    claim = await prisma.freeTrialClaim.create({
-      data: {
-        userId: user.id,
-        panelId: panel.id,
-        status: FreeTrialClaimStatus.CLAIMED,
-        durationMinutes: panel.testDurationMinutes,
-        trafficBytes: BigInt(panel.testVolumeMb ?? 0) * 1024n * 1024n,
-      },
+    claim = await prisma.$transaction(async (tx) => {
+      // Insert FIRST: concurrent same-user claims die here immediately on
+      // the partial unique index, before any lock is taken.
+      const created = await tx.freeTrialClaim.create({
+        data: {
+          userId: user.id,
+          panelId: panel.id,
+          status: FreeTrialClaimStatus.CLAIMED,
+          durationMinutes: panel.testDurationMinutes,
+          trafficBytes: BigInt(panel.testVolumeMb ?? 0) * 1024n * 1024n,
+        },
+      });
+      // Fresh barrier re-check: a revoke/denial that landed after the
+      // outer eligibility read must win over this claim.
+      const freshUser = await tx.user.findUniqueOrThrow({ where: { id: user.id } });
+      if (freshUser.status !== UserStatus.ACTIVE) {
+        throw new TrialDenied("user-not-active", TRIAL_TEMP_UNAVAILABLE_TEXT);
+      }
+      if (freshUser.freeTrialRevokedAt !== null) {
+        throw new TrialDenied(
+          "admin-denied",
+          "در حال حاضر امکان دریافت اکانت تست برای حساب شما فعال نیست.",
+        );
+      }
+      if (freshUser.freeTrialDeniedUntil !== null && freshUser.freeTrialDeniedUntil > now) {
+        throw new TrialDenied("admin-denied", TRIAL_TEMP_UNAVAILABLE_TEXT);
+      }
+      if (freshUser.freeTrialCooldownUntil !== null && freshUser.freeTrialCooldownUntil > now) {
+        throw new TrialDenied("cooldown", ENTITLEMENT_ALREADY_USED_TEXT);
+      }
+      const reservation = await reserveTrialAllowance(tx, freshUser, panel.id, {
+        excludeClaimId: created.id,
+      });
+      if (!reservation.ok) {
+        throw new TrialDenied(DENIAL_CODES[reservation.reason], reservation.text);
+      }
+      if (reservation.entitlementId === null) {
+        return created;
+      }
+      return tx.freeTrialClaim.update({
+        where: { id: created.id },
+        data: { entitlementId: reservation.entitlementId },
+      });
     });
   } catch (err) {
+    if (err instanceof TrialDenied) {
+      throw err;
+    }
     // Partial unique index: a concurrent claim by the same user won.
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      throw new TrialDenied("claim-in-progress", TRIAL_IN_PROGRESS_TEXT);
+      throw new TrialDenied("claim-in-progress", ENTITLEMENT_IN_PROGRESS_TEXT);
     }
     throw err;
   }
@@ -505,21 +500,30 @@ async function insertClaim(user: User, panel: Panel): Promise<FreeTrialClaim> {
       return true;
     });
     if (lost) {
+      // The claim self-cancelled inside the capacity transaction; give its
+      // reserved allowance unit back (exactly-once via the claim CAS).
+      await releaseClaimAllowance(claim.id, "capacity-full");
       throw new TrialDenied("capacity-full", TRIAL_CAPACITY_FULL_TEXT);
     }
   }
   return claim;
 }
 
-/** CAS release used when nothing remote can have happened yet. */
+/**
+ * CAS release used when nothing remote can have happened yet. Definite
+ * non-creation, so the reserved allowance unit is returned (exactly once).
+ */
 async function cancelClaimSafely(claimId: string, reason: string): Promise<void> {
-  await prisma.freeTrialClaim.updateMany({
+  const cancelled = await prisma.freeTrialClaim.updateMany({
     where: {
       id: claimId,
       status: { in: [FreeTrialClaimStatus.CLAIMED, FreeTrialClaimStatus.PROVISIONING] },
     },
     data: { status: FreeTrialClaimStatus.CANCELLED, failureReasonCode: reason.slice(0, 120) },
   });
+  if (cancelled.count === 1) {
+    await releaseClaimAllowance(claimId, reason.slice(0, 120));
+  }
 }
 
 /**
@@ -532,7 +536,9 @@ export async function claimFreeTrial(user: User, panelId: string): Promise<Trial
   if (panel === null || !panel.testEnabled || !assessTrialPanelConfig(panel).ok) {
     return { kind: "denied", code: "panel-not-ready", text: TRIAL_NO_PANEL_TEXT };
   }
-  const eligibility = await checkTrialEligibility(user);
+  // Panel-scoped: a user whose only remaining allowance is a grant for a
+  // DIFFERENT panel is denied here (PANEL_NOT_ALLOWED) before any write.
+  const eligibility = await checkTrialEligibility(user, { panelId: panel.id });
   if (!eligibility.ok) {
     return { kind: "denied", code: eligibility.code, text: eligibility.text };
   }
@@ -668,13 +674,16 @@ export async function provisionTrialClaim(
         return { kind: "uncertain", claim: fresh ?? claim };
       }
       // DEFINITE failure: nothing exists remotely - release the entitlement.
-      await prisma.freeTrialClaim.updateMany({
+      const failed = await prisma.freeTrialClaim.updateMany({
         where: { id: claim.id, status: FreeTrialClaimStatus.PROVISIONING },
         data: {
           status: FreeTrialClaimStatus.FAILED,
           failureReasonCode: "remote-create-failed",
         },
       });
+      if (failed.count === 1) {
+        await releaseClaimAllowance(claim.id, "remote-create-failed");
+      }
       logger.warn("free trial remote create failed", {
         claimId: claim.id,
         panelId: panel.id,
@@ -866,13 +875,18 @@ export async function reconcileTrialClaim(claimId: string): Promise<TrialReconci
       return "APPLIED";
     }
     if (remote.notFound === true) {
-      await prisma.freeTrialClaim.updateMany({
+      const failed = await prisma.freeTrialClaim.updateMany({
         where: { id: claim.id, status: { in: [FreeTrialClaimStatus.PROVISIONING, FreeTrialClaimStatus.MANUAL_REVIEW] } },
         data: {
           status: FreeTrialClaimStatus.FAILED,
           failureReasonCode: "reconciled-not-applied",
         },
       });
+      if (failed.count === 1) {
+        // NOT_APPLIED: positively established non-creation - the reserved
+        // allowance unit is returned exactly once (claim CAS guard).
+        await releaseClaimAllowance(claim.id, "reconciled-not-applied");
+      }
       logger.info("free trial reconciliation: not applied", { claimId: claim.id });
       return "NOT_APPLIED";
     }
@@ -946,6 +960,10 @@ export async function runFreeTrialSweep(api: DeliverySendApi): Promise<void> {
   try {
     const now = new Date();
 
+    // (0) Trial-entitlement phase: ACTIVE grants past their expiresAt
+    // become EXPIRED deterministically (idempotent; rows never deleted).
+    await expireTrialEntitlements(now);
+
     // (1) Expiry: claim -> EXPIRED, service -> EXPIRED (CAS both).
     const expiring = await prisma.freeTrialClaim.findMany({
       where: { status: FreeTrialClaimStatus.ACTIVE, expiresAt: { lt: now } },
@@ -957,13 +975,25 @@ export async function runFreeTrialSweep(api: DeliverySendApi): Promise<void> {
         where: { id: claim.id, status: FreeTrialClaimStatus.ACTIVE },
         data: { status: FreeTrialClaimStatus.EXPIRED },
       });
-      if (claim.serviceId !== null) {
+      // Trial-lifecycle phase: a CONVERTED service (or one whose paid
+      // renewal already moved its own expiry into the future) is a normal
+      // paid-lifecycle service now - the trial claim still expires above,
+      // but the service is never expired or remotely disabled by the sweep.
+      const converted =
+        claim.service !== null &&
+        (claim.service.convertedToPaidAt !== null ||
+          (claim.service.expiresAt !== null && claim.service.expiresAt > now));
+      if (claim.serviceId !== null && !converted) {
         await prisma.service.updateMany({
-          where: { id: claim.serviceId, status: { in: [ServiceStatus.ACTIVE, ServiceStatus.LIMITED] } },
+          where: {
+            id: claim.serviceId,
+            status: { in: [ServiceStatus.ACTIVE, ServiceStatus.LIMITED] },
+            convertedToPaidAt: null,
+          },
           data: { status: ServiceStatus.EXPIRED },
         });
       }
-      if (claim.panel.testAutoDisableAfterExpiry && claim.service !== null) {
+      if (claim.panel.testAutoDisableAfterExpiry && claim.service !== null && !converted) {
         try {
           const adapter = buildAdapterForPanel(claim.panel);
           await adapter.setServiceStatus({ username: claim.service.username, enabled: false });
@@ -977,14 +1007,19 @@ export async function runFreeTrialSweep(api: DeliverySendApi): Promise<void> {
       logger.info("free trial expired", { claimId: claim.id });
     }
 
-    // (2) Stale CLAIMED rows: never touched the panel - release safely.
-    await prisma.freeTrialClaim.updateMany({
+    // (2) Stale CLAIMED rows: never touched the panel - cancel safely one
+    // by one so each reserved allowance unit is released exactly once.
+    const staleClaims = await prisma.freeTrialClaim.findMany({
       where: {
         status: FreeTrialClaimStatus.CLAIMED,
         createdAt: { lt: new Date(now.getTime() - STALE_CLAIM_MINUTES * 60_000) },
       },
-      data: { status: FreeTrialClaimStatus.CANCELLED, failureReasonCode: "stale-claim" },
+      take: SWEEP_BATCH,
+      select: { id: true },
     });
+    for (const stale of staleClaims) {
+      await cancelClaimSafely(stale.id, "stale-claim");
+    }
 
     // (3) Reconcile PROVISIONING claims older than a minute.
     const provisioning = await prisma.freeTrialClaim.findMany({

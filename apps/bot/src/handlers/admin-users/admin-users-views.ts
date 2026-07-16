@@ -34,6 +34,8 @@ export const AU_CB = {
   blockConfirm: (sid: string): string => `admin:users:blk:${sid}:yes`,
   unblockAsk: (sid: string): string => `admin:users:ublk:${sid}`,
   unblockConfirm: (sid: string): string => `admin:users:ublk:${sid}:yes`,
+  // Trial-entitlement phase: per-user trial management entry point.
+  trial: (sid: string): string => `admin:users:trial:${sid}`,
 } as const;
 
 export const USERS_LANDING_TEXT = "مدیریت کاربران 👤";
@@ -171,6 +173,8 @@ export function userProfileKeyboard(
     .row()
     .text("سفارش‌های کاربر 🧾", AU_CB.orders(sid, 1))
     .text("پرداخت‌های کاربر 💳", AU_CB.payments(sid, 1))
+    .row()
+    .text("مدیریت اکانت تست 🎁", AU_CB.trial(sid))
     .row();
   if (status === "ACTIVE") {
     kb.text("مسدود کردن کاربر 🚫", AU_CB.blockAsk(sid)).row();

@@ -214,6 +214,45 @@ export interface SessionData {
     adminUserReturnContext?: { kind: "receipt"; receiptId: string; receiptPage?: number };
     // Admin manual wallet adjustment (Phase 20).
     adminUserWalletDraft?: AdminUserWalletDraft;
+    // Trial-entitlement phase: per-user trial-management drafts (grant /
+    // set-remaining / reset / revoke / cooldown / denial / force-resolve).
+    // One-shot nonce = the operation's idempotency key; the draft is
+    // consumed BEFORE applying so a double confirmation cannot re-run.
+    adminTrialActionDraft?: {
+      userId: string;
+      kind:
+        | "grant"
+        | "set_remaining"
+        | "reset"
+        | "revoke"
+        | "cooldown_set"
+        | "denial_set"
+        | "force_created"
+        | "force_not_created";
+      step: string;
+      nonce: string;
+      count?: number;
+      desired?: number;
+      panelId?: string;
+      expiresAt?: string;
+      untilIso?: string;
+      claimId?: string;
+      reason?: string;
+    };
+    // Trial-entitlement phase: campaign builder draft (audience, allowance,
+    // expiry, notify, include-with-allowance, reason, typed confirmation).
+    adminTrialCampaignDraft?: {
+      step: string;
+      audienceKind?: string;
+      audienceDate?: string;
+      selectedUserIds?: string[];
+      allowance?: number;
+      expiresAt?: string;
+      notifyUsers?: boolean;
+      includeUsersWithAllowance?: boolean;
+      reason?: string;
+      campaignId?: string;
+    };
     // Last admin user-search query ("بازگشت به نتایج" re-runs it).
     adminUserSearchQuery?: string;
     // Fix D user-side list contexts - details return to the same page.

@@ -55,6 +55,11 @@ import {
   userWalletKeyboard,
   userWalletText,
 } from "./admin-users-views.js";
+import {
+  clearTrialManagementState,
+  trialManagementHandler,
+  trialManagementTextHandler,
+} from "./trial-management.handler.js";
 
 // =============================================================================
 // «مدیریت کاربران 👥» (Phase 20) - admin searches/selects a user, opens the
@@ -74,6 +79,9 @@ const AMOUNT_FLOW = "admin_wallet:amount";
 const REASON_FLOW = "admin_wallet:reason";
 
 export const adminUsersHandler = new Composer<BotContext>();
+
+// «مدیریت اکانت تست 🎁» - per-user trial management (admin:users:trial:*).
+adminUsersHandler.use(trialManagementHandler);
 
 /**
  * Clears the wallet-adjustment flow/draft but keeps the stored search query
@@ -98,6 +106,7 @@ function clearAdminWalletFlowState(ctx: BotContext): void {
  */
 export function clearAdminUsersState(ctx: BotContext): void {
   clearAdminWalletFlowState(ctx);
+  clearTrialManagementState(ctx);
   delete ctx.session.temp.adminUserSearchQuery;
   delete ctx.session.temp.adminUserReturnContext;
   delete ctx.session.temp.adminUserListFilter;
@@ -590,6 +599,10 @@ adminUsersHandler.callbackQuery(AU_CB.walletConfirm, async (ctx) => {
 // --- text inputs (search / amount / reason) -----------------------------------------
 
 export const adminUsersTextHandler = new Composer<BotContext>();
+
+// Trial-management text flows ("admin_trial:*") - checked first; the trial
+// handler passes anything else through to the search/wallet flows below.
+adminUsersTextHandler.use(trialManagementTextHandler);
 
 adminUsersTextHandler.on("message:text", async (ctx, next) => {
   const flow = ctx.session.currentFlow;

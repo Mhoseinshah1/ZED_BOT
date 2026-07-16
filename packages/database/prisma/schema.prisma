@@ -468,6 +468,22 @@ model User {
   lastTestAccountCreatedAt DateTime?
   testLimitResetAt         DateTime?
 
+  // Trial-entitlement phase: per-user admin overrides for free-trial
+  // eligibility. All nullable/additive - existing rows keep today's exact
+  // behavior. Revocation blocks FUTURE claims only (existing services and
+  // history are untouched); the "denied until" barrier is a temporary
+  // admin denial distinct from cooldown; the cooldown override is a hard
+  // per-user barrier; "cooldown cleared at" waives the SETTING-computed
+  // cooldown for claims created at/before that instant; the default
+  // allowance override replaces the global default-policy allowance for
+  // this user only (used by the OWNER "set remaining" operation).
+  freeTrialRevokedAt               DateTime?
+  freeTrialRevokedByAdminId        String?
+  freeTrialDeniedUntil             DateTime?
+  freeTrialCooldownUntil           DateTime?
+  freeTrialCooldownClearedAt       DateTime?
+  freeTrialDefaultAllowanceOverride Int?
+
   // Message preferences
   cronNotificationsEnabled    Boolean @default(true)
   marketingMessagesEnabled    Boolean @default(true)
@@ -493,6 +509,8 @@ model User {
   commissionsAsReferrer   ReferralCommission[] @relation("CommissionReferrer")
   commissionsAsReferred   ReferralCommission[] @relation("CommissionReferred")
   freeTrialClaims         FreeTrialClaim[]
+  freeTrialEntitlements   FreeTrialEntitlement[]
+  freeTrialCampaignRows   FreeTrialCampaignRecipient[]
   wheelSpinHistories      WheelSpinHistory[]
   supportTickets          SupportTicket[]
   supportMessages         SupportMessage[]
@@ -652,6 +670,7 @@ model Panel {
   orders               Order[]
   hiddenForUsers       UserHiddenPanel[]
   freeTrialClaims      FreeTrialClaim[]
+  freeTrialEntitlements FreeTrialEntitlement[]
   serviceEventLogs     ServiceEventLog[]
 
   @@index([status])
@@ -1153,6 +1172,16 @@ model Service {
 
   serviceLocation ServiceLocation @default(MULTI_LOCATION)
 
+  // Trial-lifecycle phase: trial-to-paid conversion markers. `source` is
+  // the immutable ORIGIN and is never overwritten; the FIRST verified,
+  // completed paid operation (renewal / extra volume / extra time) on a
+  // FREE_TRIAL service stamps these exactly once (CAS on
+  // convertedToPaidAt IS NULL). Conversion never restores trial allowance
+  // and never re-enables another trial. firstPaidOrderId is a soft
+  // reference (plain id, no FK) like other *_OrderId audit fields.
+  convertedToPaidAt DateTime?
+  firstPaidOrderId  String?
+
   // Snapshots
   productNameSnapshot String?
   panelNameSnapshot   String?
@@ -1206,6 +1235,8 @@ model Service {
   @@index([status])
   @@index([expiresAt])
   @@index([createdAt])
+  // Trial-lifecycle phase: converted-trial metrics and admin lists.
+  @@index([source, convertedToPaidAt])
 }
 
 model ServiceRating {
@@ -1387,6 +1418,19 @@ model FreeTrialClaim {
   service   Service?             @relation(fields: [serviceId], references: [id])
   status    FreeTrialClaimStatus @default(CLAIMED)
 
+  // Trial-entitlement phase: which allowance funded this claim. Null =
+  // the default policy allowance (counted from unlinked claims - default
+  // units are never materialized as rows). The reservation is made in the
+  // SAME transaction that creates the claim; a retry reuses the claim and
+  // therefore the same reservation.
+  entitlementId String?
+  entitlement   FreeTrialEntitlement? @relation(fields: [entitlementId], references: [id])
+  // Release-exactly-once marker: stamped by the ONE place that returns
+  // this claim's allowance unit (definite non-creation / NOT_APPLIED /
+  // forced not-created). UNKNOWN outcomes never stamp it. The CAS on
+  // "allowanceReleasedAt IS NULL" is what makes release idempotent.
+  allowanceReleasedAt DateTime?
+
   // Frozen at claim time so retries/reconciliation reuse the SAME identity.
   usernameSnapshot String?
   namingSnapshot   Json?
@@ -1405,6 +1449,171 @@ model FreeTrialClaim {
   @@index([panelId])
   @@index([status, createdAt])
   @@index([createdAt])
+  @@index([entitlementId])
+}
+
+// Trial-entitlement phase: an explicit, auditable PERMISSION for one or
+// more trial claims - separate from FreeTrialClaim (one actual
+// request/provisioning attempt). The default policy allowance is NEVER
+// materialized as rows; entitlement rows exist only for admin grants,
+// resets, campaign grants, compensations and migrations. Historical rows
+// are never deleted: they expire (worker/deterministic evaluation) or are
+// revoked, and their consumed units stay linked to the claims they funded.
+// DB CHECK constraints (allowance >= 0, consumed >= 0,
+// consumed <= allowance) live in migration SQL - Prisma cannot express
+// them - and are the authoritative overdraw guard.
+enum FreeTrialEntitlementScope {
+  GLOBAL
+  PANEL
+}
+
+enum FreeTrialEntitlementSource {
+  DEFAULT_POLICY
+  ADMIN_GRANT
+  ADMIN_RESET
+  CAMPAIGN_RESET
+  COMPENSATION
+  MIGRATION
+}
+
+enum FreeTrialEntitlementStatus {
+  ACTIVE
+  CONSUMED
+  EXPIRED
+  REVOKED
+}
+
+model FreeTrialEntitlement {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  allowance Int
+  consumed  Int @default(0)
+
+  scope   FreeTrialEntitlementScope @default(GLOBAL)
+  panelId String?
+  panel   Panel?                    @relation(fields: [panelId], references: [id])
+
+  source FreeTrialEntitlementSource
+  status FreeTrialEntitlementStatus @default(ACTIVE)
+
+  startsAt  DateTime?
+  expiresAt DateTime?
+
+  // Admin-provided reason (required for grants/resets/revocations) -
+  // internal, never shown to the user.
+  reason           String?
+  createdByAdminId String?
+  revokedAt        DateTime?
+  revokedByAdminId String?
+
+  campaignId String?
+  campaign   FreeTrialResetCampaign? @relation(fields: [campaignId], references: [id])
+
+  // Explicit idempotency key for the operation that created this row
+  // (trial-grant:<nonce> / trial-reset:<nonce> / trial-campaign:<cid>:<uid>)
+  // - a replayed confirmation or retried campaign job collides here and
+  // reuses the existing grant instead of creating a second one.
+  idempotencyKey String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  claims FreeTrialClaim[]
+
+  // One grant per campaign per user - the campaign idempotency guard
+  // (NULL campaignId rows are exempt: Postgres treats NULLs as distinct).
+  @@unique([campaignId, userId])
+  @@index([userId, status])
+  @@index([panelId])
+  @@index([expiresAt])
+  @@index([campaignId])
+}
+
+// Trial-entitlement phase: a persistent bulk reset/grant campaign. The
+// campaign + its recipient snapshot rows ARE the durable queue: the
+// in-bot campaign loop (free-trial-entitlement-campaign) processes
+// PENDING recipients in small batches, so a restart resumes exactly where
+// it stopped and cancellation stops unprocessed grants while preserving
+// completed ones. Mirrors the proven Broadcast/BroadcastRecipient pattern.
+enum FreeTrialResetCampaignStatus {
+  DRAFT
+  PREVIEWED
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum FreeTrialCampaignRecipientStatus {
+  PENDING
+  GRANTED
+  SKIPPED
+  FAILED
+}
+
+model FreeTrialResetCampaign {
+  id     String                       @id @default(uuid())
+  status FreeTrialResetCampaignStatus @default(DRAFT)
+
+  allowance Int
+  // Typed, validated audience descriptor {kind, ...params} - never raw SQL.
+  audience  Json
+  reason    String
+  // Optional expiry applied to every granted entitlement.
+  expiresAt DateTime?
+
+  notifyUsers Boolean @default(false)
+  // OWNER decision: also grant users who still have unused allowance.
+  includeUsersWithAllowance Boolean @default(false)
+
+  createdByAdminId String
+
+  estimatedUsers Int?
+  totalUsers     Int?
+  processedUsers Int  @default(0)
+  grantedUsers   Int  @default(0)
+  skippedUsers   Int  @default(0)
+  failedUsers    Int  @default(0)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  startedAt   DateTime?
+  completedAt DateTime?
+  cancelledAt DateTime?
+
+  entitlements FreeTrialEntitlement[]
+  recipients   FreeTrialCampaignRecipient[]
+
+  @@index([status, createdAt])
+}
+
+model FreeTrialCampaignRecipient {
+  id         String                 @id @default(uuid())
+  campaignId String
+  campaign   FreeTrialResetCampaign @relation(fields: [campaignId], references: [id])
+  userId     String
+  user       User                   @relation(fields: [userId], references: [id])
+
+  status FreeTrialCampaignRecipientStatus @default(PENDING)
+
+  // Short safe English marker (skip/error classification) - never secrets.
+  skipReason    String?
+  errorMessage  String?
+  entitlementId String?
+  processedAt   DateTime?
+  notifiedAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // At-most-one row per campaign/user: the snapshot is stable and the
+  // batch worker can retry without ever double-granting.
+  @@unique([campaignId, userId])
+  @@index([campaignId, status])
+  @@index([userId])
 }
 
 model WheelSpinHistory {

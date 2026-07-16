@@ -130,6 +130,24 @@ Fulfillment then dispatches to the same idempotent executors the receipt
 approval uses (provisioning, renewal, extra volume/time, stock/manual
 delivery) and sends the user's success text.
 
+### Trial-to-paid conversion (trial-lifecycle phase)
+
+When the target of a renewal / extra-volume / extra-time order is a
+`FREE_TRIAL` service, the executor's **persist transaction** — the same
+one that updates the `Service`, completes the `Order` and writes the
+operation's event anchor — additionally calls `markTrialConversion`: a
+CAS on `Service.convertedToPaidAt IS NULL` stamps
+`convertedToPaidAt` + `firstPaidOrderId` and writes one
+`TRIAL_CONVERTED_TO_PAID` event, exactly once across replays, retries
+and races. Startup reconciliation's `completeReconciledMutation` makes
+the same call inside its own transaction, so a mutation recovered from
+panel truth converts too — the CAS keeps the executor/reconciler race
+safe. The fulfillment dispatch sends the one-time notice «سرویس تست شما
+با موفقیت به سرویس فعال تبدیل شد ✅» **only** when the executor outcome
+carries `trialConverted === true` (replays return `alreadyApplied` and
+never re-enter that branch; reconciliation never notifies). See
+`docs/free-trial-lifecycle.md`.
+
 ## Forbidden transitions
 
 - **Never a Service/Order/credit before a verified success** (`providerStatus
