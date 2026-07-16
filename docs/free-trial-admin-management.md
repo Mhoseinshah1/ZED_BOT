@@ -6,18 +6,23 @@ How operators configure and monitor free-trial VPN accounts. Companion to
 
 Source of truth:
 `apps/bot/src/services/free-trial-settings.service.ts` (global settings),
+`apps/bot/src/handlers/admin-settings/text-settings.handler.ts`
+(the global «تنظیمات اکانت تست 🎁» page),
 `apps/bot/src/handlers/panels/panel.handler.ts` /
-`panel-views.ts` / `panel-fields.ts` / `panel-cb.ts` (the admin page),
+`panel-views.ts` / `panel-fields.ts` / `panel-cb.ts` (the per-panel page),
 `apps/bot/src/services/free-trial.service.ts`
-(`assessTrialPanelConfig`, `trialStatsForPanel`).
+(`getFreeTrialMenuAvailability`, `assessTrialPanelConfig`,
+`trialStatsForPanel`).
 
 ## Global settings (Setting registry)
 
 Same pattern as the payment settings: key constants with built-in
 fallbacks over the `Setting` table — **not seeded**, reads fall back
-safely when the row is missing. There is no dedicated Telegram page for
-these yet; they are operator-set `Setting` rows (the per-panel page below
-is the interactive admin surface).
+safely when the row is missing. The global kill-switch
+(`free_trial_enabled`) is managed from the dedicated
+[global settings page](#the-global-settings-page-تنظیمات-اکانت-تست-) below;
+the remaining keys are operator-set `Setting` rows without a Telegram
+page yet.
 
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
@@ -30,6 +35,60 @@ is the interactive admin surface).
 
 Per-panel readiness gates on top of these — the global switch alone never
 makes a trial available.
+
+## The global settings page («تنظیمات اکانت تست 🎁»)
+
+Path: **پنل ادمین → تنظیمات عمومی ⚙️ → تنظیمات اکانت تست 🎁**
+(`admin:trial_settings`), OWNER-only. This is the one place that flips
+`free_trial_enabled` and the one place that explains — with the exact
+shared-policy reason — why the user main-menu button is hidden. No new
+root-level admin menu item: the page lives inside the existing general
+settings landing.
+
+The page («🎁 تنظیمات اکانت تست رایگان») renders four diagnostics blocks,
+all computed by `getFreeTrialMenuAvailability()` (the SAME classifier the
+user menu uses — the admin view can never disagree with what users see):
+
+- «وضعیت سراسری:» — «فعال ✅» / «غیرفعال ❌» (the Setting);
+- «پنل‌های آماده تست:» — count of panels claimable right now;
+- «پنل‌های فعال ولی ناقص:» — trial-enabled panels that are not ready;
+- «وضعیت نمایش دکمه کاربر:» — «نمایش داده می‌شود ✅» / «مخفی است ❌»,
+  plus, when hidden, «علت مخفی بودن دکمه:» with exactly one of:
+  - «تست رایگان به‌صورت سراسری غیرفعال است.» (`GLOBAL_DISABLED`)
+  - «هیچ پنل آماده‌ای برای ساخت اکانت تست وجود ندارد.» (`NO_READY_PANEL`)
+  - «تنظیمات پنل‌های تست کامل نیست.» (`PANEL_CONFIG_INCOMPLETE`)
+  - «هیچ اینباند معتبری برای تست XUI انتخاب نشده است.»
+    (`NO_VALID_XUI_INBOUND`)
+
+Keyboard (stable callbacks, never derived from the Persian labels):
+
+| Button | Callback | Action |
+| --- | --- | --- |
+| فعال کردن تست رایگان (only while disabled) | `admin:trial_settings:en` | two-step confirm («آیا از فعال کردن اکانت تست رایگان برای کاربران مطمئن هستید؟» » `…:en:yes`) |
+| غیرفعال کردن تست رایگان (only while enabled) | `admin:trial_settings:dis` | two-step confirm («آیا از غیرفعال کردن اکانت تست رایگان برای کاربران مطمئن هستید؟» » `…:dis:yes`) |
+| مشاهده پنل‌های آماده | `admin:trial_settings:ready` | safe ready-panel list (name, type, «مدت تست», «حجم تست») + a «تنظیمات پنل 🎁» link per panel to its existing trial page |
+| مشاهده پنل‌های ناقص | `admin:trial_settings:inc` | per-panel safe problem sentence (`trialPanelProblemLabel`) + the same per-panel link |
+| بروزرسانی وضعیت ♻️ | `admin:trial_settings` | recompute + re-render |
+| بازگشت به تنظیمات عمومی | `admin:general_settings` | back |
+
+Enable flow: gate OWNER » re-read the Setting (already enabled answers
+«اکانت تست رایگان از قبل فعال است.») » recompute readiness — **zero ready
+panels refuses** with «امکان فعال‌سازی وجود ندارد؛ ابتدا تنظیمات اکانت
+تست حداقل یک پنل را کامل کنید.» » confirmation » the confirm route
+re-checks everything again (stale confirmations), then flips the Setting
+with an atomic **compare-and-set**
+(`compareAndSetFreeTrialEnabled(false, true)` — a conditional
+`updateMany`/guarded `create`, so two racing admins can never both win) »
+clears the settings cache » re-renders with «اکانت تست رایگان برای
+کاربران فعال شد ✅». Disable mirrors it (idempotent answer «اکانت تست
+رایگان از قبل غیرفعال است.», success «اکانت تست رایگان برای کاربران
+غیرفعال شد.») and flips ONLY the Setting: panels, existing
+`FreeTrialClaim` rows, trial `Service`s and remote accounts are never
+touched.
+
+The pages expose config values and counters only — never panel URLs,
+credentials, tokens or raw readiness/provider errors (unknown problem
+codes collapse into «پنل برای ساخت سرویس آماده نیست.»).
 
 ## Per-panel fields (`Panel.test*`)
 
@@ -101,7 +160,8 @@ out of the user flow.
 
 ## OWNER-only restriction
 
-Every trial route (`admin:panel:trial|tren|trdis|trpn|trst`, the legacy
+Every trial route (the global `admin:trial_settings*` pages,
+`admin:panel:trial|tren|trdis|trpn|trst`, the legacy
 `ts` route, trial field edits and trial toggles) requires
 `ctx.admin.role === "OWNER"`. Non-admins are already stopped by the admin
 auth middleware; an active non-OWNER admin gets only the safe toast
@@ -128,13 +188,17 @@ logger with **safe fields only**:
 
 | Event | Fields |
 | --- | --- |
-| enable / disable | `adminId`, `panelId`, `action: trial-enable\|trial-disable`, `before`, `after` |
+| global enable / disable | `adminId`, `action: free-trial-global-enable\|free-trial-global-disable`, `readyPanelCount` (enable), `result` |
+| global diagnostics viewed | `adminId`, `action: free-trial-diagnostics-view`, `readyPanelCount`, `result` (the availability reason) |
+| enable / disable (per panel) | `adminId`, `panelId`, `action: trial-enable\|trial-disable`, `before`, `after` |
 | toggle (`tade`) | `adminId`, `panelId`, `action: trial-toggle`, `field`, `before`, `after` |
 | field edit (`tvm`/`tdm`/`tmc`/`tib`) | `adminId`, `panelId`, `action: trial-field-edit`, `field`, `before`, `after` (non-secret scalar/array values only) |
 
 ## Limitations
 
-- Global settings have no Telegram editing page yet (Setting rows only).
+- Only `free_trial_enabled` has a Telegram editing page; the other global
+  keys (cooldown, once-per-user, purchase/membership requirements, notice
+  text) remain operator-set Setting rows.
 - `free_trial_require_channel_membership` inherits the force-join
   placeholder until real `getChatMember` verification lands.
 - Manual-review escalations DM active OWNER admins directly (LogTopic
