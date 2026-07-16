@@ -73,7 +73,7 @@ export async function buildSupportLandingKeyboard(): Promise<InlineKeyboard> {
     .text("بازگشت به منوی اصلی", CB.USER_MENU);
 }
 
-async function renderLanding(ctx: BotContext): Promise<void> {
+export async function renderSupportLanding(ctx: BotContext): Promise<void> {
   clearSupportState(ctx);
   delete ctx.session.temp.userTicketListPage;
   await safeAnswerCallback(ctx);
@@ -191,12 +191,12 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
 }
 
 supportHandler.callbackQuery(CB.USER_SUPPORT, async (ctx) => {
-  await renderLanding(ctx);
+  await renderSupportLanding(ctx);
   ctx.session.lastMenu = CB.USER_SUPPORT;
 });
 
 supportHandler.callbackQuery(SUP_CB.cancel, async (ctx) => {
-  await renderLanding(ctx);
+  await renderSupportLanding(ctx);
 });
 
 supportHandler.callbackQuery(SUP_CB.new, async (ctx) => {

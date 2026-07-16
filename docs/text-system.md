@@ -104,3 +104,23 @@ bytes); ButtonText edits change only what the user sees. Editing
 so operators cannot break navigation, and old keyboards in Telegram chats
 keep working. Whole-tree route integrity (no dead buttons, no orphan routes)
 is locked by `apps/bot/tests/navigation-integrity.test.ts`.
+
+## Main-menu labels and reply-keyboard routing
+
+Since the menu-keyboard-mode phase, the 8 user main-menu ButtonText rows
+(`MAIN_MENU_BUTTON_KEYS`) do double duty: besides being displayed, their
+**current** labels are what incoming reply-keyboard text is matched
+against when the user menu runs in `REPLY` mode (exact trimmed match →
+language-neutral action; the label still never selects behavior on its
+own — the wiring is stable). Consequences:
+
+- label edits apply immediately in **both** keyboard modes (the cache is
+  cleared on every edit), and the old label stops routing at the same
+  moment;
+- `updateButtonText` rejects an edit that would make two main-menu labels
+  identical — «این متن دکمه با یکی دیگر از دکمه‌های منوی اصلی یکسان است.»
+  — since a duplicate would make text routing ambiguous (the resolver
+  additionally fails safe to no action on any residual ambiguity). The
+  guard is scoped to the 8 main-menu keys only.
+
+Design details in `docs/user-menu-keyboard-modes.md`.

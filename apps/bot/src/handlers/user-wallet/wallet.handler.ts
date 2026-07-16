@@ -54,7 +54,7 @@ function clearTopupState(ctx: BotContext): void {
   ctx.session.temp.walletTopupDraft = undefined;
 }
 
-async function renderWallet(ctx: BotContext, answer?: string): Promise<void> {
+export async function renderWallet(ctx: BotContext, answer?: string): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     return;

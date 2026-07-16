@@ -208,7 +208,7 @@ export async function buildHistoryLandingKeyboard(): Promise<InlineKeyboard> {
     .text("بازگشت به منوی اصلی", CB.USER_MENU);
 }
 
-async function renderHub(ctx: BotContext): Promise<void> {
+export async function renderOrdersHub(ctx: BotContext): Promise<void> {
   await safeAnswerCallback(ctx);
   // Fix D: operator-editable landing text.
   const notice = await getMessageTemplate("history_landing_text");
@@ -220,12 +220,12 @@ async function renderHub(ctx: BotContext): Promise<void> {
 }
 
 userOrdersHandler.callbackQuery(CB.USER_ORDERS, async (ctx) => {
-  await renderHub(ctx);
+  await renderOrdersHub(ctx);
   ctx.session.lastMenu = CB.USER_ORDERS;
 });
 
 userOrdersHandler.callbackQuery("user:hist", async (ctx) => {
-  await renderHub(ctx);
+  await renderOrdersHub(ctx);
 });
 
 // --- Phase 29 deep routes (unchanged behavior) -----------------------------------------------

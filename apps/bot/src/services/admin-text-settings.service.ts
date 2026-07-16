@@ -1,6 +1,7 @@
 import { prisma, type ButtonText, type MessageTemplate } from "@zedbot/database";
 
 import { logger } from "../core/logger.js";
+import { MAIN_MENU_BUTTON_KEYS } from "../keyboards/user-menu-definition.js";
 import { validateTemplateContentVariables } from "./template-variables.js";
 import { clearTextCache } from "./text.service.js";
 
@@ -161,6 +162,10 @@ export async function getButtonTextByShortId(shortId: string): Promise<ButtonTex
   return matches.length === 1 ? matches[0] : null;
 }
 
+/** Reply-keyboard routing safety: two main-menu labels must never collide. */
+export const DUPLICATE_MAIN_MENU_LABEL_TEXT =
+  "این متن دکمه با یکی دیگر از دکمه‌های منوی اصلی یکسان است.";
+
 /** New currentText for an EDITABLE button; clears the text cache. */
 export async function updateButtonText(
   id: string,
@@ -170,6 +175,22 @@ export async function updateButtonText(
   const clean = text.trim();
   if (clean.length < BUTTON_TEXT_MIN || clean.length > BUTTON_TEXT_MAX) {
     return { ok: false, safeMessage: INVALID_BUTTON_TEXT_TEXT };
+  }
+  // Menu-keyboard-mode phase: reply-keyboard routing resolves incoming text
+  // against the CURRENT main-menu labels, so a main-menu label may never
+  // equal another main-menu button's label (ambiguous navigation).
+  const editing = await prisma.buttonText.findUnique({ where: { id } });
+  if (editing !== null && MAIN_MENU_BUTTON_KEYS.includes(editing.key)) {
+    const clash = await prisma.buttonText.findFirst({
+      where: {
+        key: { in: MAIN_MENU_BUTTON_KEYS.filter((key) => key !== editing.key) },
+        currentText: clean,
+      },
+      select: { id: true },
+    });
+    if (clash !== null) {
+      return { ok: false, safeMessage: DUPLICATE_MAIN_MENU_LABEL_TEXT };
+    }
   }
   const updated = await prisma.buttonText.updateMany({
     where: { id, isEditable: true },

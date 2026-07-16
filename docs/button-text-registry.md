@@ -16,6 +16,16 @@ overwritten (see `docs/text-system.md`).
 - Operators edit per item via «تنظیمات عمومی ⚙️ → مدیریت متن‌ها ✍️»
   (update or reset-to-default; `isEditable` rows only — all seeded rows are
   editable).
+- **Duplicate-label restriction (menu-keyboard-mode phase)**: the 8 user
+  main-menu keys (`buy_subscription`, `renew_service`, `my_services`,
+  `wallet`, `other_products`, `my_orders`, `support`, `free_test` —
+  `MAIN_MENU_BUTTON_KEYS`) may never share a current label, because in
+  `REPLY` keyboard mode incoming text is resolved against these labels.
+  An edit that would collide with another main-menu button's current
+  label is rejected with
+  «این متن دکمه با یکی دیگر از دکمه‌های منوی اصلی یکسان است.». The guard
+  applies only across those 8 keys; all other rows are unaffected. See
+  `docs/user-menu-keyboard-modes.md`.
 - Rows for hidden placeholder sections (`tutorials`,
   `referral`, `pricing`, `representative_request`, `lucky_wheel`) stay seeded
   so their labels are ready when those features ship; the buttons themselves

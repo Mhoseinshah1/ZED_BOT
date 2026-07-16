@@ -273,6 +273,12 @@ monitor trials per panel (OWNER-only page). Design in
 `docs/free-trial-admin-management.md`, threat model in
 `docs/free-trial-security.md`.
 
+**Configurable user main-menu keyboard**: admins choose («تنظیمات عمومی ⚙️
+→ نوع نمایش منوی کاربر») whether the user main menu renders as inline
+glass buttons inside the message (default) or as a persistent reply
+keyboard below the input field — one shared menu definition drives both
+modes; see `docs/user-menu-keyboard-modes.md`.
+
 ### Persian bot copy
 
 All Telegram-visible user and admin texts are Persian and aligned with the
