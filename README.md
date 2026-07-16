@@ -263,6 +263,16 @@ retries/reconciliation) — `docs/service-naming-strategies.md`,
 `docs/provisioning-idempotency.md`. OTHER_PRODUCT orders get safe
 deterministic delivery references — `docs/other-product-naming.md`.
 
+**Free-trial VPN accounts** (disabled by default): eligible users can
+claim one real trial account per the operator's policy — an atomic,
+DB-guarded `FreeTrialClaim` entitlement that provisions a real panel
+account and a real local Service with **zero payment-system writes**
+(no orders, payments, wallet or referral effects). Admins configure and
+monitor trials per panel (OWNER-only page). Design in
+`docs/free-trial-architecture.md`, operator guide in
+`docs/free-trial-admin-management.md`, threat model in
+`docs/free-trial-security.md`.
+
 ### Persian bot copy
 
 All Telegram-visible user and admin texts are Persian and aligned with the

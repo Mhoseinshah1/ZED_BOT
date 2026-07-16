@@ -16,10 +16,16 @@ overwritten (see `docs/text-system.md`).
 - Operators edit per item via «تنظیمات عمومی ⚙️ → مدیریت متن‌ها ✍️»
   (update or reset-to-default; `isEditable` rows only — all seeded rows are
   editable).
-- Rows for hidden placeholder sections (`tutorials`, `free_test`,
+- Rows for hidden placeholder sections (`tutorials`,
   `referral`, `pricing`, `representative_request`, `lucky_wheel`) stay seeded
   so their labels are ready when those features ship; the buttons themselves
   are not rendered in menus.
+- `free_test` left the placeholder list in the free-trial phase: it is now
+  the real main-menu trial button «اکانت تست رایگان 🎁», rendered
+  conditionally (feature enabled + ≥ 1 trial-ready panel — see
+  `docs/free-trial-architecture.md`). Its seeded default was updated from
+  the literal-brace placeholder «اشتراک رایگان {تست}»; operator-customized
+  labels are, as always, untouched by the seed.
 
 | Key | Title | Default (Persian) | Editable |
 | --- | --- | --- | --- |
@@ -31,7 +37,7 @@ overwritten (see `docs/text-system.md`).
 | `wallet` | کیف پول | کیف پول + شارژ 🏦 | yes |
 | `support` | پشتیبانی | پشتیبانی ☎️ | yes |
 | `tutorials` | آموزش | آموزش 📚 | yes |
-| `free_test` | اشتراک رایگان تست | اشتراک رایگان {تست} | yes |
+| `free_test` | اکانت تست رایگان | اکانت تست رایگان 🎁 | yes |
 | `referral` | زیرمجموعه گیری | زیرمجموعه گیری 👥 | yes |
 | `other_products` | محصولات دیگر | محصولات دیگر 🛍 | yes |
 | `my_orders` | سفارش‌های من | سفارش‌های من 🧾 | yes |

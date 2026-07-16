@@ -93,6 +93,22 @@ capability statuses (`panelCapabilityStatusLines`): ساخت سرویس ·
 persisted readiness test; an unsupported `apiVariant` marks every
 operation «نسخه API ناسازگار است».
 
+## Free trials
+
+Free-trial availability rides the same capability model
+(`assessTrialPanelConfig` in `apps/bot/src/services/free-trial.service.ts`):
+a panel can serve trials only when it satisfies the purchase-grade
+provisioning bar — `status = ACTIVE`, the adapter supports
+`createService`, the local configuration assessment passes, and the last
+persisted readiness check did not fail (`provisioningReady === false`
+blocks; `null`/untested does not) — PLUS the trial-specific config
+(positive duration and traffic, valid capacity, complete naming config,
+and for XUI a non-empty `testInboundIds` subset of the panel allowlist).
+**Readiness invalidation applies unchanged**: editing any
+provisioning-relevant panel field resets the persisted readiness result,
+and an explicitly failed «تست اتصال» blocks trials exactly as it blocks
+sales. See `docs/free-trial-architecture.md`.
+
 ## Outcome model (provisioning flow safety)
 
 `createServiceAccount` results distinguish four outcomes:

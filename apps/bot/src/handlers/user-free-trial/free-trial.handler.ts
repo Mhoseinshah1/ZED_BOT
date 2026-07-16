@@ -1,4 +1,4 @@
-import { prisma, type Panel } from "@zedbot/database";
+import { type Panel } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 

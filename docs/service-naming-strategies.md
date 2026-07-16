@@ -166,6 +166,23 @@ context, no order, no remote call). Saving answers
 «اطلاعات لازم برای این روش نام‌گذاری کامل نیست.» while required fields are
 missing (checkout stays blocked until fixed).
 
+## Free-trial accounts (trial note)
+
+Free trials (`docs/free-trial-architecture.md`) use the **same eight
+strategies** through the same resolver — `resolveVpnRemoteIdentity` takes
+a generic subject, and for a trial the **`FreeTrialClaim` id replaces the
+order id** as the deterministic source (the `orderShort` component, the
+truncation tail and the collision suffix all derive from the claim id).
+The resolved snapshot is frozen once (compare-and-set on
+`FreeTrialClaim.usernameSnapshot IS NULL`) and persisted on BOTH
+`FreeTrialClaim.namingSnapshot` (plus a `trialMarker` field) and the
+created `Service.namingStrategySnapshot` — trial retries and
+reconciliation reuse the stored identity exactly like paid orders reuse
+`Order.namingSnapshot`. The trial ownership marker is
+`zedbot trial:<claim-short> tg:<telegramId>` (the order marker's trial
+counterpart). An incomplete naming config blocks trial activation and
+trial claims the same way it blocks checkout.
+
 ## Privacy note
 
 `TELEGRAM_USERNAME_SEQUENCE` embeds the buyer's public Telegram username

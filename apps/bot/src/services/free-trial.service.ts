@@ -61,8 +61,9 @@ import {
 //
 // Provider truth: an UNKNOWN remote outcome never issues a second account
 // and never consumes/releases the entitlement without reconciliation - the
-// claim stays PROVISIONING and the sweep re-checks the exact username and
-// ownership marker. No secrets (tokens, passwords, subscription links) are
+// claim stays PROVISIONING and the sweep re-checks by the exact frozen
+// username (the ownership marker is persisted on the account note for
+// manual audits). No secrets (tokens, passwords, subscription links) are
 // ever logged.
 // =============================================================================
 

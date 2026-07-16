@@ -14,19 +14,23 @@ Changes to any layout below need an explicit new decision; tests in
 - Payment / order / provisioning / stock-delivery / wallet-mutation /
   renewal-mutation / receipt approval-rejection business logic.
 
-## User main menu (4 rows, implemented sections only)
+## User main menu (4 rows + conditional trial row, implemented sections only)
 
 | row | buttons (ButtonText-backed) |
 | --- | --- |
 | 1 | خرید اشتراک 🔐 → `user:buy` · تمدید سرویس ♻️ → `user:renew` |
 | 2 | سرویس‌های من 🛍 → `user:services` · کیف پول + شارژ 🏦 → `user:wallet` |
 | 3 | محصولات دیگر 🛍 → `user:other_products` · سفارش‌های من 🧾 → `user:orders` |
+| 3½ | اکانت تست رایگان 🎁 → `user:free_test` — **conditional, feature-gated (NOT a placeholder)**: rendered only when free trials are globally enabled AND at least one trial-ready panel exists; a fully operational section or no button at all (`docs/free-trial-architecture.md`) |
 | 4 | پشتیبانی ☎️ → `user:support` |
 
-The six unfinished placeholder sections (referral, free_test, lucky_wheel,
+The five unfinished placeholder sections (referral, lucky_wheel,
 tutorials, pricing, representative_request) are HIDDEN until their real
 flows land; their callbacks stay registered in
 `user-placeholders.handler.ts` so old Telegram keyboards keep answering.
+`free_test` left the placeholder list in the free-trial phase — its
+callback is owned by the real trial flow
+(`handlers/user-free-trial/free-trial.handler.ts`).
 
 ## User wallet landing (Fix A)
 
