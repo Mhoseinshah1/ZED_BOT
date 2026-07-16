@@ -5,9 +5,15 @@ import type { Panel } from "@zedbot/database";
 // the registries drive both keyboard rendering and text-input validation.
 // =============================================================================
 
-export type PanelPage = "detail" | "features" | "pricing" | "test" | "username" | "cfg";
+export type PanelPage = "detail" | "features" | "pricing" | "test" | "trial" | "username" | "cfg";
 
-export type FieldKind = "text" | "int" | "json-int-array" | "json-object";
+export type FieldKind =
+  | "text"
+  | "int"
+  | "positive-int"
+  | "positive-int-array"
+  | "json-int-array"
+  | "json-object";
 
 export interface EditableField {
   key: string;
@@ -37,9 +43,16 @@ export const EDITABLE_FIELDS: EditableField[] = [
   { key: "csmind", column: "customServiceMinDays", label: "سرویس دلخواه: حداقل روز", kind: "int", nullable: true, page: "pricing" },
   { key: "csmaxd", column: "customServiceMaxDays", label: "سرویس دلخواه: حداکثر روز", kind: "int", nullable: true, page: "pricing" },
 
-  // Test settings
-  { key: "tvm", column: "testVolumeMb", label: "حجم تست (مگابایت)", kind: "int", nullable: true, page: "test" },
-  { key: "tdm", column: "testDurationMinutes", label: "مدت تست (دقیقه)", kind: "int", nullable: true, page: "test" },
+  // Free-trial settings (OWNER-only trial page). Duration/volume/capacity
+  // must be strictly positive - assessTrialPanelConfig treats 0 as missing.
+  { key: "tvm", column: "testVolumeMb", label: "حجم تست (مگابایت)", kind: "positive-int", nullable: true, page: "trial" },
+  { key: "tdm", column: "testDurationMinutes", label: "مدت تست (دقیقه)", kind: "positive-int", nullable: true, page: "trial" },
+  { key: "tmc", column: "testMaxConcurrentAccounts", label: "ظرفیت تست (تعداد همزمان)", kind: "positive-int", nullable: true, page: "trial" },
+  // Trial inbound selection: a non-empty subset of Panel.inboundIds; the
+  // subset check itself needs the panel row and runs in handleEditField.
+  { key: "tib", column: "testInboundIds", label: "اینباندهای تست", kind: "positive-int-array", nullable: false, page: "trial", onlyFor: "XUI" },
+
+  // Legacy test display extras (no page button anymore; stale callbacks only)
   { key: "tpn", column: "testProductName", label: "نام محصول تست", kind: "text", nullable: true, page: "test" },
   { key: "tloc", column: "testLocation", label: "لوکیشن تست", kind: "text", nullable: true, page: "test" },
   { key: "tmt", column: "testMessageTemplate", label: "قالب پیام تست", kind: "text", nullable: true, page: "test" },
@@ -103,7 +116,10 @@ export const TOGGLE_FIELDS: ToggleField[] = [
   { key: "dsl", column: "dedicatedSubscriptionLinkEnabled", label: "لینک ساب اختصاصی", page: "features" },
   { key: "ucd", column: "userCanDisableService", label: "غیرفعال‌سازی توسط کاربر", page: "features" },
   { key: "uce", column: "userCanEnableService", label: "فعال‌سازی توسط کاربر", page: "features" },
+  // "te" stays registered ONLY for stale keyboards: the toggle handler
+  // special-cases testEnabled and routes to the guarded two-step trial flow.
   { key: "te", column: "testEnabled", label: "تست رایگان فعال", page: "test" },
+  { key: "tade", column: "testAutoDisableAfterExpiry", label: "غیرفعال‌سازی خودکار بعد از انقضا", page: "trial" },
   { key: "ale", column: "accountLimitEnabled", label: "محدودیت ظرفیت اکانت", page: "features" },
 ];
 
@@ -143,6 +159,53 @@ export function validateFieldInput(field: EditableField, raw: string): Validatio
         return { ok: false, error: "عدد وارد شده بیش از حد بزرگ است." };
       }
       return { ok: true, value };
+    }
+    case "positive-int": {
+      if (!/^\d+$/.test(text)) {
+        return { ok: false, error: "لطفاً فقط یک عدد صحیح بزرگ‌تر از صفر وارد کنید." };
+      }
+      const value = Number.parseInt(text, 10);
+      if (value <= 0) {
+        return { ok: false, error: "عدد باید بزرگ‌تر از صفر باشد." };
+      }
+      if (value > MAX_INT) {
+        return { ok: false, error: "عدد وارد شده بیش از حد بزرگ است." };
+      }
+      return { ok: true, value };
+    }
+    case "positive-int-array": {
+      // Accept "1,2,3", "1 2 3" or JSON "[1,2,3]" - positive ints only.
+      let parts: unknown[];
+      if (text.startsWith("[")) {
+        try {
+          const parsed: unknown = JSON.parse(text);
+          if (!Array.isArray(parsed)) {
+            return { ok: false, error: "فرمت نامعتبر. مثال: 1,2,3 یا [1,2,3]" };
+          }
+          parts = parsed;
+        } catch {
+          return { ok: false, error: "فرمت نامعتبر. مثال: 1,2,3 یا [1,2,3]" };
+        }
+      } else {
+        parts = text.split(/[\s,،]+/).filter((p) => p.length > 0);
+      }
+      if (parts.length === 0) {
+        return { ok: false, error: "حداقل یک شناسه وارد کنید. مثال: 1,2,3" };
+      }
+      const numbers: number[] = [];
+      for (const item of parts) {
+        const token = String(item).trim();
+        if (!/^\d+$/.test(token)) {
+          return { ok: false, error: "همه شناسه‌ها باید عدد صحیح بزرگ‌تر از صفر باشند. مثال: 1,2,3" };
+        }
+        const num = Number.parseInt(token, 10);
+        if (num <= 0 || num > MAX_INT) {
+          return { ok: false, error: "همه شناسه‌ها باید عدد صحیح بزرگ‌تر از صفر باشند. مثال: 1,2,3" };
+        }
+        numbers.push(num);
+      }
+      // Deduplicate but keep the admin's order.
+      return { ok: true, value: [...new Set(numbers)] };
     }
     case "json-int-array": {
       // Accept "1,2,3" or JSON "[1,2,3]".

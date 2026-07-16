@@ -84,6 +84,7 @@ import { pingHandler } from "./handlers/ping.handler.js";
 import { starsPaymentHandler } from "./handlers/stars-payment.handler.js";
 import { startHandler } from "./handlers/start.handler.js";
 import { termsHandler } from "./handlers/terms.handler.js";
+import { freeTrialHandler } from "./handlers/user-free-trial/free-trial.handler.js";
 import { userPlaceholdersHandler } from "./handlers/user-placeholders.handler.js";
 import { safeAnswerCallback } from "./utils/safe-reply.js";
 
@@ -241,6 +242,9 @@ export function createBot(token: string): Bot<BotContext> {
   // Phase 32: support tickets - must run before the placeholder handler,
   // which used to own CB.USER_SUPPORT.
   userArea.use(supportHandler);
+  // Free-trial phase: the real trial flow - must run before the placeholder
+  // handler, which used to own CB.USER_FREE_TEST.
+  userArea.use(freeTrialHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());

@@ -362,7 +362,9 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "wallet", title: "کیف پول", text: "کیف پول + شارژ 🏦" },
   { key: "support", title: "پشتیبانی", text: "پشتیبانی ☎️" },
   { key: "tutorials", title: "آموزش", text: "آموزش 📚" },
-  { key: "free_test", title: "اشتراک رایگان تست", text: "اشتراک رایگان {تست}" },
+  // Free-trial phase: the real main-menu label (was a literal-brace
+  // placeholder «اشتراک رایگان {تست}» before the flow existed).
+  { key: "free_test", title: "اکانت تست رایگان", text: "اکانت تست رایگان 🎁" },
   { key: "referral", title: "زیرمجموعه گیری", text: "زیرمجموعه گیری 👥" },
   { key: "other_products", title: "محصولات دیگر", text: "محصولات دیگر 🛍" },
   { key: "my_orders", title: "سفارش‌های من", text: "سفارش‌های من 🧾" },

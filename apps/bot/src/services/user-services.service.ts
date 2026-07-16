@@ -103,6 +103,18 @@ const EXTRA_TIME_STATUSES: ServiceStatus[] = [
  * the GLOBAL_CLIENT remote model hide every mutating action.
  */
 export async function resolveServiceDetailActions(service: Service): Promise<ServiceDetailActions> {
+  // Free-trial phase: trial services are read-only entitlements - no
+  // renewal, no extra volume/time, no toggle, no link regeneration. Live
+  // sync, stored links and configs stay available (rendered elsewhere).
+  if (service.source === "FREE_TRIAL") {
+    return {
+      toggleAction: null,
+      canBuyExtraVolume: false,
+      canBuyExtraTime: false,
+      canRegenerateLink: false,
+      canRenew: false,
+    };
+  }
   const panel = await prisma.panel.findUnique({ where: { id: service.panelId } });
   if (panel === null) {
     return {

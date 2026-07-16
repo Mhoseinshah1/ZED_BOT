@@ -261,6 +261,15 @@ enum ServiceStatus {
   FAILED
 }
 
+// Free-trial phase: how the Service entitlement came to exist. PAID services
+// flow through checkout/settlement; FREE_TRIAL services are claim-backed and
+// never count toward paid statistics, revenue or referral commissions.
+enum ServiceSource {
+  PAID
+  FREE_TRIAL
+  ADMIN_CREATED
+}
+
 enum OtherProductOrderStatus {
   PAID
   WAITING_USER_INFO
@@ -483,7 +492,7 @@ model User {
   referralAsReferred      Referral?            @relation("ReferralReferred")
   commissionsAsReferrer   ReferralCommission[] @relation("CommissionReferrer")
   commissionsAsReferred   ReferralCommission[] @relation("CommissionReferred")
-  testAccountHistories    TestAccountHistory[]
+  freeTrialClaims         FreeTrialClaim[]
   wheelSpinHistories      WheelSpinHistory[]
   supportTickets          SupportTicket[]
   supportMessages         SupportMessage[]
@@ -581,7 +590,9 @@ model Panel {
   customServiceMinDays          Int?
   customServiceMaxDays          Int?
 
-  // Free test settings
+  // Free test settings (free-trial phase: testEnabled/testVolumeMb/
+  // testDurationMinutes are the authoritative per-panel trial config; the
+  // remaining legacy fields stay editable display extras)
   testEnabled          Boolean @default(false)
   testVolumeMb         Int?
   testDurationMinutes  Int?
@@ -589,6 +600,12 @@ model Panel {
   testLocation         String?
   testMessageTemplate  String?
   testGuideAfterCreate String?
+  // Free-trial phase additions: optional concurrent-capacity cap, the XUI
+  // trial inbound selection (subset of Panel.inboundIds), and whether the
+  // cleanup loop disables the remote account after expiry.
+  testMaxConcurrentAccounts   Int?
+  testInboundIds              Json?
+  testAutoDisableAfterExpiry  Boolean @default(false)
 
   // Marzban / XUI provisioning settings
   templateUsername                 String?
@@ -634,7 +651,7 @@ model Panel {
   services             Service[]
   orders               Order[]
   hiddenForUsers       UserHiddenPanel[]
-  testAccountHistories TestAccountHistory[]
+  freeTrialClaims      FreeTrialClaim[]
   serviceEventLogs     ServiceEventLog[]
 
   @@index([status])
@@ -1131,6 +1148,8 @@ model Service {
   // lifecycle operations always use the stored `username`, never recompute.
   namingStrategySnapshot Json?
   status    ServiceStatus @default(CREATING)
+  // Free-trial phase: entitlement origin (PAID default keeps history intact).
+  source    ServiceSource @default(PAID)
 
   serviceLocation ServiceLocation @default(MULTI_LOCATION)
 
@@ -1178,7 +1197,7 @@ model Service {
   eventLogs            ServiceEventLog[]
   relatedOrders        Order[]              @relation("ServiceTargetOrders")
   checkoutSessions     CheckoutSession[]    @relation("ServiceCheckoutSessions")
-  testAccountHistories TestAccountHistory[]
+  freeTrialClaims      FreeTrialClaim[]
 
   @@index([userId])
   @@index([panelId])
@@ -1341,18 +1360,50 @@ model ReferralCommission {
 // Free test accounts / lucky wheel
 // =============================================================================
 
-model TestAccountHistory {
-  id        String   @id @default(uuid())
+// Free-trial phase: lifecycle of one free-trial entitlement. Migrated from
+// the unused TestAccountHistory placeholder (table renamed in place). The
+// claim - NOT a Payment/Order - is the entitlement record: it is created
+// atomically (partial unique index on userId over in-progress/active
+// statuses, see migration SQL) and drives provisioning, reconciliation and
+// expiry. FAILED/CANCELLED rows never block a retry; lifetime/cooldown
+// policy over EXPIRED rows is enforced transactionally in the service.
+enum FreeTrialClaimStatus {
+  CLAIMED
+  PROVISIONING
+  ACTIVE
+  FAILED
+  EXPIRED
+  CANCELLED
+  MANUAL_REVIEW
+}
+
+model FreeTrialClaim {
+  id        String               @id @default(uuid())
   userId    String
-  user      User     @relation(fields: [userId], references: [id])
+  user      User                 @relation(fields: [userId], references: [id])
   panelId   String
-  panel     Panel    @relation(fields: [panelId], references: [id])
+  panel     Panel                @relation(fields: [panelId], references: [id])
   serviceId String?
-  service   Service? @relation(fields: [serviceId], references: [id])
-  createdAt DateTime @default(now())
+  service   Service?             @relation(fields: [serviceId], references: [id])
+  status    FreeTrialClaimStatus @default(CLAIMED)
+
+  // Frozen at claim time so retries/reconciliation reuse the SAME identity.
+  usernameSnapshot String?
+  namingSnapshot   Json?
+  durationMinutes  Int?
+  trafficBytes     BigInt?
+
+  provisionedAt     DateTime?
+  expiresAt         DateTime?
+  // Short SAFE English marker - never raw provider/panel data.
+  failureReasonCode String?
+  attemptCount      Int       @default(0)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   @@index([userId])
   @@index([panelId])
+  @@index([status, createdAt])
   @@index([createdAt])
 }
 

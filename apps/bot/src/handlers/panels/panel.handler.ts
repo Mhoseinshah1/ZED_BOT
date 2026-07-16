@@ -5,8 +5,13 @@ import { Composer, InlineKeyboard } from "grammy";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
 import {
+  assessTrialPanelConfig,
+  trialStatsForPanel,
+} from "../../services/free-trial.service.js";
+import {
   countPanelProducts,
   createPanel,
+  getPanelById,
   getPanelByShortId,
   listPanels,
   panelShortId,
@@ -15,6 +20,7 @@ import {
 } from "../../services/panel.service.js";
 import { testPanelConnection } from "../../services/panel-test.service.js";
 import {
+  parsePanelInboundIds,
   READINESS_RELEVANT_COLUMNS,
   readinessResetData,
 } from "../../services/panel-readiness.service.js";
@@ -39,7 +45,15 @@ import {
   panelMenuKeyboard,
   panelMenuText,
   panelPageView,
+  panelTrialKeyboard,
+  panelTrialStatsText,
+  panelTrialText,
   statusMenuKeyboard,
+  trialDisableAskView,
+  trialEnableAskView,
+  TRIAL_CONFIG_INCOMPLETE_TEXT,
+  TRIAL_DISABLED_TEXT,
+  TRIAL_ENABLED_TEXT,
   usernamePatternKeyboard,
   USERNAME_PATTERNS,
 } from "./panel-views.js";
@@ -80,6 +94,71 @@ async function showDetail(ctx: BotContext, panel: Panel): Promise<void> {
     panelDetailKeyboard(panel, backList),
     HTML,
   );
+}
+
+// --- free-trial admin page (OWNER-only) ---------------------------------------
+
+/** Shown (toast only, no data) to active non-OWNER admins on trial routes. */
+export const TRIAL_OWNER_ONLY_TOAST =
+  "دسترسی به این بخش فقط برای مالک مجموعه فعال است.";
+
+/**
+ * OWNER-only gate for the free-trial routes. The panels area is otherwise
+ * any-admin; this is a local copy of the financial-reconciliation gate
+ * (centralized RBAC is a documented separate task). Non-admins are already
+ * stopped by adminAuthMiddleware; an active non-OWNER admin gets the safe
+ * toast and no trial data at all.
+ */
+async function requireOwner(ctx: BotContext): Promise<boolean> {
+  if (ctx.admin === null) {
+    return false;
+  }
+  if (ctx.admin.role === "OWNER") {
+    return true;
+  }
+  await safeAnswerCallback(ctx, TRIAL_OWNER_ONLY_TOAST);
+  return false;
+}
+
+/**
+ * Trial inbound input must be a NON-EMPTY subset of the panel's allowlist -
+ * ids outside Panel.inboundIds can never provision. Exported for tests.
+ */
+export function assessTrialInboundInput(
+  panel: Panel,
+  ids: number[],
+): { ok: true } | { ok: false; error: string } {
+  const allowed = parsePanelInboundIds(panel.inboundIds);
+  if (allowed.length === 0) {
+    return {
+      ok: false,
+      error: "ابتدا شناسه‌های inbound خود پنل را در «تنظیمات پنل ⚙️» تنظیم کنید.",
+    };
+  }
+  const allowedSet = new Set(allowed);
+  const invalid = [...new Set(ids.filter((id) => !allowedSet.has(id)))];
+  if (invalid.length > 0) {
+    return {
+      ok: false,
+      error: `شناسه‌های اینباند تست باید داخل لیست اینباندهای مجاز پنل باشند. شناسه‌های نامعتبر: ${invalid.join(", ")}`,
+    };
+  }
+  return { ok: true };
+}
+
+async function trialPageView(
+  panel: Panel,
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const stats = await trialStatsForPanel(panel);
+  return {
+    text: panelTrialText(panel, assessTrialPanelConfig(panel), stats),
+    keyboard: panelTrialKeyboard(panel),
+  };
+}
+
+async function showTrialPage(ctx: BotContext, panel: Panel): Promise<void> {
+  const view = await trialPageView(panel);
+  await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
 }
 
 // --- root menu + list --------------------------------------------------------
@@ -318,12 +397,11 @@ panelHandler.callbackQuery(/^admin:panel:del:([^:]+):yes$/, async (ctx) => {
   await safeEditOrReply(ctx, `پنل «${updated.name}» غیرفعال و مخفی شد.`, kb);
 });
 
-// --- feature / pricing / test / cfg pages ------------------------------------
+// --- feature / pricing / cfg pages --------------------------------------------
 
-const PAGE_ROUTES: Array<{ pattern: RegExp; page: "features" | "pricing" | "test" | "cfg" }> = [
+const PAGE_ROUTES: Array<{ pattern: RegExp; page: "features" | "pricing" | "cfg" }> = [
   { pattern: /^admin:panel:feat:(.+)$/, page: "features" },
   { pattern: /^admin:panel:price:(.+)$/, page: "pricing" },
-  { pattern: /^admin:panel:ts:(.+)$/, page: "test" },
   { pattern: /^admin:panel:cfg:(.+)$/, page: "cfg" },
 ];
 
@@ -338,6 +416,151 @@ for (const route of PAGE_ROUTES) {
     await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
   });
 }
+
+// --- free-trial admin routes (all OWNER-only) ----------------------------------
+
+// «اکانت تست 🎁» page. The legacy «تنظیمات تست» route (admin:panel:ts:)
+// stays registered and renders the SAME trial page so stale buttons keep
+// working.
+for (const pattern of [/^admin:panel:trial:(.+)$/, /^admin:panel:ts:(.+)$/]) {
+  panelHandler.callbackQuery(pattern, async (ctx) => {
+    if (!(await requireOwner(ctx))) {
+      return;
+    }
+    const panel = await resolvePanel(ctx, ctx.match[1]);
+    if (panel === null) {
+      return;
+    }
+    await safeAnswerCallback(ctx);
+    await showTrialPage(ctx, panel);
+  });
+}
+
+// Two-step enable: ask first (same shape as the delete flow).
+panelHandler.callbackQuery(/^admin:panel:tren:([^:]+)$/, async (ctx) => {
+  if (!(await requireOwner(ctx))) {
+    return;
+  }
+  const panel = await resolvePanel(ctx, ctx.match[1]);
+  if (panel === null) {
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const view = trialEnableAskView(panel);
+  await safeEditOrReply(ctx, view.text, view.keyboard);
+});
+
+// Enable confirm: re-fetch + re-validate (the confirmation may be stale),
+// then a CAS flip so double-clicks / concurrent confirms stay idempotent.
+panelHandler.callbackQuery(/^admin:panel:tren:([^:]+):yes$/, async (ctx) => {
+  if (!(await requireOwner(ctx))) {
+    return;
+  }
+  const panel = await resolvePanel(ctx, ctx.match[1]);
+  if (panel === null) {
+    return;
+  }
+  const assessment = assessTrialPanelConfig(panel);
+  if (!assessment.ok) {
+    await safeAnswerCallback(ctx, TRIAL_CONFIG_INCOMPLETE_TEXT);
+    await showTrialPage(ctx, panel);
+    return;
+  }
+  const enabled = await prisma.panel.updateMany({
+    where: { id: panel.id, testEnabled: false },
+    data: { testEnabled: true },
+  });
+  if (enabled.count === 1) {
+    // Audit trail: safe fields only - ids and the flipped flag.
+    logger.info("panel trial enabled", {
+      adminId: ctx.admin?.id ?? null,
+      panelId: panel.id,
+      action: "trial-enable",
+      before: false,
+      after: true,
+    });
+    await safeAnswerCallback(ctx, TRIAL_ENABLED_TEXT);
+  } else {
+    // Already enabled (double-click / concurrent confirm): just re-render.
+    await safeAnswerCallback(ctx);
+  }
+  await showTrialPage(ctx, (await getPanelById(panel.id)) ?? panel);
+});
+
+// Two-step disable: ask first.
+panelHandler.callbackQuery(/^admin:panel:trdis:([^:]+)$/, async (ctx) => {
+  if (!(await requireOwner(ctx))) {
+    return;
+  }
+  const panel = await resolvePanel(ctx, ctx.match[1]);
+  if (panel === null) {
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const view = trialDisableAskView(panel);
+  await safeEditOrReply(ctx, view.text, view.keyboard);
+});
+
+// Disable confirm: CAS flip. Disabling only stops NEW claims - existing
+// claims/services are never touched here (expiry stays with the sweep).
+panelHandler.callbackQuery(/^admin:panel:trdis:([^:]+):yes$/, async (ctx) => {
+  if (!(await requireOwner(ctx))) {
+    return;
+  }
+  const panel = await resolvePanel(ctx, ctx.match[1]);
+  if (panel === null) {
+    return;
+  }
+  const disabled = await prisma.panel.updateMany({
+    where: { id: panel.id, testEnabled: true },
+    data: { testEnabled: false },
+  });
+  if (disabled.count === 1) {
+    logger.info("panel trial disabled", {
+      adminId: ctx.admin?.id ?? null,
+      panelId: panel.id,
+      action: "trial-disable",
+      before: true,
+      after: false,
+    });
+    await safeAnswerCallback(ctx, TRIAL_DISABLED_TEXT);
+  } else {
+    await safeAnswerCallback(ctx);
+  }
+  await showTrialPage(ctx, (await getPanelById(panel.id)) ?? panel);
+});
+
+// «پیش‌نمایش نام»: safe sample preview (no counter reservation, no remote).
+panelHandler.callbackQuery(/^admin:panel:trpn:(.+)$/, async (ctx) => {
+  if (!(await requireOwner(ctx))) {
+    return;
+  }
+  const panel = await resolvePanel(ctx, ctx.match[1]);
+  if (panel === null) {
+    return;
+  }
+  const preview = previewNamingStrategy(panel, panel.usernamePatternType);
+  await safeAnswerCallback(
+    ctx,
+    preview.ok ? `نمونه نام ساخته‌شده:\n${preview.preview}` : preview.preview,
+  );
+  await showTrialPage(ctx, panel);
+});
+
+// «آمار اکانت‌های تست»: counters only - no URLs, no credentials.
+panelHandler.callbackQuery(/^admin:panel:trst:(.+)$/, async (ctx) => {
+  if (!(await requireOwner(ctx))) {
+    return;
+  }
+  const panel = await resolvePanel(ctx, ctx.match[1]);
+  if (panel === null) {
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const stats = await trialStatsForPanel(panel);
+  const kb = new InlineKeyboard().text("بازگشت", cb.trial(panelShortId(panel)));
+  await safeEditOrReply(ctx, panelTrialStatsText(panel, stats), kb, HTML);
+});
 
 // Username settings page + pattern selector.
 panelHandler.callbackQuery(/^admin:panel:us:(.+)$/, async (ctx) => {
@@ -409,11 +632,39 @@ panelHandler.callbackQuery(/^admin:panel:tg:([^:]+):([a-z0-9]+)$/, async (ctx) =
     await safeAnswerCallback(ctx, "گزینه نامعتبر.");
     return;
   }
+  // Stale «تست رایگان فعال» buttons: testEnabled now only flips through the
+  // guarded two-step trial flow (validation + CAS) - render the trial page
+  // instead of blindly toggling.
+  if (toggle.column === "testEnabled") {
+    if (!(await requireOwner(ctx))) {
+      return;
+    }
+    await safeAnswerCallback(ctx);
+    await showTrialPage(ctx, panel);
+    return;
+  }
+  // Trial-page toggles are OWNER-only like the trial page itself.
+  if (toggle.page === "trial" && !(await requireOwner(ctx))) {
+    return;
+  }
   const current = panel[toggle.column] === true;
   const updated = await updatePanel(panel.id, {
     [toggle.column]: !current,
   } as Prisma.PanelUpdateInput);
   await safeAnswerCallback(ctx, !current ? "فعال شد ✅" : "غیرفعال شد ❌");
+  if (toggle.page === "trial") {
+    // Audit trail for trial config flips: safe fields only.
+    logger.info("panel trial config changed", {
+      adminId: ctx.admin?.id ?? null,
+      panelId: panel.id,
+      action: "trial-toggle",
+      field: toggle.column,
+      before: current,
+      after: !current,
+    });
+    await showTrialPage(ctx, updated);
+    return;
+  }
   const view = panelPageView(updated, toggle.page === "test" ? "test" : "features");
   await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
 });
@@ -478,6 +729,17 @@ panelHandler.callbackQuery(/^admin:panel:fe:([^:]+):(.+)$/, async (ctx) => {
     return;
   }
   const fieldKey = ctx.match[2];
+  // Trial fields are OWNER-only (like the trial page); tib is XUI-only.
+  const knownField = findField(fieldKey);
+  if (knownField !== undefined && knownField.page === "trial") {
+    if (!(await requireOwner(ctx))) {
+      return;
+    }
+    if (knownField.onlyFor !== undefined && knownField.onlyFor !== panel.type) {
+      await safeAnswerCallback(ctx, "فقط برای پنل‌های XUI.");
+      return;
+    }
+  }
   await safeAnswerCallback(ctx);
   ctx.session.temp.editingPanelId = panel.id;
 
@@ -498,7 +760,7 @@ panelHandler.callbackQuery(/^admin:panel:fe:([^:]+):(.+)$/, async (ctx) => {
     return;
   }
 
-  const field = findField(fieldKey);
+  const field = knownField;
   if (field === undefined) {
     await safeReply(ctx, "فیلد نامعتبر است.");
     return;
@@ -737,10 +999,38 @@ async function handleEditField(ctx: BotContext, text: string): Promise<void> {
     await safeReply(ctx, `${validation.error}\nدوباره وارد کنید.`);
     return;
   }
+  // Trial fields: fetch the current row for the subset check + audit trail.
+  let panelBefore: Panel | null = null;
+  if (field.page === "trial") {
+    panelBefore = await getPanelById(panelId);
+    if (panelBefore === null) {
+      clearFlow(ctx);
+      await safeReply(ctx, "پنل یافت نشد.");
+      return;
+    }
+    if (field.key === "tib") {
+      const subset = assessTrialInboundInput(panelBefore, validation.value as number[]);
+      if (!subset.ok) {
+        await safeReply(ctx, `${subset.error}\nدوباره وارد کنید.`);
+        return;
+      }
+    }
+  }
   const updated = await updatePanel(panelId, {
     [field.column]: validation.value,
     ...(READINESS_RELEVANT_COLUMNS.has(field.column) ? readinessResetData() : {}),
   } as Prisma.PanelUpdateInput);
+  if (panelBefore !== null) {
+    // Audit trail for trial config edits: non-secret scalar/array values only.
+    logger.info("panel trial config changed", {
+      adminId: ctx.admin?.id ?? null,
+      panelId,
+      action: "trial-field-edit",
+      field: field.column,
+      before: panelBefore[field.column] ?? null,
+      after: validation.value,
+    });
+  }
   clearFlow(ctx);
   await safeReply(ctx, `«${field.label}» بروزرسانی شد ✅`);
   // Shrinking the XUI inbound allowlist can strand products whose selection
@@ -767,6 +1057,11 @@ async function handleEditField(ctx: BotContext, text: string): Promise<void> {
   // The name field belongs to the detail view; group fields return to their page.
   if (field.page === "detail") {
     await safeReply(ctx, panelDetailText(updated), panelDetailKeyboard(updated), HTML);
+    return;
+  }
+  if (field.page === "trial") {
+    const view = await trialPageView(updated);
+    await safeReply(ctx, view.text, view.keyboard, HTML);
     return;
   }
   const view = panelPageView(updated, field.page);
