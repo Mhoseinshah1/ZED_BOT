@@ -16,16 +16,20 @@ overwritten (see `docs/text-system.md`).
 - Operators edit per item via «تنظیمات عمومی ⚙️ → مدیریت متن‌ها ✍️»
   (update or reset-to-default; `isEditable` rows only — all seeded rows are
   editable).
-- **Duplicate-label restriction (menu-keyboard-mode phase)**: the 8 user
+- **Duplicate-label restriction (menu-keyboard-mode phases)**: the 8 user
   main-menu keys (`buy_subscription`, `renew_service`, `my_services`,
   `wallet`, `other_products`, `my_orders`, `support`, `free_test` —
-  `MAIN_MENU_BUTTON_KEYS`) may never share a current label, because in
-  `REPLY` keyboard mode incoming text is resolved against these labels.
-  An edit that would collide with another main-menu button's current
-  label is rejected with
-  «این متن دکمه با یکی دیگر از دکمه‌های منوی اصلی یکسان است.». The guard
-  applies only across those 8 keys; all other rows are unaffected. See
-  `docs/user-menu-keyboard-modes.md`.
+  `MAIN_MENU_BUTTON_KEYS`) may never share a current label, and neither
+  may the 9 admin main-menu keys (the `admin_*` rows below —
+  `ADMIN_MAIN_MENU_BUTTON_KEYS`), because in `REPLY` keyboard mode
+  incoming text is resolved against the current labels of each menu. An
+  edit that would collide with another button's current label **in the
+  same menu** is rejected with
+  «این متن دکمه با یکی دیگر از دکمه‌های همین منو یکسان است.». The two
+  menus are separate reply-routing contexts, so the same label may exist
+  in both; all other rows are unaffected. See
+  `docs/user-menu-keyboard-modes.md` and
+  `docs/admin-menu-keyboard-mode.md`.
 - Rows for hidden placeholder sections (`tutorials`,
   `referral`, `pricing`, `representative_request`, `lucky_wheel`) stay seeded
   so their labels are ready when those features ship; the buttons themselves
@@ -43,9 +47,12 @@ overwritten (see `docs/text-system.md`).
 - Admin-page button labels («تنظیمات اکانت تست 🎁», «فعال کردن تست
   رایگان», «غیرفعال کردن تست رایگان», «مشاهده پنل‌های آماده», «مشاهده
   پنل‌های ناقص», «بروزرسانی وضعیت ♻️» and the rest of the admin tree) are
-  code-level constants bound to stable callback ids, NOT registry rows —
-  the registry deliberately covers only user-facing buttons, and no
-  equivalent admin keys existed to reuse.
+  code-level constants bound to stable callback ids, NOT registry rows.
+  The one exception (admin-menu-keyboard-mode phase) is the admin **main
+  menu**: its 9 top-level navigation labels are the `admin_*` rows below
+  (defaults = the exact approved inline labels), so reply-keyboard
+  routing keeps working after operator edits — deeper admin pages stay
+  code-level. See `docs/admin-menu-keyboard-mode.md`.
 
 | Key | Title | Default (Persian) | Editable |
 | --- | --- | --- | --- |
@@ -83,3 +90,12 @@ overwritten (see `docs/text-system.md`).
 | `wallet_transactions` | تراکنش‌های کیف پول | تراکنش‌های کیف پول 🏦 | yes |
 | `back_to_support` | بازگشت به پشتیبانی | بازگشت به پشتیبانی | yes |
 | `back_to_history` | بازگشت به سوابق | بازگشت به سوابق | yes |
+| `admin_finance` | منوی ادمین: مالی | مالی 💎 | yes |
+| `admin_users` | منوی ادمین: مدیریت کاربران | مدیریت کاربران 👤 | yes |
+| `admin_products` | منوی ادمین: محصولات/پلن‌ها | مدیریت محصولات/پلن‌ها 📦 | yes |
+| `admin_panels` | منوی ادمین: مدیریت پنل‌ها | مدیریت پنل‌ها 🖥 | yes |
+| `admin_other_products` | منوی ادمین: محصولات دیگر | محصولات دیگر / سفارش‌های محصولات دیگر | yes |
+| `admin_support_tickets` | منوی ادمین: تیکت‌ها | تیکت‌های پشتیبانی 🎫 | yes |
+| `admin_broadcast` | منوی ادمین: پیام همگانی | پیام همگانی 📣 | yes |
+| `admin_general_settings` | منوی ادمین: تنظیمات عمومی | تنظیمات عمومی ⚙️ | yes |
+| `admin_reports_backup` | منوی ادمین: گزارشات / بکاپ | گزارشات / بکاپ 📊 | yes |

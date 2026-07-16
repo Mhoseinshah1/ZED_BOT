@@ -6,8 +6,10 @@ inside the menu message (the historical behavior and the default) — or
 **reply** — a persistent Telegram reply keyboard below the input field.
 Only the keyboard *type* switches. The approved menu structure, labels,
 ordering and visibility rules are one shared definition consumed by both
-renderers, so the two modes can never drift apart. Admin menus are never
-affected.
+renderers, so the two modes can never drift apart. The admin main menu
+has its own **independent** mode setting
+(`admin_main_menu_keyboard_mode`) — every combination of the two is
+supported; see `docs/admin-menu-keyboard-mode.md`.
 
 Code map:
 
@@ -40,41 +42,45 @@ Code map:
   and a corrupted value can never crash the menu or half-enable the
   feature (fail-closed).
 
-## Admin page: پنل ادمین → تنظیمات عمومی ⚙️ → نوع نمایش منوی کاربر
+## Admin page: پنل ادمین → تنظیمات عمومی ⚙️ → نوع نمایش منوها
 
 The general-settings landing (`admin:general_settings`) carries the
-«نوع نمایش منوی کاربر» button. Every route below requires an
-authenticated admin (`ctx.admin`), and a mode change always goes through
-an explicit confirmation step:
+«نوع نمایش منوها» button — since the admin-menu extension it opens a
+combined overview of **both** menu modes (`admin:menu_mode`, see
+`docs/admin-menu-keyboard-mode.md`); «تنظیم منوی کاربران» →
+`admin:menu_mode:user` leads to the user scope documented here. Every
+route below requires an authenticated admin (`ctx.admin`), and a mode
+change always goes through an explicit confirmation step:
 
-1. **Mode page** — `admin:menu_mode` shows the current mode:
+1. **Mode page** — `admin:menu_mode:user` shows the current mode:
 
    > نوع نمایش منوی کاربر
    >
    > نوع فعلی:
    > دکمه شیشه‌ای داخل پیام
 
-   Buttons: «دکمه شیشه‌ای» → `admin:menu_mode:ask:inline` ·
-   «دکمه معمولی» → `admin:menu_mode:ask:reply` ·
-   «بازگشت به تنظیمات عمومی» → `admin:general_settings`.
+   Buttons: «دکمه شیشه‌ای» → `admin:menu_mode:ask:user:inline` ·
+   «دکمه معمولی» → `admin:menu_mode:ask:user:reply` ·
+   «بازگشت» → `admin:menu_mode` (the combined overview).
 
-2. **Confirm** — `admin:menu_mode:ask:<inline|reply>`. Selecting the mode
-   that is already active only answers with the toast
+2. **Confirm** — `admin:menu_mode:ask:user:<inline|reply>`. Selecting the
+   mode that is already active only answers with the toast
    «این نوع نمایش از قبل فعال است.» (no page change). Otherwise a
    confirmation page asks:
 
    - switching to INLINE: «آیا منوی کاربر به حالت دکمه‌های شیشه‌ای داخل پیام تغییر کند؟»
    - switching to REPLY: «آیا منوی کاربر به حالت دکمه‌های معمولی پایین صفحه تغییر کند؟»
 
-   with «تایید ✅» → `admin:menu_mode:set:<mode>` and «انصراف» →
-   `admin:menu_mode`.
+   with «تایید ✅» → `admin:menu_mode:set:user:<mode>` and «انصراف» →
+   `admin:menu_mode:user`.
 
-3. **Apply** — `admin:menu_mode:set:<inline|reply>` re-checks the current
-   mode (already active → the same «از قبل فعال» toast plus a re-render),
-   otherwise stores the setting, logs the change with the acting admin's
-   id, answers «نوع نمایش منوی کاربر با موفقیت تغییر کرد ✅» and
-   re-renders the mode page. The `<mode>` callback parameter parses
-   fail-closed: anything other than `reply` means `INLINE`.
+3. **Apply** — `admin:menu_mode:set:user:<inline|reply>` re-checks the
+   current mode (already active → the same «از قبل فعال» toast plus a
+   re-render), otherwise stores the setting, logs the change with the
+   acting admin's id, answers «نوع نمایش منوی کاربر با موفقیت تغییر کرد ✅»
+   and re-renders the mode page. The `<scope>`/`<mode>` callback
+   parameters parse fail-closed: anything other than `admin` means the
+   user scope, anything other than `reply` means `INLINE`.
 
 ## One menu definition, two renderers
 
@@ -144,11 +150,15 @@ that would make one of the 8 main-menu ButtonText keys
 (`MAIN_MENU_BUTTON_KEYS`) equal to another main-menu button's current
 label, with:
 
-> این متن دکمه با یکی دیگر از دکمه‌های منوی اصلی یکسان است.
+> این متن دکمه با یکی دیگر از دکمه‌های همین منو یکسان است.
 
-The guard is scoped to the 8 main-menu keys only — all other ButtonText
-rows are unaffected. The resolver's fails-safe `null` on multiple matches
-remains as defense in depth (e.g. rows edited outside the bot).
+The guard is scoped **per menu**: the 8 user main-menu keys and the 9
+admin main-menu keys (`ADMIN_MAIN_MENU_BUTTON_KEYS`, see
+`docs/admin-menu-keyboard-mode.md`) are separate scopes, so the same
+label *may* exist in both menus — they are separate reply-routing
+contexts. All other ButtonText rows are unaffected. The resolver's
+fails-safe `null` on multiple matches remains as defense in depth
+(e.g. rows edited outside the bot).
 
 ### One dispatcher, the same section entries
 
@@ -167,7 +177,10 @@ The reply text router (`userMenuTextRouter`) is registered in `app.ts`
 **after** the flow-gated message dispatcher, so every active
 conversational flow (discount entry, support messages, receipt uploads,
 admin text edits, …) has already consumed its text before the router
-runs. Inside the router the checks run in this order, and everything that
+runs. Since the admin-menu extension, the admin reply text router
+(`adminMenuTextRouter`) is registered immediately **before** it — the
+approved priority is command → active flow → admin reply action → user
+reply action → fallback (see `docs/admin-menu-keyboard-mode.md`). Inside the router the checks run in this order, and everything that
 does not fully match falls through untouched:
 
 1. an active flow (`ctx.session.currentFlow !== null`) → pass through
@@ -193,13 +206,15 @@ mode at render time (`/start`, `/menu`, `user:menu`, `common:back`):
   persistent keyboard — Telegram cannot attach reply keyboards via
   `editMessageText` — and `ctx.session.replyMenuKeyboardActive` is set to
   `true`.
-- **INLINE** for a user whose session still has
-  `replyMenuKeyboardActive === true`: the bot first sends the one-time
+- **INLINE** for a user whose session still carries a stale persistent
+  keyboard flag (`replyMenuKeyboardActive` — or
+  `adminReplyMenuKeyboardActive` from the independent admin menu, see
+  `docs/admin-menu-keyboard-mode.md`): the bot first sends the one-time
   transition notice
 
   > نوع منوی ربات تغییر کرده است.
 
-  with `remove_keyboard: true`, clears the flag, and then renders the
+  with `remove_keyboard: true`, clears the flags, and then renders the
   inline menu as usual (edit-in-place for callbacks, fresh reply for
   commands). The notice appears **exactly once** per transition — later
   menu renders show only the inline menu.
@@ -227,13 +242,18 @@ panel — see `docs/free-trial-architecture.md`). Since both renderers
 - while visible, the trial label routes to `openFreeTrialSection`, which
   still re-checks eligibility server-side on every step.
 
-## Admin menus stay inline
+## The admin menu has its own independent mode
 
-The mode applies to the **user main menu only**. The admin panel and all
-admin pages keep their inline keyboards regardless of the setting.
-Additionally, the reply text router can only ever resolve the 8 user
-main-menu actions — admin actions are unreachable by text by
-construction (the tests prove that typing «پنل ادمین» resolves nothing).
+The `user_main_menu_keyboard_mode` setting applies to the **user main
+menu only**. The admin main menu is governed by its own independent
+setting (`admin_main_menu_keyboard_mode`, same values, same fail-closed
+`INLINE` default) — every combination of the two is supported. See
+`docs/admin-menu-keyboard-mode.md` for the admin side (shared admin menu
+definition, admin reply text router, authorization model). The **user**
+reply text router can still only ever resolve the 8 user main-menu
+actions — admin actions never route through it (the tests prove that
+typing «پنل ادمین» resolves nothing) — and all deeper admin pages keep
+their inline keyboards in every mode.
 
 ## Security notes
 

@@ -61,7 +61,7 @@ export function clearAdminSupportState(ctx: BotContext): void {
   delete ctx.session.temp.adminSupportReplyTicketId;
 }
 
-async function renderLanding(ctx: BotContext): Promise<void> {
+export async function renderLanding(ctx: BotContext): Promise<void> {
   clearAdminSupportState(ctx);
   const counts = await getAdminTicketCounts();
   await safeAnswerCallback(ctx);

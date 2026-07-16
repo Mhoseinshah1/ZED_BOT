@@ -398,4 +398,21 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "pm_settings_card", title: "تنظیمات کارت‌به‌کارت", text: "تنظیمات کارت‌به‌کارت" },
   { key: "pm_test", title: "تست اتصال روش پرداخت", text: "تست اتصال" },
   { key: "pm_back_providers", title: "بازگشت به روش‌های پرداخت", text: "بازگشت به روش‌های پرداخت" },
+  // Admin-menu-keyboard-mode phase: the admin MAIN menu section labels join
+  // the editable registry (defaults = the exact approved inline labels), so
+  // reply-keyboard routing keeps working after operator edits. Only the
+  // top-level navigation labels - deeper admin pages stay code-level.
+  { key: "admin_finance", title: "منوی ادمین: مالی", text: "مالی 💎" },
+  { key: "admin_users", title: "منوی ادمین: مدیریت کاربران", text: "مدیریت کاربران 👤" },
+  { key: "admin_products", title: "منوی ادمین: محصولات/پلن‌ها", text: "مدیریت محصولات/پلن‌ها 📦" },
+  { key: "admin_panels", title: "منوی ادمین: مدیریت پنل‌ها", text: "مدیریت پنل‌ها 🖥" },
+  {
+    key: "admin_other_products",
+    title: "منوی ادمین: محصولات دیگر",
+    text: "محصولات دیگر / سفارش‌های محصولات دیگر",
+  },
+  { key: "admin_support_tickets", title: "منوی ادمین: تیکت‌ها", text: "تیکت‌های پشتیبانی 🎫" },
+  { key: "admin_broadcast", title: "منوی ادمین: پیام همگانی", text: "پیام همگانی 📣" },
+  { key: "admin_general_settings", title: "منوی ادمین: تنظیمات عمومی", text: "تنظیمات عمومی ⚙️" },
+  { key: "admin_reports_backup", title: "منوی ادمین: گزارشات / بکاپ", text: "گزارشات / بکاپ 📊" },
 ];

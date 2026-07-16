@@ -93,7 +93,7 @@ function cancelKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("لغو ❌", PROD_CB.CANCEL);
 }
 
-async function showProductMenu(ctx: BotContext): Promise<void> {
+export async function showProductMenu(ctx: BotContext): Promise<void> {
   await safeEditOrReply(ctx, productMenuText(), productMenuKeyboard());
 }
 

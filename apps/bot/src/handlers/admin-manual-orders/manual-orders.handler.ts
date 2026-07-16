@@ -164,7 +164,7 @@ export function otherProductsLandingKeyboard(): InlineKeyboard {
     .text("بازگشت به پنل ادمین", CB.ADMIN_MENU);
 }
 
-async function renderLanding(ctx: BotContext): Promise<void> {
+export async function renderLanding(ctx: BotContext): Promise<void> {
   clearManualOrderState(ctx);
   const counts = await listManualOrders("open", 1);
   await safeAnswerCallback(ctx);

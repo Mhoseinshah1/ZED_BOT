@@ -113,7 +113,7 @@ function receiptReturnSid(ctx: BotContext): string | undefined {
   return context?.kind === "receipt" ? context.receiptId.slice(0, 8) : undefined;
 }
 
-async function renderLanding(ctx: BotContext): Promise<void> {
+export async function renderLanding(ctx: BotContext): Promise<void> {
   clearAdminUsersState(ctx); // full clear: flow + draft + stored search query
   await safeAnswerCallback(ctx);
   await safeEditOrReply(ctx, USERS_LANDING_TEXT, usersLandingKeyboard());

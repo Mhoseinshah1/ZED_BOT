@@ -117,10 +117,13 @@ own — the wiring is stable). Consequences:
 - label edits apply immediately in **both** keyboard modes (the cache is
   cleared on every edit), and the old label stops routing at the same
   moment;
-- `updateButtonText` rejects an edit that would make two main-menu labels
-  identical — «این متن دکمه با یکی دیگر از دکمه‌های منوی اصلی یکسان است.»
-  — since a duplicate would make text routing ambiguous (the resolver
-  additionally fails safe to no action on any residual ambiguity). The
-  guard is scoped to the 8 main-menu keys only.
+- `updateButtonText` rejects an edit that would make two labels of the
+  SAME main menu identical — «این متن دکمه با یکی دیگر از دکمه‌های همین
+  منو یکسان است.» — since a duplicate would make text routing ambiguous
+  (the resolver additionally fails safe to no action on any residual
+  ambiguity). The guard runs per menu scope: the 8 user main-menu keys
+  and the 9 `admin_*` admin main-menu keys are separate reply-routing
+  contexts, so the same label may exist in both menus.
 
-Design details in `docs/user-menu-keyboard-modes.md`.
+Design details in `docs/user-menu-keyboard-modes.md` and
+`docs/admin-menu-keyboard-mode.md`.

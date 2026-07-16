@@ -33,10 +33,12 @@ import {
   type TrialPanelDiagnostic,
 } from "../../services/free-trial.service.js";
 import {
+  getAdminMenuMode,
   getUserMenuMode,
   MENU_MODE_LABELS,
+  setAdminMenuMode,
   setUserMenuMode,
-  type UserMenuMode,
+  type MenuMode,
 } from "../../services/menu-mode.service.js";
 import { clearSettingsCache } from "../../services/settings.service.js";
 import { escapeHtml } from "../../utils/html.js";
@@ -64,8 +66,11 @@ const TX_CB = {
   // Menu-keyboard-mode phase: user main-menu keyboard mode page. Stable
   // identifiers - behavior never derives from the visible Persian labels.
   menuMode: "admin:menu_mode",
-  menuModeAsk: (mode: "inline" | "reply"): string => `admin:menu_mode:ask:${mode}`,
-  menuModeSet: (mode: "inline" | "reply"): string => `admin:menu_mode:set:${mode}`,
+  menuModeScope: (scope: "user" | "admin"): string => `admin:menu_mode:${scope}`,
+  menuModeAsk: (scope: "user" | "admin", mode: "inline" | "reply"): string =>
+    `admin:menu_mode:ask:${scope}:${mode}`,
+  menuModeSet: (scope: "user" | "admin", mode: "inline" | "reply"): string =>
+    `admin:menu_mode:set:${scope}:${mode}`,
   cancel: "admin:texts:cancel",
   templates: (page: number): string => `admin:texts:templates:${page}`,
   buttons: (page: number): string => `admin:texts:buttons:${page}`,
@@ -93,13 +98,13 @@ function preview(text: string, max = 600): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
-async function renderSettingsLanding(ctx: BotContext): Promise<void> {
+export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
   clearAdminTextSettingsState(ctx);
   await safeAnswerCallback(ctx);
   const kb = new InlineKeyboard()
     .text("مدیریت متن‌ها ✍️", TX_CB.texts)
     .row()
-    .text("نوع نمایش منوی کاربر", TX_CB.menuMode)
+    .text("نوع نمایش منوها", TX_CB.menuMode)
     .row()
     .text("تنظیمات اکانت تست 🎁", TRIAL_SETTINGS_CB.root)
     .row()
@@ -107,30 +112,87 @@ async function renderSettingsLanding(ctx: BotContext): Promise<void> {
   await safeEditOrReply(ctx, "تنظیمات عمومی ⚙️\n\nیک بخش را انتخاب کنید:", kb);
 }
 
-// --- user main-menu keyboard mode (menu-keyboard-mode phase) -------------------------------
+// --- main-menu keyboard modes (menu-keyboard-mode phases) ----------------------------------
+// One combined page manages BOTH independent settings (user menu + admin
+// menu). Every step stays on this fully Inline surface regardless of the
+// modes being configured; scope/mode always come from the stable callback
+// data, never from visible labels.
 
-const MENU_MODE_CONFIRM_TEXTS: Record<UserMenuMode, string> = {
-  INLINE: "آیا منوی کاربر به حالت دکمه‌های شیشه‌ای داخل پیام تغییر کند؟",
-  REPLY: "آیا منوی کاربر به حالت دکمه‌های معمولی پایین صفحه تغییر کند؟",
+type MenuModeScope = "user" | "admin";
+
+/** Persian display name of each configurable menu (page titles/texts). */
+const MENU_SCOPE_TITLES: Record<MenuModeScope, string> = {
+  user: "منوی کاربر",
+  admin: "منوی ادمین",
 };
-const MENU_MODE_CHANGED_OK_TEXT = "نوع نمایش منوی کاربر با موفقیت تغییر کرد ✅";
+
+const MENU_MODE_CONFIRM_TEXTS: Record<MenuModeScope, Record<MenuMode, string>> = {
+  user: {
+    INLINE: "آیا منوی کاربر به حالت دکمه‌های شیشه‌ای داخل پیام تغییر کند؟",
+    REPLY: "آیا منوی کاربر به حالت دکمه‌های معمولی پایین صفحه تغییر کند؟",
+  },
+  admin: {
+    INLINE: "آیا منوی ادمین به حالت دکمه‌های شیشه‌ای داخل پیام تغییر کند؟",
+    REPLY: "آیا منوی ادمین به حالت دکمه‌های معمولی پایین صفحه تغییر کند؟",
+  },
+};
+const MENU_MODE_CHANGED_OK_TEXTS: Record<MenuModeScope, string> = {
+  user: "نوع نمایش منوی کاربر با موفقیت تغییر کرد ✅",
+  admin: "نوع نمایش منوی ادمین با موفقیت تغییر کرد ✅",
+};
 const MENU_MODE_ALREADY_TEXT = "این نوع نمایش از قبل فعال است.";
 
-function parseModeParam(raw: string): UserMenuMode {
+function parseScopeParam(raw: string): MenuModeScope {
+  return raw === "admin" ? "admin" : "user";
+}
+
+function parseModeParam(raw: string): MenuMode {
   return raw === "reply" ? "REPLY" : "INLINE";
 }
 
-async function renderMenuModePage(ctx: BotContext): Promise<void> {
+async function getModeForScope(scope: MenuModeScope): Promise<MenuMode> {
+  return scope === "admin" ? getAdminMenuMode() : getUserMenuMode();
+}
+
+async function setModeForScope(scope: MenuModeScope, mode: MenuMode): Promise<void> {
+  if (scope === "admin") {
+    await setAdminMenuMode(mode);
+  } else {
+    await setUserMenuMode(mode);
+  }
+}
+
+/** The combined overview: current mode of BOTH menus + per-menu entries. */
+async function renderMenuModesOverview(ctx: BotContext): Promise<void> {
   await safeAnswerCallback(ctx);
-  const mode = await getUserMenuMode();
+  const [userMode, adminMode] = await Promise.all([getUserMenuMode(), getAdminMenuMode()]);
   const kb = new InlineKeyboard()
-    .text("دکمه شیشه‌ای", TX_CB.menuModeAsk("inline"))
-    .text("دکمه معمولی", TX_CB.menuModeAsk("reply"))
+    .text("تنظیم منوی کاربران", TX_CB.menuModeScope("user"))
+    .row()
+    .text("تنظیم منوی ادمین", TX_CB.menuModeScope("admin"))
     .row()
     .text("بازگشت به تنظیمات عمومی", TX_CB.settings);
   await safeEditOrReply(
     ctx,
-    `نوع نمایش منوی کاربر\n\nنوع فعلی:\n${MENU_MODE_LABELS[mode]}`,
+    "نوع نمایش منوها\n\n" +
+      `منوی کاربر:\n${MENU_MODE_LABELS[userMode]}\n\n` +
+      `منوی ادمین:\n${MENU_MODE_LABELS[adminMode]}`,
+    kb,
+  );
+}
+
+/** One menu's page: its current mode + the two mode choices. */
+async function renderMenuModeScopePage(ctx: BotContext, scope: MenuModeScope): Promise<void> {
+  await safeAnswerCallback(ctx);
+  const mode = await getModeForScope(scope);
+  const kb = new InlineKeyboard()
+    .text("دکمه شیشه‌ای", TX_CB.menuModeAsk(scope, "inline"))
+    .text("دکمه معمولی", TX_CB.menuModeAsk(scope, "reply"))
+    .row()
+    .text("بازگشت", TX_CB.menuMode);
+  await safeEditOrReply(
+    ctx,
+    `نوع نمایش ${MENU_SCOPE_TITLES[scope]}\n\nنوع فعلی:\n${MENU_MODE_LABELS[mode]}`,
     kb,
   );
 }
@@ -139,47 +201,63 @@ adminTextSettingsHandler.callbackQuery(TX_CB.menuMode, async (ctx) => {
   if (ctx.admin === null) {
     return;
   }
-  await renderMenuModePage(ctx);
+  await renderMenuModesOverview(ctx);
 });
 
-adminTextSettingsHandler.callbackQuery(/^admin:menu_mode:ask:(inline|reply)$/, async (ctx) => {
+adminTextSettingsHandler.callbackQuery(/^admin:menu_mode:(user|admin)$/, async (ctx) => {
   if (ctx.admin === null) {
     return;
   }
-  const target = parseModeParam(ctx.match[1]);
-  if ((await getUserMenuMode()) === target) {
-    await safeAnswerCallback(ctx, MENU_MODE_ALREADY_TEXT);
-    return;
-  }
-  await safeAnswerCallback(ctx);
-  await safeEditOrReply(
-    ctx,
-    MENU_MODE_CONFIRM_TEXTS[target],
-    new InlineKeyboard()
-      .text("تایید ✅", TX_CB.menuModeSet(ctx.match[1] as "inline" | "reply"))
-      .row()
-      .text("انصراف", TX_CB.menuMode),
-  );
+  await renderMenuModeScopePage(ctx, parseScopeParam(ctx.match[1]));
 });
 
-adminTextSettingsHandler.callbackQuery(/^admin:menu_mode:set:(inline|reply)$/, async (ctx) => {
-  if (ctx.admin === null) {
-    return;
-  }
-  const target = parseModeParam(ctx.match[1]);
-  if ((await getUserMenuMode()) === target) {
-    await safeAnswerCallback(ctx, MENU_MODE_ALREADY_TEXT);
-    await renderMenuModePage(ctx);
-    return;
-  }
-  await setUserMenuMode(target);
-  logger.info("user menu keyboard mode changed", {
-    adminId: ctx.admin.id,
-    mode: target,
-  });
-  await safeAnswerCallback(ctx, MENU_MODE_CHANGED_OK_TEXT);
-  await renderMenuModePage(ctx);
-});
+adminTextSettingsHandler.callbackQuery(
+  /^admin:menu_mode:ask:(user|admin):(inline|reply)$/,
+  async (ctx) => {
+    if (ctx.admin === null) {
+      return;
+    }
+    const scope = parseScopeParam(ctx.match[1]);
+    const target = parseModeParam(ctx.match[2]);
+    if ((await getModeForScope(scope)) === target) {
+      await safeAnswerCallback(ctx, MENU_MODE_ALREADY_TEXT);
+      return;
+    }
+    await safeAnswerCallback(ctx);
+    await safeEditOrReply(
+      ctx,
+      MENU_MODE_CONFIRM_TEXTS[scope][target],
+      new InlineKeyboard()
+        .text("تایید ✅", TX_CB.menuModeSet(scope, ctx.match[2] as "inline" | "reply"))
+        .row()
+        .text("انصراف", TX_CB.menuModeScope(scope)),
+    );
+  },
+);
+
+adminTextSettingsHandler.callbackQuery(
+  /^admin:menu_mode:set:(user|admin):(inline|reply)$/,
+  async (ctx) => {
+    if (ctx.admin === null) {
+      return;
+    }
+    const scope = parseScopeParam(ctx.match[1]);
+    const target = parseModeParam(ctx.match[2]);
+    if ((await getModeForScope(scope)) === target) {
+      await safeAnswerCallback(ctx, MENU_MODE_ALREADY_TEXT);
+      await renderMenuModeScopePage(ctx, scope);
+      return;
+    }
+    await setModeForScope(scope, target);
+    logger.info("main menu keyboard mode changed", {
+      adminId: ctx.admin.id,
+      scope,
+      mode: target,
+    });
+    await safeAnswerCallback(ctx, MENU_MODE_CHANGED_OK_TEXTS[scope]);
+    await renderMenuModeScopePage(ctx, scope);
+  },
+);
 
 async function renderTextsLanding(ctx: BotContext): Promise<void> {
   clearAdminTextSettingsState(ctx);

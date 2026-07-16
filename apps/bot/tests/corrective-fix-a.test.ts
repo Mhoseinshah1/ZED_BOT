@@ -53,9 +53,16 @@ function callbacks(kb: { inline_keyboard: unknown }): string[] {
     .map((b) => b.callback_data ?? "");
 }
 
+// buildAdminMainKeyboard is admin-scoped since the admin-menu-keyboard-mode
+// phase: a minimal ACTIVE admin renders the full approved menu (labels come
+// from the ButtonText registry with in-code seed fallbacks, so no DB needed).
+const activeAdmin = { isActive: true } as unknown as Parameters<
+  typeof buildAdminMainKeyboard
+>[0];
+
 describe("admin root / finance nesting (Fix A)", () => {
-  it("admin root has the Fix A rows and no receipts button", () => {
-    const kb = buildAdminMainKeyboard();
+  it("admin root has the Fix A rows and no receipts button", async () => {
+    const kb = await buildAdminMainKeyboard(activeAdmin);
     expect(rows(kb).map((row) => row.map((b) => b.callback_data))).toEqual([
       [CB.ADMIN_FINANCE, CB.ADMIN_USERS],
       [CB.ADMIN_PRODUCTS, CB.ADMIN_PANELS],

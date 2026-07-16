@@ -1,10 +1,14 @@
+import { type Admin } from "@zedbot/database";
 import { InlineKeyboard } from "grammy";
 
-import { CB } from "../core/callbacks.js";
+import { buildAdminMainMenuDefinition } from "./admin-menu-definition.js";
 
 /**
- * Admin main menu. Labels are hardcoded for now - admin buttons are not part
- * of the operator-editable ButtonText baseline yet.
+ * Admin main menu - the INLINE rendering of the shared definition
+ * (admin-menu-definition.ts): same approved rows, same stable callbacks,
+ * operator-editable labels (admin-menu-keyboard-mode phase; the historical
+ * hardcoded labels are now the seeded ButtonText defaults, so existing
+ * installations render byte-identically).
  *
  * Corrective Fix A: «رسیدهای تایید نشده 💵» moved off the root into the
  * finance landing (financeLandingKeyboard) - CB.ADMIN_RECEIPTS and its
@@ -13,19 +17,11 @@ import { CB } from "../core/callbacks.js";
  * custom service price) are not rendered here either; their callbacks keep
  * answering via admin-placeholders.handler.
  */
-export function buildAdminMainKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("مالی 💎", CB.ADMIN_FINANCE)
-    .text("مدیریت کاربران 👤", CB.ADMIN_USERS)
-    .row()
-    .text("مدیریت محصولات/پلن‌ها 📦", CB.ADMIN_PRODUCTS)
-    .text("مدیریت پنل‌ها 🖥", CB.ADMIN_PANELS)
-    .row()
-    .text("محصولات دیگر / سفارش‌های محصولات دیگر", CB.ADMIN_OTHER_PRODUCTS)
-    .row()
-    .text("تیکت‌های پشتیبانی 🎫", CB.ADMIN_SUPPORT)
-    .text("پیام همگانی 📣", CB.ADMIN_BROADCAST)
-    .row()
-    .text("تنظیمات عمومی ⚙️", CB.ADMIN_GENERAL_SETTINGS)
-    .text("گزارشات / بکاپ 📊", CB.ADMIN_REPORTS_BACKUP);
+export async function buildAdminMainKeyboard(
+  admin: Admin | null | undefined,
+): Promise<InlineKeyboard> {
+  const rows = await buildAdminMainMenuDefinition(admin);
+  return new InlineKeyboard(
+    rows.map((row) => row.map((button) => InlineKeyboard.text(button.label, button.callback))),
+  );
 }

@@ -163,11 +163,14 @@ async function showTrialPage(ctx: BotContext, panel: Panel): Promise<void> {
 
 // --- root menu + list --------------------------------------------------------
 
-panelHandler.callbackQuery(PANEL_CB.MENU, async (ctx) => {
+/** Panels root menu - shared by the inline callback and the reply-menu router. */
+export async function renderPanelMenu(ctx: BotContext): Promise<void> {
   clearFlow(ctx);
   await safeAnswerCallback(ctx);
   await safeEditOrReply(ctx, panelMenuText(), panelMenuKeyboard());
-});
+}
+
+panelHandler.callbackQuery(PANEL_CB.MENU, renderPanelMenu);
 
 panelHandler.callbackQuery("admin:panels:noop", async (ctx) => {
   await safeAnswerCallback(ctx);

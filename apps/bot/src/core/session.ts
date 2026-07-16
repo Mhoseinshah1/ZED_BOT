@@ -167,6 +167,13 @@ export interface SessionData {
    * keyboard exactly once after an admin switches modes (quiet transition).
    */
   replyMenuKeyboardActive?: boolean;
+  /**
+   * Admin-menu-keyboard-mode phase: true after the persistent REPLY admin
+   * menu was delivered to this chat. Together with replyMenuKeyboardActive
+   * it tracks WHICH persistent keyboard is on screen, so user/admin menu
+   * transitions replace it and INLINE renders remove it exactly once.
+   */
+  adminReplyMenuKeyboardActive?: boolean;
   temp: {
     panelAdd?: PanelAddState;
     // Panel id being edited via a text-input step.
