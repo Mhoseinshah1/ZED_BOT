@@ -43,6 +43,11 @@ legacy_self_heal() {
   log_warn "(env migration, CLI refresh, container recreation)"
   log_warn "=================================================================="
 
+  # The pre-PR92 installer chmod +x'ed 644-committed scripts, leaving every
+  # legacy tree mode-dirty; ignore mode bits so no later git operation on
+  # this appliance repo can be blocked by installer-managed modes.
+  git -C "$ZEDBOT_APP_DIR" config core.fileMode false 2>/dev/null || true
+
   load_env_if_exists
   migrate_legacy_env
   # Re-load so the freshly appended keys (ZEDBOT_BACKUP_DIR & co) apply.

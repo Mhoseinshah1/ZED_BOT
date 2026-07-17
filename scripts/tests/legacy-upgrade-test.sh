@@ -280,6 +280,13 @@ EOF
   if grep -q '^ZEDBOT_BACKUP_DIR=' "${APP_DIR}/.env"; then
     fail "test setup bug: the legacy .env must not contain ZEDBOT_BACKUP_DIR"
   fi
+
+  # Faithful replication of the pre-PR92 installer (install.sh line ~486):
+  # it chmod +x'ed every script in the clone even though several were
+  # committed 644, leaving every real legacy tree MODE-DIRTY. This is what
+  # silently blocked `git pull --ff-only` in the old updater on production
+  # hosts - the exact defect the fileMode bridge below exists for.
+  chmod +x "${APP_DIR}/scripts/"*.sh "${APP_DIR}/scripts/zedbot"
 }
 
 create_legacy_dirs_and_backups() {
@@ -305,7 +312,6 @@ install_legacy_cli() {
 
 start_legacy_stack() {
   phase "build + start the OLD stack and apply OLD migrations"
-  (cd "$APP_DIR" && chmod +x scripts/*.sh)
   dc build
   # The scenario under test is a LONG-RUNNING legacy production install, so
   # its database always has the old migrations applied. Bring up only the
@@ -333,6 +339,13 @@ start_legacy_stack() {
 run_first_update() {
   phase "THE REAL UPDATE: old CLI -> old update.sh -> pull -> new migrate.sh self-heal"
   cp -a "${APP_DIR}/.env" "${WORK}/env-before-update"
+  # The documented ONE-TIME bridge for pre-PR92 installations (see
+  # docs/legacy-upgrade.md): the old updater runs entirely OLD code up to and
+  # including its ff-only pull, and the old installer's chmod left the tree
+  # mode-dirty, so without this the pull is refused and the update "succeeds"
+  # without fetching anything. New installer/updater generations set it
+  # automatically; the already-shipped generation needs it exactly once.
+  git -C "$APP_DIR" config core.fileMode false
   local rc=0
   env ZEDBOT_NONINTERACTIVE=1 "$CLI_PATH" update 2>&1 | tee "${WORK}/update-1.log" || rc=$?
   [ "$rc" -eq 0 ] || fail "first update (legacy path) exited ${rc} - must exit 0"

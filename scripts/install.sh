@@ -327,6 +327,11 @@ clone_or_update_repo() {
   if [ -d "${APP_DIR}/.git" ]; then
     log_info "Repository already present in ${APP_DIR} - fetching updates ..."
     ensure_git_safe_directory
+    # Script modes on this appliance are the installer's job (chmod +x), not
+    # git's. Pre-PR92 installers flipped 644-committed scripts to 755, which
+    # made the tree permanently "dirty" and silently blocked every ff-only
+    # pull - ignore mode bits so upgrades can never wedge on that again.
+    git -C "$APP_DIR" config core.fileMode false
     git -C "$APP_DIR" fetch --all --prune
     # Only switch branches when one was explicitly requested via ZEDBOT_BRANCH;
     # otherwise respect whatever the server is already tracking.
@@ -349,6 +354,9 @@ clone_or_update_repo() {
   else
     log_info "Cloning ${REPO_URL} (branch: ${REPO_BRANCH}) into ${APP_DIR} ..."
     git clone --branch "$REPO_BRANCH" "$REPO_URL" "$APP_DIR"
+    # See the update path above: installer-managed script modes must never
+    # count as local changes.
+    git -C "$APP_DIR" config core.fileMode false
     log_success "Repository cloned."
   fi
 }

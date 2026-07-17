@@ -201,6 +201,12 @@ main() {
   if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ZEDBOT_APP_DIR"; then
     git config --global --add safe.directory "$ZEDBOT_APP_DIR" >/dev/null 2>&1 || true
   fi
+  # Script modes on this appliance are the installer's job, not git's: the
+  # pre-PR92 installer chmod +x'ed scripts that were committed 644, which
+  # made every legacy tree permanently "dirty" and silently blocked ff-only
+  # pulls (the update then "succeeded" without ever fetching new code).
+  # Ignoring mode bits removes that whole failure class.
+  git config core.fileMode false
   git fetch --all --prune
   if ! git pull --ff-only; then
     log_warn "Could not fast-forward the repository (local modifications?). Continuing with the current code."

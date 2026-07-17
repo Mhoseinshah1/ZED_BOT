@@ -50,6 +50,32 @@ file **is the new code** — making it the ONLY new-code hook the legacy
 updater calls. `migrate.sh` therefore ends with `legacy_self_heal`, which
 finishes everything the old updater cannot do.
 
+## One-time command for pre-PR92 installations
+
+The chain above depends on the old updater's `git pull --ff-only`
+actually succeeding — and on real pre-PR92 hosts it silently does not.
+The old installer ran `chmod +x` over scripts that were committed with
+mode 644, so every legacy working tree is permanently "dirty" with
+mode-only changes; because those same scripts changed upstream, the
+ff-only pull is refused, the old updater logs a warning and "completes"
+without fetching anything, and no new code ever reaches the machine.
+
+The pull runs entirely inside already-shipped old code, so nothing this
+repository ships can fix it retroactively. A pre-PR92 host therefore
+needs exactly one manual command before its first `zedbot update`:
+
+```bash
+git -C /opt/zedbot/app config core.fileMode false && zedbot update
+```
+
+`core.fileMode false` tells git to ignore mode bits in this repository —
+script modes on this appliance are the installer's job, not git's. With
+the mode noise gone the old updater's pull fast-forwards normally and the
+self-heal chain takes over. The command is needed **once, ever**: the new
+updater and installer set the flag automatically, all script modes are
+now committed as 755, and the CI legacy-upgrade job exercises exactly
+this documented path.
+
 ## Trigger conditions
 
 `legacy_self_heal` runs only when `legacy_install_detected`

@@ -105,6 +105,15 @@ after an update) converge automatically, and `zedbot deploy-status` shows
 whether repository, images, containers and migrations are aligned — see
 `docs/legacy-upgrade.md`.
 
+Installations that predate the persistent-backup release need one manual
+command before their first update (the old updater cannot pull past the
+mode-dirty tree its own installer created; the reason and details are in
+`docs/legacy-upgrade.md`):
+
+```bash
+git -C /opt/zedbot/app config core.fileMode false && zedbot update
+```
+
 ### Status and health
 
 ```bash
