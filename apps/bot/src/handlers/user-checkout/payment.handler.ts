@@ -43,6 +43,7 @@ import { getMessageTemplate } from "../../services/text.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { clearCheckoutState } from "./checkout-state.js";
+import { maybeStartPreSettlementCustomerInput } from "./customer-input-form.handler.js";
 import {
   CARD_INFO_INCOMPLETE_TEXT,
   cardToCardKeyboard,
@@ -478,6 +479,19 @@ paymentReceiptHandler.on("message", async (ctx, next) => {
       cardNumber: draft.cardNumber,
       cardAccountId: draft.cardAccountId,
     });
+    // Specialized-workflows phase: pre-settlement customer-input collection.
+    // When the checkout's frozen fulfillment snapshot wants the info form
+    // BEFORE manual approval, open it right here - presentation-only, the
+    // receipt stays PENDING_REVIEW. Guarded on its own: a form failure must
+    // NEVER break the already-registered receipt.
+    try {
+      await maybeStartPreSettlementCustomerInput(ctx, checkout);
+    } catch (formErr) {
+      logger.error("pre-settlement customer-input start failed", {
+        checkoutSessionId: checkout.id,
+        error: errorMessage(formErr),
+      });
+    }
   } catch (err) {
     clearCheckoutState(ctx);
     logger.error("receipt submission failed", { error: errorMessage(err) });

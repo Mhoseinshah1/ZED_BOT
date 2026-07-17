@@ -36,7 +36,7 @@ function sourceFiles(): string[] {
   return files;
 }
 
-const NS = "(?:user|admin|common|terms|force_join)";
+const NS = "(?:user|admin|common|terms|force_join|cinput)";
 
 /** IDENT: "literal" callback-constant map defined in one file. */
 function literalConsts(src: string): Map<string, string> {

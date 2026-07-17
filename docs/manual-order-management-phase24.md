@@ -28,6 +28,11 @@ category), handler in `apps/bot/src/handlers/admin-manual-orders/`.
 | `info` | WAITING_USER_INFO | createdAt desc |
 | `ready` | WAITING_ADMIN_DELIVERY | createdAt desc |
 | `delivered` | DELIVERED (history) | deliveredAt desc (updatedAt/createdAt fallback) |
+| `stock` *(specialized-workflows phase, additive)* | AWAITING_STOCK — paid stock orders parked for a refill | createdAt desc |
+
+The `stock` filter surfaces as a conditional «در انتظار شارژ موجودی ⏳ (n)»
+button on the other lists (and a landing counter) whenever parked orders
+exist; the four original filters' semantics are untouched.
 
 10/page; pagination preserves the filter. Rows:
 `📝|📦|✅ مبلغ | محصول (كوتاه‌شده) | @کاربر | MM-DD` (delivered rows date
@@ -63,6 +68,18 @@ and the delivery text. Buttons stay state-gated: «تحویل سفارش 📦» 
 اطلاعات, nothing mutable for delivered. Back navigation: to the last
 filter/page (stored in session) or to the search results when the detail
 was opened from a search, plus «بازگشت به سفارش‌های دستی».
+
+**Specialized-workflows additions** (see
+`docs/specialized-product-workflows.md`): specialized records show the
+frozen kind/profile labels and a customer-info **presence** line (values
+never appear on lists/details); «مشاهده اطلاعات مشتری 🔒»
+(`admin:mo:cinfo:<sid>`) opens the audited on-demand decryption viewer
+(masked first, «نمایش کامل 🔓» = `admin:mo:cinfo_full:<sid>` separately
+audited — every open writes an `AuditLog` row before anything is shown);
+`PERSONALIZED_SERVICE` records offer «تکمیل بدون متن ✅»
+(`admin:mo:deliver_done:<sid>`) on the delivery prompt. New status labels:
+`AWAITING_STOCK` «در انتظار شارژ موجودی ⏳», `STOCK_RESERVED` «در حال تحویل
+از موجودی 🎟».
 
 ## State cleanup
 

@@ -98,6 +98,19 @@ documented here.
 > see `docs/user-other-product-orders-phase29.md`. Admin pages still never
 > show content.
 
+> **Specialized-workflows phase:** this lifecycle stays the pinned behavior
+> for **GENERIC** products only. Specialized kinds (APPLE_ID / AI_ACCOUNT /
+> TELEGRAM_PREMIUM / GIFT_CARD) use a separate reserve→send→finalize path
+> (`reserveStockItemForOrder` + `runSpecializedStockDelivery`) that **never
+> falls back to manual delivery** — an empty inventory parks the paid order
+> as `AWAITING_STOCK` until the replenishment retry completes it.
+> `OtherProductStockItem.deliveredOrderId` is now **UNIQUE** (one item per
+> order AND one order per item, DB-enforced) and items gain an optional
+> `contentFingerprint` (keyed HMAC) with a `(productId, contentFingerprint)`
+> unique for decryption-free duplicate detection on bulk imports — legacy
+> rows keep a null fingerprint and are invisible to dedup. See
+> `docs/specialized-product-workflows.md`.
+
 ## Stuck RESERVED cleanup (Phase 26)
 
 When no retry resolves a stuck claim, the item list offers two

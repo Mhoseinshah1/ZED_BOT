@@ -36,6 +36,10 @@ import {
   checkoutTextHandler,
 } from "./handlers/user-checkout/checkout.handler.js";
 import {
+  customerInputFormHandler,
+  customerInputFormTextHandler,
+} from "./handlers/user-checkout/customer-input-form.handler.js";
+import {
   paymentHandler,
   paymentReceiptHandler,
 } from "./handlers/user-checkout/payment.handler.js";
@@ -230,6 +234,15 @@ export function createBot(token: string): Bot<BotContext> {
       await walletTopupTextHandler.middleware()(ctx, next);
       return;
     }
+    // Specialized-workflows phase: the structured pre-settlement customer
+    // input form. MUST be dispatched BEFORE the legacy other_product:info
+    // branch - both consume plain user text from the same surface, and a
+    // buyer inside "customer_input:form" must never fall through to the
+    // legacy free-text intake (which would persist raw text on the order).
+    if (flow === "customer_input:form") {
+      await customerInputFormTextHandler.middleware()(ctx, next);
+      return;
+    }
     if (flow === "other_product:info") {
       await otherProductInfoTextHandler.middleware()(ctx, next);
       return;
@@ -266,6 +279,11 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(extraVolumeHandler);
   userArea.use(extraTimeHandler);
   userArea.use(walletHandler);
+  // Specialized-workflows phase: structured customer-input form callbacks
+  // (cinput:*). Registered BEFORE otherProductInfoHandler so the structured
+  // flow always wins over the legacy free-text intake for specialized
+  // products; the legacy handler keeps its own user:op:info:* routes.
+  userArea.use(customerInputFormHandler);
   userArea.use(otherProductInfoHandler);
   // Phase 29: read-only OTHER_PRODUCT order tracking («سفارش‌های من 🧾»).
   userArea.use(userOrdersHandler);
@@ -278,6 +296,9 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());
+  // Customer-input form callbacks (cinput:*) go through the same gated user
+  // area - the access gates and owner checks apply exactly as for user:*.
+  bot.callbackQuery(/^cinput:/, userArea.middleware());
 
   // Any other callback (old keyboards, future features): clear the spinner.
   bot.on("callback_query:data", async (ctx) => {

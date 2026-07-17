@@ -39,6 +39,19 @@ AES-256-GCM encryption, so detecting an already-stored duplicate would
 require decrypting the entire inventory; duplicates are only detected within
 the submitted batch.
 
+> **Specialized-workflows update:** this legacy flow now applies only to
+> products whose effective inventory parser is `SINGLE_LINE` (all GENERIC
+> products). Products configured with `EMAIL_BOUNDARY` (Apple ID) or
+> `EXPLICIT_SEPARATOR` route the same «افزودن گروهی آیتم‌ها ➕➕» paste
+> through the fingerprint-dedup import instead
+> (`other-product-stock-import.service.ts`): a stateless preview with
+> counts + masked first/last identifiers, then «تایید و افزودن ✅»
+> (`admin:stock:imp_confirm`) — which re-parses the draft, detects
+> duplicates **without decryption** via `contentFingerprint` (keyed HMAC,
+> DB-unique per product) and inserts all-or-nothing. Successful additions
+> on either path trigger the awaiting-stock replenishment retry. See
+> `docs/specialized-product-workflows.md`.
+
 ## Confirmation
 
 «افزودن گروهی موجودی 🎟» shows the product name, the valid-unique count, the

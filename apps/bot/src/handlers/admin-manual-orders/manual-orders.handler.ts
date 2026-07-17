@@ -1,8 +1,16 @@
-import type { OrderStatus } from "@zedbot/database";
+import { prisma, type Admin, type OrderStatus } from "@zedbot/database";
+import { errorMessage, maskSecretEdges } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
+import { logger } from "../../core/logger.js";
+import {
+  decodeValuesEncrypted,
+  renderSafeSummary,
+  validateCustomerInputSchema,
+  type CustomerInputSchema,
+} from "../../services/customer-input-schema.service.js";
 import {
   ALREADY_DELIVERED_TEXT,
   DELIVERY_TEXT_MAX,
@@ -19,6 +27,7 @@ import {
   type ManualOrdersPage,
 } from "../../services/other-product-delivery.service.js";
 import { DELIVERY_REFERENCE_LABEL } from "../../services/other-product-naming.service.js";
+import { kindLabel, profileLabel } from "../../services/other-product-profile.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 
@@ -48,6 +57,11 @@ const MO_CB = {
   deliver: (sid: string): string => `admin:mo:deliver:${sid}`,
   deliverConfirm: "admin:mo:deliver_confirm",
   deliverCancel: "admin:mo:deliver_cancel",
+  // Specialized-workflows phase: mark a PERSONALIZED_SERVICE order done
+  // without credentials, and the audited customer-input viewer.
+  deliverDone: (sid: string): string => `admin:mo:deliver_done:${sid}`,
+  customerInfo: (sid: string): string => `admin:mo:cinfo:${sid}`,
+  customerInfoFull: (sid: string): string => `admin:mo:cinfo_full:${sid}`,
   remind: (sid: string): string => `admin:mo:remind:${sid}`,
   search: "admin:mo:search",
   searchAgain: "admin:mo:search:again",
@@ -89,6 +103,11 @@ function statusLabel(status: string): string {
       return "آماده تحویل 📦";
     case "DELIVERED":
       return "تحویل شده ✅";
+    // Specialized-workflows phase statuses (additive).
+    case "AWAITING_STOCK":
+      return "در انتظار شارژ موجودی ⏳";
+    case "STOCK_RESERVED":
+      return "در حال تحویل از موجودی 🎟";
     default:
       return status;
   }
@@ -111,10 +130,17 @@ const FILTER_TITLES: Record<ManualOrderFilter, string> = {
   info: "در انتظار اطلاعات کاربر 📝",
   ready: "آماده تحویل 📦",
   delivered: "تحویل‌شده ✅",
+  stock: "در انتظار شارژ موجودی ⏳",
 };
 
 function statusIcon(status: string): string {
-  return status === "WAITING_USER_INFO" ? "📝" : status === "DELIVERED" ? "✅" : "📦";
+  return status === "WAITING_USER_INFO"
+    ? "📝"
+    : status === "DELIVERED"
+      ? "✅"
+      : status === "AWAITING_STOCK"
+        ? "⏳"
+        : "📦";
 }
 
 function userLabel(record: ManualOrderDetail): string {
@@ -176,6 +202,10 @@ export async function renderLanding(ctx: BotContext): Promise<void> {
       `در انتظار اطلاعات کاربر: ${counts.waitingInfoCount}`,
       `آماده تحویل: ${counts.readyCount}`,
       `تحویل‌شده: ${counts.deliveredCount}`,
+      // Specialized-workflows phase: paid stock orders parked for refill.
+      ...(counts.awaitingStockCount > 0
+        ? [`در انتظار شارژ موجودی: ${counts.awaitingStockCount}`]
+        : []),
       `کل بازها: ${counts.waitingInfoCount + counts.readyCount}`,
     ].join("\n"),
     otherProductsLandingKeyboard(),
@@ -198,6 +228,14 @@ function listKeyboard(pageData: ManualOrdersPage): InlineKeyboard {
       kb.text("بعدی »", MO_CB.list(pageData.filter, pageData.page + 1));
     }
     kb.row();
+  }
+  // Specialized-workflows phase: the AWAITING_STOCK filter surfaces on the
+  // lists whenever paid orders are parked for a refill.
+  if (pageData.filter !== "stock" && pageData.awaitingStockCount > 0) {
+    kb.text(
+      `در انتظار شارژ موجودی ⏳ (${pageData.awaitingStockCount})`,
+      MO_CB.list("stock", 1),
+    ).row();
   }
   // Fix B: search moved off the landing onto the lists it searches.
   kb.text("جستجوی سفارش 🔎", MO_CB.search).row();
@@ -227,7 +265,7 @@ manualOrdersHandler.callbackQuery(MO_CB.landing, async (ctx) => {
 });
 
 manualOrdersHandler.callbackQuery(
-  /^admin:mo:list:(open|info|ready|delivered):(\d+)$/,
+  /^admin:mo:list:(open|info|ready|delivered|stock):(\d+)$/,
   async (ctx) => {
     if (ctx.admin === null) {
       return;
@@ -301,6 +339,24 @@ manualOrdersHandler.callbackQuery(MO_CB.searchAgain, async (ctx) => {
 
 // --- detail ------------------------------------------------------------------------------
 
+/**
+ * Safe customer-info state line (specialized records): presence only -
+ * never a value. Structured (encrypted) and legacy free-text submissions
+ * both count as registered.
+ */
+function customerInfoLine(record: ManualOrderDetail): string {
+  const submitted =
+    record.customerInputSubmittedAt !== null ||
+    (record.userProvidedInfoText !== null && record.userProvidedInfoText !== "");
+  if (submitted) {
+    return "اطلاعات مشتری: ثبت شده ✅";
+  }
+  if (record.status === "WAITING_USER_INFO") {
+    return "اطلاعات مشتری: در انتظار ⏳";
+  }
+  return "اطلاعات مشتری: لازم نیست";
+}
+
 function detailText(record: ManualOrderDetail): string {
   const fullName = [record.user.firstName, record.user.lastName].filter(Boolean).join(" ");
   const lines = [
@@ -311,6 +367,13 @@ function detailText(record: ManualOrderDetail): string {
       ? [`${DELIVERY_REFERENCE_LABEL} <code>${escapeHtml(record.order.deliveryReference)}</code>`]
       : []),
     `وضعیت تحویل: ${statusLabel(record.status)}`,
+    // Specialized-workflows phase: safe frozen-snapshot labels only.
+    ...(record.kindSnapshot !== null ? [`نوع محصول: ${kindLabel(record.kindSnapshot)}`] : []),
+    ...(record.fulfillmentProfileSnapshot !== null
+      ? [`پروفایل تحویل: ${profileLabel(record.fulfillmentProfileSnapshot)}`]
+      : []),
+    ...(record.kindSnapshot !== null ? [customerInfoLine(record)] : []),
+    ...(record.status === "AWAITING_STOCK" ? ["موجودی: در انتظار شارژ"] : []),
     `محصول: ${escapeHtml(record.product.name)}`,
     `دسته‌بندی: ${escapeHtml(record.product.category.name)}`,
     `مبلغ: <b>${formatToman(record.order.finalPriceToman)}</b>`,
@@ -355,6 +418,11 @@ export function manualOrderDetailKeyboard(
   }
   if (record.status === "WAITING_USER_INFO") {
     kb.text("پیام به کاربر برای تکمیل اطلاعات 📝", MO_CB.remind(sid)).row();
+  }
+  // Specialized-workflows phase: audited on-demand viewer for the encrypted
+  // structured customer input (list/detail pages never show values).
+  if (record.customerInputEncrypted !== null) {
+    kb.text("مشاهده اطلاعات مشتری 🔒", MO_CB.customerInfo(sid)).row();
   }
   const hasSearch =
     typeof ctx.session.temp.adminManualOrderSearchQuery === "string" &&
@@ -406,6 +474,131 @@ manualOrdersHandler.callbackQuery(/^admin:mo:remind:([0-9a-f-]+)$/, async (ctx) 
   }
 });
 
+// --- audited customer-input viewer (specialized-workflows phase) ---------------------------
+//
+// «مشاهده اطلاعات مشتری 🔒»: decrypts the structured submission ON DEMAND
+// for a re-validated admin. The first page shows the SCHEMA-labeled values
+// with sensitive fields masked; «نمایش کامل» is a second, separately-audited
+// confirm. EVERY open/decrypt writes an AuditLog row (ids only - never
+// values). Nothing here is ever logged or echoed outside this chat.
+
+/** Audit one decrypt/view. Returns false when the audit write failed. */
+async function writeCustomerInputViewAudit(
+  admin: Admin,
+  record: ManualOrderDetail,
+  view: "masked" | "full",
+): Promise<boolean> {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        actorTelegramId: admin.telegramId,
+        actorType: "ADMIN",
+        action: "other_product_customer_input_viewed",
+        entityType: "OtherProductOrder",
+        entityId: record.id,
+        metadata: { orderShortId: record.orderId.slice(0, 8), adminId: admin.id, view },
+      },
+    });
+    return true;
+  } catch (err) {
+    logger.error("customer-input view audit write failed", {
+      recordId: record.id,
+      error: errorMessage(err),
+    });
+    return false;
+  }
+}
+
+/** Full (unmasked) rendering by the SCHEMA labels; values HTML-escaped. */
+function renderFullCustomerInput(
+  schema: CustomerInputSchema | null,
+  values: Record<string, string>,
+): string {
+  if (schema === null) {
+    return Object.entries(values)
+      .map(([key, value]) => `${escapeHtml(key)}: ${value === "" ? "—" : escapeHtml(value)}`)
+      .join("\n");
+  }
+  return [...schema.fields]
+    .sort((a, b) => a.order - b.order)
+    .map((field) => {
+      const raw = values[field.key];
+      return `${escapeHtml(field.label)}: ${raw === undefined || raw === "" ? "—" : escapeHtml(raw)}`;
+    })
+    .join("\n");
+}
+
+/** Masked fallback when no valid schema snapshot survived. */
+function renderMaskedWithoutSchema(values: Record<string, string>): string {
+  return Object.entries(values)
+    .map(([key, value]) => `${escapeHtml(key)}: ${escapeHtml(maskSecretEdges(value))}`)
+    .join("\n");
+}
+
+async function renderCustomerInfoPage(
+  ctx: BotContext,
+  sid: string,
+  view: "masked" | "full",
+): Promise<void> {
+  // Server-side re-validation: the button alone is never an authorization.
+  const admin = ctx.admin;
+  if (admin === null) {
+    return;
+  }
+  const record = await getManualOrderByShortId(sid);
+  if (record === null || record.customerInputEncrypted === null) {
+    await safeAnswerCallback(ctx, "اطلاعات مشتری ثبت نشده است.");
+    return;
+  }
+  let values: Record<string, string>;
+  try {
+    values = decodeValuesEncrypted(record.customerInputEncrypted);
+  } catch {
+    // Tampered payload / rotated APP_SECRET - never log the payload itself.
+    await safeAnswerCallback(ctx, "رمزگشایی اطلاعات ناموفق بود.");
+    return;
+  }
+  // The audit row is a precondition of showing anything.
+  if (!(await writeCustomerInputViewAudit(admin, record, view))) {
+    await safeAnswerCallback(ctx, "ثبت لاگ بازبینی ناموفق بود؛ نمایش انجام نشد.");
+    return;
+  }
+  const parsedSchema =
+    record.customerInputSchemaSnapshot === null
+      ? null
+      : validateCustomerInputSchema(record.customerInputSchemaSnapshot);
+  const schema = parsedSchema !== null && parsedSchema.ok ? parsedSchema.schema : null;
+  const body =
+    view === "full"
+      ? renderFullCustomerInput(schema, values)
+      : schema !== null
+        ? renderSafeSummary(schema, values)
+        : (record.customerInputSummary ?? renderMaskedWithoutSchema(values));
+  const lines = [
+    `🔒 <b>اطلاعات مشتری - سفارش ${escapeHtml(manualOrderShortId(record))}</b>`,
+    view === "full"
+      ? "نمایش کامل (این بازدید در لاگ بازبینی ثبت شد)"
+      : "فیلدهای حساس پوشیده نمایش داده می‌شوند (بازدید در لاگ بازبینی ثبت شد)",
+    "",
+    body,
+  ];
+  const kb = new InlineKeyboard();
+  if (view === "masked") {
+    kb.text("نمایش کامل 🔓", MO_CB.customerInfoFull(sid)).row();
+  }
+  kb.text("بازگشت به سفارش", MO_CB.view(sid));
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
+}
+
+manualOrdersHandler.callbackQuery(/^admin:mo:cinfo:([0-9a-f-]+)$/, async (ctx) => {
+  await renderCustomerInfoPage(ctx, ctx.match[1], "masked");
+});
+
+manualOrdersHandler.callbackQuery(/^admin:mo:cinfo_full:([0-9a-f-]+)$/, async (ctx) => {
+  await renderCustomerInfoPage(ctx, ctx.match[1], "full");
+});
+
 // --- delivery (Phase 23 - unchanged mutation semantics) -----------------------------------
 
 manualOrdersHandler.callbackQuery(/^admin:mo:deliver:([0-9a-f-]+)$/, async (ctx) => {
@@ -427,11 +620,43 @@ manualOrdersHandler.callbackQuery(/^admin:mo:deliver:([0-9a-f-]+)$/, async (ctx)
   ctx.session.temp.adminDeliveryDraft = { recordId: record.id };
   ctx.session.currentFlow = DELIVER_FLOW;
   await safeAnswerCallback(ctx);
+  const kb = new InlineKeyboard();
+  // Specialized-workflows phase: a PERSONALIZED_SERVICE order may complete
+  // WITHOUT credentials (the service happened on the customer's account).
+  if (record.fulfillmentProfileSnapshot === "PERSONALIZED_SERVICE") {
+    kb.text("تکمیل بدون متن ✅", MO_CB.deliverDone(ctx.match[1])).row();
+  }
+  kb.text("انصراف", MO_CB.view(ctx.match[1]));
   await safeEditOrReply(
     ctx,
     `متن تحویل سفارش را وارد کنید. (حداکثر ${DELIVERY_TEXT_MAX} کاراکتر)`,
-    new InlineKeyboard().text("انصراف", MO_CB.view(ctx.match[1])),
+    kb,
   );
+});
+
+// «تکمیل بدون متن ✅» - PERSONALIZED_SERVICE only (re-checked in the
+// service); the buyer receives «انجام شد ✅» plus the completion message.
+manualOrdersHandler.callbackQuery(/^admin:mo:deliver_done:([0-9a-f-]+)$/, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null) {
+    return;
+  }
+  clearDeliveryFlowState(ctx);
+  const record = await getManualOrderByShortId(ctx.match[1]);
+  if (record === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  const outcome = await deliverManualOrder(ctx.api, {
+    recordId: record.id,
+    adminId: admin.id,
+    deliveryText: null,
+  });
+  await safeAnswerCallback(ctx, outcome.ok ? "سفارش تکمیل شد ✅" : outcome.safeMessage);
+  const fresh = await getManualOrderByShortId(ctx.match[1]);
+  if (fresh !== null) {
+    await renderDetail(ctx, fresh);
+  }
 });
 
 manualOrdersHandler.callbackQuery(MO_CB.deliverCancel, async (ctx) => {

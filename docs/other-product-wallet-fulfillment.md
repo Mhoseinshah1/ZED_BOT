@@ -48,6 +48,18 @@ item, re-prompts the user or re-alerts the admins.
 
 ## OTHER_PRODUCT flow
 
+> **Specialized-workflows phase:** before the steps below,
+> `fulfillOtherProduct` now resolves the checkout's **frozen fulfillment
+> snapshot** (`readFulfillmentSnapshot`: stored
+> `otherProductFulfillmentSnapshot` → live product → `productSnapshot`
+> fallback) and routes non-GENERIC kinds (APPLE_ID / AI_ACCOUNT /
+> TELEGRAM_PREMIUM / GIFT_CARD) to the specialized engine
+> (`fulfillSpecializedOtherProduct`) — which consumes any pre-settlement
+> customer-input submission exactly once and parks out-of-stock paid
+> orders as `AWAITING_STOCK` instead of falling back to the manual queue.
+> GENERIC products (and any resolution failure) continue on the unchanged
+> legacy steps below. See `docs/specialized-product-workflows.md`.
+
 1. `autoDeliverStockOrder` — stock-eligible products (deliveryType
    `STOCK_ITEM` or `stockEnabled`, never with required user info) deliver one
    encrypted stock item; the order completes and admins get the low/out

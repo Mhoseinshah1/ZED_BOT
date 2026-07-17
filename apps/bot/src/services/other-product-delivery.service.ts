@@ -208,7 +208,15 @@ export async function submitUserInfo(
   }
   const updated = await prisma.otherProductOrder.updateMany({
     where: { id: recordId, userId, status: "WAITING_USER_INFO" },
-    data: { userProvidedInfoText: text, status: "WAITING_ADMIN_DELIVERY" },
+    // Specialized-workflows phase: the submit handler notifies the admins
+    // right after this flip, so the exactly-once notification stamp is
+    // claimed HERE by the same status CAS - the specialized dispatch /
+    // completion bridge can never send a second "ready" notice afterwards.
+    data: {
+      userProvidedInfoText: text,
+      status: "WAITING_ADMIN_DELIVERY",
+      fulfillmentAdminsNotifiedAt: new Date(),
+    },
   });
   if (updated.count !== 1) {
     return {
@@ -230,14 +238,19 @@ export async function submitUserInfo(
 
 // --- admin list / detail ----------------------------------------------------------------
 
-/** Phase 24 list filters. "open" = both undelivered statuses. */
-export type ManualOrderFilter = "open" | "info" | "ready" | "delivered";
+/**
+ * Phase 24 list filters. "open" = both undelivered statuses. The
+ * specialized-workflows phase ADDS "stock" (paid orders parked as
+ * AWAITING_STOCK) without touching the four original filters' semantics.
+ */
+export type ManualOrderFilter = "open" | "info" | "ready" | "delivered" | "stock";
 
 const FILTER_WHERE: Record<ManualOrderFilter, Prisma.OtherProductOrderWhereInput> = {
   open: { status: { in: ["WAITING_USER_INFO", "WAITING_ADMIN_DELIVERY"] } },
   info: { status: "WAITING_USER_INFO" },
   ready: { status: "WAITING_ADMIN_DELIVERY" },
   delivered: { status: "DELIVERED" },
+  stock: { status: "AWAITING_STOCK" },
 };
 
 const DETAIL_INCLUDE = {
@@ -255,6 +268,8 @@ export interface ManualOrdersPage {
   waitingInfoCount: number;
   readyCount: number;
   deliveredCount: number;
+  /** Specialized-workflows phase: paid orders parked as AWAITING_STOCK. */
+  awaitingStockCount: number;
 }
 
 /**
@@ -267,12 +282,14 @@ export async function listManualOrders(
   page: number,
 ): Promise<ManualOrdersPage> {
   const where = FILTER_WHERE[filter];
-  const [total, waitingInfoCount, readyCount, deliveredCount] = await Promise.all([
-    prisma.otherProductOrder.count({ where }),
-    prisma.otherProductOrder.count({ where: FILTER_WHERE.info }),
-    prisma.otherProductOrder.count({ where: FILTER_WHERE.ready }),
-    prisma.otherProductOrder.count({ where: FILTER_WHERE.delivered }),
-  ]);
+  const [total, waitingInfoCount, readyCount, deliveredCount, awaitingStockCount] =
+    await Promise.all([
+      prisma.otherProductOrder.count({ where }),
+      prisma.otherProductOrder.count({ where: FILTER_WHERE.info }),
+      prisma.otherProductOrder.count({ where: FILTER_WHERE.ready }),
+      prisma.otherProductOrder.count({ where: FILTER_WHERE.delivered }),
+      prisma.otherProductOrder.count({ where: FILTER_WHERE.stock }),
+    ]);
   const pages = Math.max(1, Math.ceil(total / MANUAL_ORDERS_PAGE_SIZE));
   const safePage = Math.min(Math.max(1, page), pages);
   const orderBy: Prisma.OtherProductOrderOrderByWithRelationInput[] =
@@ -295,6 +312,7 @@ export async function listManualOrders(
     waitingInfoCount,
     readyCount,
     deliveredCount,
+    awaitingStockCount,
   };
 }
 
@@ -383,6 +401,15 @@ export type DeliverOutcome =
   | { ok: false; error: string; safeMessage: string };
 
 /**
+ * Specialized-workflows phase: the delivery body of a PERSONALIZED_SERVICE
+ * order completed WITHOUT credentials (the admin performed the service on
+ * the customer's own account - there is nothing to hand over).
+ */
+export const PERSONALIZED_DONE_TEXT = "انجام شد ✅";
+export const EMPTY_DELIVERY_NOT_ALLOWED_TEXT =
+  "تحویل بدون متن فقط برای سفارش‌های سرویس شخصی‌سازی‌شده مجاز است.";
+
+/**
  * Delivers one manual order with an ATOMIC CLAIM so the user can never
  * receive the same delivery twice:
  *
@@ -396,13 +423,22 @@ export type DeliverOutcome =
  *      matches our exact claimed values, so a newer claim after the
  *      rollback window can never be cleared) and report failure - the
  *      record stays deliverable.
+ *
+ * Specialized-workflows phase (additive): deliveryText may be null ONLY for
+ * records whose fulfillmentProfileSnapshot is PERSONALIZED_SERVICE - the
+ * order is marked completed and the buyer receives «انجام شد ✅» instead of
+ * credentials. After any successful delivery, a record carrying a
+ * completionMessageSnapshot ALSO sends that message (escaped) to the buyer.
  */
 export async function deliverManualOrder(
   api: DeliverySendApi,
-  args: { recordId: string; adminId: string; deliveryText: string },
+  args: { recordId: string; adminId: string; deliveryText: string | null },
 ): Promise<DeliverOutcome> {
-  const deliveryText = args.deliveryText.trim();
-  if (deliveryText.length < DELIVERY_TEXT_MIN || deliveryText.length > DELIVERY_TEXT_MAX) {
+  const deliveryText = args.deliveryText === null ? null : args.deliveryText.trim();
+  if (
+    deliveryText !== null &&
+    (deliveryText.length < DELIVERY_TEXT_MIN || deliveryText.length > DELIVERY_TEXT_MAX)
+  ) {
     return { ok: false, error: "invalid delivery text", safeMessage: INVALID_DELIVERY_TEXT };
   }
   const record = await prisma.otherProductOrder.findUnique({
@@ -411,6 +447,13 @@ export async function deliverManualOrder(
   });
   if (record === null) {
     return { ok: false, error: "record not found", safeMessage: "مورد یافت نشد." };
+  }
+  if (deliveryText === null && record.fulfillmentProfileSnapshot !== "PERSONALIZED_SERVICE") {
+    return {
+      ok: false,
+      error: "empty delivery only for PERSONALIZED_SERVICE",
+      safeMessage: EMPTY_DELIVERY_NOT_ALLOWED_TEXT,
+    };
   }
   if (record.status === "DELIVERED") {
     return { ok: false, error: "already delivered", safeMessage: ALREADY_DELIVERED_TEXT };
@@ -452,7 +495,11 @@ export async function deliverManualOrder(
   try {
     await api.sendMessage(
       record.user.telegramId.toString(),
-      buildDeliveryUserMessage(record.product.name, deliveryText, deliveryReference),
+      buildDeliveryUserMessage(
+        record.product.name,
+        deliveryText ?? PERSONALIZED_DONE_TEXT,
+        deliveryReference,
+      ),
       { parse_mode: "HTML" },
     );
   } catch (err) {
@@ -499,6 +546,23 @@ export async function deliverManualOrder(
     where: { id: record.orderId, status: OrderStatus.PAID },
     data: { status: OrderStatus.COMPLETED, completedAt: now },
   });
+  // Specialized-workflows phase: the product's frozen completion message
+  // follows the delivery (best-effort - a failed extra send never rolls the
+  // finished delivery back; the message is escaped, plain product copy).
+  if (record.completionMessageSnapshot !== null && record.completionMessageSnapshot !== "") {
+    try {
+      await api.sendMessage(
+        record.user.telegramId.toString(),
+        escapeHtml(record.completionMessageSnapshot),
+        { parse_mode: "HTML" },
+      );
+    } catch (err) {
+      logger.warn("completion message send failed", {
+        recordId: record.id,
+        error: errorMessage(err),
+      });
+    }
+  }
   const updated = await prisma.otherProductOrder.findUnique({ where: { id: record.id } });
   logger.info("manual order delivered", {
     recordId: record.id,
@@ -564,10 +628,12 @@ export async function notifyAdminsAboutManualOrder(
       where: { isActive: true },
       select: { telegramId: true },
     });
-    const infoLine =
-      record.userProvidedInfoText === null || record.userProvidedInfoText === ""
-        ? "اطلاعات کاربر: —"
-        : "اطلاعات کاربر: ثبت شده ✅";
+    // Structured submissions (specialized phase) count as registered info
+    // too - the flag only ever says "present", never the values themselves.
+    const hasInfo =
+      (record.userProvidedInfoText !== null && record.userProvidedInfoText !== "") ||
+      record.customerInputSubmittedAt !== null;
+    const infoLine = hasInfo ? "اطلاعات کاربر: ثبت شده ✅" : "اطلاعات کاربر: —";
     const text = [
       "سفارش دستی جدید 📦",
       "",

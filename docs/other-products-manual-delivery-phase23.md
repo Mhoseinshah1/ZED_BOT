@@ -83,6 +83,20 @@ schema's reminder counters), «بازگشت».
 > `docs/user-other-product-orders-phase29.md`. Read-only; nothing in this
 > flow changed.
 
+> **Specialized-workflows update:** this init/delivery pipeline stays the
+> pinned path for **GENERIC** products; specialized kinds create their
+> `OtherProductOrder` through the specialized engine (same unique
+> `orderId`, plus frozen kind/profile/schema/completion snapshots) and can
+> collect a **structured, encrypted** customer-input form instead of the
+> free-text prompt. Additive changes to THIS flow: `deliverManualOrder`
+> accepts a **null delivery text only for `PERSONALIZED_SERVICE` records**
+> («تکمیل بدون متن ✅» — the buyer receives «انجام شد ✅»), a frozen
+> `completionMessageSnapshot` is sent after any successful delivery
+> (best-effort), and `submitUserInfo` stamps
+> `fulfillmentAdminsNotifiedAt` inside its status flip so the specialized
+> dispatch can never send a second "ready" notice. See
+> `docs/specialized-product-workflows.md`.
+
 ## Delivery flow
 
 «تحویل سفارش 📦» → flow `admin_manual:deliver_text` asks «متن تحویل سفارش

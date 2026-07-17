@@ -114,6 +114,19 @@ three counters (services, pending orders, referrals) only.
 payment. After approval: stock auto-delivery or the manual path;
 «تکمیل اطلاعات سفارش 📝» (`user:op:info:<sid>`) resumes required info.
 
+**Specialized-workflows phase — `cinput:*` namespace** (pre-settlement
+customer-input form, flow `customer_input:form`; see
+`docs/specialized-product-workflows.md`). Opened automatically after a
+card-to-card receipt when the checkout's frozen snapshot collects info
+before approval, or via the post-payment «تکمیل اطلاعات سفارش 📝» button:
+
+| page | buttons |
+| --- | --- |
+| entry/re-entry | ادامه فرم 📝 / تکمیل اطلاعات سفارش 📝 » `cinput:start:<checkout-prefix>` (owner-scoped 12-char prefix) |
+| field page *(flow: text answer)* | (SELECT) `1) گزینه…` » `cinput:opt:<index>` (index only, never option text) · رد شدن ⏭ » `cinput:skip` (optional fields) · ⬅️ قبلی » `cinput:back` · انصراف » `cinput:cancel` |
+| cancel confirm | بله، لغو شود » `cinput:cancel:yes` (row stays COLLECTING; result offers ادامه فرم 📝 » `cinput:start:…` + منوی اصلی) · ادامه فرم » `cinput:cancel:no` |
+| review page (masked summary) | تایید و ثبت ✅ » `cinput:confirm` (the ONLY persistence point — never settles payment / creates orders / notifies admins) · ⬅️ قبلی · انصراف |
+
 ### سفارش‌های من 🧾 (Fix D landing)
 
 | page | buttons |
@@ -191,11 +204,11 @@ on the users landing / admin menu).
 
 | page | buttons |
 | --- | --- |
-| landing (`admin:other_products`, with counters) | مدیریت محصولات دیگر 🛍 » `admin:products` / سفارش‌های دستی 📦 » open list · در انتظار اطلاعات 📝 » info list / آماده تحویل 🚚 » ready list · تاریخچه تحویل ✅ » delivered list / مدیریت موجودی استاک 🎟 » `admin:stock:products` / بازگشت به پنل ادمین |
-| filtered lists (paged) | rows » `admin:mo:view:<sid>` · جستجوی سفارش 🔎 *(flow)* · بازگشت به محصولات دیگر |
-| manual-order detail | تحویل سفارش 📦 *(flow + confirm)* · پیام تکمیل اطلاعات 📝 · بازگشت به لیست (same filter/page) · بازگشت به محصولات دیگر |
+| landing (`admin:other_products`, with counters — incl. «در انتظار شارژ موجودی» when > 0) | مدیریت محصولات دیگر 🛍 » `admin:products` / سفارش‌های دستی 📦 » open list · در انتظار اطلاعات 📝 » info list / آماده تحویل 🚚 » ready list · تاریخچه تحویل ✅ » delivered list / مدیریت موجودی استاک 🎟 » `admin:stock:products` / بازگشت به پنل ادمین |
+| filtered lists (paged; filters `admin:mo:list:<open\|info\|ready\|delivered\|stock>:<page>` — `stock` = paid orders parked AWAITING_STOCK) | rows » `admin:mo:view:<sid>` · در انتظار شارژ موجودی ⏳ (n) » `admin:mo:list:stock:1` (conditional, when parked orders exist) · جستجوی سفارش 🔎 *(flow)* · بازگشت به محصولات دیگر |
+| manual-order detail (specialized records add frozen kind/profile labels + the customer-info presence line) | تحویل سفارش 📦 *(flow + confirm)* · تکمیل بدون متن ✅ » `admin:mo:deliver_done:<sid>` (PERSONALIZED_SERVICE only, offered on the delivery prompt) · مشاهده اطلاعات مشتری 🔒 » `admin:mo:cinfo:<sid>` (audited masked view » نمایش کامل 🔓 » `admin:mo:cinfo_full:<sid>`, separately audited) · پیام تکمیل اطلاعات 📝 · بازگشت به لیست (same filter/page) · بازگشت به محصولات دیگر |
 | مدیریت موجودی استاک 🎟 | product rows (🚨/⚠️/🎟/📦 badges) » product page · بازگشت به محصولات دیگر |
-| stock product page | افزودن آیتم تکی ➕ · افزودن گروهی ➕➕ *(flows)* / آیتم‌های موجود ✅ · رزروشده ⏳ / غیرفعال ⏸ · تاریخچه تحویل 📦 (status lists `admin:stock:items:<sid>:<a|r|x|d>:<page>`) / تنظیم حد هشدار 🔔 *(flow)* / پاک کردن حد هشدار (when set) / toggle استاک / بازگشت به لیست محصولات استاک / بازگشت به محصولات دیگر |
+| stock product page | افزودن آیتم تکی ➕ · افزودن گروهی ➕➕ *(flows; EMAIL_BOUNDARY/EXPLICIT_SEPARATOR products preview counts + masked ids » تایید و افزودن ✅ » `admin:stock:imp_confirm`)* / آیتم‌های موجود ✅ · رزروشده ⏳ / غیرفعال ⏸ · تاریخچه تحویل 📦 (status lists `admin:stock:items:<sid>:<a|r|x|d>:<page>`) / تنظیم حد هشدار 🔔 *(flow)* / تکمیل سفارش‌های در انتظار 🔁 » `admin:stock:retry:<sid>` / پاک کردن حد هشدار (when set) / toggle استاک / بازگشت به لیست محصولات استاک / بازگشت به محصولات دیگر |
 | status item lists | release/disable actions (AVAILABLE/RESERVED only; DELIVERED/DISABLED read-only) returning to the same status/page · pagination · بازگشت » product page |
 
 ### مدیریت کاربران 👤 (Fix C)
@@ -225,7 +238,8 @@ on the users landing / admin menu).
 | --- | --- |
 | root (`admin:products`) | لیست محصولات 🧾 · افزودن محصول ➕ (type chooser) / دسته‌بندی‌ها 🗂 · افزودن دسته‌بندی ➕ / محصولات اشتراک VPN 🔐 · محصولات دیگر 🛍 / بازگشت به پنل ادمین |
 | product lists (`admin:prod:ls:<S|O|A|V|X>:<page>`) | rows » detail · pagination · افزودن ➕ · دسته‌بندی‌ها 🗂 · بازگشت به مدیریت محصولات |
-| product detail | field edits · category/groups · (SERVICE) پنل/حجم/موقعیت · (OTHER) تحویل/اطلاعات/استاک 🎟 » `admin:stock:p:<sid>` · toggle · غیرفعال‌سازی (soft) · بازگشت به لیست (same filter/page) · بازگشت به مدیریت محصولات |
+| product detail | field edits (incl. پیام تکمیل سفارش » `admin:prod:fe:<sid>:cmt`, OTHER only) · category/groups · (SERVICE) پنل/حجم/موقعیت · (OTHER) نوع محصول » `admin:prod:kind:<sid>` (» `admin:prod:setkind:<sid>:<APPLE\|AI\|TGP\|GIFT\|GEN>`) · فرمت موجودی » `admin:prod:sparser:<sid>` (» `admin:prod:setsp:<sid>:<SL\|SEP\|EB>`, stock profiles only) · دریافت اطلاعات قبل از تایید رسید » `admin:prod:cba:<sid>` (info-collecting products only) · تحویل/اطلاعات/استاک 🎟 » `admin:stock:p:<sid>` · toggle · غیرفعال‌سازی (soft) · بازگشت به لیست (same filter/page) · بازگشت به مدیریت محصولات |
+| OTHER_PRODUCT add-wizard kind branching (specialized-workflows phase, after the category step) | نوع محصول » `admin:prod:f:kind:<APPLE\|AI\|TGP\|GIFT\|GEN>` · (AI) اکانت آماده / اکانت شخصی برای مشتری » `admin:prod:f:ai:<ready\|pers>` · (gift) کد آماده از موجودی / تحویل دستی توسط ادمین » `admin:prod:f:gc:<stock\|manual>` · فرمت موجودی » `admin:prod:f:sp:<SL\|SEP\|EB>` · فرم اطلاعات مشتری » `admin:prod:f:fp:<AI\|NONE>` — every branch lands on the duration step; see `docs/specialized-product-workflows.md` |
 | categories | pre-existing lists/detail/wizard; delete = soft-deactivate only |
 
 ### مدیریت پنل‌ها 🖥 (Fix C)
