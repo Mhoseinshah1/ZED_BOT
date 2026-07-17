@@ -213,9 +213,13 @@ create_dump_backup() {
 
   # Verification: pg_restore must be able to read the archive's table of
   # contents. Runs in the postgres container (same major version), the file
-  # travels over stdin so nothing is copied into the container.
+  # travels over stdin so nothing is copied into the container. pg_restore
+  # reads bare stdin when no file argument is given - passing /dev/stdin as
+  # a PATH breaks under docker exec (the fd is a socket that cannot be
+  # re-opened by path; the archive reads as empty: "did not find magic
+  # string").
   log_info "Verifying the dump (pg_restore --list) ..."
-  if ! run_compose exec -T postgres pg_restore --list /dev/stdin < "$partial" > /dev/null; then
+  if ! run_compose exec -T postgres pg_restore --list < "$partial" > /dev/null; then
     log_error "Backup verification FAILED (pg_restore cannot read the archive) - removing the partial file."
     exit 1
   fi

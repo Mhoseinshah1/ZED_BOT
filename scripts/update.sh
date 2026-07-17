@@ -44,8 +44,10 @@ verify_backup_file() {
   case "$file" in
     *.dump)
       # The postgres container's pg_restore must be able to read the
-      # archive's table of contents (file travels over stdin).
-      run_compose exec -T postgres pg_restore --list /dev/stdin < "$file" > /dev/null
+      # archive's table of contents. Bare stdin, never the /dev/stdin path:
+      # under docker exec that path resolves to a non-reopenable socket and
+      # the archive reads as empty ("did not find magic string").
+      run_compose exec -T postgres pg_restore --list < "$file" > /dev/null
       ;;
     *.dump.enc)
       # Full decryption checks need the worker's verify CLI; fall back to a

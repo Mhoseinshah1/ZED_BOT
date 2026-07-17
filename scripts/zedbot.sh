@@ -252,7 +252,9 @@ backup_verify() {
         log_error "The postgres container is not running - start it first: zedbot start"
         exit 1
       fi
-      if run_compose exec -T postgres pg_restore --list /dev/stdin < "$file" > /dev/null; then
+      # Bare stdin, never the /dev/stdin path: under docker exec that path
+      # resolves to a non-reopenable socket and the archive reads as empty.
+      if run_compose exec -T postgres pg_restore --list < "$file" > /dev/null; then
         log_success "pg_restore can read the archive - backup is valid."
       else
         log_error "pg_restore could NOT read the archive - backup is corrupt."
