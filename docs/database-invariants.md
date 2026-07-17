@@ -47,6 +47,23 @@ background: [free-trial-entitlements.md](free-trial-entitlements.md),
 | `FreeTrialClaim.allowanceReleasedAt` CAS (`… IS NULL` + status ∈ FAILED/CANCELLED) | A claim's allowance unit is released **at most once**, and only from a released claim state | `releaseClaimAllowance` — CAS losers change nothing; concurrent sweeps cannot double-release |
 | `Service.convertedToPaidAt` CAS (`… IS NULL AND source = 'FREE_TRIAL'`) | Trial-to-paid conversion is marked **exactly once**; `firstPaidOrderId` records the winning order | `markTrialConversion` returns false for losers; replays/reconciliation are no-ops |
 
+## Specialized digital-product workflow invariants
+
+Same discipline for OTHER_PRODUCT fulfillment (specialized-workflows
+phase). Schema +
+`packages/database/prisma/migrations/20260717213000_specialized_other_product_workflows/migration.sql`;
+background: [specialized-product-workflows.md](specialized-product-workflows.md).
+
+| Constraint / guard | Invariant | Who handles the violation |
+| --- | --- | --- |
+| `OtherProductStockItem.deliveredOrderId` `@unique` (nullable; upgraded from an index by this migration) | One stock item per order AND one order per item — delivery correctness in both directions is a DB guarantee | Claims are CAS `updateMany` (`AVAILABLE → RESERVED`); a `P2002` means THIS order already claimed an item concurrently — `claimStockItem` / `reserveStockItemForOrder` re-read via `findUnique({ deliveredOrderId })` and resume the winner idempotently. A stale non-claim row (e.g. DISABLED still holding the order id) is reported as an error, never as a live reservation |
+| `OtherProductStockItem` `@@unique([productId, contentFingerprint])` (fingerprint nullable — legacy rows exempt) | No duplicate inventory content per product (keyed HMAC of the normalized plaintext, detected without decryption) | `importStockItems`: a `P2002` aborts the WHOLE batch (one `$transaction createMany`, all-or-nothing) and reports the duplicate without content; `previewStockImport` pre-blocks known duplicates |
+| `CheckoutCustomerInput.checkoutSessionId` `@unique` | Exactly one customer-input row per checkout (frozen schema snapshot) | `getOrCreateCheckoutInput` catches the `P2002` and re-reads the winner (owner-checked) |
+| `CheckoutCustomerInput.consumedByOtherProductOrderId` `@unique` + checkout-scoped CAS (`status = SUBMITTED AND consumedBy… IS NULL`) | A submission is consumed **exactly once**, by exactly one order, and one order can never consume two submissions; submission itself never settles payment / creates orders / starts fulfillment | `consumeCheckoutInputForOrder`: CAS winner gets the payload; a repeat by the SAME order returns `alreadyConsumedByThisOrder`; a different order gets `null`. Retention sweep redacts only dead-end rows — CONSUMED rows are never redacted |
+| `OtherProductOrder.orderId` `@unique` (pre-existing, now shared by the specialized engine) | One fulfillment record per paid order | `ensureSpecializedRecord` / `initManualDelivery`: create-first, on the unique collision re-read and resume the winner |
+| `OtherProductOrder.fulfillmentAdminsNotifiedAt` CAS on NULL (status-scoped) | Fulfillment admins are notified **at most once** per record — shared by the ready-for-delivery notice, the awaiting-stock notice, the input-completion bridge and the legacy submit path (which stamps the field inside its own status flip) | `notifyFulfillmentAdminsOnce` / `notifyAwaitingStockAdminsOnce` / `submitUserInfo` — only the CAS winner sends; losers change nothing |
+| `OtherProductOrder` status CASes (`PAID`/`STOCK_RESERVED` → `AWAITING_STOCK`, stock finalize, `WAITING_USER_INFO` → `WAITING_ADMIN_DELIVERY`, copy CAS on `customerInputEncrypted IS NULL`) | Park/deliver/copy transitions apply once; crashed passes converge on retry without re-sending content or re-copying values | `specialized-product-fulfillment.service.ts` — every transition is a status-guarded `updateMany`; repeated dispatches and the replenishment retry are no-ops on already-transitioned rows |
+
 ## Ops invariants (backups + operational logging)
 
 Same discipline as above, applied by the production-backup/Telegram-logging

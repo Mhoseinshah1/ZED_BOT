@@ -25,11 +25,14 @@ product management menu, also reachable as `admin:prod:menu`.
 | `admin:prod:adds` / `addo` | Add service / other product wizard |
 | `admin:prod:ls` / `ls:<S\|O\|A>:<page>` | Product list filter menu / paginated list |
 | `admin:prod:view:<sid>` | Product detail |
-| `admin:prod:fe:<sid>:<key>` | Text edits: `nm` name, `pr` price, `inv` invoice text, `dur` duration, `vol` volume, `ord` position, `ruip` user-info prompt |
+| `admin:prod:fe:<sid>:<key>` | Text edits: `nm` name, `pr` price, `inv` invoice text, `dur` duration, `vol` volume, `ord` position, `ruip` user-info prompt, `cmt` completion message (OTHER only, ≤500 chars, «-» clears — specialized-workflows phase) |
 | `admin:prod:tgl:<sid>` | Enable/disable |
 | `admin:prod:del:<sid>[:yes]` | Soft-delete confirm/execute |
 | `admin:prod:cats/setcat`, `grp/setgrp`, `pnl/setpnl`, `loc/setloc`, `trc/settrc`, `rui`, `dlv/setdlv` | Pickers: category, display groups, panel, location, traffic reset cycle, user-info toggle, delivery type |
-| `admin:prod:f:*` | Add-wizard step callbacks (`pnl`, `grp`, `loc`, `cat`, `newcat`, `trc`, `rui`, `dlv`, `save`) |
+| `admin:prod:kind:<sid>` / `setkind:<sid>:<APPLE\|AI\|TGP\|GIFT\|GEN>` | Specialized-workflows phase: product-kind selector (applies the kind's edit-time defaults; warns «⚠️ تغییر نوع فقط بر خریدهای آینده اثر دارد.») |
+| `admin:prod:sparser:<sid>` / `setsp:<sid>:<SL\|SEP\|EB>` | Inventory-parser picker (stock profiles only) |
+| `admin:prod:cba:<sid>` | Toggle «دریافت اطلاعات قبل از تایید رسید» (info-collecting products only) |
+| `admin:prod:f:*` | Add-wizard step callbacks (`pnl`, `grp`, `loc`, `cat`, `newcat`, `trc`, `rui`, `dlv`, `save`, plus the specialized kind branch: `kind`, `ai`, `gc`, `sp`, `fp`) |
 | `admin:prod:cancel` | Cancel any product/category flow |
 
 All entity references use 8-char UUID-prefix short ids (resolved by unique
@@ -74,11 +77,25 @@ description (`-` = empty) → display position (0 = end) → confirmation page
 
 ## Add other product wizard
 
-Name → groups → category → duration (0 = none) → price → invoice description
-→ required-user-info yes/no (+ prompt text when yes) → delivery type
-(MANUAL_ADMIN, or STOCK_ITEM with the warning «استوک فعلاً فقط در دیتابیس
-آماده است...») → position → confirmation → save. `stockEnabled` stays false —
-stock delivery is schema-ready only.
+Name → groups → category → **product kind** (specialized-workflows phase:
+`admin:prod:f:kind:<APPLE|AI|TGP|GIFT|GEN>`) → duration (0 = none) → price
+→ invoice description → required-user-info yes/no (+ prompt text when yes)
+→ delivery type (MANUAL_ADMIN, or STOCK_ITEM with the warning «استوک فعلاً
+فقط در دیتابیس آماده است...») → position → confirmation → save.
+
+The kind step branches the wizard (see
+`docs/specialized-product-workflows.md` for the full defaults table):
+APPLE_ID fixes credential stock + the email-boundary inventory format;
+AI_ACCOUNT asks «اکانت آماده» vs «اکانت شخصی برای مشتری»
+(`admin:prod:f:ai:ready|pers` — ready adds a parser picker
+`admin:prod:f:sp:<SL|SEP|EB>`, personal adds a form preset picker
+`admin:prod:f:fp:<AI|NONE>`); TELEGRAM_PREMIUM fixes the personalized
+service with the default premium form and collect-before-approval on;
+GIFT_CARD asks stock codes vs manual delivery (`admin:prod:f:gc:stock|manual`).
+Specialized kinds skip the legacy delivery question (fixed by the branch)
+and stock-backed kinds save with `stockEnabled = true`; GENERIC keeps the
+exact legacy question flow (and the legacy `stockEnabled = false` creation
+default).
 
 ## Editing
 

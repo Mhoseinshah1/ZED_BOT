@@ -67,6 +67,13 @@ empty.
   untouched. The reference derives only from order/user/product values,
   NEVER from the encrypted stock content, and appears in the delivery
   message and safe admin audit.
+- **Specialized fulfillment** (specialized-workflows phase): the
+  specialized engine keeps the same contract —
+  `ensureOrderDeliveryReference` runs before the record enters any queue
+  (`ensureSpecializedRecord`) and before every specialized stock
+  reservation, and the awaiting-stock admin notice shows the reference
+  (never stock content, never customer data). See
+  `docs/specialized-product-workflows.md`.
 - **User pages**: the OTHER_PRODUCT order detail and the unified history
   detail render «شناسه تحویل:» when present.
 - **Admin search**: «جستجوی سفارش 🔎» additionally matches the delivery

@@ -345,6 +345,18 @@ glass buttons inside the message (default) or as a persistent reply
 keyboard below the input field — one shared menu definition drives both
 modes; see `docs/user-menu-keyboard-modes.md`.
 
+**Specialized digital-product workflows**: OTHER_PRODUCT items carry an
+admin-selected kind (Apple ID, AI account, Telegram Premium, gift card, or
+generic) that drives the creation wizard, the encrypted stock-inventory
+format (including an email-boundary Apple-ID parser with fingerprint-based
+duplicate detection), structured pre-payment customer-information forms
+(encrypted at rest, masked everywhere, consumed exactly once at
+settlement — submitting a form never settles a payment), and immutable
+per-checkout fulfillment snapshots; paid stock orders with an empty
+inventory park as AWAITING_STOCK and complete automatically on refill.
+Legacy generic products keep their exact previous behavior. See
+`docs/specialized-product-workflows.md`.
+
 ### Persian bot copy
 
 All Telegram-visible user and admin texts are Persian and aligned with the

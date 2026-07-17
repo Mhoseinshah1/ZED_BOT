@@ -130,6 +130,34 @@ Fulfillment then dispatches to the same idempotent executors the receipt
 approval uses (provisioning, renewal, extra volume/time, stock/manual
 delivery) and sends the user's success text.
 
+### Specialized OTHER_PRODUCT fulfillment (specialized-workflows phase)
+
+The **post-settlement dispatch is unchanged**: every method still commits
+its financial transaction first and then calls
+`dispatchPaidOrderFulfillment` — no Telegram sends or stock writes ever run
+inside the money transaction. What changed is inside the OTHER_PRODUCT
+branch: the dispatcher resolves the checkout's **frozen fulfillment
+snapshot** (`CheckoutSession.otherProductFulfillmentSnapshot`, captured at
+checkout creation; legacy fallback order: stored snapshot → live product →
+`productSnapshot`-derived GENERIC) and routes non-GENERIC kinds to the
+specialized engine (`fulfillSpecializedOtherProduct`). GENERIC — and any
+resolution failure — continues on the untouched legacy path
+(`autoDeliverStockOrder` → `initManualDelivery`).
+
+**Pre-settlement customer input is consumed at settlement time, never at
+submission.** A buyer may fill the structured info form right after
+submitting a card-to-card receipt (while the payment is still
+`PENDING_REVIEW`), but that submission writes only a
+`CheckoutCustomerInput` row — it never settles the payment, creates
+orders, starts fulfillment, notifies admins or consumes stock. When the
+approval/settlement transaction commits and the dispatcher runs, the
+specialized engine consumes the submission **exactly once** (CAS on the
+unique `consumedByOtherProductOrderId`) and copies it onto the
+`OtherProductOrder`. A paid specialized stock order with an empty inventory
+parks as `AWAITING_STOCK` (never a silent downgrade to manual delivery)
+until the replenishment retry completes it. See
+[specialized-product-workflows.md](specialized-product-workflows.md).
+
 ### Trial-to-paid conversion (trial-lifecycle phase)
 
 When the target of a renewal / extra-volume / extra-time order is a
