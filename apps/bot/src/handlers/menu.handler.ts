@@ -53,7 +53,13 @@ export async function showUserMenu(ctx: BotContext): Promise<void> {
     }
     // Sending the user reply keyboard REPLACES whatever persistent keyboard
     // is on screen (including the admin one) - no removal message needed.
-    await safeReplyWithMarkup(ctx, text, await buildUserMainReplyKeyboard());
+    await safeReplyWithMarkup(
+      ctx,
+      text,
+      // Viewer-aware: the final admin row renders only while the sender is
+      // an active admin (ctx.admin is middleware-attached, active-only).
+      await buildUserMainReplyKeyboard({ isActiveAdmin: ctx.admin !== null }),
+    );
     ctx.session.replyMenuKeyboardActive = true;
     ctx.session.adminReplyMenuKeyboardActive = false;
   } else {
@@ -68,7 +74,7 @@ export async function showUserMenu(ctx: BotContext): Promise<void> {
       ctx.session.replyMenuKeyboardActive = false;
       ctx.session.adminReplyMenuKeyboardActive = false;
     }
-    const keyboard = await buildUserMainKeyboard();
+    const keyboard = await buildUserMainKeyboard({ isActiveAdmin: ctx.admin !== null });
     if (ctx.callbackQuery !== undefined) {
       await safeAnswerCallback(ctx);
       await safeEditOrReply(ctx, text, keyboard);

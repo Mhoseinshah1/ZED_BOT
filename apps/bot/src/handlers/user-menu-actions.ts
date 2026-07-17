@@ -3,7 +3,9 @@ import { Composer } from "grammy";
 import type { BotContext } from "../core/context.js";
 import { getUserMenuMode } from "../services/menu-mode.service.js";
 import { resolveMainMenuAction, type UserMainMenuAction } from "../keyboards/user-menu-definition.js";
+import { ensureActiveAdminAccess } from "../middlewares/admin-auth.middleware.js";
 import { ensureUserAccess } from "../middlewares/user-access.middleware.js";
+import { showAdminMenu } from "./admin.handler.js";
 import { openOtherProductsSection, startBuyFlow } from "./user-checkout/checkout.handler.js";
 import { openFreeTrialSection } from "./user-free-trial/free-trial.handler.js";
 import { renderOrdersHub } from "./user-orders/orders.handler.js";
@@ -22,6 +24,13 @@ import { renderWallet } from "./user-wallet/wallet.handler.js";
 // =============================================================================
 
 const ACTION_HANDLERS: Record<UserMainMenuAction, (ctx: BotContext) => Promise<void>> = {
+  // Defense in depth: even a direct call re-validates the active admin (the
+  // reply router already branches BEFORE user gates - see below).
+  ADMIN_PANEL: async (ctx) => {
+    if (await ensureActiveAdminAccess(ctx)) {
+      await showAdminMenu(ctx);
+    }
+  },
   BUY_SUBSCRIPTION: startBuyFlow,
   RENEW_SERVICE: (ctx) => renderRenewableList(ctx, 1),
   MY_SERVICES: (ctx) => renderServicesList(ctx, 1),
@@ -70,6 +79,19 @@ userMenuTextRouter.on("message:text", async (ctx, next) => {
   const action = await resolveMainMenuAction(text);
   if (action === null) {
     return next(); // arbitrary text is never navigation
+  }
+  // Admin entry is INDEPENDENT of the customer gates: an active admin whose
+  // user account is blocked must still reach the panel, and a normal user
+  // typing the admin label gets the explicit admin denial (the resolver
+  // recognizes the label for everyone; authorization happens HERE, never by
+  // visibility). Stale reply keyboards of deactivated admins are denied the
+  // same way - ctx.admin is attached for ACTIVE admins only.
+  if (action === "ADMIN_PANEL") {
+    if (!(await ensureActiveAdminAccess(ctx))) {
+      return;
+    }
+    await showAdminMenu(ctx);
+    return;
   }
   // Same gates as the user area (maintenance/blocked/terms/force-join) -
   // applied only AFTER a real menu label matched, so unrelated text from

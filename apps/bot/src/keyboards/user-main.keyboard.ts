@@ -1,6 +1,9 @@
 import { InlineKeyboard } from "grammy";
 
-import { buildUserMainMenuDefinition } from "./user-menu-definition.js";
+import {
+  buildUserMainMenuDefinition,
+  type UserMainMenuViewer,
+} from "./user-menu-definition.js";
 
 /**
  * Main user menu - button texts come from the database (operator-editable
@@ -23,11 +26,12 @@ import { buildUserMainMenuDefinition } from "./user-menu-definition.js";
  *  - «محصولات دیگر» stays a SEPARATE section (CB.USER_OTHER_PRODUCTS) -
  *    never merged into the subscription purchase.
  */
-export async function buildUserMainKeyboard(): Promise<InlineKeyboard> {
+export async function buildUserMainKeyboard(viewer?: UserMainMenuViewer): Promise<InlineKeyboard> {
   // Menu-keyboard-mode phase: rendered from the ONE shared menu definition
   // (rows/labels/visibility identical to the reply-keyboard mode); the
-  // approved inline layout and stable callbacks are unchanged.
-  const rows = await buildUserMainMenuDefinition();
+  // approved inline layout and stable callbacks are unchanged. The viewer
+  // gates the active-admin-only final row (absent viewer = hidden).
+  const rows = await buildUserMainMenuDefinition(viewer);
   return new InlineKeyboard(
     rows.map((row) => row.map((button) => InlineKeyboard.text(button.label, button.callback))),
   );
