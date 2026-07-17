@@ -11,6 +11,7 @@ import {
   RECOVERY_RECHECK_DELAY_MS,
   runStartupRecovery,
 } from "./services/startup-recovery.service.js";
+import { OPS_EVENTS, writeSystemLog } from "./services/system-log.service.js";
 
 const token = getBotToken();
 if (token === null) {
@@ -36,6 +37,14 @@ async function run(botToken: string): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`received ${signal}, stopping bot`);
     try {
+      // Ops log BEFORE the database disconnects; writeSystemLog never throws.
+      await writeSystemLog({
+        level: "INFO",
+        eventType: OPS_EVENTS.BOT_STOPPED,
+        message: "bot service stopping",
+        metadata: { signal },
+        topicKey: "SYSTEM",
+      });
       await bot.stop();
       await disconnectDatabase();
     } catch (err) {
@@ -49,6 +58,13 @@ async function run(botToken: string): Promise<void> {
   try {
     await connectDatabase();
     logger.info("database connection established");
+    // Ops log (SYSTEM topic): fire-and-forget, never blocks startup.
+    void writeSystemLog({
+      level: "INFO",
+      eventType: OPS_EVENTS.BOT_STARTED,
+      message: "bot service started",
+      topicKey: "SYSTEM",
+    });
   } catch (err) {
     logger.warn("database not reachable at startup, continuing", { error: errorMessage(err) });
   }

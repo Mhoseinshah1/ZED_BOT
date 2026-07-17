@@ -159,14 +159,16 @@ else
 fi
 
 # --- 9: backup dir permissions ----------------------------------------------------
-BACKUP_DIR_VALUE="$(env_value BACKUP_DIR 2>/dev/null)"
+# ZEDBOT_BACKUP_DIR is the HOST path (BACKUP_DIR in .env is the in-container
+# mount path since the ops phase and never points at a host directory).
+BACKUP_DIR_VALUE="$(env_value ZEDBOT_BACKUP_DIR 2>/dev/null)"
 BACKUP_DIR_VALUE="${BACKUP_DIR_VALUE:-$ZEDBOT_BACKUP_DIR}"
 if [ -d "$BACKUP_DIR_VALUE" ]; then
   bperms="$(stat -c '%a' "$BACKUP_DIR_VALUE" 2>/dev/null || echo '')"
   if [ -n "$bperms" ] && [ $(( 0$bperms & 007 )) -eq 0 ]; then
     pass "backup directory is not world accessible (${bperms})."
   else
-    warn "backup directory permissions are ${bperms:-unknown} - consider: chmod 700 ${BACKUP_DIR_VALUE}"
+    warn "backup directory permissions are ${bperms:-unknown} - repair with: zedbot repair backups"
   fi
 else
   warn "backup directory does not exist yet (${BACKUP_DIR_VALUE})."

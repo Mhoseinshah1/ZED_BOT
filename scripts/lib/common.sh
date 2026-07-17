@@ -19,8 +19,12 @@ set -Eeuo pipefail
 ZEDBOT_BASE_DIR="${ZEDBOT_BASE_DIR:-/opt/zedbot}"
 ZEDBOT_APP_DIR="${ZEDBOT_APP_DIR:-${ZEDBOT_BASE_DIR}/app}"
 ZEDBOT_DATA_DIR="${ZEDBOT_DATA_DIR:-${ZEDBOT_BASE_DIR}/data}"
-# BACKUP_DIR (from .env) takes precedence so operators can relocate backups.
-ZEDBOT_BACKUP_DIR="${BACKUP_DIR:-${ZEDBOT_BACKUP_DIR:-${ZEDBOT_BASE_DIR}/backups}}"
+# HOST path of the backup directory. Deliberately independent of BACKUP_DIR:
+# since the ops phase BACKUP_DIR (.env / compose environment) is the
+# IN-CONTAINER mount path (/var/lib/zedbot/backups) and must never influence
+# where backups live on the host. Relocate host backups by setting
+# ZEDBOT_BACKUP_DIR (install.sh writes it into .env).
+ZEDBOT_BACKUP_DIR="${ZEDBOT_BACKUP_DIR:-${ZEDBOT_BASE_DIR}/backups}"
 ZEDBOT_LOGS_DIR="${ZEDBOT_LOGS_DIR:-${ZEDBOT_BASE_DIR}/logs}"
 ZEDBOT_ENV_FILE="${ZEDBOT_ENV_FILE:-${ZEDBOT_APP_DIR}/.env}"
 ZEDBOT_REPO_URL="${ZEDBOT_REPO_URL:-https://github.com/Mhoseinshah1/ZED_BOT.git}"
@@ -90,6 +94,25 @@ ensure_directory() {
   if [ -n "$mode" ]; then
     chmod "$mode" "$dir"
   fi
+}
+
+# Makes the host backup directory usable by the containers: the bot mounts it
+# read-only and the worker read-write, both running as the unprivileged image
+# user (node, UID/GID 1000 unless overridden via ZEDBOT_RUNTIME_UID/GID).
+# Idempotent repair: mkdir -p + chown + chmod 750. It NEVER deletes anything
+# and never widens permissions beyond 750 (no world access, ever).
+ensure_backup_dir_permissions() {
+  local dir="${1:-$ZEDBOT_BACKUP_DIR}"
+  local uid="${ZEDBOT_RUNTIME_UID:-1000}" gid="${ZEDBOT_RUNTIME_GID:-1000}"
+  mkdir -p "$dir"
+  chown "${uid}:${gid}" "$dir"
+  chmod 750 "$dir"
+  # Database backup files must be readable by the runtime user (the worker
+  # delivers them to Telegram; the bot lists them through its ro mount).
+  # Only zedbot-db-* files are touched: the update safety archives
+  # (zedbot_backup_*.tar.gz, they contain .env) stay root-owned with 600.
+  find "$dir" -maxdepth 1 -type f -name 'zedbot-db-*' \
+    -exec chown "${uid}:${gid}" {} + -exec chmod 640 {} + 2>/dev/null || true
 }
 
 generate_password() {

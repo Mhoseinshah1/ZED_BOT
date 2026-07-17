@@ -242,3 +242,128 @@ jobs:
             scripts/firewall-setup.sh \
             scripts/security-check.sh \
             scripts/lib/common.sh
+
+  # Builds the production image and exercises the real backup pipeline:
+  # worker creates + verifies a backup through its CLI into the shared bind
+  # mount, the file persists across containers, the bot sees it read-only,
+  # and no secret-shaped strings appear in any captured log.
+  docker-backup-smoke:
+    name: Docker backup smoke (image + worker backup pipeline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build the app image
+        run: docker build -t zedbot-app .
+
+      - name: Image ships PostgreSQL 16 client tools and runs as non-root
+        run: |
+          docker run --rm zedbot-app pg_dump --version
+          docker run --rm zedbot-app pg_restore --version
+          # The client major must match the postgres:16-alpine server.
+          docker run --rm zedbot-app pg_dump --version | grep -E 'pg_dump \(PostgreSQL\) 16\.'
+          uid="$(docker run --rm zedbot-app id -u)"
+          echo "container runs as uid ${uid}"
+          test "$uid" = "1000"
+
+      - name: Prepare host backup dir, data dir and .env
+        run: |
+          backup_dir="$(mktemp -d)"
+          data_dir="$(mktemp -d)"
+          # Same ownership/mode the installer applies on a real server.
+          sudo chown 1000:1000 "$backup_dir"
+          sudo chmod 750 "$backup_dir"
+          echo "BACKUP_HOST_DIR=${backup_dir}" >> "$GITHUB_ENV"
+          echo "DATA_HOST_DIR=${data_dir}" >> "$GITHUB_ENV"
+          # Dummy values only; BACKUP_ENCRYPTION_PASSWORD stays empty so the
+          # produced file is a plain .dump (asserted below).
+          cat > .env <<EOF
+          NODE_ENV=${NODE_ENV}
+          APP_NAME=${APP_NAME}
+          APP_DOMAIN=${APP_DOMAIN}
+          APP_BASE_URL=${APP_BASE_URL}
+          API_PORT=${API_PORT}
+          LOG_LEVEL=${LOG_LEVEL}
+          TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+          ADMIN_TELEGRAM_IDS=${ADMIN_TELEGRAM_IDS}
+          POSTGRES_DB=${POSTGRES_DB}
+          POSTGRES_USER=${POSTGRES_USER}
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          DATABASE_URL=postgresql://zedbot:zedbot_test_password@postgres:5432/zedbot?schema=public
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+          REDIS_PASSWORD=${REDIS_PASSWORD}
+          REDIS_URL=redis://:zedbot_test_redis_password@redis:6379/0
+          APP_SECRET=ci-smoke-app-secret-ci-smoke-app-secret-1234
+          INTERNAL_API_TOKEN=ci-smoke-internal-token-1234567890
+          ZEDBOT_DATA_DIR=${data_dir}
+          ZEDBOT_BACKUP_DIR=${backup_dir}
+          BACKUP_RETENTION_DAYS=14
+          BACKUP_MIN_RETAINED=3
+          BACKUP_ENCRYPTION_PASSWORD=
+          EOF
+
+      - name: Start postgres and redis
+        run: docker compose up -d --wait postgres redis
+
+      - name: Apply database migrations (one-off container)
+        run: |
+          docker compose run --rm --no-deps worker \
+            sh -c 'cd packages/database && node_modules/.bin/prisma migrate deploy' \
+            | tee migrate.log
+
+      - name: Create a backup via the worker CLI (into the shared mount)
+        run: |
+          docker compose run --rm --no-deps worker \
+            node apps/worker/dist/cli/create-backup.js | tee create-backup.log
+
+      - name: Assert dump + manifest landed on the HOST
+        run: |
+          sudo ls -la "$BACKUP_HOST_DIR"
+          dump="$(sudo find "$BACKUP_HOST_DIR" -maxdepth 1 -name 'zedbot-db-*.dump' | head -n 1)"
+          manifest="$(sudo find "$BACKUP_HOST_DIR" -maxdepth 1 -name 'zedbot-db-*.manifest.json' | head -n 1)"
+          test -n "$dump"
+          test -n "$manifest"
+          echo "host dump: ${dump}"
+          echo "host manifest: ${manifest}"
+
+      - name: Backup persists into a FRESH worker container
+        run: |
+          docker compose run --rm --no-deps worker \
+            sh -c 'ls -la /var/lib/zedbot/backups/ && ls /var/lib/zedbot/backups/zedbot-db-*.dump'
+
+      - name: Bot sees the backup read-only (write must fail)
+        run: |
+          docker compose run --rm --no-deps bot \
+            sh -c 'ls /var/lib/zedbot/backups/' | tee bot-ls.log
+          grep -q 'zedbot-db-' bot-ls.log
+          if docker compose run --rm --no-deps bot \
+            sh -c 'touch /var/lib/zedbot/backups/.ci-write-test 2>/dev/null'; then
+            echo "ERROR: the bot mount is writable but must be read-only" >&2
+            exit 1
+          fi
+          echo "bot mount is read-only as intended."
+
+      - name: Captured logs never contain connection strings or bot tokens
+        run: |
+          docker compose logs --no-color > compose.log 2>&1 || true
+          cat migrate.log create-backup.log bot-ls.log compose.log > all-captured.log
+          if grep -E 'postgres(ql)?://' all-captured.log; then
+            echo "ERROR: a postgres:// connection string leaked into the logs" >&2
+            exit 1
+          fi
+          if grep -E '[0-9]{6,12}:[A-Za-z0-9_-]{30,}' all-captured.log; then
+            echo "ERROR: a bot-token-shaped string leaked into the logs" >&2
+            exit 1
+          fi
+          echo "log scan clean."
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans || true
+          rm -f .env
+          sudo rm -rf "$BACKUP_HOST_DIR" "$DATA_HOST_DIR" || true

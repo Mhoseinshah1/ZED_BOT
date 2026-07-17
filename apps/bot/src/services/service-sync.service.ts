@@ -15,6 +15,7 @@ import {
   SERVICE_LOCK_UNAVAILABLE_TEXT,
   serviceOperationLockKey,
 } from "./service-lock.service.js";
+import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 
 // =============================================================================
 // Service sync (Phase 11 + service-live-sync phase): read-only refresh of one
@@ -231,6 +232,18 @@ async function syncServiceFromPanelUnlocked(
         : code === "unreachable" || code === "timeout" || code === "auth-failed"
           ? "panel-unreachable"
           : "other";
+    if (failureKind === "panel-unreachable") {
+      // Ops log (PANEL topic) - THE central panel-connection-failure signal.
+      // Ids + safe diagnostic code only; never URLs, credentials or raw errors.
+      void writeSystemLog({
+        level: "WARN",
+        eventType: OPS_EVENTS.PANEL_CONNECTION_FAILED,
+        message: "panel connection failed during service sync",
+        metadata: { panelId: panel.id, panelType: panel.type, code: code ?? "unknown" },
+        topicKey: "PANEL",
+        serviceId: service.id,
+      });
+    }
     return {
       ok: false,
       service: serviceRow,

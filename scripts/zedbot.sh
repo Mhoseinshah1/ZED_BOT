@@ -4,8 +4,7 @@
 # Installed to /usr/local/bin/zedbot by scripts/install.sh.
 #
 # Restore is INSTRUCTIONS ONLY: `zedbot restore` / `zedbot restore-help`
-# print the manual steps and exit without touching anything. There is no
-# uninstall command.
+# print the manual steps and exit without touching anything.
 # =============================================================================
 
 set -Eeuo pipefail
@@ -27,10 +26,13 @@ Commands:
   restart                 Restart all services (re-reads .env)
   start                   Start all services
   stop                    Stop all services
-  update                  Update ZED_BOT to the latest version (creates a safety backup first)
-  backup                  Create a database backup (zedbot-db-YYYYMMDD-HHMMSS.sql.gz)
+  update                  Update ZED_BOT to the latest version (creates + verifies a backup first)
+  backup [create]         Create a verified database backup (zedbot-db-<stamp>.dump[.enc] + manifest)
+  backup list             List all backups (name, size, date, type, verified)
+  backup verify <file>    Verify a backup by file name, path or timestamp id
+  repair backups          Fix backup directory ownership/permissions and test container access
   health                  Quick health summary (services, database, disk)
-  doctor                  Run the full system health checks
+  doctor                  Run the full system health checks (doctor --fix repairs the backup dir)
   shell [service]         Open a shell inside a container (default: bot)
   env-check               Validate the .env configuration (never prints values)
   nginx                   Set up / refresh the Nginx reverse proxy for APP_DOMAIN
@@ -46,6 +48,7 @@ Examples:
   zedbot status
   zedbot logs api
   zedbot backup
+  zedbot backup list
   zedbot env-check
 EOF
 }
@@ -62,7 +65,8 @@ on the server.
        zedbot backup
 
   1. Pick the backup file to restore (newest first):
-       ls -1t /opt/zedbot/backups/zedbot-db-*.sql.gz
+       zedbot backup list
+       ls -1t /opt/zedbot/backups/zedbot-db-*
 
   2. Stop the application services (keep postgres running):
        cd /opt/zedbot/app
@@ -70,8 +74,19 @@ on the server.
 
   3. Restore the dump (values for <POSTGRES_USER> / <POSTGRES_DB> are in
      /opt/zedbot/app/.env - do not paste them into chats or logs):
-       gunzip -c /opt/zedbot/backups/zedbot-db-YYYYMMDD-HHMMSS.sql.gz \
-         | docker compose exec -T postgres psql -U <POSTGRES_USER> -d <POSTGRES_DB>
+
+     a) Custom-format dump (zedbot-db-YYYYMMDD-HHMMSS.dump):
+          docker compose exec -T postgres pg_restore --clean --if-exists \
+            -U <POSTGRES_USER> -d <POSTGRES_DB> < /opt/zedbot/backups/zedbot-db-YYYYMMDD-HHMMSS.dump
+
+     b) Encrypted dump (.dump.enc): decrypt it first with the worker tooling
+        (requires BACKUP_ENCRYPTION_PASSWORD from .env), then restore the
+        resulting .dump as in (a). Check the file first:
+          zedbot backup verify zedbot-db-YYYYMMDD-HHMMSS.dump.enc
+
+     c) Legacy plain SQL (zedbot-db-YYYYMMDD-HHMMSS.sql.gz):
+          gunzip -c /opt/zedbot/backups/zedbot-db-YYYYMMDD-HHMMSS.sql.gz \
+            | docker compose exec -T postgres psql -U <POSTGRES_USER> -d <POSTGRES_DB>
 
   4. Start everything again and verify:
        docker compose up -d
@@ -104,7 +119,7 @@ fi
 . "$COMMON_LIB"
 
 health_summary() {
-  local backup_dir="${BACKUP_DIR:-$ZEDBOT_BACKUP_DIR}"
+  local backup_dir="$ZEDBOT_BACKUP_DIR"
   log_info "Services:"
   run_compose ps || true
   if compose_service_running postgres; then
@@ -121,6 +136,191 @@ health_summary() {
     df -h "$backup_dir" | tail -n 1 || true
   else
     log_warn "Backup directory does not exist yet: ${backup_dir}"
+  fi
+}
+
+# Reads the "verified" flag from a backup's sidecar manifest ("yes", "no" or
+# "-" when there is no manifest). Plain grep - never sources anything.
+manifest_verified_flag() {
+  local manifest="$1"
+  if [ ! -f "$manifest" ]; then
+    printf -- '-'
+    return 0
+  fi
+  if grep -Eq '"verified"[[:space:]]*:[[:space:]]*true' "$manifest"; then
+    printf 'yes'
+  else
+    printf 'no'
+  fi
+}
+
+backup_list() {
+  local dir="$ZEDBOT_BACKUP_DIR"
+  if [ ! -d "$dir" ]; then
+    log_warn "Backup directory does not exist yet: ${dir}"
+    exit 0
+  fi
+  local files
+  files="$(find "$dir" -maxdepth 1 -type f \
+    \( -name 'zedbot-db-*.dump' -o -name 'zedbot-db-*.dump.enc' -o -name 'zedbot-db-*.sql.gz' \) \
+    2>/dev/null | sort -r)"
+  if [ -z "$files" ]; then
+    log_info "No database backups found in ${dir}."
+    exit 0
+  fi
+  log_info "Database backups in ${dir} (newest first):"
+  printf '  %-44s %10s  %-19s %-9s %s\n' "NAME" "SIZE" "DATE" "TYPE" "VERIFIED"
+  local f name size mdate type verified
+  while IFS= read -r f; do
+    name="${f##*/}"
+    size="$(du -h "$f" 2>/dev/null | cut -f1)"
+    mdate="$(date -d "@$(stat -c %Y "$f" 2>/dev/null || echo 0)" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
+    case "$name" in
+      *.dump.enc) type="dump.enc" ;;
+      *.dump)     type="dump" ;;
+      *.sql.gz)   type="sql.gz" ;;
+      *)          type="other" ;;
+    esac
+    verified="$(manifest_verified_flag "${f}.manifest.json")"
+    printf '  %-44s %10s  %-19s %-9s %s\n' "$name" "$size" "$mdate" "$type" "$verified"
+  done <<< "$files"
+}
+
+# Resolves a user-supplied backup reference (absolute path, file name inside
+# the backup dir, or a timestamp short id) to one existing file.
+resolve_backup_file() {
+  local ref="$1" dir="$ZEDBOT_BACKUP_DIR"
+  if [ -f "$ref" ]; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  if [ -f "${dir}/${ref}" ]; then
+    printf '%s' "${dir}/${ref}"
+    return 0
+  fi
+  local matches count
+  matches="$(find "$dir" -maxdepth 1 -type f \
+    \( -name "zedbot-db-*${ref}*.dump" -o -name "zedbot-db-*${ref}*.dump.enc" -o -name "zedbot-db-*${ref}*.sql.gz" \) \
+    2>/dev/null | sort -r)"
+  count="$(printf '%s' "$matches" | grep -c . || true)"
+  if [ "$count" -eq 1 ]; then
+    printf '%s' "$matches"
+    return 0
+  fi
+  if [ "$count" -gt 1 ]; then
+    log_error "Backup reference '${ref}' is ambiguous - matching files:"
+    printf '%s\n' "$matches" >&2
+    return 1
+  fi
+  log_error "No backup found for '${ref}' in ${dir}. See: zedbot backup list"
+  return 1
+}
+
+backup_verify() {
+  local ref="${1:-}"
+  if [ -z "$ref" ]; then
+    log_error "Usage: zedbot backup verify <file-or-timestamp>"
+    exit 1
+  fi
+  local file
+  file="$(resolve_backup_file "$ref")" || exit 1
+  local name="${file##*/}"
+  log_info "Verifying ${name} ..."
+
+  # Integrity against the manifest first, when one exists.
+  local manifest="${file}.manifest.json"
+  if [ -f "$manifest" ]; then
+    local expected actual
+    expected="$(grep -Eo '"sha256"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' "$manifest" | grep -Eo '[a-f0-9]{64}' || true)"
+    if [ -n "$expected" ]; then
+      actual="$(sha256sum "$file" | awk '{print $1}')"
+      if [ "$expected" = "$actual" ]; then
+        log_success "sha256 matches the manifest."
+      else
+        log_error "sha256 MISMATCH against the manifest - the file is corrupt or was modified."
+        exit 1
+      fi
+    fi
+  else
+    log_warn "No manifest found for ${name} (legacy or externally created file)."
+  fi
+
+  case "$name" in
+    *.dump)
+      if ! compose_service_running postgres; then
+        log_error "The postgres container is not running - start it first: zedbot start"
+        exit 1
+      fi
+      if run_compose exec -T postgres pg_restore --list /dev/stdin < "$file" > /dev/null; then
+        log_success "pg_restore can read the archive - backup is valid."
+      else
+        log_error "pg_restore could NOT read the archive - backup is corrupt."
+        exit 1
+      fi
+      ;;
+    *.dump.enc)
+      if run_compose run --rm --no-deps worker sh -c \
+        'test -f apps/worker/dist/cli/verify-backup.js' >/dev/null 2>&1; then
+        if run_compose run --rm --no-deps worker node apps/worker/dist/cli/verify-backup.js \
+          "/var/lib/zedbot/backups/${name}"; then
+          log_success "Worker verification passed - backup is valid."
+        else
+          log_error "Worker verification FAILED - wrong password or corrupt file."
+          exit 1
+        fi
+      elif [ "$(head -c 4 "$file" 2>/dev/null)" = "ZBK1" ]; then
+        log_warn "Worker verify CLI not available - only the ZBK1 envelope header was checked."
+        log_warn "Rebuild the images (zedbot update) for full encrypted-backup verification."
+      else
+        log_error "The file does not start with the ZBK1 envelope header - it is not a valid encrypted backup."
+        exit 1
+      fi
+      ;;
+    *.sql.gz)
+      if gzip -t "$file"; then
+        log_success "gzip integrity check passed - legacy backup is readable."
+      else
+        log_error "gzip integrity check FAILED - the legacy backup is corrupt."
+        exit 1
+      fi
+      ;;
+    *)
+      log_error "Unsupported backup type: ${name}"
+      exit 1
+      ;;
+  esac
+}
+
+repair_backups() {
+  local dir="$ZEDBOT_BACKUP_DIR"
+  log_info "Repairing backup directory permissions (${dir}) ..."
+  ensure_backup_dir_permissions "$dir"
+  log_success "Owner $(stat -c '%u:%g' "$dir"), mode $(stat -c '%a' "$dir")."
+
+  if compose_service_running worker; then
+    if run_compose exec -T worker sh -c 'touch "${BACKUP_DIR:-/var/lib/zedbot/backups}/.zedbot-write-test" && rm -f "${BACKUP_DIR:-/var/lib/zedbot/backups}/.zedbot-write-test"' >/dev/null 2>&1; then
+      log_success "worker: read-write access to the backup mount confirmed."
+    else
+      log_error "worker: could NOT write to the backup mount - check the volume and ownership (zedbot doctor)."
+    fi
+  else
+    log_warn "worker container is not running - write test skipped (zedbot start)."
+  fi
+
+  if compose_service_running bot; then
+    if run_compose exec -T bot sh -c 'ls "${BACKUP_DIR:-/var/lib/zedbot/backups}" >/dev/null' >/dev/null 2>&1; then
+      log_success "bot: read access to the backup mount confirmed."
+    else
+      log_error "bot: could NOT read the backup mount - check the volume (zedbot doctor)."
+    fi
+    if run_compose exec -T bot sh -c 'touch "${BACKUP_DIR:-/var/lib/zedbot/backups}/.zedbot-write-test"' >/dev/null 2>&1; then
+      run_compose exec -T bot sh -c 'rm -f "${BACKUP_DIR:-/var/lib/zedbot/backups}/.zedbot-write-test"' >/dev/null 2>&1 || true
+      log_warn "bot: the backup mount is WRITABLE but should be read-only - recreate the services: zedbot restart"
+    else
+      log_success "bot: backup mount is read-only as intended."
+    fi
+  else
+    log_warn "bot container is not running - read test skipped (zedbot start)."
   fi
 }
 
@@ -163,7 +363,45 @@ case "$CMD" in
     exec bash "${SCRIPTS_DIR}/update.sh" "$@"
     ;;
   backup)
-    exec bash "${SCRIPTS_DIR}/backup-db.sh" "$@"
+    SUB="${1:-create}"
+    shift || true
+    case "$SUB" in
+      create)
+        exec bash "${SCRIPTS_DIR}/backup-db.sh" "$@"
+        ;;
+      list)
+        require_root
+        load_env_if_exists
+        backup_list
+        ;;
+      verify)
+        require_root
+        app_cd
+        detect_compose_command
+        load_env_if_exists
+        backup_verify "${1:-}"
+        ;;
+      *)
+        log_error "Unknown backup subcommand: ${SUB} (use: create, list, verify)"
+        exit 1
+        ;;
+    esac
+    ;;
+  repair)
+    SUB="${1:-}"
+    case "$SUB" in
+      backups)
+        require_root
+        app_cd
+        detect_compose_command
+        load_env_if_exists
+        repair_backups
+        ;;
+      *)
+        log_error "Unknown repair target: '${SUB}' (use: repair backups)"
+        exit 1
+        ;;
+    esac
     ;;
   health)
     require_root

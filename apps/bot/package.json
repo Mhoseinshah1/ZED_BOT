@@ -17,6 +17,7 @@
     "@zedbot/panel-adapters": "workspace:*",
     "@zedbot/payments": "workspace:*",
     "@zedbot/shared": "workspace:*",
+    "bullmq": "^5.34.0",
     "grammy": "^1.34.0",
     "ioredis": "^5.10.1"
   },

@@ -1,15 +1,35 @@
+import { connectDatabase, disconnectDatabase } from "@zedbot/database";
 import {
+  BACKUP_QUEUE_NAME,
+  LOG_DELIVERY_QUEUE_NAME,
   createLogger,
   errorMessage,
   getRedisOptions,
   type RedisConnectionOptions,
 } from "@zedbot/shared";
-import { Queue, Worker, type Job } from "bullmq";
+import { Worker } from "bullmq";
+
+import { startHeartbeat } from "./heartbeat.js";
+import { createLogDeliveryProcessor } from "./log-delivery.js";
+import { setLogDeliveryEnqueuer } from "./ops-log.js";
+import {
+  createBackupQueue,
+  createLogDeliveryQueue,
+  enqueueLogDelivery,
+  type WorkerRedisConnection,
+} from "./queues.js";
+import { rawRedisClient } from "./redis.js";
+import { startScheduleReconciler } from "./scheduler.js";
+import { createBackupProcessor } from "./workers.js";
+
+// =============================================================================
+// ZED_BOT worker bootstrap: Prisma + two BullMQ consumers (database backups,
+// Telegram log delivery), the Redis heartbeat/capabilities loop and the
+// scheduled-backup reconciler. Shutdown closes workers -> queues -> Prisma
+// so in-flight jobs finish and connections drain cleanly.
+// =============================================================================
 
 const logger = createLogger("worker");
-
-export const DEFAULT_QUEUE_NAME = "default";
-export const PLACEHOLDER_JOB_NAME = "placeholder";
 
 const redisOptions = getRedisOptions();
 if (redisOptions === null) {
@@ -19,43 +39,74 @@ if (redisOptions === null) {
   // Slow down the restart loop while the operator fixes the configuration.
   setTimeout(() => process.exit(1), 60_000);
 } else {
-  void run(redisOptions);
+  run(redisOptions).catch((err: unknown) => {
+    logger.error("worker bootstrap failed", { error: errorMessage(err) });
+    setTimeout(() => process.exit(1), 10_000);
+  });
 }
 
 async function run(options: RedisConnectionOptions): Promise<void> {
   // BullMQ requires maxRetriesPerRequest=null so blocking commands survive
   // reconnects.
-  const connection = { ...options, maxRetriesPerRequest: null };
+  const connection: WorkerRedisConnection = { ...options, maxRetriesPerRequest: null };
 
-  const queue = new Queue(DEFAULT_QUEUE_NAME, { connection });
-  queue.on("error", (err) => {
-    logger.warn("queue redis error", { error: errorMessage(err) });
+  await connectDatabase();
+  logger.info("database connected");
+
+  const backupQueue = createBackupQueue(connection);
+  const logQueue = createLogDeliveryQueue(connection);
+  backupQueue.on("error", (err) => {
+    logger.warn("backup queue redis error", { error: errorMessage(err) });
+  });
+  logQueue.on("error", (err) => {
+    logger.warn("log queue redis error", { error: errorMessage(err) });
   });
 
-  const worker = new Worker(
-    DEFAULT_QUEUE_NAME,
-    async (job: Job) => {
-      switch (job.name) {
-        case PLACEHOLDER_JOB_NAME:
-          logger.info("processed placeholder job", { jobId: job.id });
-          return { ok: true };
-        default:
-          logger.warn("received unknown job type, ignoring", { jobName: job.name, jobId: job.id });
-          return { ok: false, reason: "unknown_job" };
-      }
-    },
-    { connection },
+  // Ops logs written anywhere in this process enqueue their Telegram delivery
+  // through the log queue.
+  setLogDeliveryEnqueuer((deliveryId) => enqueueLogDelivery(logQueue, deliveryId));
+
+  // Heartbeat + capabilities reuse the queue's existing Redis connection
+  // (the worker holds no direct ioredis dependency - see redis.ts).
+  const redis = await rawRedisClient(backupQueue);
+  const stopHeartbeat = startHeartbeat(redis);
+  const stopReconciler = startScheduleReconciler(backupQueue);
+
+  const backupWorker = new Worker(
+    BACKUP_QUEUE_NAME,
+    createBackupProcessor({ redis, backupQueue }),
+    { connection, concurrency: 1 },
+  );
+  const logWorker = new Worker(
+    LOG_DELIVERY_QUEUE_NAME,
+    createLogDeliveryProcessor({ redis, logQueue }),
+    // Telegram-safe: at most 15 sends per minute, one at a time.
+    { connection, concurrency: 1, limiter: { max: 15, duration: 60_000 } },
   );
 
-  worker.on("ready", () => {
-    logger.info(`ZED_BOT worker service started (queue: ${DEFAULT_QUEUE_NAME})`);
-  });
-  worker.on("failed", (job, err) => {
-    logger.error("job failed", { jobId: job?.id, jobName: job?.name, error: errorMessage(err) });
-  });
-  worker.on("error", (err) => {
-    logger.warn("worker redis error", { error: errorMessage(err) });
-  });
+  for (const [name, worker] of [
+    ["backup", backupWorker],
+    ["log-delivery", logWorker],
+  ] as const) {
+    worker.on("ready", () => {
+      logger.info(`${name} worker ready`);
+    });
+    worker.on("failed", (job, err) => {
+      logger.error(`${name} job failed`, {
+        jobId: job?.id,
+        jobName: job?.name,
+        attemptsMade: job?.attemptsMade,
+        error: errorMessage(err),
+      });
+    });
+    worker.on("error", (err) => {
+      logger.warn(`${name} worker redis error`, { error: errorMessage(err) });
+    });
+  }
+
+  logger.info(
+    `ZED_BOT worker service started (queues: ${BACKUP_QUEUE_NAME}, ${LOG_DELIVERY_QUEUE_NAME})`,
+  );
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
@@ -64,9 +115,12 @@ async function run(options: RedisConnectionOptions): Promise<void> {
     }
     shuttingDown = true;
     logger.info(`received ${signal}, shutting down`);
+    stopHeartbeat();
+    stopReconciler();
     try {
-      await worker.close();
-      await queue.close();
+      await Promise.allSettled([backupWorker.close(), logWorker.close()]);
+      await Promise.allSettled([backupQueue.close(), logQueue.close()]);
+      await disconnectDatabase();
     } catch (err) {
       logger.warn("error during shutdown", { error: errorMessage(err) });
     }

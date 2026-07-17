@@ -107,10 +107,17 @@ services:
     command: ["node", "apps/bot/dist/index.js"]
     env_file:
       - .env
+    environment:
+      # In-container backup path (compose `environment` overrides env_file),
+      # decoupled from the HOST location ZEDBOT_BACKUP_DIR below.
+      BACKUP_DIR: /var/lib/zedbot/backups
     security_opt:
       - no-new-privileges:true
     tmpfs:
       - /tmp
+    volumes:
+      # Read-only: the bot lists/serves backups but never writes them.
+      - ${ZEDBOT_BACKUP_DIR:-/opt/zedbot/backups}:/var/lib/zedbot/backups:ro
     depends_on:
       api:
         condition: service_healthy
@@ -131,10 +138,17 @@ services:
     command: ["node", "apps/worker/dist/index.js"]
     env_file:
       - .env
+    environment:
+      # In-container backup path (compose `environment` overrides env_file),
+      # decoupled from the HOST location ZEDBOT_BACKUP_DIR below.
+      BACKUP_DIR: /var/lib/zedbot/backups
     security_opt:
       - no-new-privileges:true
     tmpfs:
       - /tmp
+    volumes:
+      # Read-write: only the worker creates, verifies and prunes backups.
+      - ${ZEDBOT_BACKUP_DIR:-/opt/zedbot/backups}:/var/lib/zedbot/backups:rw
     depends_on:
       postgres:
         condition: service_healthy

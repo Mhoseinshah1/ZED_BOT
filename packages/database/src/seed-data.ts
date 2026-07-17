@@ -26,6 +26,27 @@ export interface ButtonTextSeed {
   text: string;
 }
 
+// Operational log-topic rows (ops phase: backups + Telegram operational
+// logging). SOURCE OF TRUTH for the stable keys and default Persian titles
+// is packages/shared/src/ops.ts (OPS_LOG_TOPIC_KEYS / OPS_LOG_TOPIC_TITLES);
+// they are duplicated here on purpose because @zedbot/database intentionally
+// carries NO workspace dependencies (the migration/seed container runs it
+// standalone). Keep the two lists in sync when a topic is added.
+// Seeded create-if-missing by key; the 13 legacy topics are never touched.
+export const OPS_LOG_TOPIC_SEEDS: Array<{ key: string; title: string }> = [
+  { key: "SYSTEM", title: "سیستم" },
+  { key: "ERROR", title: "خطاها" },
+  { key: "PAYMENT", title: "پرداخت‌ها" },
+  { key: "ORDER", title: "سفارش‌ها" },
+  { key: "SERVICE", title: "سرویس‌ها" },
+  { key: "PANEL", title: "پنل‌ها" },
+  { key: "SECURITY", title: "امنیت" },
+  { key: "BACKUP", title: "بکاپ‌ها" },
+  { key: "SUPPORT", title: "پشتیبانی" },
+  { key: "BROADCAST", title: "پیام همگانی" },
+  { key: "AUDIT", title: "گزارش حسابرسی" },
+];
+
 export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
   // --- general / access gates ------------------------------------------------
   {

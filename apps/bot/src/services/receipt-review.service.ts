@@ -17,6 +17,7 @@ import {
 } from "@zedbot/database";
 
 import { claimDiscountUsage } from "./discount.service.js";
+import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 import { WALLET_TOPUP_REASON } from "./wallet-topup.service.js";
 
 // =============================================================================
@@ -363,6 +364,18 @@ export async function approveReceiptPayment(
       return order;
     });
 
+    // Ops log (PAYMENT topic) - ids/amounts only, never the receipt itself.
+    void writeSystemLog({
+      level: "INFO",
+      eventType: OPS_EVENTS.RECEIPT_APPROVED,
+      message: "manual receipt approved",
+      metadata: { amountToman: payment.amountToman, orderType },
+      topicKey: "PAYMENT",
+      userId: payment.userId,
+      adminId: admin.id,
+      paymentId: payment.id,
+      orderId: order.id,
+    });
     return {
       ok: true,
       kind: "ORDER_PAYMENT",
@@ -476,6 +489,17 @@ async function approveWalletTopup(
       return { walletTransaction: created, newBalanceToman: balanceAfter };
     });
 
+    // Ops log (PAYMENT topic) - amount only, never balances beyond the ledger.
+    void writeSystemLog({
+      level: "INFO",
+      eventType: OPS_EVENTS.RECEIPT_APPROVED,
+      message: "manual wallet top-up receipt approved",
+      metadata: { amountToman: payment.amountToman, purpose: "WALLET_CHARGE" },
+      topicKey: "PAYMENT",
+      userId: payment.userId,
+      adminId: admin.id,
+      paymentId: payment.id,
+    });
     return {
       ok: true,
       kind: "WALLET_TOPUP",
@@ -562,6 +586,18 @@ export async function rejectReceiptPayment(
     throw err;
   }
 
+  // Ops log (PAYMENT topic) - the rejection REASON is admin-authored free
+  // text shown to the user, safe to persist (still scrubbed defensively).
+  void writeSystemLog({
+    level: "WARN",
+    eventType: OPS_EVENTS.RECEIPT_REJECTED,
+    message: "manual receipt rejected",
+    metadata: { amountToman: payment.amountToman },
+    topicKey: "PAYMENT",
+    userId: payment.userId,
+    adminId: admin.id,
+    paymentId: payment.id,
+  });
   return {
     ok: true,
     payment,

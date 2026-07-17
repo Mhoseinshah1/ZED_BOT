@@ -11,6 +11,7 @@ import {
 import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
+import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 
 // =============================================================================
 // Financial reconciliation (P0 settlement phase): the persistent review
@@ -114,6 +115,19 @@ export async function recordDuplicateSuccess(
       duplicatePaymentId: input.duplicatePaymentId,
       primaryPaymentId: input.primaryPaymentId,
       userId: input.userId,
+    });
+    // Ops log (PAYMENT topic) - ids/amounts only, never provider payloads.
+    void writeSystemLog({
+      level: "WARN",
+      eventType: OPS_EVENTS.PAYMENT_DUPLICATE_SUCCESS,
+      message: "duplicate successful payment filed for financial review",
+      metadata: {
+        caseId: result.reconciliationCase.id,
+        expectedAmountToman: input.expectedAmountToman,
+      },
+      topicKey: "PAYMENT",
+      userId: input.userId,
+      paymentId: input.duplicatePaymentId,
     });
   }
   return result;

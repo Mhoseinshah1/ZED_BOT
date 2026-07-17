@@ -43,6 +43,14 @@ RUN pnpm install --prod --frozen-lockfile
 # --- Runtime -------------------------------------------------------------------
 FROM base AS runtime
 ENV NODE_ENV=production
+# PostgreSQL 16 client tools (pg_dump/pg_restore/psql) so the worker can
+# create and verify database backups inside its own container. The major
+# version is pinned to match the postgres:16-alpine server in
+# docker-compose.yml. Since Alpine 3.23 the postgresql16 aport lives in the
+# community repository, which node:22-alpine (Alpine 3.24) enables by
+# default. The CI docker-backup-smoke job asserts `pg_dump --version`
+# reports 16.x, so a base-image bump that drops PG16 fails loudly here.
+RUN apk add --no-cache postgresql16-client
 COPY --from=prod-deps /repo ./
 COPY --from=build /repo/packages/shared/dist packages/shared/dist
 COPY --from=build /repo/packages/database/dist packages/database/dist

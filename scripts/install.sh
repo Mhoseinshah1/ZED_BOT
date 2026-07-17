@@ -30,8 +30,14 @@ set -Eeuo pipefail
 ZEDBOT_BASE_DIR="${ZEDBOT_BASE_DIR:-/opt/zedbot}"
 APP_DIR="${ZEDBOT_APP_DIR:-${ZEDBOT_BASE_DIR}/app}"
 DATA_DIR="${ZEDBOT_DATA_DIR:-${ZEDBOT_BASE_DIR}/data}"
-BACKUP_DIR="${ZEDBOT_BACKUP_DIR:-${ZEDBOT_BASE_DIR}/backups}"
+# HOST backup directory (the containers see it as /var/lib/zedbot/backups).
+HOST_BACKUP_DIR="${ZEDBOT_BACKUP_DIR:-${ZEDBOT_BASE_DIR}/backups}"
 LOGS_DIR="${ZEDBOT_LOGS_DIR:-${ZEDBOT_BASE_DIR}/logs}"
+# UID/GID of the unprivileged user the app containers run as (node in the
+# image). The backup directory is handed to this owner so the worker (rw
+# mount) and bot (ro mount) can use it.
+RUNTIME_UID="${ZEDBOT_RUNTIME_UID:-1000}"
+RUNTIME_GID="${ZEDBOT_RUNTIME_GID:-1000}"
 ENV_FILE="${APP_DIR}/.env"
 REPO_URL="${ZEDBOT_REPO_URL:-https://github.com/Mhoseinshah1/ZED_BOT.git}"
 REPO_BRANCH="${ZEDBOT_BRANCH:-main}"
@@ -298,10 +304,16 @@ detect_compose_command() {
 
 create_directories() {
   log_info "Creating ZED_BOT directories under ${ZEDBOT_BASE_DIR} ..."
-  mkdir -p "$ZEDBOT_BASE_DIR" "$APP_DIR" "$DATA_DIR" "$BACKUP_DIR" "$LOGS_DIR"
+  mkdir -p "$ZEDBOT_BASE_DIR" "$APP_DIR" "$DATA_DIR" "$HOST_BACKUP_DIR" "$LOGS_DIR"
   mkdir -p "${DATA_DIR}/postgres" "${DATA_DIR}/redis"
-  chmod 700 "$DATA_DIR" "$BACKUP_DIR"
-  log_success "Directories ready: ${APP_DIR}, ${DATA_DIR}, ${BACKUP_DIR}, ${LOGS_DIR}"
+  chmod 700 "$DATA_DIR"
+  # The backup dir is bind-mounted into the bot (read-only) and worker
+  # (read-write) containers, which run as the unprivileged runtime user -
+  # hand it over (750: owner + group only, never world accessible).
+  # Idempotent: safe on every re-run, never deletes anything.
+  chown "${RUNTIME_UID}:${RUNTIME_GID}" "$HOST_BACKUP_DIR"
+  chmod 750 "$HOST_BACKUP_DIR"
+  log_success "Directories ready: ${APP_DIR}, ${DATA_DIR}, ${HOST_BACKUP_DIR}, ${LOGS_DIR}"
 }
 
 ensure_git_safe_directory() {
@@ -465,8 +477,18 @@ APP_SECRET='${app_secret}'
 INTERNAL_API_TOKEN='${internal_api_token}'
 
 # --- Backups ---
-BACKUP_DIR='${BACKUP_DIR}'
-# When set, backups are encrypted (AES-256). Keep a copy of this password
+# HOST directory holding all backups (bind-mounted into bot ro / worker rw).
+ZEDBOT_BACKUP_DIR='${HOST_BACKUP_DIR}'
+BACKUP_RETENTION_DAYS='14'
+BACKUP_MIN_RETAINED='3'
+# UID/GID of the container runtime user that owns ZEDBOT_BACKUP_DIR.
+ZEDBOT_RUNTIME_UID='${RUNTIME_UID}'
+ZEDBOT_RUNTIME_GID='${RUNTIME_GID}'
+# NOTE: BACKUP_DIR (the IN-CONTAINER path) is intentionally NOT set here.
+# docker-compose.yml pins it to /var/lib/zedbot/backups for bot and worker;
+# setting a host path here would not relocate anything (use
+# ZEDBOT_BACKUP_DIR above instead).
+# When set, backups are encrypted (AES-256-GCM). Keep a copy of this password
 # somewhere safe OUTSIDE this server - encrypted backups are useless without
 # it. Empty value = unencrypted backups.
 BACKUP_ENCRYPTION_PASSWORD='${backup_encryption_password}'
@@ -554,7 +576,7 @@ print_summary() {
   Paths
     Application : ${APP_DIR}
     Data        : ${DATA_DIR}
-    Backups     : ${BACKUP_DIR}
+    Backups     : ${HOST_BACKUP_DIR}
     Logs        : ${LOGS_DIR}
     Config      : ${ENV_FILE} (chmod 600)
 
@@ -567,7 +589,7 @@ print_summary() {
     zedbot status     - show service status
     zedbot logs       - tail all logs (zedbot logs api|bot|worker)
     zedbot doctor     - run health checks
-    zedbot backup     - create a database backup (zedbot-db-YYYYMMDD-HHMMSS.sql.gz)
+    zedbot backup     - create a verified database backup (zedbot-db-YYYYMMDD-HHMMSS.dump[.enc])
     zedbot env-check  - validate the .env configuration (never prints values)
     zedbot nginx      - set up the Nginx reverse proxy
     zedbot ssl        - request the Let's Encrypt certificate (HTTPS)
