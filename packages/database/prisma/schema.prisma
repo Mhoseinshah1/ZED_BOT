@@ -132,6 +132,48 @@ enum OtherProductDeliveryType {
   STOCK_ITEM
 }
 
+// Specialized-workflows phase: the admin-selected product kind. Controls the
+// creation wizard, inventory format, customer-information collection and
+// fulfillment behavior. NEVER inferred from category/product names. Legacy
+// rows are backfilled to GENERIC (their behavior is unchanged - the profile
+// resolver derives it from the legacy deliveryType/stockEnabled fields).
+enum OtherProductKind {
+  GENERIC
+  APPLE_ID
+  AI_ACCOUNT
+  TELEGRAM_PREMIUM
+  GIFT_CARD
+}
+
+// Effective fulfillment behavior. Null on the Product means "derive from the
+// legacy fields" (GENERIC compatibility) - the one resolver in
+// other-product-profile.service.ts is the single mapping authority.
+enum OtherProductFulfillmentProfile {
+  MANUAL_DELIVERY
+  STOCK_CREDENTIAL
+  STOCK_CODE
+  PERSONALIZED_SERVICE
+}
+
+// How bulk inventory pastes are split into stock items.
+enum OtherProductStockParser {
+  SINGLE_LINE
+  EXPLICIT_SEPARATOR
+  EMAIL_BOUNDARY
+}
+
+// Pre-settlement customer-input lifecycle (CheckoutCustomerInput.status).
+// SUBMITTED never settles payment, never creates orders and never starts
+// fulfillment - consumption happens exactly once at settlement time via a
+// CAS on consumedByOtherProductOrderId.
+enum CheckoutCustomerInputStatus {
+  COLLECTING
+  SUBMITTED
+  CONSUMED
+  ABANDONED
+  REDACTED
+}
+
 // Naming phase: how the OTHER_PRODUCT delivery/order reference is built.
 // Order-facing identifiers ONLY - never stock content, never a Service row.
 enum OtherProductNamingPolicy {
@@ -279,6 +321,12 @@ enum OtherProductOrderStatus {
   REFUNDED
   DELIVERY_CANCELLED_REFUNDED
   DELIVERY_REJECTED_NO_REFUND
+  // Specialized-workflows phase: paid stock order with empty inventory -
+  // NEVER silently downgraded to generic manual delivery. Completed by the
+  // replenishment retry once stock is added.
+  AWAITING_STOCK
+  // Transient claim window between stock reservation and delivery send.
+  STOCK_RESERVED
 }
 
 enum ReferralCommissionStatus {
@@ -358,21 +406,21 @@ enum SettingType {
 // =============================================================================
 
 model Admin {
-  id            String    @id @default(uuid())
-  telegramId    BigInt    @unique
-  username      String?
-  firstName     String?
-  lastName      String?
-  role          AdminRole
-  isActive      Boolean   @default(true)
-  addedByAdminId String?
-  addedByAdmin  Admin?    @relation("AdminAddedBy", fields: [addedByAdminId], references: [id])
-  addedAdmins   Admin[]   @relation("AdminAddedBy")
-  permissions   AdminPermission[]
-  supportMessages SupportMessage[]
-  closedSupportTickets SupportTicket[] @relation("SupportTicketClosedBy")
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id                   String            @id @default(uuid())
+  telegramId           BigInt            @unique
+  username             String?
+  firstName            String?
+  lastName             String?
+  role                 AdminRole
+  isActive             Boolean           @default(true)
+  addedByAdminId       String?
+  addedByAdmin         Admin?            @relation("AdminAddedBy", fields: [addedByAdminId], references: [id])
+  addedAdmins          Admin[]           @relation("AdminAddedBy")
+  permissions          AdminPermission[]
+  supportMessages      SupportMessage[]
+  closedSupportTickets SupportTicket[]   @relation("SupportTicketClosedBy")
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
 
   @@index([role])
 }
@@ -416,42 +464,42 @@ model User {
   lastSeenAt DateTime?
 
   // Security / verification
-  blockedAt               DateTime?
-  blockedByAdminId        String?
-  blockReason             String?
-  disabledAt              DateTime?
-  disabledByAdminId       String?
-  isPhoneVerified         Boolean   @default(false)
-  phoneVerifiedAt         DateTime?
-  phoneVerifiedByAdminId  String?
-  kycStatus               KycStatus @default(NONE)
-  kycUpdatedAt            DateTime?
-  kycUpdatedByAdminId     String?
-  termsAcceptedAt         DateTime?
-  forceJoinBypass         Boolean   @default(false)
+  blockedAt                DateTime?
+  blockedByAdminId         String?
+  blockReason              String?
+  disabledAt               DateTime?
+  disabledByAdminId        String?
+  isPhoneVerified          Boolean   @default(false)
+  phoneVerifiedAt          DateTime?
+  phoneVerifiedByAdminId   String?
+  kycStatus                KycStatus @default(NONE)
+  kycUpdatedAt             DateTime?
+  kycUpdatedByAdminId      String?
+  termsAcceptedAt          DateTime?
+  forceJoinBypass          Boolean   @default(false)
   forceJoinBypassByAdminId String?
 
   // Referral
-  referrerId            String?
-  referrer              User?     @relation("UserReferrer", fields: [referrerId], references: [id])
-  referredUsers         User[]    @relation("UserReferrer")
-  referralCode          String?   @unique
-  referralJoinedAt      DateTime?
-  referralGiftClaimedAt DateTime?
-  totalReferralCount               Int @default(0)
-  totalReferralPurchaseCount       Int @default(0)
-  totalReferralPurchaseAmountToman Int @default(0)
-  totalReferralCommissionToman     Int @default(0)
+  referrerId                       String?
+  referrer                         User?     @relation("UserReferrer", fields: [referrerId], references: [id])
+  referredUsers                    User[]    @relation("UserReferrer")
+  referralCode                     String?   @unique
+  referralJoinedAt                 DateTime?
+  referralGiftClaimedAt            DateTime?
+  totalReferralCount               Int       @default(0)
+  totalReferralPurchaseCount       Int       @default(0)
+  totalReferralPurchaseAmountToman Int       @default(0)
+  totalReferralCommissionToman     Int       @default(0)
 
   // Wallet totals (authoritative history in WalletTransaction)
-  balanceToman            Int     @default(0)
-  totalChargedToman       Int     @default(0)
-  totalSpentToman         Int     @default(0)
-  totalDiscountToman      Int     @default(0)
-  totalRefundedToman      Int     @default(0)
-  totalManualAddedToman   Int     @default(0)
-  totalManualDeductedToman Int    @default(0)
-  allowNegativeBalance    Boolean @default(false)
+  balanceToman             Int     @default(0)
+  totalChargedToman        Int     @default(0)
+  totalSpentToman          Int     @default(0)
+  totalDiscountToman       Int     @default(0)
+  totalRefundedToman       Int     @default(0)
+  totalManualAddedToman    Int     @default(0)
+  totalManualDeductedToman Int     @default(0)
+  allowNegativeBalance     Boolean @default(false)
 
   // Stats
   referralCount            Int @default(0)
@@ -477,11 +525,11 @@ model User {
   // cooldown for claims created at/before that instant; the default
   // allowance override replaces the global default-policy allowance for
   // this user only (used by the OWNER "set remaining" operation).
-  freeTrialRevokedAt               DateTime?
-  freeTrialRevokedByAdminId        String?
-  freeTrialDeniedUntil             DateTime?
-  freeTrialCooldownUntil           DateTime?
-  freeTrialCooldownClearedAt       DateTime?
+  freeTrialRevokedAt                DateTime?
+  freeTrialRevokedByAdminId         String?
+  freeTrialDeniedUntil              DateTime?
+  freeTrialCooldownUntil            DateTime?
+  freeTrialCooldownClearedAt        DateTime?
   freeTrialDefaultAllowanceOverride Int?
 
   // Message preferences
@@ -495,29 +543,30 @@ model User {
   updatedAt DateTime @updatedAt
 
   // Relations
-  walletTransactions      WalletTransaction[]
-  orders                  Order[]
-  payments                Payment[]
-  services                Service[]
-  checkoutSessions        CheckoutSession[]
-  discountCodeUsages      DiscountCodeUsage[]
-  manualReceipts          ManualReceipt[]
-  hiddenPanels            UserHiddenPanel[]
-  hiddenPaymentGateways   UserHiddenPaymentGateway[]
-  referralsAsReferrer     Referral[]           @relation("ReferralReferrer")
-  referralAsReferred      Referral?            @relation("ReferralReferred")
-  commissionsAsReferrer   ReferralCommission[] @relation("CommissionReferrer")
-  commissionsAsReferred   ReferralCommission[] @relation("CommissionReferred")
-  freeTrialClaims         FreeTrialClaim[]
-  freeTrialEntitlements   FreeTrialEntitlement[]
-  freeTrialCampaignRows   FreeTrialCampaignRecipient[]
-  wheelSpinHistories      WheelSpinHistory[]
-  supportTickets          SupportTicket[]
-  supportMessages         SupportMessage[]
-  broadcastRecipients     BroadcastRecipient[]
-  serviceRatings          ServiceRating[]
-  serviceEventLogs        ServiceEventLog[]
-  otherProductOrders      OtherProductOrder[]
+  walletTransactions     WalletTransaction[]
+  orders                 Order[]
+  payments               Payment[]
+  services               Service[]
+  checkoutSessions       CheckoutSession[]
+  discountCodeUsages     DiscountCodeUsage[]
+  manualReceipts         ManualReceipt[]
+  hiddenPanels           UserHiddenPanel[]
+  hiddenPaymentGateways  UserHiddenPaymentGateway[]
+  referralsAsReferrer    Referral[]                   @relation("ReferralReferrer")
+  referralAsReferred     Referral?                    @relation("ReferralReferred")
+  commissionsAsReferrer  ReferralCommission[]         @relation("CommissionReferrer")
+  commissionsAsReferred  ReferralCommission[]         @relation("CommissionReferred")
+  freeTrialClaims        FreeTrialClaim[]
+  freeTrialEntitlements  FreeTrialEntitlement[]
+  freeTrialCampaignRows  FreeTrialCampaignRecipient[]
+  wheelSpinHistories     WheelSpinHistory[]
+  supportTickets         SupportTicket[]
+  checkoutCustomerInputs CheckoutCustomerInput[]
+  supportMessages        SupportMessage[]
+  broadcastRecipients    BroadcastRecipient[]
+  serviceRatings         ServiceRating[]
+  serviceEventLogs       ServiceEventLog[]
+  otherProductOrders     OtherProductOrder[]
 
   @@index([status])
   @@index([group])
@@ -576,25 +625,25 @@ model Panel {
   renewalMethod     RenewalMethod @default(RESET_VOLUME_AND_TIME)
 
   // Feature toggles
-  showPanel                       Boolean @default(true)
-  showFreeTest                    Boolean @default(false)
-  renewalEnabled                  Boolean @default(true)
-  customServiceForF               Boolean @default(false)
-  customServiceForN               Boolean @default(false)
-  customServiceForN2              Boolean @default(false)
-  panelUserLimitEnabled           Boolean @default(false)
-  userLimitEnabled                Boolean @default(false)
-  extraUserPurchaseEnabled        Boolean @default(false)
-  sendConfigEnabled               Boolean @default(true)
-  happLinkEnabled                 Boolean @default(false)
-  configKeyboardEnabled           Boolean @default(false)
-  subscriptionLinkEnabled         Boolean @default(true)
-  firstConnectionEnabled          Boolean @default(false)
-  freeTestFirstConnectionEnabled  Boolean @default(false)
-  locationChangeEnabled           Boolean @default(false)
+  showPanel                        Boolean @default(true)
+  showFreeTest                     Boolean @default(false)
+  renewalEnabled                   Boolean @default(true)
+  customServiceForF                Boolean @default(false)
+  customServiceForN                Boolean @default(false)
+  customServiceForN2               Boolean @default(false)
+  panelUserLimitEnabled            Boolean @default(false)
+  userLimitEnabled                 Boolean @default(false)
+  extraUserPurchaseEnabled         Boolean @default(false)
+  sendConfigEnabled                Boolean @default(true)
+  happLinkEnabled                  Boolean @default(false)
+  configKeyboardEnabled            Boolean @default(false)
+  subscriptionLinkEnabled          Boolean @default(true)
+  firstConnectionEnabled           Boolean @default(false)
+  freeTestFirstConnectionEnabled   Boolean @default(false)
+  locationChangeEnabled            Boolean @default(false)
   dedicatedSubscriptionLinkEnabled Boolean @default(false)
-  userCanDisableService           Boolean @default(false)
-  userCanEnableService            Boolean @default(false)
+  userCanDisableService            Boolean @default(false)
+  userCanEnableService             Boolean @default(false)
 
   // Per-panel pricing
   pricePerExtraGbToman          Int  @default(0)
@@ -611,19 +660,19 @@ model Panel {
   // Free test settings (free-trial phase: testEnabled/testVolumeMb/
   // testDurationMinutes are the authoritative per-panel trial config; the
   // remaining legacy fields stay editable display extras)
-  testEnabled          Boolean @default(false)
-  testVolumeMb         Int?
-  testDurationMinutes  Int?
-  testProductName      String?
-  testLocation         String?
-  testMessageTemplate  String?
-  testGuideAfterCreate String?
+  testEnabled                Boolean @default(false)
+  testVolumeMb               Int?
+  testDurationMinutes        Int?
+  testProductName            String?
+  testLocation               String?
+  testMessageTemplate        String?
+  testGuideAfterCreate       String?
   // Free-trial phase additions: optional concurrent-capacity cap, the XUI
   // trial inbound selection (subset of Panel.inboundIds), and whether the
   // cleanup loop disables the remote account after expiry.
-  testMaxConcurrentAccounts   Int?
-  testInboundIds              Json?
-  testAutoDisableAfterExpiry  Boolean @default(false)
+  testMaxConcurrentAccounts  Int?
+  testInboundIds             Json?
+  testAutoDisableAfterExpiry Boolean @default(false)
 
   // Marzban / XUI provisioning settings
   templateUsername                 String?
@@ -665,13 +714,13 @@ model Panel {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  products             Product[]
-  services             Service[]
-  orders               Order[]
-  hiddenForUsers       UserHiddenPanel[]
-  freeTrialClaims      FreeTrialClaim[]
+  products              Product[]
+  services              Service[]
+  orders                Order[]
+  hiddenForUsers        UserHiddenPanel[]
+  freeTrialClaims       FreeTrialClaim[]
   freeTrialEntitlements FreeTrialEntitlement[]
-  serviceEventLogs     ServiceEventLog[]
+  serviceEventLogs      ServiceEventLog[]
 
   @@index([status])
   @@index([type])
@@ -745,6 +794,21 @@ model Product {
   otherNamingPolicy          OtherProductNamingPolicy?
   otherNamingTemplate        String?
 
+  // Specialized-workflows phase. Kind defaults to GENERIC (legacy backfill);
+  // a null profile/parser means "resolve from the legacy fields above" -
+  // behavior mapping lives ONLY in other-product-profile.service.ts.
+  otherProductKind                OtherProductKind                @default(GENERIC)
+  otherProductFulfillmentProfile  OtherProductFulfillmentProfile?
+  otherProductStockParser         OtherProductStockParser?
+  // Card-to-card: start the customer-information form right after receipt
+  // submission (before admin approval). Collection NEVER settles payment.
+  collectInfoBeforeManualApproval Boolean                         @default(false)
+  // Structured customer-input form (validated by
+  // customer-input-schema.service.ts; stable field keys, Persian labels).
+  customerInputSchema             Json?
+  // Optional Persian message sent when a personalized service is completed.
+  completionMessageTemplate       String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -815,38 +879,45 @@ model DiscountCodeUsage {
 // =============================================================================
 
 model CheckoutSession {
-  id                  String          @id @default(uuid())
-  userId              String
-  user                User            @relation(fields: [userId], references: [id])
-  purpose             CheckoutPurpose
-  productId           String?
-  product             Product?        @relation(fields: [productId], references: [id])
-  serviceId           String? // renewal / extra volume / extra time / location change
-  service             Service?        @relation("ServiceCheckoutSessions", fields: [serviceId], references: [id])
-  orderType           OrderType?
-  productSnapshot     Json?
-  originalPriceToman  Int             @default(0)
-  discountAmountToman Int             @default(0)
-  finalPriceToman     Int             @default(0)
-  discountCodeId      String?
-  discountCode        DiscountCode?   @relation(fields: [discountCodeId], references: [id])
-  status              CheckoutStatus  @default(PENDING)
+  id                              String          @id @default(uuid())
+  userId                          String
+  user                            User            @relation(fields: [userId], references: [id])
+  purpose                         CheckoutPurpose
+  productId                       String?
+  product                         Product?        @relation(fields: [productId], references: [id])
+  serviceId                       String? // renewal / extra volume / extra time / location change
+  service                         Service?        @relation("ServiceCheckoutSessions", fields: [serviceId], references: [id])
+  orderType                       OrderType?
+  productSnapshot                 Json?
+  // Specialized-workflows phase: immutable fulfillment snapshot captured at
+  // checkout creation (kind, profile, parser, info requirements, schema,
+  // prompt, completion template). Paid checkouts are fulfilled from THIS,
+  // never from the mutable live Product row. Null on legacy checkouts - the
+  // compatibility resolver derives behavior from productSnapshot + Product.
+  otherProductFulfillmentSnapshot Json?
+  originalPriceToman              Int             @default(0)
+  discountAmountToman             Int             @default(0)
+  finalPriceToman                 Int             @default(0)
+  discountCodeId                  String?
+  discountCode                    DiscountCode?   @relation(fields: [discountCodeId], references: [id])
+  status                          CheckoutStatus  @default(PENDING)
   // P0 settlement phase: THE atomic cross-provider settlement claim. The
   // one Payment allowed to create the Order / credit the wallet for this
   // checkout - written by a compare-and-set (settledByPaymentId IS NULL),
   // so two provider successes can never both settle. Unique: one payment
   // can own at most one checkout. Null on legacy/ambiguous rows.
-  settledByPaymentId  String?         @unique
-  settledByPayment    Payment?        @relation("CheckoutSettledBy", fields: [settledByPaymentId], references: [id])
-  expiresAt           DateTime
-  paidAt              DateTime?
-  completedAt         DateTime?
-  createdAt           DateTime        @default(now())
-  updatedAt           DateTime        @updatedAt
+  settledByPaymentId              String?         @unique
+  settledByPayment                Payment?        @relation("CheckoutSettledBy", fields: [settledByPaymentId], references: [id])
+  expiresAt                       DateTime
+  paidAt                          DateTime?
+  completedAt                     DateTime?
+  createdAt                       DateTime        @default(now())
+  updatedAt                       DateTime        @updatedAt
 
   orders         Order[]
   payments       Payment[]
   discountUsages DiscountCodeUsage[]
+  customerInput  CheckoutCustomerInput?
 
   @@index([userId])
   @@index([status])
@@ -924,13 +995,13 @@ model Order {
   cancelledAt DateTime?
   refundedAt  DateTime?
 
-  payments            Payment[]            @relation("PaymentOrder")
-  walletTransactions  WalletTransaction[]  @relation("OrderWalletTransactions")
-  discountUsages      DiscountCodeUsage[]
-  createdServices     Service[]            @relation("OrderCreatedService")
-  otherProductOrder   OtherProductOrder?
-  referralCommissions ReferralCommission[]
-  firstPurchaseReferrals Referral[]        @relation("ReferralFirstPurchaseOrder")
+  payments               Payment[]            @relation("PaymentOrder")
+  walletTransactions     WalletTransaction[]  @relation("OrderWalletTransactions")
+  discountUsages         DiscountCodeUsage[]
+  createdServices        Service[]            @relation("OrderCreatedService")
+  otherProductOrder      OtherProductOrder?
+  referralCommissions    ReferralCommission[]
+  firstPurchaseReferrals Referral[]           @relation("ReferralFirstPurchaseOrder")
 
   @@index([userId])
   @@index([status])
@@ -949,27 +1020,27 @@ model Order {
 // =============================================================================
 
 model PaymentGateway {
-  id                                  String             @id @default(uuid())
-  type                                PaymentGatewayType
-  name                                String
-  isEnabled                           Boolean            @default(true)
-  isHidden                            Boolean            @default(false)
-  configEncrypted                     String?
-  minAmountToman                      Int?
-  maxAmountToman                      Int?
-  activateAfterSuccessfulPaymentsCount Int               @default(0)
-  allowedGroups                       Json? // array of UserGroup values
-  cashbackPercent                     Int                @default(0)
-  supportUsername                     String?
-  instructionText                     String?
-  displayOrder                        Int                @default(0)
+  id                                   String             @id @default(uuid())
+  type                                 PaymentGatewayType
+  name                                 String
+  isEnabled                            Boolean            @default(true)
+  isHidden                             Boolean            @default(false)
+  configEncrypted                      String?
+  minAmountToman                       Int?
+  maxAmountToman                       Int?
+  activateAfterSuccessfulPaymentsCount Int                @default(0)
+  allowedGroups                        Json? // array of UserGroup values
+  cashbackPercent                      Int                @default(0)
+  supportUsername                      String?
+  instructionText                      String?
+  displayOrder                         Int                @default(0)
   // Provider-management phase: optional admin-facing description plus the
   // last connection-test outcome ("OK"/"FAILED"; never raw provider errors).
-  description                         String?
-  lastCheckedAt                       DateTime?
-  healthStatus                        String?
-  createdAt                           DateTime           @default(now())
-  updatedAt                           DateTime           @updatedAt
+  description                          String?
+  lastCheckedAt                        DateTime?
+  healthStatus                         String?
+  createdAt                            DateTime           @default(now())
+  updatedAt                            DateTime           @updatedAt
 
   cardAccounts   CardToCardAccount[]
   payments       Payment[]
@@ -994,17 +1065,17 @@ model CardToCardAccount {
 }
 
 model Payment {
-  id                    String          @id @default(uuid())
+  id                    String                  @id @default(uuid())
   userId                String
-  user                  User            @relation(fields: [userId], references: [id])
+  user                  User                    @relation(fields: [userId], references: [id])
   orderId               String?
-  order                 Order?          @relation("PaymentOrder", fields: [orderId], references: [id])
+  order                 Order?                  @relation("PaymentOrder", fields: [orderId], references: [id])
   checkoutSessionId     String?
-  checkoutSession       CheckoutSession? @relation(fields: [checkoutSessionId], references: [id])
+  checkoutSession       CheckoutSession?        @relation(fields: [checkoutSessionId], references: [id])
   gatewayId             String?
-  gateway               PaymentGateway? @relation(fields: [gatewayId], references: [id])
+  gateway               PaymentGateway?         @relation(fields: [gatewayId], references: [id])
   purpose               PaymentPurpose
-  status                PaymentStatus   @default(PENDING)
+  status                PaymentStatus           @default(PENDING)
   amountToman           Int
   payableAmountToman    Int
   // Online gateway fields (payment-gateway-system phase). provider is a
@@ -1020,13 +1091,13 @@ model Payment {
   // the bot settlement transaction. callbackPayload stays sanitized:
   // NEVER credentials, signatures, api keys or tokens.
   provider              PaymentGatewayType?
-  authority             String?         @unique
+  authority             String?                 @unique
   externalReference     String?
   providerStatus        String?
   verifiedAt            DateTime?
   externalTransactionId String?
   callbackPayload       Json?
-  idempotencyKey        String?         @unique
+  idempotencyKey        String?                 @unique
   // P0 settlement phase: LOCAL settlement truth, separate from the provider
   // outcome. SETTLED = this payment owns its checkout's settlement;
   // DUPLICATE_SUCCESS_REVIEW = provider SUCCESS but another payment owns the
@@ -1040,14 +1111,19 @@ model Payment {
   reviewedAt            DateTime?
   reviewedByAdminId     String?
   rejectReason          String?
-  createdAt             DateTime        @default(now())
-  updatedAt             DateTime        @updatedAt
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
 
   receipts           ManualReceipt[]
   walletTransactions WalletTransaction[] @relation("PaymentWalletTransactions")
   primaryForOrders   Order[]             @relation("OrderPrimaryPayment")
   settledCheckout    CheckoutSession?    @relation("CheckoutSettledBy")
 
+  // One external provider transaction can settle at most one local Payment.
+  // Provider-scoped: transaction ids are not globally unique across
+  // providers. Postgres treats NULLs as distinct, so legacy/pending rows
+  // without an external id are unaffected.
+  @@unique([provider, externalTransactionId])
   @@index([userId])
   @@index([status])
   @@index([orderId])
@@ -1058,11 +1134,6 @@ model Payment {
   @@index([externalReference])
   @@index([settlementStatus])
   @@index([createdAt])
-  // One external provider transaction can settle at most one local Payment.
-  // Provider-scoped: transaction ids are not globally unique across
-  // providers. Postgres treats NULLs as distinct, so legacy/pending rows
-  // without an external id are unaffected.
-  @@unique([provider, externalTransactionId])
 }
 
 // P0 settlement phase: persistent financial-review queue. One case per
@@ -1071,13 +1142,13 @@ model Payment {
 // only when a legacy checkout was settled before ownership was recorded.
 // safeReason carries a short English marker, never provider payloads.
 model FinancialReconciliationCase {
-  id                 String                        @id @default(uuid())
-  type               FinancialReconciliationType
-  status             FinancialReconciliationStatus @default(OPEN)
+  id     String                        @id @default(uuid())
+  type   FinancialReconciliationType
+  status FinancialReconciliationStatus @default(OPEN)
 
   checkoutSessionId  String
   primaryPaymentId   String?
-  duplicatePaymentId String                        @unique
+  duplicatePaymentId String  @unique
 
   userId              String
   expectedAmountToman Int
@@ -1129,19 +1200,19 @@ model UserHiddenPaymentGateway {
 
 // Single logical global row, addressed via singletonKey = "default".
 model StarsPricingSetting {
-  id                          String           @id @default(uuid())
-  singletonKey                String           @unique @default("default")
-  pricingMode                 StarsPricingMode @default(MANUAL_RATE)
-  manualTomanPerStar          Int?
-  currencyRateApiUrl          String?
+  id                            String           @id @default(uuid())
+  singletonKey                  String           @unique @default("default")
+  pricingMode                   StarsPricingMode @default(MANUAL_RATE)
+  manualTomanPerStar            Int?
+  currencyRateApiUrl            String?
   currencyRateApiTokenEncrypted String?
-  currencyCode                String?
-  starsPriceFormula           String?
-  minStars                    Int?
-  maxStars                    Int?
-  cashbackPercent             Int              @default(0)
-  createdAt                   DateTime         @default(now())
-  updatedAt                   DateTime         @updatedAt
+  currencyCode                  String?
+  starsPriceFormula             String?
+  minStars                      Int?
+  maxStars                      Int?
+  cashbackPercent               Int              @default(0)
+  createdAt                     DateTime         @default(now())
+  updatedAt                     DateTime         @updatedAt
 }
 
 // =============================================================================
@@ -1149,26 +1220,26 @@ model StarsPricingSetting {
 // =============================================================================
 
 model Service {
-  id        String        @id @default(uuid())
-  userId    String
-  user      User          @relation(fields: [userId], references: [id])
-  orderId   String? // order that created this service
-  order     Order?        @relation("OrderCreatedService", fields: [orderId], references: [id])
-  panelId   String
-  panel     Panel         @relation(fields: [panelId], references: [id])
-  productId String?
-  product   Product?      @relation(fields: [productId], references: [id])
-  panelType PanelType // snapshot of the panel type at creation
-  username  String        @unique
-  note      String?
+  id                     String        @id @default(uuid())
+  userId                 String
+  user                   User          @relation(fields: [userId], references: [id])
+  orderId                String? // order that created this service
+  order                  Order?        @relation("OrderCreatedService", fields: [orderId], references: [id])
+  panelId                String
+  panel                  Panel         @relation(fields: [panelId], references: [id])
+  productId              String?
+  product                Product?      @relation(fields: [productId], references: [id])
+  panelType              PanelType // snapshot of the panel type at creation
+  username               String        @unique
+  note                   String?
   // Naming phase: how `username` (the REMOTE technical identity) was
   // resolved - { strategy, version, resolvedRemoteUsername,
   // resolvedDisplayName }. Null = LEGACY (created before the naming phase);
   // lifecycle operations always use the stored `username`, never recompute.
   namingStrategySnapshot Json?
-  status    ServiceStatus @default(CREATING)
+  status                 ServiceStatus @default(CREATING)
   // Free-trial phase: entitlement origin (PAID default keeps history intact).
-  source    ServiceSource @default(PAID)
+  source                 ServiceSource @default(PAID)
 
   serviceLocation ServiceLocation @default(MULTI_LOCATION)
 
@@ -1191,23 +1262,23 @@ model Service {
   remainingBytes BigInt @default(0)
   durationDays   Int    @default(0)
 
-  startsAt                  DateTime  @default(now())
+  startsAt                 DateTime  @default(now())
   // Nullable: services with unlimited time (durationDays = 0) never expire.
-  expiresAt                 DateTime?
-  firstConnectedAt          DateTime?
-  lastConnectedAt           DateTime?
-  lastSubscriptionUpdateAt  DateTime?
-  subscriptionUrl           String?
-  subscriptionToken         String?
-  configLinks               Json?
-  qrCodeFileId              String?
-  userAgent                 String?
-  rating                    Int?
-  transferredFromUserId     String?
-  transferredAt             DateTime?
-  deletedAt                 DateTime?
-  panelDeletedAt            DateTime?
-  failureReason             String?
+  expiresAt                DateTime?
+  firstConnectedAt         DateTime?
+  lastConnectedAt          DateTime?
+  lastSubscriptionUpdateAt DateTime?
+  subscriptionUrl          String?
+  subscriptionToken        String?
+  configLinks              Json?
+  qrCodeFileId             String?
+  userAgent                String?
+  rating                   Int?
+  transferredFromUserId    String?
+  transferredAt            DateTime?
+  deletedAt                DateTime?
+  panelDeletedAt           DateTime?
+  failureReason            String?
 
   // Remote client identifiers for panels that address clients rather than
   // usernames (XUI). remoteClientId is the primary client identifier (UUID
@@ -1222,11 +1293,11 @@ model Service {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  ratings              ServiceRating[]
-  eventLogs            ServiceEventLog[]
-  relatedOrders        Order[]              @relation("ServiceTargetOrders")
-  checkoutSessions     CheckoutSession[]    @relation("ServiceCheckoutSessions")
-  freeTrialClaims      FreeTrialClaim[]
+  ratings          ServiceRating[]
+  eventLogs        ServiceEventLog[]
+  relatedOrders    Order[]           @relation("ServiceTargetOrders")
+  checkoutSessions CheckoutSession[] @relation("ServiceCheckoutSessions")
+  freeTrialClaims  FreeTrialClaim[]
 
   @@index([userId])
   @@index([panelId])
@@ -1295,15 +1366,64 @@ model OtherProductOrder {
   adminRejectReason    String?
   adminCancelReason    String?
 
-  userInfoReminderCount   Int       @default(0)
-  lastUserInfoReminderAt  DateTime?
+  userInfoReminderCount  Int       @default(0)
+  lastUserInfoReminderAt DateTime?
+
+  // Specialized-workflows phase: immutable per-order copies (from the
+  // checkout fulfillment snapshot) + encrypted structured customer input.
+  // Legacy plaintext userProvidedInfoText stays for old rows; NEW structured
+  // submissions live in customerInputEncrypted (AES-256-GCM, APP_SECRET)
+  // with only a masked safe summary alongside.
+  kindSnapshot                OtherProductKind?
+  fulfillmentProfileSnapshot  OtherProductFulfillmentProfile?
+  customerInputSchemaSnapshot Json?
+  customerInputEncrypted      String?
+  customerInputSummary        String?
+  customerInputSubmittedAt    DateTime?
+  completionMessageSnapshot   String?
+  // Exactly-once fulfillment-admin notification (CAS on NULL).
+  fulfillmentAdminsNotifiedAt DateTime?
+  awaitingStockSince          DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  customerInput CheckoutCustomerInput?
+
   @@index([userId])
   @@index([productId])
   @@index([status])
+}
+
+// Specialized-workflows phase: pre-settlement customer input scoped to ONE
+// checkout of ONE user. Collected right after a card-to-card receipt is
+// submitted (before approval) or after automatic settlement. Submission is
+// NEVER a financial event: it cannot settle payments, create orders, start
+// fulfillment, consume stock or notify fulfillment admins. Values are
+// encrypted at rest; renderedSafeSummary is the ONLY display copy (masked,
+// password fields never rendered in full). Consumption is exactly-once via
+// the unique consumedByOtherProductOrderId CAS; rejected/expired rows are
+// redacted by the retention sweep (valuesEncrypted cleared, status REDACTED).
+model CheckoutCustomerInput {
+  id                            String                      @id @default(uuid())
+  checkoutSessionId             String                      @unique
+  checkoutSession               CheckoutSession             @relation(fields: [checkoutSessionId], references: [id])
+  userId                        String
+  user                          User                        @relation(fields: [userId], references: [id])
+  schemaSnapshot                Json
+  valuesEncrypted               String?
+  renderedSafeSummary           String?
+  status                        CheckoutCustomerInputStatus @default(COLLECTING)
+  submittedAt                   DateTime?
+  consumedByOtherProductOrderId String?                     @unique
+  consumedByOtherProductOrder   OtherProductOrder?          @relation(fields: [consumedByOtherProductOrderId], references: [id])
+  consumedAt                    DateTime?
+  redactedAt                    DateTime?
+  createdAt                     DateTime                    @default(now())
+  updatedAt                     DateTime                    @updatedAt
+
+  @@index([userId])
+  @@index([status, updatedAt])
 }
 
 enum StockItemStatus {
@@ -1322,19 +1442,28 @@ model OtherProductStockItem {
   product   Product         @relation(fields: [productId], references: [id])
   status    StockItemStatus @default(AVAILABLE)
 
-  contentEncrypted  String
-  label             String?
-  deliveredOrderId  String?
-  deliveredToUserId String?
-  deliveredAt       DateTime?
-  disabledAt        DateTime?
-  createdByAdminId  String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  contentEncrypted   String
+  label              String?
+  // Specialized-workflows phase: deterministic keyed hash (HMAC-SHA256,
+  // APP_SECRET-derived key) of the normalized plaintext so duplicate
+  // inventory can be detected per product WITHOUT decrypting, logging or
+  // exposing content. Null on legacy rows (random-IV ciphertext cannot be
+  // fingerprinted retroactively without a rewrite).
+  contentFingerprint String?
+  deliveredOrderId   String?   @unique
+  deliveredToUserId  String?
+  deliveredAt        DateTime?
+  disabledAt         DateTime?
+  createdByAdminId   String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
+  // DB-authoritative delivery correctness: deliveredOrderId is UNIQUE, so a
+  // stock item reaches at most one order AND an order receives at most one
+  // item (each order id can appear on at most one row).
+  @@unique([productId, contentFingerprint])
   @@index([productId])
   @@index([status])
-  @@index([deliveredOrderId])
   @@index([createdAt])
 }
 
@@ -1343,19 +1472,19 @@ model OtherProductStockItem {
 // =============================================================================
 
 model Referral {
-  id                        String    @id @default(uuid())
-  referrerUserId            String
-  referrer                  User      @relation("ReferralReferrer", fields: [referrerUserId], references: [id])
-  referredUserId            String    @unique
-  referred                  User      @relation("ReferralReferred", fields: [referredUserId], references: [id])
-  joinedAt                  DateTime  @default(now())
-  firstPurchaseAt           DateTime?
-  firstPurchaseOrderId      String?
-  firstPurchaseOrder        Order?    @relation("ReferralFirstPurchaseOrder", fields: [firstPurchaseOrderId], references: [id])
-  totalPurchaseAmountToman  Int       @default(0)
-  totalCommissionAmountToman Int      @default(0)
-  createdAt                 DateTime  @default(now())
-  updatedAt                 DateTime  @updatedAt
+  id                         String    @id @default(uuid())
+  referrerUserId             String
+  referrer                   User      @relation("ReferralReferrer", fields: [referrerUserId], references: [id])
+  referredUserId             String    @unique
+  referred                   User      @relation("ReferralReferred", fields: [referredUserId], references: [id])
+  joinedAt                   DateTime  @default(now())
+  firstPurchaseAt            DateTime?
+  firstPurchaseOrderId       String?
+  firstPurchaseOrder         Order?    @relation("ReferralFirstPurchaseOrder", fields: [firstPurchaseOrderId], references: [id])
+  totalPurchaseAmountToman   Int       @default(0)
+  totalCommissionAmountToman Int       @default(0)
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
 
   commissions ReferralCommission[]
 
@@ -1423,8 +1552,8 @@ model FreeTrialClaim {
   // units are never materialized as rows). The reservation is made in the
   // SAME transaction that creates the claim; a retry reuses the claim and
   // therefore the same reservation.
-  entitlementId String?
-  entitlement   FreeTrialEntitlement? @relation(fields: [entitlementId], references: [id])
+  entitlementId       String?
+  entitlement         FreeTrialEntitlement? @relation(fields: [entitlementId], references: [id])
   // Release-exactly-once marker: stamped by the ONE place that returns
   // this claim's allowance unit (definite non-creation / NOT_APPLIED /
   // forced not-created). UNKNOWN outcomes never stamp it. The CAS on
@@ -1565,7 +1694,7 @@ model FreeTrialResetCampaign {
   // Optional expiry applied to every granted entitlement.
   expiresAt DateTime?
 
-  notifyUsers Boolean @default(false)
+  notifyUsers               Boolean @default(false)
   // OWNER decision: also grant users who still have unused allowance.
   includeUsersWithAllowance Boolean @default(false)
 
@@ -1636,17 +1765,17 @@ model WheelSpinHistory {
 // =============================================================================
 
 model SupportTicket {
-  id        String              @id @default(uuid())
-  userId    String
-  user      User                @relation(fields: [userId], references: [id])
-  status    SupportTicketStatus @default(OPEN)
-  subject   String?
-  createdAt DateTime            @default(now())
-  updatedAt DateTime            @updatedAt
-  closedAt  DateTime?
+  id              String              @id @default(uuid())
+  userId          String
+  user            User                @relation(fields: [userId], references: [id])
+  status          SupportTicketStatus @default(OPEN)
+  subject         String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  closedAt        DateTime?
   // Phase 32: which admin closed the ticket.
   closedByAdminId String?
-  closedByAdmin   Admin?  @relation("SupportTicketClosedBy", fields: [closedByAdminId], references: [id])
+  closedByAdmin   Admin?              @relation("SupportTicketClosedBy", fields: [closedByAdminId], references: [id])
 
   messages SupportMessage[]
 
@@ -1866,7 +1995,7 @@ model SystemLogDelivery {
   telegramMessageId Int?
   // Short safe English marker (rate-limited / group-missing / ...) - never
   // raw Telegram API payloads.
-  safeErrorCode String?
+  safeErrorCode     String?
 
   nextAttemptAt DateTime?
   sentAt        DateTime?
