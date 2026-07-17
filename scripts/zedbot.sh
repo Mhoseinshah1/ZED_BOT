@@ -140,15 +140,19 @@ health_summary() {
   fi
 }
 
-# Reads the "verified" flag from a backup's sidecar manifest ("yes", "no" or
-# "-" when there is no manifest). Plain grep - never sources anything.
+# Reads the verification state from a backup's sidecar manifest ("yes", "no"
+# or "-" when there is no manifest). Plain grep - never sources anything.
+# Two manifest dialects exist and both mean the same thing: shell-created
+# backups (backup-db.sh) write `"verified": true`, worker-created backups
+# (apps/worker/src/backup/files.ts) write `"verification": "VERIFIED"`.
 manifest_verified_flag() {
   local manifest="$1"
   if [ ! -f "$manifest" ]; then
     printf -- '-'
     return 0
   fi
-  if grep -Eq '"verified"[[:space:]]*:[[:space:]]*true' "$manifest"; then
+  if grep -Eq '"verified"[[:space:]]*:[[:space:]]*true' "$manifest" \
+    || grep -Eq '"verification"[[:space:]]*:[[:space:]]*"VERIFIED"' "$manifest"; then
     printf 'yes'
   else
     printf 'no'
