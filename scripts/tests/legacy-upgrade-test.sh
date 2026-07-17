@@ -44,14 +44,34 @@ phase() { printf '\n=== [iteration %s] %s ===\n' "$ITERATION" "$*"; }
 
 dump_diagnostics() {
   echo "--- diagnostics ---" >&2
+  docker ps -a --filter 'name=zedbot-' >&2 || true
   if [ -f "${APP_DIR}/docker-compose.yml" ]; then
     (cd "$APP_DIR" && docker compose ps) >&2 || true
-    (cd "$APP_DIR" && docker compose logs --no-color --tail 40) >&2 || true
+    # The api gets the deepest tail: its healthcheck gates the whole stack
+    # (bot depends_on api healthy), so it is the usual first casualty.
+    (cd "$APP_DIR" && docker compose logs --no-color --tail 150 api) >&2 || true
+    (cd "$APP_DIR" && docker compose logs --no-color --tail 60 postgres redis worker bot) >&2 || true
   fi
   return 0
 }
 
+# A bare command failure under `set -e` must still explain itself: without
+# this trap the script dies silently mid-phase (e.g. `dc up -d` refusing to
+# start an unhealthy dependency) and CI shows compose noise but no container
+# logs at all.
+on_err() {
+  local rc=$? line=$1 cmd=$2
+  trap - ERR # No recursion while the handler itself runs commands.
+  printf 'FATAL: command failed (exit %s) at line %s: %s\n' "$rc" "$line" "$cmd" >&2
+  dump_diagnostics
+  exit "$rc"
+}
+trap 'on_err "$LINENO" "$BASH_COMMAND"' ERR
+
 fail() {
+  # Suppress the ERR trap for the intentional exit below - the diagnostics
+  # are dumped exactly once, right here.
+  trap - ERR
   printf 'ASSERT FAIL: %s\n' "$*" >&2
   dump_diagnostics
   exit 1
@@ -266,12 +286,21 @@ start_legacy_stack() {
   phase "build + start the OLD stack and apply OLD migrations"
   (cd "$APP_DIR" && chmod +x scripts/*.sh)
   dc build
-  dc up -d
+  # The scenario under test is a LONG-RUNNING legacy production install, so
+  # its database always has the old migrations applied. Bring up only the
+  # data services first and migrate before booting the app containers -
+  # `dc up -d` for the full stack would gate on the api healthcheck (bot
+  # depends_on api healthy), and an api booting against a bare database is
+  # the fresh-install bootstrap transient, not the steady state this test
+  # reproduces.
+  dc up -d postgres redis
   wait_healthy zedbot-postgres 180
   wait_healthy zedbot-redis 120
   # The old installer ran migrate.sh through run_migrations_if_available;
   # at PRE_SHA the script exists, so run it exactly like the installer did.
   (cd "$APP_DIR" && bash scripts/migrate.sh) || fail "OLD migrate.sh failed on the legacy stack"
+  dc up -d
+  wait_healthy zedbot-api 180
 
   OLD_IMAGE_ID="$(docker inspect -f '{{.Image}}' zedbot-worker)"
   OLD_BOT_CID="$(docker inspect -f '{{.Id}}' zedbot-bot)"
