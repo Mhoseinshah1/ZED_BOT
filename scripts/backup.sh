@@ -35,9 +35,12 @@ main() {
   app_cd
   load_env
 
-  # .env may relocate the backup directory via BACKUP_DIR.
-  local backup_dir="${BACKUP_DIR:-$ZEDBOT_BACKUP_DIR}"
-  ensure_directory "$backup_dir" 700
+  # Host backup location (BACKUP_DIR is the IN-CONTAINER path since the ops
+  # phase; relocate host backups via ZEDBOT_BACKUP_DIR). The shared dir is
+  # runtime-user-owned 750; the archive itself stays root-owned 600 because
+  # it contains .env.
+  local backup_dir="$ZEDBOT_BACKUP_DIR"
+  ensure_backup_dir_permissions "$backup_dir"
 
   local ts archive
   ts="$(date +%Y-%m-%d_%H-%M-%S)"

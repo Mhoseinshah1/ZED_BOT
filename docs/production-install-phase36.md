@@ -7,6 +7,14 @@ and database backups. **Restore execution is intentionally not implemented**
 There is **no uninstall command**. Nothing here touches
 payment/order/service/support/broadcast logic.
 
+> **Ops-phase update (production backups + Telegram logging):** the backup
+> format, directory permissions and several CLI commands described below
+> were reworked after Phase 36 — see the
+> [Ops-phase changes](#ops-phase-changes-production-backup-rework) section
+> at the end of this document and
+> [backup-architecture.md](backup-architecture.md) for the current design.
+> Where the two disagree, the ops-phase section wins.
+
 ## Scripts
 
 | file | purpose |
@@ -97,6 +105,73 @@ against the bot's own `isBackupFileName`).
 
 ## Intentionally NOT implemented
 
-Restore execution (CLI or Telegram), uninstall, scheduled backups, cloud
-upload, migration runner from Telegram, `.env` editing from Telegram,
-destructive database reset, web panel, mini app, Phase 37+.
+Restore execution (CLI or Telegram), uninstall, cloud upload, migration
+runner from Telegram, `.env` editing from Telegram, destructive database
+reset, web panel, mini app, Phase 37+. (Scheduled backups have since been
+implemented in the ops phase — worker-side, see below.)
+
+## Ops-phase changes (production-backup rework)
+
+The production-backup + Telegram-logging overhaul updated the server
+tooling documented above. Current state:
+
+### Directories and permissions
+
+- The host backup directory (`ZEDBOT_BACKUP_DIR`, default
+  `/opt/zedbot/backups`) is bind-mounted into the **bot read-only** and the
+  **worker read-write** at `/var/lib/zedbot/backups`, and must be owned by
+  the container runtime user — **`ZEDBOT_RUNTIME_UID:ZEDBOT_RUNTIME_GID`
+  (default `1000:1000`, the image's `node` user) with mode 750**.
+- The installer now chowns/chmods it accordingly (`create_directories`),
+  and the shared helper `ensure_backup_dir_permissions` (lib/common.sh)
+  repairs it idempotently: `mkdir -p` + `chown` + `chmod 750`, plus
+  normalizing `zedbot-db-*` files to `640` — it never deletes anything and
+  never widens beyond 750. Update safety archives (`zedbot_backup_*.tar.gz`)
+  stay root-owned 600.
+
+### New/changed `.env` keys
+
+`ZEDBOT_BACKUP_DIR` (HOST dir), `BACKUP_DIR` (IN-CONTAINER path — pinned by
+compose, leave empty in `.env`; it does **not** relocate host backups),
+`ZEDBOT_RUNTIME_UID` / `ZEDBOT_RUNTIME_GID`, `BACKUP_RETENTION_DAYS` (14),
+`BACKUP_MIN_RETAINED` (3), `BACKUP_MIN_FREE_DISK_MB` (500),
+`BACKUP_MAX_TELEGRAM_MB` (45), `BACKUP_ENCRYPTION_PASSWORD`
+(installer-generated; keep a copy off-server — see
+[backup-encryption.md](backup-encryption.md)).
+
+### CLI changes
+
+- **`zedbot backup [create]`** now produces the queue-parity format:
+  `zedbot-db-YYYYMMDD-HHMMSS.dump[.enc]` (pg_dump `--format=custom`,
+  verified with `pg_restore --list`, optionally ZBK1-encrypted via the
+  worker's encrypt CLI, atomic `.partial` → rename, sha256 + sidecar
+  `.manifest.json`). `ZEDBOT_BACKUP_FORMAT=legacy` still writes the old
+  `.sql.gz`.
+- **`zedbot backup list`** — name, size, date, type, verified-flag table
+  over all three formats.
+- **`zedbot backup verify <file|path|timestamp>`** — sha256 vs manifest,
+  then per-format structural verification (worker CLI for `.dump.enc`).
+- **`zedbot repair backups`** — runs `ensure_backup_dir_permissions`, then
+  live-tests worker rw / bot ro access through the running containers
+  (and warns if the bot mount is unexpectedly writable).
+- **`zedbot doctor`** gained backup-dir checks (exists / owner
+  `1000:1000` / mode ≤ 750); **`zedbot doctor --fix`** additionally runs the
+  permission repair — everything else in the doctor stays read-only.
+- **`zedbot update`** now has a hard **pre-update backup gate**: a database
+  backup is created AND verified before any code is touched, otherwise the
+  update aborts with the running installation unmodified. Escape hatch
+  (CLI-only, not recommended): `ZEDBOT_SKIP_PREUPDATE_BACKUP=1 zedbot
+  update`. `update.sh` also auto-repairs the backup-dir permissions before
+  the gate.
+- **`zedbot restore-help`** was updated for all three formats (still
+  instructions-only). The full procedure lives in
+  [backup-restore-runbook.md](backup-restore-runbook.md).
+
+### Related documentation
+
+[backup-architecture.md](backup-architecture.md) (queue, state machine,
+retention, scheduled backups), [backup-encryption.md](backup-encryption.md),
+[backup-disaster-recovery.md](backup-disaster-recovery.md),
+[worker-queues.md](worker-queues.md), [system-health.md](system-health.md),
+[operational-logging.md](operational-logging.md),
+[telegram-log-group.md](telegram-log-group.md).

@@ -44,6 +44,7 @@ import { clearSettingsCache } from "../../services/settings.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { cb as panelCb } from "../panels/panel-cb.js";
+import { LG_CB, logGroupHandler } from "./log-group.handler.js";
 import {
   TRIAL_ENT_CAMPAIGN_START_CB,
   TRIAL_ENT_DASHBOARD_CB,
@@ -113,6 +114,8 @@ export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     .text("نوع نمایش منوها", TX_CB.menuMode)
     .row()
     .text("تنظیمات اکانت تست 🎁", TRIAL_SETTINGS_CB.root)
+    .row()
+    .text("تنظیمات گروه لاگ 📝", LG_CB.root)
     .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
   await safeEditOrReply(ctx, "تنظیمات عمومی ⚙️\n\nیک بخش را انتخاب کنید:", kb);
@@ -980,3 +983,9 @@ adminTextSettingsHandler.callbackQuery(TRIAL_SETTINGS_CB.incomplete, async (ctx)
 // picks them up without app.ts changes.
 adminTextSettingsHandler.use(trialEntitlementsHandler);
 adminTextSettingsTextHandler.use(trialEntitlementsTextHandler);
+
+// Ops-logging phase: «تنظیمات گروه لاگ 📝» pages mount here so the admin
+// area picks them up without app.ts changes (same pattern as the trial
+// entitlement pages above). The /setloggroup COMMAND itself is registered
+// at bot level in app.ts because it must work inside the group chat.
+adminTextSettingsHandler.use(logGroupHandler);

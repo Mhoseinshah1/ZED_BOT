@@ -47,6 +47,18 @@ background: [free-trial-entitlements.md](free-trial-entitlements.md),
 | `FreeTrialClaim.allowanceReleasedAt` CAS (`… IS NULL` + status ∈ FAILED/CANCELLED) | A claim's allowance unit is released **at most once**, and only from a released claim state | `releaseClaimAllowance` — CAS losers change nothing; concurrent sweeps cannot double-release |
 | `Service.convertedToPaidAt` CAS (`… IS NULL AND source = 'FREE_TRIAL'`) | Trial-to-paid conversion is marked **exactly once**; `firstPaidOrderId` records the winning order | `markTrialConversion` returns false for losers; replays/reconciliation are no-ops |
 
+## Ops invariants (backups + operational logging)
+
+Same discipline as above, applied by the production-backup/Telegram-logging
+phase. Background: [backup-architecture.md](backup-architecture.md),
+[operational-logging.md](operational-logging.md).
+
+| Constraint / guard | Invariant | Who handles the violation |
+| --- | --- | --- |
+| `SystemLogDelivery` `@@unique([systemLogId, logTopicId])` | At most one Telegram delivery tracker per log × topic — a re-entrant `writeSystemLog`/`writeOpsLog` can never double-deliver one event | Bot writer catches the `P2002` and reuses the winner's id; worker writer uses `createMany({ skipDuplicates })` + `findUnique` recovery. Send-side idempotency is the status CAS (`PENDING`/`FAILED`/`SENDING` → `SENDING`) plus the terminal `SENT` check — a known-successful send never repeats |
+| `LogTopic.key` `@unique` | One topic row per stable key (`SYSTEM`, `PAYMENT`, …); behavior binds to keys, never titles | All writers `upsert` on `key`, so the constraint is a pure backstop |
+| **BackupOperation — no extra DB unique (documented)** | At most one backup runs at a time, and one operation is executed at most once | Deliberately NOT a DB constraint: single-flight is the Redis lock `zedbot:backup:database` (SET NX PX + compare-and-delete release), the BullMQ jobId = operation id (repeated taps dedupe on the job), the bot's "one active operation" pre-check, and the `updateMany` status CAS (`QUEUED`/`RUNNING` → `RUNNING`) that turns re-delivered jobs into no-ops. A queue outage closes fresh rows as `FAILED "queue-unavailable"` so nothing can rot in `QUEUED` |
+
 ## Notes
 
 - **Nullable uniques are deliberate.** PostgreSQL treats NULLs as

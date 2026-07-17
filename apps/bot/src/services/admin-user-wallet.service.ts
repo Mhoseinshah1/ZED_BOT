@@ -15,6 +15,7 @@ import {
 import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
+import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 
 // =============================================================================
 // Admin manual wallet management (Phase 20): an admin increases/decreases a
@@ -454,6 +455,16 @@ export async function adjustUserWallet(
       adminId: args.adminId,
       action: args.action,
       amountToman: args.amountToman,
+    });
+    // Ops log (AUDIT topic) - action/amount only, never the free-text reason.
+    void writeSystemLog({
+      level: "WARN",
+      eventType: OPS_EVENTS.WALLET_MANUAL_ADJUSTED,
+      message: "user wallet manually adjusted by admin",
+      metadata: { action: args.action, amountToman: args.amountToman },
+      topicKey: "AUDIT",
+      userId: args.targetUserId,
+      adminId: args.adminId,
     });
     return { ok: true, ...result };
   } catch (err) {

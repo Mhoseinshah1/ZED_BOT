@@ -36,6 +36,7 @@ import {
   executeRenewalOrder,
   RENEWAL_FAILED_USER_TEXT,
 } from "./service-renewal.service.js";
+import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 
 // =============================================================================
 // Unified post-payment fulfillment (other-product-wallet phase): ONE dispatch
@@ -189,12 +190,55 @@ async function fulfillOtherProduct(
 }
 
 /**
+ * Ops-logging phase: ONE central event per SERVICE-kind dispatch outcome.
+ * Provisioning goes to the ORDER topic, lifecycle ops (renew/extras) to the
+ * SERVICE topic; a failure that kept the order PAID (refunded=false) is the
+ * "remote-unknown / kept for review" case. Allowlisted fields only - the
+ * executor's error text never enters the ops log.
+ */
+function logDispatchOpsEvent(orderId: string, result: DispatchResult): void {
+  if (result.kind !== "SERVICE") {
+    return;
+  }
+  const isProvision = result.op === "provision";
+  void writeSystemLog({
+    level: result.ok ? "INFO" : "ERROR",
+    eventType: isProvision
+      ? result.ok
+        ? OPS_EVENTS.ORDER_PROVISIONED
+        : OPS_EVENTS.ORDER_PROVISION_FAILED
+      : result.ok
+        ? OPS_EVENTS.SERVICE_OP_COMPLETED
+        : OPS_EVENTS.SERVICE_OP_FAILED,
+    message: result.ok
+      ? `${result.op} completed`
+      : `${result.op} failed (${result.refunded ? "refunded" : "kept-paid-for-review"})`,
+    metadata: {
+      op: result.op,
+      outcome: result.ok ? "completed" : result.refunded ? "failed-refunded" : "failed-kept-paid",
+    },
+    topicKey: isProvision ? "ORDER" : "SERVICE",
+    orderId,
+  });
+}
+
+/**
  * Dispatches the post-payment fulfillment for one PAID order. Call it AFTER
  * the financial transaction committed - from the wallet handler, the receipt
  * approval handler or the gateway settlement - and never from inside a
  * database transaction. Safe to call repeatedly; never throws.
  */
 export async function dispatchPaidOrderFulfillment(
+  api: DeliverySendApi,
+  orderId: string,
+  options: { source: FulfillmentSource; user?: User },
+): Promise<DispatchResult> {
+  const result = await dispatchPaidOrderFulfillmentInner(api, orderId, options);
+  logDispatchOpsEvent(orderId, result);
+  return result;
+}
+
+async function dispatchPaidOrderFulfillmentInner(
   api: DeliverySendApi,
   orderId: string,
   options: { source: FulfillmentSource; user?: User },

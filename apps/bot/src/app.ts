@@ -75,7 +75,11 @@ import {
   adminTextSettingsHandler,
   adminTextSettingsTextHandler,
 } from "./handlers/admin-settings/text-settings.handler.js";
-import { reportsBackupHandler } from "./handlers/admin-reports-backup/reports-backup.handler.js";
+import {
+  reportsBackupHandler,
+  reportsBackupTextHandler,
+} from "./handlers/admin-reports-backup/reports-backup.handler.js";
+import { setLogGroupCommand } from "./handlers/admin-settings/log-group.handler.js";
 import {
   walletHandler,
   walletTopupTextHandler,
@@ -117,6 +121,11 @@ export function createBot(token: string): Bot<BotContext> {
   // Gate-free basics.
   bot.use(pingHandler);
   bot.use(startHandler);
+
+  // Ops-logging phase: /setloggroup must be reachable INSIDE the (super)group
+  // being bound, so it cannot live behind the admin-area callback gating.
+  // The handler verifies the sender is an active OWNER admin itself.
+  bot.use(setLogGroupCommand);
 
   // Gate actions run their own access re-check after mutating state.
   bot.use(termsHandler);
@@ -174,6 +183,8 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(adminSupportTextHandler);
   adminFlowText.use(adminBroadcastTextHandler);
   adminFlowText.use(adminTextSettingsTextHandler);
+  // Production-backup rework: scheduled-backup hour input.
+  adminFlowText.use(reportsBackupTextHandler);
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {

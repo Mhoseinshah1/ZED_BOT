@@ -4,6 +4,11 @@
 #
 # Exit code: 1 only when the CORE system is broken (Docker/Compose/app files
 # missing); optional runtime checks report WARN without failing hard.
+#
+# `doctor --fix` additionally repairs the backup directory ownership and
+# permissions (ensure_backup_dir_permissions: mkdir -p, chown to the runtime
+# UID/GID, chmod 750 - never deletes anything). Without the flag the doctor
+# stays strictly read-only and only reports.
 # =============================================================================
 
 set -Eeuo pipefail
@@ -114,9 +119,42 @@ check_api_port_listening() {
   ss -ltn 2>/dev/null | grep -q ":${API_PORT:-3000} "
 }
 
+# Backup directory: exists, owned by the container runtime user and not
+# world-accessible (the bot mounts it ro, the worker rw, both as UID 1000).
+check_backup_dir_exists() {
+  test -d "$ZEDBOT_BACKUP_DIR"
+}
+
+check_backup_dir_owner() {
+  local owner expected
+  owner="$(stat -c '%u:%g' "$ZEDBOT_BACKUP_DIR" 2>/dev/null || echo '')"
+  expected="${ZEDBOT_RUNTIME_UID:-1000}:${ZEDBOT_RUNTIME_GID:-1000}"
+  [ "$owner" = "$expected" ]
+}
+
+check_backup_dir_mode() {
+  local mode
+  mode="$(stat -c '%a' "$ZEDBOT_BACKUP_DIR" 2>/dev/null || echo '')"
+  [ -n "$mode" ] || return 1
+  # 750 or stricter: owner rwx, no group write, nothing for the world.
+  [ $(( 0$mode & 0027 )) -eq 0 ] && [ $(( 0$mode & 0700 )) -eq 448 ]
+}
+
 main() {
   require_root
   load_env_if_exists
+
+  FIX_MODE=0
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --fix) FIX_MODE=1 ;;
+      *)
+        log_error "Unknown option: ${arg} (supported: --fix)"
+        exit 1
+        ;;
+    esac
+  done
 
   echo
   log_info "ZED_BOT doctor - system health check"
@@ -136,6 +174,20 @@ main() {
   # System resources
   optional_check "Disk space (>= 2 GB free on ${ZEDBOT_BASE_DIR})" "free up disk space" check_disk_space
   optional_check "Memory (>= 1 GB total, headroom available)" "server may be too small or under memory pressure" check_memory
+
+  # Backup directory (shared bind mount: bot ro, worker rw, runtime user)
+  if [ "$FIX_MODE" -eq 1 ]; then
+    log_info "--fix: repairing backup directory ownership/permissions (${ZEDBOT_BACKUP_DIR}) ..."
+    ensure_backup_dir_permissions
+  fi
+  optional_check "Backup dir exists (${ZEDBOT_BACKUP_DIR})" "run: zedbot doctor --fix (or: zedbot repair backups)" check_backup_dir_exists
+  if [ -d "$ZEDBOT_BACKUP_DIR" ]; then
+    optional_check "Backup dir owner is ${ZEDBOT_RUNTIME_UID:-1000}:${ZEDBOT_RUNTIME_GID:-1000} (container runtime user)" "run: zedbot doctor --fix" check_backup_dir_owner
+    optional_check "Backup dir mode is 750 or stricter (no world access)" "run: zedbot doctor --fix" check_backup_dir_mode
+  else
+    skip_check "Backup dir owner is ${ZEDBOT_RUNTIME_UID:-1000}:${ZEDBOT_RUNTIME_GID:-1000} (container runtime user)" "directory missing"
+    skip_check "Backup dir mode is 750 or stricter (no world access)" "directory missing"
+  fi
 
   # Runtime (only meaningful when the core is intact)
   if [ "$CORE_BROKEN" -eq 1 ]; then

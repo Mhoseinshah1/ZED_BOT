@@ -285,6 +285,9 @@ export interface SessionData {
     adminBroadcastDraft?: { text?: string };
     // Admin text-settings edit target (Phase 34).
     adminTextEditDraft?: { kind: "template" | "button"; id: string };
+    // Production-backup rework: scheduled-backup text input target (the
+    // "rb:sched_hour" flow currently only edits the run hour).
+    adminBackupScheduleDraft?: { field: "hour" };
     // Admin stock add-item wizard (Phase 25), bulk add (Phase 27) and
     // low-stock threshold editing (Phase 28); content NEVER logged.
     adminStockDraft?: {

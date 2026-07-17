@@ -76,8 +76,11 @@ All management goes through the `zedbot` CLI (run as root):
 | `zedbot restart`               | Restart all services                                    |
 | `zedbot start`                 | Start all services                                      |
 | `zedbot stop`                  | Stop all services                                       |
-| `zedbot update`                | Update to the latest version (creates a backup first)   |
-| `zedbot backup`                | Create a database backup (`zedbot-db-YYYYMMDD-HHMMSS.sql.gz`) |
+| `zedbot update`                | Update to the latest version (creates **and verifies** a backup first) |
+| `zedbot backup`                | Create a verified database backup (`zedbot-db-YYYYMMDD-HHMMSS.dump[.enc]` + manifest) |
+| `zedbot backup list`           | List all backups (name, size, date, type, verified)      |
+| `zedbot backup verify <file>`  | Verify a backup by file name, path or timestamp id       |
+| `zedbot repair backups`        | Fix backup directory ownership/permissions, test container access |
 | `zedbot health`                | Quick health summary (services, database, disk)         |
 | `zedbot ps`                    | Alias of `zedbot status`                                 |
 | `zedbot shell [service]`       | Open a shell inside a container (default: bot)           |
@@ -115,27 +118,54 @@ zedbot logs bot
 zedbot logs worker
 ```
 
-### Backup and restore
+### Backups, system health and the Telegram log group
 
 ```bash
-zedbot backup                     # database backup: zedbot-db-YYYYMMDD-HHMMSS.sql.gz
+zedbot backup                     # verified backup: zedbot-db-YYYYMMDD-HHMMSS.dump[.enc] + manifest
+zedbot backup list                # all backups: name, size, date, type, verified
+zedbot backup verify <file|id>    # sha256 + structural verification (worker CLI for .dump.enc)
+zedbot repair backups             # fix dir ownership/permissions (1000:1000, 750) + mount tests
 zedbot restore-help               # prints the MANUAL restore steps (executes nothing)
 ```
 
-`zedbot backup` writes a database-only dump to `/opt/zedbot/backups` as
-`zedbot-db-YYYYMMDD-HHMMSS.sql.gz` — the same format the in-bot admin backup
-page (Phase 35) creates and lists, so both appear together. It never
-includes `.env`. When `BACKUP_RETENTION_DAYS` is set to a positive number,
-matching `zedbot-db-*.sql.gz` files older than that many days are removed
-after a successful backup; nothing else is ever deleted. (`zedbot update`
-additionally creates a `.env`+database safety archive via `scripts/backup.sh`
-before updating.)
+**Backups** are `pg_dump --format=custom` dumps, verified with
+`pg_restore --list`, written atomically (`.partial` → rename) into the
+host directory `ZEDBOT_BACKUP_DIR` (default `/opt/zedbot/backups`) with a
+non-secret `.manifest.json` sidecar, and — when
+`BACKUP_ENCRYPTION_PASSWORD` is set (the installer generates one; **keep a
+copy off the server**) — encrypted at rest with AES-256-GCM (the ZBK1
+envelope). The directory is bind-mounted into the bot (**read-only**) and
+the worker (**read-write**) at `/var/lib/zedbot/backups`; only the worker
+service ever runs `pg_dump`. Admins manage everything from Telegram:
+«گزارشات / بکاپ 🛡» offers manual backups, list/download/verify/delete,
+retention cleanup and scheduled backups («تنظیمات بکاپ خودکار ⏰»);
+retention keeps `BACKUP_MIN_RETAINED` newest files and never deletes the
+newest or the newest verified backup. `zedbot update` refuses to run until
+a fresh backup was created **and verified** (escape hatch:
+`ZEDBOT_SKIP_PREUPDATE_BACKUP=1`). It never includes `.env` (the update's
+separate safety archive does). Design: `docs/backup-architecture.md`,
+`docs/backup-encryption.md`.
+
+**System health** — «وضعیت سیستم 🩺» in the bot shows DB/Redis latency,
+worker heartbeat, queue depth, backup-dir access (bot-read vs
+worker-write), pg_dump presence, disk usage, the latest backup (with a
+48-hour staleness warning), encryption and log-group state; `zedbot
+doctor` covers the host side and `zedbot doctor --fix` repairs the backup
+directory permissions. Line-by-line reference: `docs/system-health.md`.
+
+**Telegram log group** — operational events (payments, orders, services,
+panels, security, backups, audit) are delivered by the worker into an
+operator-owned forum supergroup, one topic per category: promote the bot
+to admin with manage-topics and send `/setloggroup` inside the group, then
+manage topics/tests from «تنظیمات عمومی ⚙️ → تنظیمات گروه لاگ 📝». Setup
+guide: `docs/telegram-log-group.md`; pipeline:
+`docs/operational-logging.md`.
 
 **Restore is intentionally manual.** Neither the bot nor the CLI executes a
-restore — `zedbot restore-help` prints the exact server commands
-(stop the app services, `gunzip -c … | docker compose exec -T postgres
-psql …`, start again) with placeholders you fill from `.env`. Always take a
-fresh backup first.
+restore — `zedbot restore-help` prints the manual steps and the full
+procedure (including `.dump.enc` decryption and disaster recovery) lives in
+`docs/backup-restore-runbook.md` / `docs/backup-disaster-recovery.md`.
+Always take a fresh backup first.
 
 ### Start / stop / restart
 
@@ -199,8 +229,9 @@ All configuration lives in `/opt/zedbot/app/.env` (created by the installer,
 | `REDIS_URL`                            | auto-generated         | Redis connection URL                   |
 | `APP_SECRET`                           | auto-generated         | Application signing/crypto secret      |
 | `INTERNAL_API_TOKEN`                   | auto-generated         | Token for internal service-to-service calls |
-| `BACKUP_DIR`                           | `/opt/zedbot/backups`  | Where backup archives are written      |
-| `BACKUP_ENCRYPTION_PASSWORD`           | auto-generated         | Backup encryption password (empty = unencrypted) |
+| `ZEDBOT_BACKUP_DIR`                    | `/opt/zedbot/backups`  | HOST backup directory (bind-mounted: bot ro, worker rw) |
+| `BACKUP_DIR`                           | *(leave empty)*        | IN-CONTAINER backup path — pinned to `/var/lib/zedbot/backups` by compose |
+| `BACKUP_ENCRYPTION_PASSWORD`           | auto-generated         | Backup encryption password (empty = unencrypted; keep a copy off-server) |
 
 After editing `.env`, apply the changes with `zedbot restart`.
 
@@ -331,7 +362,7 @@ pnpm workspaces monorepo:
 │   ├── update.sh         # Updater (backup → pull → rebuild → doctor)
 │   ├── migrate.sh        # prisma migrate deploy + seed (run by install/update)
 │   ├── backup.sh         # Update safety archive (.env + PostgreSQL dump)
-│   ├── backup-db.sh      # Database backup (zedbot-db-YYYYMMDD-HHMMSS.sql.gz)
+│   ├── backup-db.sh      # Database backup (zedbot-db-YYYYMMDD-HHMMSS.dump[.enc] + manifest)
 │   ├── validate-env.sh   # .env validation (never prints values)
 │   ├── doctor.sh         # Health checks
 │   ├── zedbot.sh         # Management CLI (installed to /usr/local/bin/zedbot)

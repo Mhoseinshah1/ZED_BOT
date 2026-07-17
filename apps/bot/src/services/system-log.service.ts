@@ -1,0 +1,137 @@
+import { Prisma, prisma } from "@zedbot/database";
+import {
+  sanitizeOpsMetadata,
+  scrubSecretsFromText,
+  type OpsLogTopicKey,
+} from "@zedbot/shared";
+
+import { logger } from "../core/logger.js";
+import { enqueueLogDelivery } from "./ops-queue.service.js";
+import { getSetting } from "./settings.service.js";
+
+// =============================================================================
+// THE shared bot-side structured ops logger (ops-logging phase). Every
+// operational event is persisted as a SystemLog row FIRST (source of truth);
+// when a topicKey is given AND that LogTopic is enabled AND the Telegram log
+// group is configured, exactly one SystemLogDelivery row is created (unique
+// [systemLogId, logTopicId]) and its id is enqueued for the worker to send.
+// writeSystemLog NEVER throws and never recurses into itself - any internal
+// failure goes to the local stdout logger only, so ops logging can never
+// take down the operation that emitted the event. Metadata passes through
+// sanitizeOpsMetadata and the message through scrubSecretsFromText as the
+// last line of defense; callers must still pass allowlisted fields only
+// (ids, amounts, statuses - never payloads, URLs or tokens).
+// =============================================================================
+
+/** Setting key: Telegram chat id of the operational log group (supergroup). */
+export const LOG_GROUP_CHAT_ID_KEY = "log_group_chat_id";
+
+/**
+ * Event catalog wired by this phase. Stable English markers - behavior and
+ * queries bind to these, never to the human-readable messages.
+ */
+export const OPS_EVENTS = {
+  BOT_STARTED: "bot.started",
+  BOT_STOPPED: "bot.stopped",
+  PAYMENT_SETTLED: "payment.settled",
+  PAYMENT_DUPLICATE_SUCCESS: "payment.duplicate_success",
+  RECEIPT_APPROVED: "payment.receipt_approved",
+  RECEIPT_REJECTED: "payment.receipt_rejected",
+  ORDER_PROVISIONED: "order.provision_completed",
+  ORDER_PROVISION_FAILED: "order.provision_failed",
+  SERVICE_OP_COMPLETED: "service.operation_completed",
+  SERVICE_OP_FAILED: "service.operation_failed",
+  PANEL_CONNECTION_FAILED: "panel.connection_failed",
+  SECURITY_ADMIN_DENIED: "security.admin_access_denied",
+  WALLET_MANUAL_ADJUSTED: "wallet.manual_adjustment",
+  BACKUP_DELETED: "backup.deleted",
+  LOG_GROUP_CHANGED: "log_group.changed",
+} as const;
+export type OpsEventType = (typeof OPS_EVENTS)[keyof typeof OPS_EVENTS];
+
+export interface WriteSystemLogArgs {
+  level: "INFO" | "WARN" | "ERROR";
+  eventType: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+  /** When set, the log is also queued for the matching Telegram log topic. */
+  topicKey?: OpsLogTopicKey;
+  userId?: string;
+  adminId?: string;
+  orderId?: string;
+  paymentId?: string;
+  serviceId?: string;
+}
+
+const MESSAGE_MAX = 1_000;
+
+/**
+ * Persists one structured ops log and (best effort) queues its Telegram
+ * delivery. NEVER throws - a database or queue failure is written to the
+ * local logger only, never re-entered into this function.
+ */
+export async function writeSystemLog(args: WriteSystemLogArgs): Promise<void> {
+  try {
+    const message = scrubSecretsFromText(args.message).slice(0, MESSAGE_MAX);
+    const metadata =
+      args.metadata === undefined
+        ? undefined
+        : (sanitizeOpsMetadata(args.metadata) as Prisma.InputJsonValue);
+    const systemLog = await prisma.systemLog.create({
+      data: {
+        level: args.level,
+        eventType: args.eventType,
+        message,
+        ...(metadata === undefined ? {} : { metadata }),
+        userId: args.userId ?? null,
+        adminId: args.adminId ?? null,
+        orderId: args.orderId ?? null,
+        paymentId: args.paymentId ?? null,
+        serviceId: args.serviceId ?? null,
+      },
+    });
+
+    if (args.topicKey === undefined) {
+      return;
+    }
+    const topic = await prisma.logTopic.findUnique({ where: { key: args.topicKey } });
+    if (topic === null || !topic.isEnabled) {
+      return;
+    }
+    if ((await getSetting(LOG_GROUP_CHAT_ID_KEY, "")) === "") {
+      return;
+    }
+
+    let deliveryId: string;
+    try {
+      const delivery = await prisma.systemLogDelivery.create({
+        data: { systemLogId: systemLog.id, logTopicId: topic.id },
+      });
+      deliveryId = delivery.id;
+    } catch (err) {
+      // P2002 = a concurrent writer already created this pair - reuse it.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        const existing = await prisma.systemLogDelivery.findUnique({
+          where: {
+            systemLogId_logTopicId: { systemLogId: systemLog.id, logTopicId: topic.id },
+          },
+        });
+        if (existing === null) {
+          return;
+        }
+        deliveryId = existing.id;
+      } else {
+        throw err;
+      }
+    }
+    // Fail-soft: an unqueued delivery stays PENDING and the worker's
+    // periodic requeue sweep picks it up - never blocks the caller.
+    await enqueueLogDelivery(deliveryId);
+  } catch (err) {
+    // Local logger ONLY - never recurse into writeSystemLog from here.
+    logger.warn("system log write failed", {
+      eventType: args.eventType,
+      error: err instanceof Error ? err.message.slice(0, 200) : "unknown",
+    });
+  }
+}

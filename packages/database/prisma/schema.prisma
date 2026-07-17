@@ -1829,10 +1829,109 @@ model SystemLog {
   serviceId String?
   createdAt DateTime       @default(now())
 
+  deliveries SystemLogDelivery[]
+
   @@index([level])
   @@index([eventType])
   @@index([userId])
   @@index([createdAt])
+}
+
+// Ops-logging phase: one Telegram delivery attempt-tracker per SystemLog x
+// topic. The SystemLog row is ALWAYS persisted first (source of truth);
+// delivery to the Telegram log group is asynchronous, retried with backoff
+// and idempotent - the unique pair plus the SENT CAS guarantee a known
+// successful send is never repeated. Delivery failures never propagate to
+// the operation that emitted the log, and log-sender failures are written
+// only to stdout/stderr and this row (never re-enqueued as Telegram logs).
+enum LogDeliveryStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+  DEAD_LETTER
+  SKIPPED
+}
+
+model SystemLogDelivery {
+  id String @id @default(uuid())
+
+  systemLogId String
+  systemLog   SystemLog @relation(fields: [systemLogId], references: [id])
+  logTopicId  String?
+
+  status   LogDeliveryStatus @default(PENDING)
+  attempts Int               @default(0)
+
+  telegramMessageId Int?
+  // Short safe English marker (rate-limited / group-missing / ...) - never
+  // raw Telegram API payloads.
+  safeErrorCode String?
+
+  nextAttemptAt DateTime?
+  sentAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([systemLogId, logTopicId])
+  @@index([status, nextAttemptAt])
+}
+
+// Ops-backup phase: one row per database-backup attempt - the durable
+// operation record behind the BullMQ database-backup queue. The operation
+// id IS the job idempotency key (repeated button callbacks reuse the same
+// QUEUED row and job id). Credentials and encryption passwords are NEVER
+// stored here; safeErrorCode carries only short scrubbed English markers.
+enum BackupOperationStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  VERIFYING
+  VERIFIED
+  CORRUPT
+  CANCELLED
+}
+
+enum BackupTrigger {
+  MANUAL
+  SCHEDULED
+  PRE_UPDATE
+}
+
+model BackupOperation {
+  id String @id @default(uuid())
+
+  status  BackupOperationStatus @default(QUEUED)
+  trigger BackupTrigger
+
+  requestedByAdminId String?
+
+  filename       String?
+  sizeBytes      BigInt?
+  checksumSha256 String?
+
+  encrypted     Boolean @default(false)
+  formatVersion Int     @default(1)
+
+  // App/git + pg_dump versions captured into the manifest (non-secret).
+  appVersion      String?
+  pgClientVersion String?
+
+  safeErrorCode String?
+
+  queuedAt    DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+  verifiedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([completedAt])
+  @@index([filename])
 }
 
 model AuditLog {

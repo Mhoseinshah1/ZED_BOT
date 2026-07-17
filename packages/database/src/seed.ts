@@ -1,7 +1,11 @@
 import { AdminRole, SettingType } from "@prisma/client";
 
 import { connectDatabase, disconnectDatabase, prisma } from "./client.js";
-import { INITIAL_BUTTON_TEXTS, INITIAL_MESSAGE_TEMPLATES } from "./seed-data.js";
+import {
+  INITIAL_BUTTON_TEXTS,
+  INITIAL_MESSAGE_TEMPLATES,
+  OPS_LOG_TOPIC_SEEDS,
+} from "./seed-data.js";
 
 // =============================================================================
 // ZED_BOT seed - idempotent baseline data.
@@ -97,7 +101,9 @@ async function seedSettings(): Promise<number> {
 
 async function seedLogTopics(): Promise<number> {
   let created = 0;
-  for (const topic of INITIAL_LOG_TOPICS) {
+  // Legacy topics + ops topics (see seed-data.ts): create-if-missing ONLY,
+  // so existing rows - including operator edits - are never modified.
+  for (const topic of [...INITIAL_LOG_TOPICS, ...OPS_LOG_TOPIC_SEEDS]) {
     const existing = await prisma.logTopic.findUnique({ where: { key: topic.key } });
     if (existing === null) {
       await prisma.logTopic.create({ data: { key: topic.key, title: topic.title } });
@@ -213,7 +219,7 @@ async function main(): Promise<void> {
   console.log(
     `[seed] done: ${adminCount} OWNER admin(s) upserted, ` +
       `${settingsCreated}/${INITIAL_SETTINGS.length} setting(s) created, ` +
-      `${logTopicsCreated}/${INITIAL_LOG_TOPICS.length} log topic(s) created, ` +
+      `${logTopicsCreated}/${INITIAL_LOG_TOPICS.length + OPS_LOG_TOPIC_SEEDS.length} log topic(s) created, ` +
       `${templates.created} template(s) created + ${templates.refreshed} default(s) refreshed, ` +
       `${buttons.created} button text(s) created + ${buttons.refreshed} default(s) refreshed, ` +
       `${starsCreated} stars pricing row(s) created.`,

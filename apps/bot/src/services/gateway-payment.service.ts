@@ -37,6 +37,7 @@ import {
 import { dispatchPaidOrderFulfillment } from "./order-fulfillment.service.js";
 import { type DeliverySendApi } from "./other-product-delivery.service.js";
 import { resolveOrderType } from "./receipt-review.service.js";
+import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 import { getMessageTemplate } from "./text.service.js";
 import { WALLET_TOPUP_REASON } from "./wallet-topup.service.js";
 
@@ -886,6 +887,21 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
       settledByPaymentId: payment.id,
       orderId: order?.id ?? null,
       amountToman: payment.amountToman,
+    });
+    // Ops log (PAYMENT topic) - allowlisted fields only, never payloads.
+    void writeSystemLog({
+      level: "INFO",
+      eventType: OPS_EVENTS.PAYMENT_SETTLED,
+      message: "gateway payment settled",
+      metadata: {
+        provider: payment.provider,
+        purpose: payment.purpose,
+        amountToman: payment.amountToman,
+      },
+      topicKey: "PAYMENT",
+      userId: payment.userId,
+      paymentId: payment.id,
+      orderId: order?.id ?? undefined,
     });
     return {
       kind: "settled",

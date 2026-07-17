@@ -246,11 +246,49 @@ on the users landing / admin menu).
 - **پیام همگانی 📣** — draft *(flow)* » audience » preview » test/start.
 - **تنظیمات عمومی ⚙️** — مدیریت متن‌ها ✍️ (templates/buttons list » edit
   *(flows)* / reset). The four wallet template keys are editable here.
-  Plus the user menu-keyboard-mode page and the global free-trial page
-  «تنظیمات اکانت تست 🎁» (see the tables below,
-  `docs/user-menu-keyboard-modes.md` and
-  `docs/free-trial-admin-management.md`).
-- **گزارشات / بکاپ 🛡** — health, backups (OWNER), restore help.
+  Plus the user menu-keyboard-mode page, the global free-trial page
+  «تنظیمات اکانت تست 🎁» and the ops-logging page «تنظیمات گروه لاگ 📝»
+  (see the tables below, `docs/user-menu-keyboard-modes.md`,
+  `docs/free-trial-admin-management.md` and `docs/telegram-log-group.md`).
+- **گزارشات / بکاپ 🛡** — production-backup rework: health, queued
+  worker-side backups, file detail/verify/delete, scheduled-backup
+  settings (see the tables below and `docs/backup-architecture.md`).
+
+### گزارشات / بکاپ 🛡 (`admin:reports_backup`, production-backup rework)
+
+Health/list/file-detail/restore-help are admin-readable; **every mutating
+action (create/download/verify/delete/cleanup/schedule) is OWNER-only**.
+Callback data carries only timestamp short ids (`YYYYMMDD-HHMMSS`) and
+operation short ids — never raw filenames.
+
+| page | buttons |
+| --- | --- |
+| landing (`admin:reports_backup`) | وضعیت سیستم 🩺 » `admin:rb:health` / ساخت بکاپ دیتابیس 💾 » `admin:rb:backup` / لیست بکاپ‌ها 🧾 » `admin:rb:list:1` / پاکسازی بکاپ‌های قدیمی 🧹 » `admin:rb:cleanup` / راهنمای Restore ♻️ » `admin:rb:restore_help` / تنظیمات بکاپ خودکار ⏰ » `admin:rb:sched` / بازگشت به منوی ادمین » `admin:menu` |
+| وضعیت سیستم 🩺 (`admin:rb:health`, see `docs/system-health.md`) | به‌روزرسانی 🔄 » `admin:rb:health` / بازگشت » `admin:reports_backup` |
+| ساخت بکاپ (`admin:rb:backup`, confirm) | بله، ساخت بکاپ 💾 » `admin:rb:backup_yes` (creates ONE `BackupOperation` + queued job; repeated taps reuse the active operation) / انصراف » `admin:reports_backup` |
+| operation status (`admin:rb:op:<opSid>`) | (while active) بروزرسانی وضعیت 🔄 » `admin:rb:op:<opSid>` / (when a file exists) دریافت فایل 📥 » `admin:rb:dl:<sid>` / لیست بکاپ‌ها 🧾 » `admin:rb:list:1` / بازگشت » `admin:reports_backup` |
+| لیست بکاپ‌ها 🧾 (`admin:rb:list:<page>`, 10/page) | one per file «💾 {sid} \| {size} \| {verify}» » `admin:rb:file:<sid>` · pagination · بازگشت » `admin:reports_backup` |
+| file detail (`admin:rb:file:<sid>` — time, size, type, encryption, verify state, trigger, status) | دریافت فایل 📥 » `admin:rb:dl:<sid>` / بررسی سلامت 🧪 » `admin:rb:verify:<sid>` (queued VERIFY job; legacy/CLI files without an operation row toast «برای این فایل رکورد عملیات وجود ندارد؛ از CLI بررسی کنید.») / حذف بکاپ 🗑 » `admin:rb:del:<sid>` / بازگشت » `admin:rb:list:1` |
+| delete step 1 (`admin:rb:del:<sid>`) | ادامه حذف 🗑 » `admin:rb:del2:<sid>` / انصراف » `admin:rb:file:<sid>` |
+| delete step 2 — DISTINCT final page (`admin:rb:del2:<sid>`) | بله، حذف نهایی ❗️ » `admin:rb:del_yes:<sid>` / انصراف » `admin:rb:file:<sid>` |
+| پاکسازی (`admin:rb:cleanup`, confirm with retention numbers) | بله، پاکسازی 🧹 » `admin:rb:cleanup_yes` (queued worker CLEANUP job) / انصراف » `admin:reports_backup` |
+| راهنمای Restore ♻️ (`admin:rb:restore_help`, instructions only — nothing executed) | بازگشت » `admin:reports_backup` |
+| تنظیمات بکاپ خودکار ⏰ (`admin:rb:sched` — status, interval, hour UTC, log-group notify, env-managed retention values) | فعال/غیرفعال کردن بکاپ خودکار » `admin:rb:sched:toggle` / هر ۶ ساعت · هر ۱۲ ساعت · روزانه · هفتگی » `admin:rb:sched:int:<6h\|12h\|daily\|weekly>` / تغییر ساعت اجرا 🕒 » `admin:rb:sched:hour` *(flow `rb:sched_hour`, 0–23)* / خاموش/روشن کردن اعلان گروه لاگ » `admin:rb:sched:notify` / بازگشت » `admin:reports_backup` |
+
+### تنظیمات عمومی ⚙️ → تنظیمات گروه لاگ 📝 (ops-logging phase; namespace `admin:lg`)
+
+Status page is admin-readable; binding/tests/toggles/disconnect are
+**OWNER-only**. Chat ids are always masked. Binding happens with
+`/setloggroup` sent **inside** the target forum supergroup (bot must be
+admin with manage-topics); see `docs/telegram-log-group.md`.
+
+| page | buttons |
+| --- | --- |
+| «تنظیمات گروه لاگ 📝» (`admin:lg`; state, group name, masked id, «موضوعات فعال: n از 11», last success/error) | بررسی اتصال 🧪 » `admin:lg:check` (rights check, sends nothing) / ارسال پیام آزمایشی » `admin:lg:test` / ساخت موضوعات پیش‌فرض » `admin:lg:ensure` / همگام‌سازی موضوعات » `admin:lg:sync` / مدیریت موضوعات » `admin:lg:topics` / قطع اتصال گروه » `admin:lg:disc` / بازگشت » `admin:general_settings` |
+| همگام‌سازی موضوعات 🔄 (`admin:lg:sync`, read-only report: ready / بدون موضوع / متصل به گروه دیگر) | بازگشت » `admin:lg` |
+| مدیریت موضوعات (`admin:lg:topics`, one row per stable topic key) | «✅/❌ {title}» toggle » `admin:lg:tt:<KEY>` · ارسال تست » `admin:lg:tx:<KEY>` (KEY ∈ SYSTEM/ERROR/PAYMENT/ORDER/SERVICE/PANEL/SECURITY/BACKUP/SUPPORT/BROADCAST/AUDIT) / بازگشت » `admin:lg` |
+| قطع اتصال (`admin:lg:disc`, confirm «ارسال لاگ‌ها به گروه متوقف می‌شود؛ موضوعات و تاریخچه حذف نمی‌شوند.») | بله، قطع اتصال » `admin:lg:disc_yes` / انصراف » `admin:lg` |
+| replacement confirm (sent INSIDE the new group when a different group is already bound) | تایید جایگزینی ✅ » `admin:lg:rep` (re-validates everything) / انصراف » `admin:lg:rep_no` |
 
 ### تنظیمات عمومی ⚙️ → نوع نمایش منوها (menu-keyboard-mode phases)
 
