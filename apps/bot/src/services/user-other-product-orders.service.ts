@@ -68,8 +68,12 @@ export function deriveUserOrderStatus(row: UserOtherProductOrderRow): UserOrderD
     switch (manual.status) {
       case "WAITING_USER_INFO":
         return "waiting_info";
+      // AWAITING_STOCK / STOCK_RESERVED (specialized-workflows phase) are
+      // "being prepared" from the buyer's perspective - never "closed".
       case "PAID":
       case "WAITING_ADMIN_DELIVERY":
+      case "AWAITING_STOCK":
+      case "STOCK_RESERVED":
         return "waiting_delivery";
       case "DELIVERED":
         return "delivered_manual";

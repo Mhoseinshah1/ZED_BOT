@@ -1,8 +1,14 @@
-import type { OtherProductStockItem, Product } from "@zedbot/database";
+import type { OtherProductStockItem, OtherProductStockParser, Product } from "@zedbot/database";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
+import { resolveEffectiveProfile } from "../../services/other-product-profile.service.js";
+import {
+  importStockItems,
+  previewStockImport,
+} from "../../services/other-product-stock-import.service.js";
+import { retryAwaitingStockOrders } from "../../services/specialized-product-fulfillment.service.js";
 import {
   addStockItem,
   addStockItemsBulk,
@@ -78,6 +84,10 @@ export const ST_CB = {
   bulkAdd: (sid: string): string => `admin:stock:bulk_add:${sid}`,
   bulkConfirm: "admin:stock:bulk_confirm",
   bulkCancel: "admin:stock:bulk_cancel",
+  // Specialized-workflows phase: parser-aware import confirm + the
+  // awaiting-stock replenishment retry.
+  importConfirm: "admin:stock:imp_confirm",
+  retryAwaiting: (sid: string): string => `admin:stock:retry:${sid}`,
   threshold: (sid: string): string => `admin:stock:threshold:${sid}`,
   thresholdClear: (sid: string): string => `admin:stock:threshold_clear:${sid}`,
   // Old all-statuses list (kept working for old keyboards).
@@ -110,6 +120,41 @@ export function clearAdminStockState(ctx: BotContext): void {
 
 function productShortId(product: Pick<Product, "id">): string {
   return product.id.slice(0, 8);
+}
+
+/**
+ * The effective inventory parser of one product (specialized-workflows
+ * phase): resolved from the kind/profile columns with the kind defaults.
+ * Misconfigured or non-stock products fall back to SINGLE_LINE - i.e. the
+ * legacy bulk flow, which is also the pinned behavior for GENERIC products.
+ */
+function effectiveImportParser(product: Product): OtherProductStockParser {
+  try {
+    return resolveEffectiveProfile(product).stockParser ?? "SINGLE_LINE";
+  } catch {
+    return "SINGLE_LINE";
+  }
+}
+
+/**
+ * Runs the awaiting-stock replenishment retry after a successful inventory
+ * addition and reports completions (silent when nothing was waiting, so the
+ * legacy flows keep their exact pinned messages).
+ */
+async function reportAwaitingRetryAfterImport(
+  ctx: BotContext,
+  productId: string,
+  always = false,
+): Promise<void> {
+  const { completed, remaining } = await retryAwaitingStockOrders(ctx.api, productId);
+  if (!always && completed === 0) {
+    return;
+  }
+  const lines = [`سفارش‌های در انتظار موجودی تکمیل‌شده: ${completed}`];
+  if (remaining > 0) {
+    lines.push(`هنوز در انتظار موجودی: ${remaining}`);
+  }
+  await safeReply(ctx, lines.join("\n"));
 }
 
 async function renderProducts(ctx: BotContext): Promise<void> {
@@ -185,6 +230,10 @@ export function stockProductKeyboard(product: Product, threshold: number | null)
     .text("تاریخچه تحویل 📦", ST_CB.itemsFiltered(sid, "d", 1))
     .row()
     .text("تنظیم حد هشدار 🔔", ST_CB.threshold(sid))
+    .row()
+    // Specialized-workflows phase: manual replenishment retry for paid
+    // orders parked as AWAITING_STOCK.
+    .text("تکمیل سفارش‌های در انتظار 🔁", ST_CB.retryAwaiting(sid))
     .row();
   if (threshold !== null) {
     kb.text("پاک کردن حد هشدار", ST_CB.thresholdClear(sid)).row();
@@ -512,6 +561,9 @@ stockHandler.callbackQuery(ST_CB.addConfirm, async (ctx) => {
     return;
   }
   await safeAnswerCallback(ctx, "آیتم با موفقیت و به‌صورت رمزنگاری‌شده ذخیره شد ✅");
+  // Replenishment retry: a fresh item may complete parked AWAITING_STOCK
+  // orders (silent when nothing was waiting - legacy flow stays identical).
+  await reportAwaitingRetryAfterImport(ctx, draft.productId);
   const product = await getStockProductByShortId(draft.productId.slice(0, 8));
   if (product !== null) {
     await renderProductPage(ctx, product);
@@ -519,6 +571,36 @@ stockHandler.callbackQuery(ST_CB.addConfirm, async (ctx) => {
 });
 
 // --- bulk-add wizard (Phase 27) --------------------------------------------------------------
+
+/** Parser-specific paste instructions (never echoes any content back). */
+function bulkIntroLines(parser: OtherProductStockParser): string[] {
+  switch (parser) {
+    case "EMAIL_BOUNDARY":
+      return [
+        "افزودن گروهی موجودی 🎟",
+        "",
+        "کل موجودی را در یک پیام ارسال کنید.",
+        "هر حساب باید با یک خط ایمیل شروع شود؛ خط‌های بعدی تا ایمیل بعدی به همان حساب تعلق می‌گیرند.",
+        "پیش از ثبت، پیش‌نمایش شمارش نمایش داده می‌شود.",
+      ];
+    case "EXPLICIT_SEPARATOR":
+      return [
+        "افزودن گروهی موجودی 🎟",
+        "",
+        "کل موجودی را در یک پیام ارسال کنید.",
+        "بلاک‌های هر آیتم را با یک خط «---» از هم جدا کنید.",
+        "پیش از ثبت، پیش‌نمایش شمارش نمایش داده می‌شود.",
+      ];
+    case "SINGLE_LINE":
+      return [
+        "افزودن گروهی موجودی 🎟",
+        "",
+        "هر خط باید شامل یک آیتم باشد.",
+        "خط‌های خالی نادیده گرفته می‌شوند.",
+        `(حداکثر ${STOCK_BULK_MAX_ITEMS} آیتم در هر مرحله)`,
+      ];
+  }
+}
 
 stockHandler.callbackQuery(/^admin:stock:bulk_add:([0-9a-f-]+)$/, async (ctx) => {
   if (ctx.admin === null) {
@@ -534,13 +616,7 @@ stockHandler.callbackQuery(/^admin:stock:bulk_add:([0-9a-f-]+)$/, async (ctx) =>
   await safeAnswerCallback(ctx);
   await safeEditOrReply(
     ctx,
-    [
-      "افزودن گروهی موجودی 🎟",
-      "",
-      "هر خط باید شامل یک آیتم باشد.",
-      "خط‌های خالی نادیده گرفته می‌شوند.",
-      `(حداکثر ${STOCK_BULK_MAX_ITEMS} آیتم در هر مرحله)`,
-    ].join("\n"),
+    bulkIntroLines(effectiveImportParser(product)).join("\n"),
     new InlineKeyboard().text("انصراف", ST_CB.bulkCancel),
   );
 });
@@ -570,10 +646,89 @@ stockHandler.callbackQuery(ST_CB.bulkConfirm, async (ctx) => {
     ctx,
     `${outcome.createdCount} آیتم با موفقیت و به‌صورت رمزنگاری‌شده ذخیره شد ✅`,
   );
+  // Replenishment retry after the legacy bulk add (silent when idle).
+  await reportAwaitingRetryAfterImport(ctx, draft.productId);
   const product = await getStockProductByShortId(draft.productId.slice(0, 8));
   if (product !== null) {
     await renderProductPage(ctx, product);
   }
+});
+
+// --- parser-aware import (specialized-workflows phase) ---------------------------------------
+//
+// EMAIL_BOUNDARY / EXPLICIT_SEPARATOR products route the bulk paste through
+// previewStockImport (counts + masked identifiers, NEVER content) and this
+// confirm re-runs importStockItems from the session draft - stateless
+// re-validation, one all-or-nothing createMany, fingerprint dedup.
+
+stockHandler.callbackQuery(ST_CB.importConfirm, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null) {
+    return;
+  }
+  const draft = ctx.session.temp.adminStockDraft;
+  // Consumed BEFORE importing: a double-clicked confirm cannot import twice.
+  clearAdminStockState(ctx);
+  if (draft === undefined || draft.parserRaw === undefined) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  const product = await getStockProductByShortId(draft.productId.slice(0, 8));
+  if (product === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  const parser = effectiveImportParser(product);
+  const result = await importStockItems(product.id, admin.id, parser, draft.parserRaw);
+  if (!result.ok) {
+    await safeAnswerCallback(ctx, "ثبت انجام نشد ❌");
+    await safeEditOrReply(
+      ctx,
+      ["ثبت گروهی موجودی ناموفق بود ❌", "", ...result.errors.map((e) => `• ${escapeHtml(e)}`)].join(
+        "\n",
+      ),
+      new InlineKeyboard()
+        .text("تلاش دوباره ➕➕", ST_CB.bulkAdd(productShortId(product)))
+        .row()
+        .text("بازگشت", ST_CB.product(productShortId(product))),
+      HTML,
+    );
+    return;
+  }
+  await safeAnswerCallback(ctx, "آیتم‌ها به‌صورت رمزنگاری‌شده ذخیره شدند ✅");
+  const { completed, remaining } = await retryAwaitingStockOrders(ctx.api, product.id);
+  const lines = [
+    "نتیجه افزودن گروهی موجودی 🎟",
+    "",
+    `محصول: ${escapeHtml(product.name)}`,
+    `آیتم‌های افزوده‌شده: ${result.importedCount}`,
+    `سفارش‌های در انتظار موجودی تکمیل‌شده: ${completed}`,
+  ];
+  if (remaining > 0) {
+    lines.push(`هنوز در انتظار موجودی: ${remaining}`);
+  }
+  await safeEditOrReply(
+    ctx,
+    lines.join("\n"),
+    new InlineKeyboard().text("بازگشت به محصول", ST_CB.product(productShortId(product))),
+    HTML,
+  );
+});
+
+// Manual replenishment retry («تکمیل سفارش‌های در انتظار 🔁»).
+stockHandler.callbackQuery(/^admin:stock:retry:([0-9a-f-]+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearAdminStockState(ctx);
+  const product = await getStockProductByShortId(ctx.match[1]);
+  if (product === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  const { completed, remaining } = await retryAwaitingStockOrders(ctx.api, product.id);
+  await safeAnswerCallback(ctx, `تکمیل‌شده: ${completed} | هنوز در انتظار: ${remaining}`);
+  await renderProductPage(ctx, product);
 });
 
 // --- low-stock threshold (Phase 28) ----------------------------------------------------------
@@ -675,6 +830,66 @@ stockTextHandler.on("message:text", async (ctx, next) => {
 
   if (flow === BULK_FLOW) {
     const bulkCancelKb = new InlineKeyboard().text("انصراف", ST_CB.bulkCancel);
+    // Parser-aware routing (specialized-workflows phase): EMAIL_BOUNDARY /
+    // EXPLICIT_SEPARATOR products preview via the fingerprint-dedup import;
+    // SINGLE_LINE products continue on the exact legacy flow below.
+    const importProduct = await getStockProductByShortId(draft.productId.slice(0, 8));
+    const importParser =
+      importProduct === null ? "SINGLE_LINE" : effectiveImportParser(importProduct);
+    if (importProduct !== null && importParser !== "SINGLE_LINE") {
+      const preview = await previewStockImport(importProduct.id, importParser, text);
+      if (!preview.ok) {
+        // Flow stays active so the admin can resend a corrected paste.
+        const errorLines = [
+          "ثبت ممکن نیست ❌",
+          "",
+          ...preview.errors.map((error) => `• ${escapeHtml(error)}`),
+        ];
+        if (preview.warnings.length > 0) {
+          errorLines.push("", "هشدارها:", ...preview.warnings.map((w) => `• ${escapeHtml(w)}`));
+        }
+        await safeReply(ctx, errorLines.join("\n"), bulkCancelKb, HTML);
+        return;
+      }
+      // The raw paste stays ONLY in the session draft; the confirm re-parses
+      // and re-validates it from scratch (stateless preview by design).
+      draft.parserRaw = text;
+      ctx.session.currentFlow = null;
+      const lines = [
+        "پیش‌نمایش افزودن گروهی موجودی 🎟",
+        "",
+        `محصول: ${escapeHtml(importProduct.name)}`,
+        `تعداد شناسایی‌شده: ${preview.itemCount}`,
+        ...(preview.maskedFirst !== null
+          ? [`اولین مورد: ${escapeHtml(preview.maskedFirst)}`]
+          : []),
+        ...(preview.maskedLast !== null && preview.itemCount > 1
+          ? [`آخرین مورد: ${escapeHtml(preview.maskedLast)}`]
+          : []),
+        `خطوط نامعتبر: ${preview.invalidLineCount}`,
+        `تکراری در متن: ${preview.batchDuplicateCount}`,
+        `تکراری در موجودی: ${preview.existingDuplicateCount}`,
+      ];
+      if (preview.warnings.length > 0) {
+        lines.push("", "هشدارها:", ...preview.warnings.map((w) => `• ${escapeHtml(w)}`));
+      }
+      lines.push(
+        "",
+        "محتوای کامل هرگز نمایش داده نمی‌شود.",
+        "",
+        "آیا از افزودن این آیتم‌ها مطمئن هستید؟",
+      );
+      await safeReply(
+        ctx,
+        lines.join("\n"),
+        new InlineKeyboard()
+          .text("تایید و افزودن ✅", ST_CB.importConfirm)
+          .row()
+          .text("انصراف", ST_CB.bulkCancel),
+        HTML,
+      );
+      return;
+    }
     const parsed = parseBulkStockInput(text);
     if (!parsed.ok) {
       // Flow stays active so the admin can resend a corrected list.

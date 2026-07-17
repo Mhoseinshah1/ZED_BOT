@@ -289,7 +289,8 @@ export interface SessionData {
     adminDeliveryDraft?: { recordId: string; deliveryText?: string };
     // Admin manual-order navigation (Phase 24).
     adminManualOrderSearchQuery?: string;
-    adminManualOrderLastFilter?: "open" | "info" | "ready" | "delivered";
+    // "stock" = AWAITING_STOCK list (specialized-workflows phase, additive).
+    adminManualOrderLastFilter?: "open" | "info" | "ready" | "delivered" | "stock";
     adminManualOrderLastPage?: number;
     // Support tickets (Phase 32): user new-ticket/reply draft + the admin
     // reply target.
@@ -312,6 +313,12 @@ export interface SessionData {
       invalidCount?: number;
       duplicateCount?: number;
       thresholdEditing?: true;
+      /**
+       * Parser-aware import (specialized-workflows phase): the raw pasted
+       * inventory kept between preview and confirm. importStockItems
+       * re-parses + re-validates it from scratch; NEVER logged.
+       */
+      parserRaw?: string;
     };
     // Pre-settlement customer-input form draft (specialized-workflows phase,
     // flow "customer_input:form"). In-progress answers live ONLY here until

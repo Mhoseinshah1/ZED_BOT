@@ -20,11 +20,13 @@ import {
   userInfoPromptText,
   type DeliverySendApi,
 } from "./other-product-delivery.service.js";
+import { readFulfillmentSnapshot } from "./other-product-profile.service.js";
 import {
   autoDeliverStockOrder,
   notifyAdminsAboutStockAlert,
   type AutoDeliverOutcome,
 } from "./other-product-stock.service.js";
+import { fulfillSpecializedOtherProduct } from "./specialized-product-fulfillment.service.js";
 import {
   buildServiceInfoMessage,
   PROVISION_FAILED_USER_TEXT,
@@ -123,6 +125,43 @@ async function fulfillOtherProduct(
   chatId: string,
   source: FulfillmentSource,
 ): Promise<DispatchResult> {
+  // Specialized-workflows phase: resolve the checkout's FROZEN fulfillment
+  // behavior first. Non-GENERIC kinds route to the specialized engine (which
+  // never falls back to the generic manual queue); GENERIC - and any
+  // resolution failure - continues on the legacy path below, byte-identical
+  // to the pre-phase behavior.
+  try {
+    const checkout =
+      order.checkoutSessionId === null
+        ? null
+        : await prisma.checkoutSession.findUnique({
+            where: { id: order.checkoutSessionId },
+            select: { otherProductFulfillmentSnapshot: true, productSnapshot: true },
+          });
+    const snapshot = await readFulfillmentSnapshot(
+      checkout ?? { otherProductFulfillmentSnapshot: null, productSnapshot: null },
+      order.productId === null
+        ? undefined
+        : async () => prisma.product.findUnique({ where: { id: order.productId ?? "" } }),
+    );
+    if (snapshot.kind !== "GENERIC") {
+      const specialized = await fulfillSpecializedOtherProduct(api, order, snapshot, {
+        chatId,
+        source,
+      });
+      if (specialized !== null) {
+        return specialized;
+      }
+    }
+  } catch (err) {
+    // Defensive only: readFulfillmentSnapshot swallows resolution failures
+    // itself, and the specialized engine never throws.
+    logger.error("specialized fulfillment resolution failed - using legacy path", {
+      orderId: order.id,
+      error: errorMessage(err),
+    });
+  }
+
   const line = fulfillmentConfirmationLine(source);
   // Stock-eligible products (deliveryType STOCK_ITEM or stockEnabled, without
   // required user info) auto-deliver from the encrypted inventory; the stock
