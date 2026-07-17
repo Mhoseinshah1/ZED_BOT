@@ -50,6 +50,15 @@ function isOwner(ctx: BotContext): boolean {
 }
 
 /**
+ * Keyboard for the flow's terminal pages inside the group: the only useful
+ * next step is back in the bot's private chat (admin panel), so this is a
+ * plain URL button - no callback routes ever leak into a group keyboard.
+ */
+function backToBotKeyboard(ctx: BotContext): InlineKeyboard {
+  return new InlineKeyboard().url("بازگشت به ربات", `https://t.me/${ctx.me.username}`);
+}
+
+/**
  * Full environment validation for binding THIS chat as the log group.
  * Returns null when everything is fine, otherwise the safe Persian error.
  */
@@ -223,7 +232,7 @@ logGroupSetupHandler.callbackQuery(LGSET_CB.yes, async (ctx) => {
     lines.push(`⚠️ ${ensured.failedCount} موضوع ساخته نشد: ${ensured.safeMessage}`);
   }
   lines.push(test.ok ? "پیام آزمایشی ارسال شد ✅" : `پیام آزمایشی: ${test.safeMessage}`);
-  await safeEditOrReply(ctx, lines.join("\n"));
+  await safeEditOrReply(ctx, lines.join("\n"), backToBotKeyboard(ctx));
 });
 
 logGroupSetupHandler.callbackQuery(LGSET_CB.no, async (ctx) => {
@@ -233,5 +242,5 @@ logGroupSetupHandler.callbackQuery(LGSET_CB.no, async (ctx) => {
     return;
   }
   await safeAnswerCallback(ctx, "لغو شد.");
-  await safeEditOrReply(ctx, SETUP_CANCELLED_TEXT);
+  await safeEditOrReply(ctx, SETUP_CANCELLED_TEXT, backToBotKeyboard(ctx));
 });
