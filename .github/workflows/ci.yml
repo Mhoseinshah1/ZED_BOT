@@ -393,6 +393,12 @@ jobs:
           fetch-depth: 0
 
       - name: Run the legacy upgrade test (3 iterations)
-        env:
-          GITHUB_SHA: ${{ github.sha }}
-        run: sudo -E bash scripts/tests/legacy-upgrade-test.sh --iterations 3
+        # Deliberately NOT `sudo -E`: the workflow-level env block exports
+        # dummy POSTGRES_PASSWORD/DATABASE_URL/REDIS_* values for the unit
+        # jobs, and Docker Compose gives the PROCESS environment precedence
+        # over the project .env during interpolation - leaking them in would
+        # initialize postgres with the workflow password while the app
+        # containers read the installer-generated one from env_file (exactly
+        # the P1000 auth split a real production root shell can never have).
+        # Only GITHUB_SHA crosses the sudo boundary.
+        run: sudo env GITHUB_SHA="${{ github.sha }}" bash scripts/tests/legacy-upgrade-test.sh --iterations 3

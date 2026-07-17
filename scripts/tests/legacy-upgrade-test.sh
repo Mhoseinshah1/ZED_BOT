@@ -21,6 +21,27 @@
 
 set -Eeuo pipefail
 
+# --- Environment sanitation --------------------------------------------------
+# A real production root shell carries NONE of the app configuration in its
+# environment - everything lives in /opt/zedbot/app/.env. CI (and careless
+# local shells) may export dummy values for the unit-test jobs, and Docker
+# Compose gives the PROCESS environment precedence over the project .env
+# during ${VAR} interpolation: a leaked POSTGRES_PASSWORD would initialize
+# postgres with one password while the app containers read another from
+# env_file (observed as prisma P1000 / a permanently unhealthy api). Scrub
+# every variable the compose file or the zedbot scripts would consume.
+unset NODE_ENV APP_NAME APP_DOMAIN APP_BASE_URL API_PORT LOG_LEVEL \
+  TELEGRAM_BOT_TOKEN ADMIN_TELEGRAM_IDS \
+  POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL \
+  REDIS_HOST REDIS_PORT REDIS_PASSWORD REDIS_URL REDISCLI_AUTH \
+  APP_SECRET INTERNAL_API_TOKEN SSL_EMAIL GIT_SHA \
+  BACKUP_DIR BACKUP_ENCRYPTION_PASSWORD BACKUP_RETENTION_DAYS \
+  BACKUP_MIN_RETAINED BACKUP_MAX_TELEGRAM_MB BACKUP_MIN_FREE_DISK_MB \
+  ZEDBOT_BASE_DIR ZEDBOT_APP_DIR ZEDBOT_DATA_DIR ZEDBOT_BACKUP_DIR \
+  ZEDBOT_LOGS_DIR ZEDBOT_ENV_FILE ZEDBOT_CLI_PATH ZEDBOT_REPO_URL \
+  ZEDBOT_SKIP_PREUPDATE_BACKUP ZEDBOT_SMOKE_TIMEOUT_SECONDS \
+  2>/dev/null || true
+
 # --- Constants ---------------------------------------------------------------
 PRE_SHA=4d0f3ba89b0cc3e94fe9c280ade276e2025a19a4
 SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
