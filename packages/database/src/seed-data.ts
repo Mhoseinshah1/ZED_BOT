@@ -386,6 +386,9 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   // Free-trial phase: the real main-menu label (was a literal-brace
   // placeholder «اشتراک رایگان {تست}» before the flow existed).
   { key: "free_test", title: "اکانت تست رایگان", text: "اکانت تست رایگان 🎁" },
+  // Admin-entry phase: the active-admin-only final user-menu row. Editable
+  // like every other label; the visible text is never authorization.
+  { key: "admin_panel", title: "منوی کاربر: پنل مدیریت", text: "پنل مدیریت 🛠" },
   { key: "referral", title: "زیرمجموعه گیری", text: "زیرمجموعه گیری 👥" },
   { key: "other_products", title: "محصولات دیگر", text: "محصولات دیگر 🛍" },
   { key: "my_orders", title: "سفارش‌های من", text: "سفارش‌های من 🧾" },
