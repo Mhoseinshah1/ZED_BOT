@@ -7,6 +7,7 @@ import {
 } from "@zedbot/database";
 
 import type { CheckoutDraft } from "../core/session.js";
+import { buildFulfillmentSnapshot } from "./other-product-profile.service.js";
 import { getSetting } from "./settings.service.js";
 import { resolveProductInboundIds } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
@@ -103,6 +104,18 @@ export async function createCheckoutSession(
       productId: product.id,
       orderType: product.type === "SERVICE_PRODUCT" ? "SERVICE_PURCHASE" : "OTHER_PRODUCT",
       productSnapshot: buildProductSnapshot(product, draft),
+      // Specialized-workflows phase: OTHER_PRODUCT checkouts freeze the
+      // fulfillment behavior NOW (kind/profile/parser/info schema) - the
+      // paid order fulfills from this capture, never from the mutable
+      // Product row. Throws for a misconfigured specialized product, so an
+      // unresolvable product fails BEFORE any payment.
+      ...(product.type === "OTHER_PRODUCT"
+        ? {
+            otherProductFulfillmentSnapshot: buildFulfillmentSnapshot(
+              product,
+            ) as unknown as Prisma.InputJsonObject,
+          }
+        : {}),
       originalPriceToman: draft.originalPriceToman,
       discountAmountToman: draft.discountAmountToman,
       finalPriceToman: draft.finalPriceToman,

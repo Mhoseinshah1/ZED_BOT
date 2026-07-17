@@ -1,6 +1,7 @@
 import {
   OrderStatus,
   OrderType,
+  Prisma,
   prisma,
   type Order,
   type OtherProductStockItem,
@@ -650,6 +651,10 @@ export type AutoDeliverOutcome =
 
 type OrderWithRelations = Order & { product: Product | null; user: User };
 
+function isUniqueViolation(err: unknown): boolean {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
+}
+
 /** Oldest AVAILABLE item first; atomically RESERVE it for this order. */
 async function claimStockItem(
   order: OrderWithRelations,
@@ -662,20 +667,174 @@ async function claimStockItem(
     if (candidate === null) {
       return null;
     }
-    const claimed = await prisma.otherProductStockItem.updateMany({
-      where: { id: candidate.id, status: "AVAILABLE" },
-      data: {
-        status: "RESERVED",
-        deliveredOrderId: order.id,
-        deliveredToUserId: order.userId,
-      },
-    });
-    if (claimed.count === 1) {
+    let claimedCount: number;
+    try {
+      const claimed = await prisma.otherProductStockItem.updateMany({
+        where: { id: candidate.id, status: "AVAILABLE" },
+        data: {
+          status: "RESERVED",
+          deliveredOrderId: order.id,
+          deliveredToUserId: order.userId,
+        },
+      });
+      claimedCount = claimed.count;
+    } catch (err) {
+      if (!isUniqueViolation(err)) {
+        throw err;
+      }
+      // deliveredOrderId is UNIQUE (specialized-workflows phase): a P2002
+      // here means a concurrent claim already attached an item to THIS
+      // order. Treat the CAS as lost and resume that winner idempotently -
+      // the DB constraint guarantees an order can never hold two items.
+      const winner = await prisma.otherProductStockItem.findUnique({
+        where: { deliveredOrderId: order.id },
+      });
+      if (winner !== null) {
+        return winner;
+      }
+      continue;
+    }
+    if (claimedCount === 1) {
       return prisma.otherProductStockItem.findUnique({ where: { id: candidate.id } });
     }
     // Another order claimed this candidate between read and CAS - try the next.
   }
   return null;
+}
+
+// --- specialized reservation API (specialized-workflows phase) ------------------------------
+//
+// The specialized fulfillment flow separates RESERVE from SEND: it reserves
+// an item first (so NO_STOCK can route the order to AWAITING_STOCK instead
+// of silently downgrading to manual delivery), sends outside any claim
+// window, then finalizes or releases. The existing autoDeliverStockOrder is
+// untouched - these run ALONGSIDE it for the new profiles. All three are
+// CAS/unique-guarded: deliveredOrderId's uniqueness makes "one item per
+// order, one order per item" a DB guarantee, not a code promise.
+
+export type ReserveStockOutcome =
+  | {
+      ok: true;
+      item: OtherProductStockItem;
+      /** True when the order already held an item (idempotent resume). */
+      resumed: boolean;
+    }
+  | { ok: false; reason: "NO_STOCK" | "ERROR"; error?: string };
+
+/**
+ * Reserves the oldest AVAILABLE item of one product for one order:
+ * findFirst + CAS updateMany (AVAILABLE -> RESERVED + claim fields), with
+ * retries when the CAS loses to a concurrent order. Idempotent per order -
+ * an item already carrying this orderId (RESERVED or DELIVERED) is returned
+ * as-is, whether found upfront or surfaced by a P2002 on the unique
+ * deliveredOrderId during the race itself. NO_STOCK is a distinct outcome
+ * so specialized callers can park the order as AWAITING_STOCK. Never sends,
+ * never decrypts, never logs content.
+ */
+export async function reserveStockItemForOrder(
+  orderId: string,
+  productId: string,
+  userId: string,
+): Promise<ReserveStockOutcome> {
+  try {
+    const existing = await prisma.otherProductStockItem.findUnique({
+      where: { deliveredOrderId: orderId },
+    });
+    if (existing !== null && (existing.status === "RESERVED" || existing.status === "DELIVERED")) {
+      return { ok: true, item: existing, resumed: true };
+    }
+    for (let attempt = 0; attempt < CLAIM_RETRIES; attempt++) {
+      const candidate = await prisma.otherProductStockItem.findFirst({
+        where: { productId, status: "AVAILABLE" },
+        orderBy: { createdAt: "asc" },
+      });
+      if (candidate === null) {
+        return { ok: false, reason: "NO_STOCK" };
+      }
+      try {
+        const claimed = await prisma.otherProductStockItem.updateMany({
+          where: { id: candidate.id, status: "AVAILABLE" },
+          data: { status: "RESERVED", deliveredOrderId: orderId, deliveredToUserId: userId },
+        });
+        if (claimed.count === 1) {
+          const item = await prisma.otherProductStockItem.findUnique({
+            where: { id: candidate.id },
+          });
+          if (item !== null) {
+            logger.info("stock item reserved for order", { orderId, itemId: item.id });
+            return { ok: true, item, resumed: false };
+          }
+        }
+        // CAS lost to a concurrent order - try the next candidate.
+      } catch (err) {
+        if (!isUniqueViolation(err)) {
+          throw err;
+        }
+        // P2002 on deliveredOrderId: THIS order claimed another item
+        // concurrently - return that item idempotently. A stale non-claim
+        // row (e.g. DISABLED but still holding the order id) blocks the
+        // unique forever, so it is an error, never a live reservation.
+        const winner = await prisma.otherProductStockItem.findUnique({
+          where: { deliveredOrderId: orderId },
+        });
+        if (winner !== null && (winner.status === "RESERVED" || winner.status === "DELIVERED")) {
+          return { ok: true, item: winner, resumed: true };
+        }
+        if (winner !== null) {
+          logger.error("stock reservation blocked by a stale claim row", {
+            orderId,
+            itemId: winner.id,
+            itemStatus: winner.status,
+          });
+          return { ok: false, reason: "ERROR", error: "stale stock claim row blocks the order" };
+        }
+      }
+    }
+    // Candidates existed but every CAS lost - contention behaves like the
+    // legacy claim path: report NO_STOCK and let the caller park/retry.
+    return { ok: false, reason: "NO_STOCK" };
+  } catch (err) {
+    logger.error("stock reservation failed", { orderId, productId, error: errorMessage(err) });
+    return { ok: false, reason: "ERROR", error: errorMessage(err) };
+  }
+}
+
+/**
+ * RESERVED -> DELIVERED for OUR order's claim only (scoped CAS). Returns
+ * false when the item is not RESERVED for this order (stale/foreign claim).
+ */
+export async function finalizeStockDelivery(itemId: string, orderId: string): Promise<boolean> {
+  const updated = await prisma.otherProductStockItem.updateMany({
+    where: { id: itemId, status: "RESERVED", deliveredOrderId: orderId },
+    data: { status: "DELIVERED", deliveredAt: new Date() },
+  });
+  if (updated.count === 1) {
+    logger.info("stock delivery finalized", { itemId, orderId });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Releases OUR order's claim: RESERVED -> AVAILABLE with the claim fields
+ * cleared, scoped to deliveredOrderId = orderId AND status RESERVED so a
+ * DELIVERED item or another order's claim can never be released by mistake.
+ */
+export async function releaseStockClaim(itemId: string, orderId: string): Promise<boolean> {
+  const updated = await prisma.otherProductStockItem.updateMany({
+    where: { id: itemId, status: "RESERVED", deliveredOrderId: orderId },
+    data: {
+      status: "AVAILABLE",
+      deliveredOrderId: null,
+      deliveredToUserId: null,
+      deliveredAt: null,
+    },
+  });
+  if (updated.count === 1) {
+    logger.info("stock claim released", { itemId, orderId });
+    return true;
+  }
+  return false;
 }
 
 /**

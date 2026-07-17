@@ -66,6 +66,10 @@ const MANUAL_ORDER_STATUS_LABEL: Record<OtherProductOrderStatus, string> = {
   REFUNDED: "برگشت‌خورده ↩️",
   DELIVERY_CANCELLED_REFUNDED: "تحویل لغو و مبلغ برگشت داده شد ↩️",
   DELIVERY_REJECTED_NO_REFUND: "تحویل رد شد (بدون برگشت وجه) ❌",
+  // Specialized-workflows phase statuses (paid stock order without inventory
+  // + the transient reservation window before the delivery send).
+  AWAITING_STOCK: "در انتظار تامین موجودی ⏳",
+  STOCK_RESERVED: "موجودی رزرو شده (در حال تحویل) 📦",
 };
 
 const ORDER_TYPE_ICON: Record<string, string> = {

@@ -48,6 +48,12 @@ export const pcb = {
   setDelivery: (sid: string, d: string): string => `admin:prod:setdlv:${sid}:${d}`,
   pickNaming: (sid: string): string => `admin:prod:naming:${sid}`,
   setNaming: (sid: string, index: number): string => `admin:prod:setnp:${sid}:${index}`,
+  // Specialized-workflows phase: kind / stock-parser / collect-before-approval.
+  pickKind: (sid: string): string => `admin:prod:kind:${sid}`,
+  setKind: (sid: string, code: string): string => `admin:prod:setkind:${sid}:${code}`,
+  pickStockParser: (sid: string): string => `admin:prod:sparser:${sid}`,
+  setStockParser: (sid: string, code: string): string => `admin:prod:setsp:${sid}:${code}`,
+  toggleCollectBefore: (sid: string): string => `admin:prod:cba:${sid}`,
 
   // Add-wizard step callbacks
   flowPanel: (panelSid: string): string => `admin:prod:f:pnl:${panelSid}`,
@@ -59,5 +65,11 @@ export const pcb = {
   flowResetCycle: (c: string): string => `admin:prod:f:trc:${c}`,
   flowUserInfo: (v: "y" | "n"): string => `admin:prod:f:rui:${v}`,
   flowDelivery: (d: string): string => `admin:prod:f:dlv:${d}`,
+  // Specialized-workflows phase: OTHER_PRODUCT kind branching steps.
+  flowKind: (k: string): string => `admin:prod:f:kind:${k}`,
+  flowAiMode: (m: string): string => `admin:prod:f:ai:${m}`,
+  flowGiftMode: (m: string): string => `admin:prod:f:gc:${m}`,
+  flowStockParser: (p: string): string => `admin:prod:f:sp:${p}`,
+  flowFormPreset: (p: string): string => `admin:prod:f:fp:${p}`,
   flowSave: (): string => "admin:prod:f:save",
 } as const;

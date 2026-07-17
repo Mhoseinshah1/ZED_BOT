@@ -1,9 +1,17 @@
-import type { Panel, ProductCategory, TrafficResetCycle } from "@zedbot/database";
+import type {
+  OtherProductFulfillmentProfile,
+  OtherProductKind,
+  OtherProductStockParser,
+  Panel,
+  ProductCategory,
+  TrafficResetCycle,
+} from "@zedbot/database";
 import { InlineKeyboard } from "grammy";
 
 import type { ProductAddState } from "../../core/session.js";
 import { categoryShortId } from "../../services/category.service.js";
 import { OTHER_POLICY_INFO } from "../../services/other-product-naming.service.js";
+import { kindLabel, profileLabel } from "../../services/other-product-profile.service.js";
 import { panelShortId } from "../../services/panel.service.js";
 import { productShortId, type ProductWithRelations } from "../../services/product.service.js";
 import { escapeHtml } from "../../utils/html.js";
@@ -35,6 +43,22 @@ export const DELIVERY_LABEL: Record<string, string> = {
   MANUAL_ADMIN: "تحویل دستی ادمین",
   STOCK_ITEM: "آیتم آماده/استوک",
 };
+
+// Specialized-workflows phase: kind/profile labels come from the shared
+// other-product profile service (kindLabel/profileLabel). The parser labels
+// live here - they double as the wizard/selector button captions.
+export const STOCK_PARSER_LABEL: Record<OtherProductStockParser, string> = {
+  SINGLE_LINE: "هر خط یک آیتم",
+  EXPLICIT_SEPARATOR: "بلوک‌های جداشده با ---",
+  EMAIL_BOUNDARY: "بلوک‌های ایمیل‌محور",
+};
+
+/** Stock-backed fulfillment profiles (drive stockEnabled + the parser UI). */
+export function isStockProfile(
+  profile: OtherProductFulfillmentProfile | null | undefined,
+): boolean {
+  return profile === "STOCK_CREDENTIAL" || profile === "STOCK_CODE";
+}
 
 export function groupsLabel(displayGroups: unknown): string {
   if (Array.isArray(displayGroups) && displayGroups.length > 0 && displayGroups.length < 3) {
@@ -239,6 +263,12 @@ export function productDetailText(product: ProductWithRelations): string {
     }
   } else {
     lines.push(
+      // Missing kind = legacy row backfilled to GENERIC (behavior unchanged).
+      `نوع محصول: ${kindLabel(product.otherProductKind ?? "GENERIC")}`,
+      `پروفایل تحویل: ${product.otherProductFulfillmentProfile == null ? "-" : profileLabel(product.otherProductFulfillmentProfile)}`,
+      `فرمت موجودی: ${product.otherProductStockParser == null ? "-" : STOCK_PARSER_LABEL[product.otherProductStockParser]}`,
+      `دریافت اطلاعات قبل از تایید رسید: ${product.collectInfoBeforeManualApproval === true ? "فعال" : "غیرفعال"}`,
+      `پیام تکمیل سفارش: ${escapeHtml(product.completionMessageTemplate == null || product.completionMessageTemplate === "" ? "-" : product.completionMessageTemplate)}`,
       `اطلاعات از کاربر: ${product.requiredUserInfoEnabled ? "✅" : "❌"}`,
       `متن درخواست اطلاعات: ${escapeHtml(product.requiredUserInfoPromptText ?? "-")}`,
       `نوع تحویل: ${product.deliveryType === null ? "-" : DELIVERY_LABEL[product.deliveryType]}`,
@@ -294,6 +324,24 @@ export function productDetailKeyboard(
     }
     kb.row();
   } else {
+    // Specialized-workflows phase: kind selector + per-profile controls.
+    kb.text("نوع محصول", pcb.pickKind(sid));
+    if (isStockProfile(product.otherProductFulfillmentProfile)) {
+      kb.text("فرمت موجودی", pcb.pickStockParser(sid));
+    }
+    kb.row();
+    if (
+      product.otherProductFulfillmentProfile === "PERSONALIZED_SERVICE" ||
+      product.requiredUserInfoEnabled
+    ) {
+      kb.text(
+        product.collectInfoBeforeManualApproval === true
+          ? "دریافت اطلاعات قبل از تایید رسید: فعال ✅"
+          : "دریافت اطلاعات قبل از تایید رسید: غیرفعال ❌",
+        pcb.toggleCollectBefore(sid),
+      ).row();
+    }
+    kb.text("پیام تکمیل سفارش", pcb.fieldEdit(sid, "cmt")).row();
     kb.text(
       product.requiredUserInfoEnabled ? "اطلاعات کاربر: ✅" : "اطلاعات کاربر: ❌",
       pcb.toggleUserInfo(sid),
@@ -371,6 +419,55 @@ export function deliveryKeyboard(build: (d: string) => string, backCb: string): 
     .text("لغو ❌", backCb);
 }
 
+// Specialized-workflows phase: compact callback codes for the kind/parser
+// pickers (shared between the add wizard and the detail-page selectors).
+export const OTHER_KIND_BY_CODE: Record<string, OtherProductKind> = {
+  APPLE: "APPLE_ID",
+  AI: "AI_ACCOUNT",
+  TGP: "TELEGRAM_PREMIUM",
+  GIFT: "GIFT_CARD",
+  GEN: "GENERIC",
+};
+
+export const STOCK_PARSER_BY_CODE: Record<string, OtherProductStockParser> = {
+  SL: "SINGLE_LINE",
+  SEP: "EXPLICIT_SEPARATOR",
+  EB: "EMAIL_BOUNDARY",
+};
+
+/** One kind per row, wizard order; `back` covers cancel (wizard) or return (edit). */
+export function otherKindKeyboard(
+  build: (code: string) => string,
+  back: { label: string; cb: string },
+): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(kindLabel("APPLE_ID"), build("APPLE"))
+    .row()
+    .text(kindLabel("AI_ACCOUNT"), build("AI"))
+    .row()
+    .text(kindLabel("TELEGRAM_PREMIUM"), build("TGP"))
+    .row()
+    .text(kindLabel("GIFT_CARD"), build("GIFT"))
+    .row()
+    .text(kindLabel("GENERIC"), build("GEN"))
+    .row()
+    .text(back.label, back.cb);
+}
+
+export function stockParserKeyboard(
+  build: (code: string) => string,
+  back: { label: string; cb: string },
+): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(STOCK_PARSER_LABEL.SINGLE_LINE, build("SL"))
+    .row()
+    .text(STOCK_PARSER_LABEL.EXPLICIT_SEPARATOR, build("SEP"))
+    .row()
+    .text(STOCK_PARSER_LABEL.EMAIL_BOUNDARY, build("EB"))
+    .row()
+    .text(back.label, back.cb);
+}
+
 // Deliberately offers NO "create new category" shortcut: categories are
 // created only through the category-management section.
 export function categoryPickerKeyboard(
@@ -430,6 +527,16 @@ export function addConfirmationText(state: ProductAddState): string {
     );
   }
   if (state.kind === "OTHER_PRODUCT") {
+    lines.push(
+      `نوع محصول: ${kindLabel(state.otherProductKind ?? "GENERIC")}`,
+      `پروفایل تحویل: ${state.otherProductFulfillmentProfile === undefined ? "-" : profileLabel(state.otherProductFulfillmentProfile)}`,
+    );
+    if (state.otherProductStockParser !== undefined) {
+      lines.push(`فرمت موجودی: ${STOCK_PARSER_LABEL[state.otherProductStockParser]}`);
+    }
+    if (state.collectInfoBeforeManualApproval === true) {
+      lines.push("دریافت اطلاعات قبل از تایید رسید: فعال");
+    }
     lines.push(
       `اطلاعات از کاربر: ${state.requiredUserInfoEnabled === true ? "✅" : "❌"}`,
       `متن درخواست اطلاعات: ${escapeHtml(state.requiredUserInfoPromptText ?? "-")}`,
