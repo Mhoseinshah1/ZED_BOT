@@ -224,14 +224,17 @@ preflight creates **no** operation row — it emits one WARN ops log
 `zedbot update` (`scripts/update.sh`) refuses to touch any code until a
 fresh database backup was **created and verified**:
 
-1. `[1/7]` safety archive (`.env` + database, `scripts/backup.sh`).
-2. `[2/7]` `backup-db.sh`, then the newest backup is verified per type:
+1. `[1/11]` safety archive (`.env` + database, `scripts/backup.sh`).
+2. `[2/11]` `backup-db.sh`, then the newest backup is verified per type:
    `.dump` → `pg_restore --list` in the postgres container (file over
    stdin); `.dump.enc` → the worker's `verify-backup` CLI (full decrypt +
    list), falling back to a ZBK1 header check when the CLI is not built
    yet; `.sql.gz` → `gzip -t`. Any doubt **aborts the update** with the
    running installation untouched.
-3. Only then: pull → build → restart → migrate → doctor.
+3. Only then the remaining steps run: pull → `.env` migration → CLI
+   refresh → build (with identity) → migrate → force-recreate →
+   deploy recording → post-deploy smoke → doctor — see
+   [legacy-upgrade.md](legacy-upgrade.md) for the full 11-step flow.
 
 CLI-only escape hatch (never the default, use at your own risk):
 

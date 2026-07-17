@@ -58,7 +58,7 @@ which consumed everything and returned `{ok:false}`.
 | Key | Writer | Content / semantics | TTL |
 | --- | --- | --- | --- |
 | `zedbot:worker:heartbeat` | worker, every **15 s** | ISO timestamp of the last tick; key presence = "worker alive recently" | **45 s** |
-| `zedbot:worker:capabilities` | worker, same cadence | JSON `{ pgDumpVersion, backupDirWritable, backupDir, checkedAt }` — the facts only the worker container can know (its mount is rw; the bot's is ro) | 45 s |
+| `zedbot:worker:capabilities` | worker, same cadence | JSON `{ pgDumpVersion, backupDirWritable, backupDir, gitSha, checkedAt }` — the facts only the worker container can know (its mount is rw; the bot's is ro); `gitSha` is the worker image's baked build identity (null when built without it) | 45 s |
 | `zedbot:backup:database` | worker / create-backup CLI | Global single-backup lock: `SET NX PX`, random token, compare-and-delete Lua release (never releases a lock a later run re-acquired) | 30 min (crash safety; a live run always finishes or is SIGKILLed well before) |
 | `zedbot:logagg:<topicKey>:<hash>` | log-delivery consumer | 5-minute aggregation counter per identical log line (INCR; count 1 = send, >1 = skip as `aggregated`) | 300 s |
 
@@ -72,6 +72,23 @@ page can never block.
 Writability is probed with a **write+unlink** test file
 (`.zedbot-write-test-<pid>`) — the only reliable check on bind mounts
 (`access(W_OK)` lies there).
+
+## Deploy CLIs (record-deploy, migration-status, deploy-smoke)
+
+Besides the backup CLIs (create/verify/encrypt — see
+[backup-architecture.md](backup-architecture.md)), the worker ships three
+deployment CLIs used by the shell layer. All three print **one line of
+secret-free JSON** on stdout (no env values, no connection strings) and
+signal success purely via the exit code.
+
+| CLI | Usage | JSON contract | Called by |
+| --- | --- | --- | --- |
+| `apps/worker/dist/cli/record-deploy.js` | `node … <git-sha>` | `{ok: true, sha}` exit 0; `{ok: false, error: "invalid-sha"}` exit 1 on a bad argument | `record_deployed_sha` (lib/common.sh) at the end of `update.sh` and the migrate.sh legacy self-heal; `install.sh` keeps an inline bootstrap copy of the same call. Upserts the `deployed_repo_sha` + `deployed_repo_sha_recorded_at` Settings; the bot compares its own baked `GIT_SHA` against them to detect stale containers |
+| `apps/worker/dist/cli/migration-status.js` | `node …` | `{ok: true, appliedCount, pendingCount, failedCount, upToDate, pendingNames}` exit 0 (`pendingNames` capped at 5); `{ok: false, error: "db-unreachable"\|"migrations-dir-missing"}` exit 1. A fresh database without `_prisma_migrations` reads as "nothing applied yet" | `zedbot deploy-status` (its `Migrations : pending=… upToDate=…` line). Compares the migrations **shipped in the image** against the applied `_prisma_migrations` rows |
+| `apps/worker/dist/cli/deploy-smoke.js` | `node …` (budget: `ZEDBOT_SMOKE_TIMEOUT_SECONDS`, default 240) | `{ok, failureCategory, filename, operationId, steps}` — `steps` is an ordered `{name, ok, info?}` list (`redis`, `worker-heartbeat`, `backup-dir-writable`, `pg-client`, `backup-enqueue`, `backup-verified`, `backup-file`); `failureCategory` null on success. Exit 0/1 | Step 10 of `update.sh` in a one-off worker container, while the **running** worker processes the smoke's real enqueued backup (same payload/jobId/attempts contract as the bot's `enqueueBackupCreate`). Sends nothing to Telegram, deletes nothing |
+
+Failure categories and the update script's handling of them are documented
+in [legacy-upgrade.md](legacy-upgrade.md).
 
 ## Scheduler reconcile
 
