@@ -77,6 +77,7 @@ All management goes through the `zedbot` CLI (run as root):
 | `zedbot start`                 | Start all services                                      |
 | `zedbot stop`                  | Stop all services                                       |
 | `zedbot update`                | Update to the latest version (creates **and verifies** a backup first) |
+| `zedbot deploy-status`         | Show repository/image/container version alignment and migration status |
 | `zedbot backup`                | Create a verified database backup (`zedbot-db-YYYYMMDD-HHMMSS.dump[.enc]` + manifest) |
 | `zedbot backup list`           | List all backups (name, size, date, type, verified)      |
 | `zedbot backup verify <file>`  | Verify a backup by file name, path or timestamp id       |
@@ -94,9 +95,24 @@ All management goes through the `zedbot` CLI (run as root):
 zedbot update
 ```
 
-Creates a safety backup, pulls the latest code, rebuilds the images, restarts
-the services, runs migrations (when available) and finishes with health
-checks.
+Creates and verifies a backup, pulls the latest code, migrates the `.env`
+(append-only), refreshes the installed CLI, rebuilds the images with the
+`GIT_SHA` deployment identity, runs migrations, force-recreates the
+services, records the deployed version, runs a post-deploy smoke test and
+finishes with health checks. Updates are **self-healing**: installations
+that predate the persistent-backup layout (stale containers/CLI/`.env`
+after an update) converge automatically, and `zedbot deploy-status` shows
+whether repository, images, containers and migrations are aligned — see
+`docs/legacy-upgrade.md`.
+
+Installations that predate the persistent-backup release need one manual
+command before their first update (the old updater cannot pull past the
+mode-dirty tree its own installer created; the reason and details are in
+`docs/legacy-upgrade.md`):
+
+```bash
+git -C /opt/zedbot/app config core.fileMode false && zedbot update
+```
 
 ### Status and health
 

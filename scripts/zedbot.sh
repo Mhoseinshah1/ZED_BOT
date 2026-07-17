@@ -27,6 +27,7 @@ Commands:
   start                   Start all services
   stop                    Stop all services
   update                  Update ZED_BOT to the latest version (creates + verifies a backup first)
+  deploy-status           Show repository/image/container version alignment and migration status
   backup [create]         Create a verified database backup (zedbot-db-<stamp>.dump[.enc] + manifest)
   backup list             List all backups (name, size, date, type, verified)
   backup verify <file>    Verify a backup by file name, path or timestamp id
@@ -139,15 +140,19 @@ health_summary() {
   fi
 }
 
-# Reads the "verified" flag from a backup's sidecar manifest ("yes", "no" or
-# "-" when there is no manifest). Plain grep - never sources anything.
+# Reads the verification state from a backup's sidecar manifest ("yes", "no"
+# or "-" when there is no manifest). Plain grep - never sources anything.
+# Two manifest dialects exist and both mean the same thing: shell-created
+# backups (backup-db.sh) write `"verified": true`, worker-created backups
+# (apps/worker/src/backup/files.ts) write `"verification": "VERIFIED"`.
 manifest_verified_flag() {
   local manifest="$1"
   if [ ! -f "$manifest" ]; then
     printf -- '-'
     return 0
   fi
-  if grep -Eq '"verified"[[:space:]]*:[[:space:]]*true' "$manifest"; then
+  if grep -Eq '"verified"[[:space:]]*:[[:space:]]*true' "$manifest" \
+    || grep -Eq '"verification"[[:space:]]*:[[:space:]]*"VERIFIED"' "$manifest"; then
     printf 'yes'
   else
     printf 'no'
@@ -251,7 +256,9 @@ backup_verify() {
         log_error "The postgres container is not running - start it first: zedbot start"
         exit 1
       fi
-      if run_compose exec -T postgres pg_restore --list /dev/stdin < "$file" > /dev/null; then
+      # Bare stdin, never the /dev/stdin path: under docker exec that path
+      # resolves to a non-reopenable socket and the archive reads as empty.
+      if run_compose exec -T postgres pg_restore --list < "$file" > /dev/null; then
         log_success "pg_restore can read the archive - backup is valid."
       else
         log_error "pg_restore could NOT read the archive - backup is corrupt."
@@ -289,6 +296,79 @@ backup_verify() {
       exit 1
       ;;
   esac
+}
+
+# Read-only report of repository/image/container version alignment and the
+# database migration status. Degrades gracefully when containers are down
+# ("unavailable" instead of an error) and NEVER prints env values. A report,
+# not a gate: exits 0 whether or not everything matches.
+deploy_status() {
+  local mismatch=0
+
+  # Repository HEAD.
+  local head_sha=""
+  head_sha="$(repo_head_sha)"
+  if [ -n "$head_sha" ]; then
+    log_info "Repository HEAD  : ${head_sha:0:10} (${head_sha})"
+  else
+    log_warn "Repository HEAD  : unavailable"
+  fi
+
+  # Installed CLI freshness.
+  if cli_is_stale; then
+    log_error "Installed CLI    : STALE (${ZEDBOT_CLI_PATH} differs from the repository copy)"
+    mismatch=1
+  else
+    log_success "Installed CLI    : fresh (matches the repository copy)"
+  fi
+
+  # Per-container identity (bot + worker share the app image).
+  local svc image_id created container_sha bot_sha="" worker_sha=""
+  for svc in bot worker; do
+    image_id="$(docker inspect -f '{{.Image}}' "zedbot-${svc}" 2>/dev/null | cut -c1-19 || true)"
+    created="$(docker inspect -f '{{.Created}}' "zedbot-${svc}" 2>/dev/null || true)"
+    container_sha="$(run_compose exec -T "$svc" sh -c 'printf "%s" "${GIT_SHA:-}"' 2>/dev/null | tr -d '[:space:]' || true)"
+    log_info "${svc}:"
+    log_info "  image ID       : ${image_id:-unavailable}"
+    log_info "  created        : ${created:-unavailable}"
+    log_info "  GIT_SHA        : ${container_sha:-unavailable}"
+    case "$svc" in
+      bot)    bot_sha="$container_sha" ;;
+      worker) worker_sha="$container_sha" ;;
+    esac
+  done
+
+  # Migration status via the worker CLI (one-line JSON on stdout).
+  local migration_json="" pending_count="" up_to_date=""
+  migration_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/migration-status.js 2>/dev/null | tail -n 1 || true)"
+  pending_count="$(printf '%s' "$migration_json" | grep -o '"pendingCount":[0-9]*' | head -n 1 | grep -o '[0-9]*$' || true)"
+  up_to_date="$(printf '%s' "$migration_json" | grep -o '"upToDate":\(true\|false\)' | head -n 1 | cut -d: -f2 || true)"
+  if [ -n "$pending_count" ]; then
+    log_info "Migrations       : pending=${pending_count} upToDate=${up_to_date:-unknown}"
+  else
+    log_warn "Migrations       : unavailable"
+  fi
+
+  # Verdict.
+  if [ -z "$head_sha" ] || [ "$bot_sha" != "$head_sha" ]; then
+    log_error "bot container does not run the repository HEAD."
+    mismatch=1
+  fi
+  if [ -z "$head_sha" ] || [ "$worker_sha" != "$head_sha" ]; then
+    log_error "worker container does not run the repository HEAD."
+    mismatch=1
+  fi
+  if [ "$pending_count" != "0" ]; then
+    log_error "Database migrations are pending or their status is unavailable."
+    mismatch=1
+  fi
+
+  if [ "$mismatch" -eq 0 ]; then
+    log_success "Repository, images and containers MATCH."
+  else
+    log_error "Deployment is NOT aligned. Run: zedbot update"
+  fi
+  exit 0
 }
 
 repair_backups() {
@@ -361,6 +441,13 @@ case "$CMD" in
     ;;
   update)
     exec bash "${SCRIPTS_DIR}/update.sh" "$@"
+    ;;
+  deploy-status)
+    require_root
+    app_cd
+    detect_compose_command
+    load_env_if_exists
+    deploy_status
     ;;
   backup)
     SUB="${1:-create}"

@@ -39,6 +39,15 @@ export interface LogGroupApi {
 export const LOG_GROUP_NOT_CONFIGURED_TEXT = "گروه لاگ هنوز تنظیم نشده است.";
 export const LOG_GROUP_TEST_OK_TEXT = "پیام آزمایشی گروه لاگ با موفقیت ارسال شد ✅";
 
+// Safe Persian environment-validation errors, shared by the admin status
+// page («بررسی اتصال 🧪» / «بررسی مجدد اتصال ♻️») and the group-side setup
+// flow (/setloggroup + the start-group wizard confirmation).
+export const NOT_IN_GROUP_TEXT = "این دستور باید داخل گروه لاگ اجرا شود.";
+export const NOT_FORUM_TEXT =
+  "قابلیت موضوعات گروه فعال نیست. ابتدا Topics را در تنظیمات گروه فعال کنید.";
+export const BOT_NOT_ADMIN_TEXT = "ربات باید در این گروه مدیر باشد.";
+export const BOT_RIGHTS_INCOMPLETE_TEXT = "دسترسی ارسال پیام یا مدیریت موضوعات کامل نیست.";
+
 /** Masked chat id for page output: first 4 + last 2 digits only. */
 export function maskChatId(chatId: string): string {
   const sign = chatId.startsWith("-") ? "-" : "";

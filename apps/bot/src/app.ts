@@ -79,7 +79,7 @@ import {
   reportsBackupHandler,
   reportsBackupTextHandler,
 } from "./handlers/admin-reports-backup/reports-backup.handler.js";
-import { setLogGroupCommand } from "./handlers/admin-settings/log-group.handler.js";
+import { logGroupSetupHandler } from "./handlers/admin-settings/log-group-setup.handler.js";
 import {
   walletHandler,
   walletTopupTextHandler,
@@ -120,12 +120,19 @@ export function createBot(token: string): Bot<BotContext> {
 
   // Gate-free basics.
   bot.use(pingHandler);
-  bot.use(startHandler);
 
-  // Ops-logging phase: /setloggroup must be reachable INSIDE the (super)group
-  // being bound, so it cannot live behind the admin-area callback gating.
-  // The handler verifies the sender is an active OWNER admin itself.
-  bot.use(setLogGroupCommand);
+  // Log-group setup wizard (group side): MUST run BEFORE the generic
+  // startHandler because the wizard's start-group deep link makes Telegram
+  // post "/start zedlog" in the candidate group, and that payload has to be
+  // consumed here - the composer only intercepts /start for group chats
+  // with exactly this payload, so private-chat /start (and group /start
+  // with any other payload) is completely unaffected. /setloggroup and the
+  // lgset:* confirmation callbacks live here too: they must be reachable
+  // INSIDE the (super)group being bound, so they cannot sit behind the
+  // admin-area callback gating - the handlers verify the sender is an
+  // active OWNER admin themselves.
+  bot.use(logGroupSetupHandler);
+  bot.use(startHandler);
 
   // Gate actions run their own access re-check after mutating state.
   bot.use(termsHandler);

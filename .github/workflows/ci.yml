@@ -367,3 +367,38 @@ jobs:
           docker compose down -v --remove-orphans || true
           rm -f .env
           sudo rm -rf "$BACKUP_HOST_DIR" "$DATA_HOST_DIR" || true
+
+  # End-to-end proof that installations which predate PR #92 (persistent
+  # backups) fully converge on `zedbot update`: the test installs the OLD
+  # layout (code at the pre-PR92 merge, old .env, old CLI, running old
+  # stack), then runs the OLD updater, which pulls THIS commit and must
+  # self-heal through the scripts/migrate.sh hook - the only new-code hook
+  # the legacy updater executes. Repeated 3x to prove full idempotence and
+  # clean re-runs. See scripts/tests/legacy-upgrade-test.sh for the
+  # assertion list (env migration, CLI refresh, forced recreation, baked
+  # GIT_SHA identity, backup mounts, second update through the new path,
+  # secret-leak scan).
+  legacy-upgrade-smoke:
+    name: "Legacy production upgrade (pre-PR92 layout, real update, 3 iterations)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    needs: []
+
+    steps:
+      - name: Check out repository (full history)
+        uses: actions/checkout@v4
+        with:
+          # The test checks out the pre-PR92 merge commit by SHA; a shallow
+          # clone would not contain it.
+          fetch-depth: 0
+
+      - name: Run the legacy upgrade test (3 iterations)
+        # Deliberately NOT `sudo -E`: the workflow-level env block exports
+        # dummy POSTGRES_PASSWORD/DATABASE_URL/REDIS_* values for the unit
+        # jobs, and Docker Compose gives the PROCESS environment precedence
+        # over the project .env during interpolation - leaking them in would
+        # initialize postgres with the workflow password while the app
+        # containers read the installer-generated one from env_file (exactly
+        # the P1000 auth split a real production root shell can never have).
+        # Only GITHUB_SHA crosses the sudo boundary.
+        run: sudo env GITHUB_SHA="${{ github.sha }}" bash scripts/tests/legacy-upgrade-test.sh --iterations 3

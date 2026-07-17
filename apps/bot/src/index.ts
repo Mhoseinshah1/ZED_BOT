@@ -4,6 +4,7 @@ import { errorMessage } from "@zedbot/shared";
 import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
+import { runningGitSha } from "./services/backup-health.service.js";
 import { startFreeTrialLoop } from "./services/free-trial.service.js";
 import { startFreeTrialCampaignLoop } from "./services/free-trial-campaign.service.js";
 import { startGatewaySettlementLoop } from "./services/gateway-payment.service.js";
@@ -98,7 +99,11 @@ async function run(botToken: string): Promise<void> {
 
   await bot.start({
     onStart: (botInfo) => {
-      logger.info(`ZED_BOT bot service started (long polling) as @${botInfo.username}`);
+      // Deployment identity in the boot line: "unknown" = image built
+      // without the GIT_SHA build arg (e.g. local dev).
+      logger.info(`ZED_BOT bot service started (long polling) as @${botInfo.username}`, {
+        gitSha: runningGitSha() ?? "unknown",
+      });
     },
   });
 }

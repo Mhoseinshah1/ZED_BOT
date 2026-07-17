@@ -3,7 +3,12 @@ import {
   BackupTrigger,
   type BackupOperation,
 } from "@zedbot/database";
-import { classifyBackupFileName, errorMessage, type BackupFileKind } from "@zedbot/shared";
+import {
+  classifyBackupFileName,
+  errorMessage,
+  shortGitSha,
+  type BackupFileKind,
+} from "@zedbot/shared";
 import { Composer, InlineKeyboard, InputFile } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -26,6 +31,7 @@ import {
   getBackupEntry,
   getBackupFile,
   getBackupOperationByShortId,
+  getDeploymentDiagnostics,
   getSystemHealth,
   listBackups,
   requestManualBackup,
@@ -62,6 +68,8 @@ const OWNER_ONLY_TEXT = "این عملیات فقط برای مدیر اصلی (
 const OP_NOT_FOUND_TEXT = "عملیات بکاپ پیدا نشد.";
 const NO_OPERATION_ROW_TEXT =
   "برای این فایل رکورد عملیات وجود ندارد؛ از CLI بررسی کنید.";
+const VERSION_MISMATCH_TEXT =
+  "نسخه در حال اجرای ربات با نسخه نصب‌شده روی سرور یکسان نیست ⚠️";
 
 export const SCHEDULE_HOUR_FLOW = "rb:sched_hour";
 
@@ -70,6 +78,9 @@ const RB_CB = {
   health: "admin:rb:health",
   backup: "admin:rb:backup",
   backupYes: "admin:rb:backup_yes",
+  deploy: "admin:rb:deploy",
+  testbk: "admin:rb:testbk",
+  testbkYes: "admin:rb:testbk_yes",
   op: (sid: string): string => `admin:rb:op:${sid}`,
   list: (page: number): string => `admin:rb:list:${page}`,
   file: (sid: string): string => `admin:rb:file:${sid}`,
@@ -149,6 +160,8 @@ export async function renderLanding(ctx: BotContext): Promise<void> {
     .row()
     .text("تنظیمات بکاپ خودکار ⏰", RB_CB.schedule)
     .row()
+    .text("بررسی نصب و بروزرسانی 🧪", RB_CB.deploy)
+    .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
   await safeEditOrReply(
     ctx,
@@ -169,6 +182,17 @@ reportsBackupHandler.callbackQuery(RB_CB.root, async (ctx) => {
 
 function buildHealthLines(health: SystemHealth): string[] {
   const lines = ["وضعیت سیستم 🩺", ""];
+
+  // Deployment identity first: a stale container invalidates every other
+  // "healthy" line below it.
+  lines.push(
+    `نسخه در حال اجرا: ${
+      health.version.runningSha === null ? "نامشخص" : shortGitSha(health.version.runningSha)
+    }`,
+  );
+  if (health.version.mismatch) {
+    lines.push(VERSION_MISMATCH_TEXT);
+  }
 
   lines.push(
     health.db.ok ? `دیتابیس: ✅ (${health.db.latencyMs} ms)` : "دیتابیس: ❌ در دسترس نیست",
@@ -264,6 +288,132 @@ reportsBackupHandler.callbackQuery(RB_CB.health, async (ctx) => {
     .row()
     .text("بازگشت", RB_CB.root);
   await safeEditOrReply(ctx, buildHealthLines(health).join("\n"), kb);
+});
+
+// --- deployment check («بررسی نصب و بروزرسانی 🧪») -------------------------------------------------
+
+function shaLabel(sha: string | null): string {
+  return sha === null ? "نامشخص" : shortGitSha(sha);
+}
+
+/**
+ * The deployment-diagnostics page: repo/bot/worker identity (short SHAs
+ * only), migration completeness, backup-mount access and pg_dump presence.
+ * Unknown facts render as «نامشخص» - never guessed. Admin-readable like the
+ * health page; the test-backup action below it is OWNER-only.
+ */
+async function renderDeployPage(ctx: BotContext, toast?: string): Promise<void> {
+  await safeAnswerCallback(ctx, toast);
+  const diag = await getDeploymentDiagnostics();
+  const lines = [
+    "بررسی نصب و بروزرسانی 🧪",
+    "",
+    "نسخه مخزن:",
+    shaLabel(diag.repoSha),
+    "",
+    "نسخه ربات:",
+    shaLabel(diag.botSha),
+    "",
+    "نسخه Worker:",
+    shaLabel(diag.workerSha),
+  ];
+  if (diag.mismatch) {
+    lines.push("", VERSION_MISMATCH_TEXT);
+  }
+  lines.push(
+    "",
+    "Migration:",
+    diag.migration.known ? (diag.migration.upToDate ? "بروزرسانی‌شده ✅" : "ناقص ❌") : "نامشخص",
+    "",
+    "Mount بکاپ:",
+    `ربات خواندن ${diag.botReadable ? "✅" : "❌"} | Worker نوشتن ${
+      diag.workerWritable === null ? "نامشخص" : diag.workerWritable ? "✅" : "❌"
+    }`,
+    "",
+    "ابزار بکاپ:",
+    diag.pgDumpAvailable === null
+      ? "نامشخص (Worker در دسترس نیست)"
+      : diag.pgDumpAvailable
+        ? "pg_dump آماده ✅"
+        : "نصب نیست ❌",
+  );
+  const kb = new InlineKeyboard()
+    .text("اجرای تست بکاپ", RB_CB.testbk)
+    .row()
+    .text("بروزرسانی 🔄", RB_CB.deploy)
+    .row()
+    .text("بازگشت", RB_CB.root);
+  await safeEditOrReply(ctx, lines.join("\n"), kb);
+}
+
+reportsBackupHandler.callbackQuery(RB_CB.deploy, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  await renderDeployPage(ctx);
+});
+
+// «اجرای تست بکاپ»: OWNER-only confirmation - the "test" is a REAL verified
+// database backup through the worker queue, never a dry run.
+reportsBackupHandler.callbackQuery(RB_CB.testbk, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  if (!isOwner(ctx)) {
+    await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    [
+      "اجرای تست بکاپ",
+      "",
+      "یک بکاپ واقعی و کامل از دیتابیس ساخته و سلامت آن بررسی می‌شود.",
+      "اجرا در سرویس worker انجام می‌شود و ممکن است چند دقیقه طول بکشد. ادامه می‌دهید؟",
+    ].join("\n"),
+    new InlineKeyboard()
+      .text("تایید و اجرا ✅", RB_CB.testbkYes)
+      .row()
+      .text("انصراف", RB_CB.deploy),
+  );
+});
+
+reportsBackupHandler.callbackQuery(RB_CB.testbkYes, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null) {
+    return;
+  }
+  if (!isOwner(ctx)) {
+    await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
+    return;
+  }
+  const request = await requestManualBackup(admin).catch((err: unknown) => {
+    logger.error("test backup request failed", { error: errorMessage(err) });
+    return null;
+  });
+  if (request === null) {
+    await safeAnswerCallback(ctx);
+    await safeEditOrReply(
+      ctx,
+      "اجرای تست بکاپ\n\n❌ ثبت درخواست بکاپ ناموفق بود. لاگ سرور را بررسی کنید.",
+      new InlineKeyboard().text("بازگشت", RB_CB.deploy),
+    );
+    return;
+  }
+  if (!request.enqueued) {
+    // Queue down: the existing toast, back on the diagnostics page.
+    await renderDeployPage(ctx, BACKUP_QUEUE_UNAVAILABLE_TEXT);
+    return;
+  }
+  // Success: land on the SAME live operation page the manual-backup button
+  // uses (admin:rb:op:<sid> keeps refreshing it).
+  await safeAnswerCallback(ctx, "در حال ساخت بکاپ… ⏳");
+  const view = renderOperationView(request.op);
+  const header = request.created
+    ? "در حال ساخت بکاپ… ⏳"
+    : "یک عملیات بکاپ از قبل در حال انجام است.";
+  await safeEditOrReply(ctx, `${header}\n\n${view.text}`, view.keyboard);
 });
 
 // --- create backup (OWNER only, queued) -----------------------------------------------------------

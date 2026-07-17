@@ -40,8 +40,8 @@ bash -n scripts/backup-db.sh
 ## zedbot CLI commands
 
 `help`, `status`, `ps` (alias), `logs [service]`, `restart`, `start`,
-`stop`, `update`, `backup`, `health`, `doctor`, `shell [service]`,
-`env-check`, `restore-help` — plus, from later phases, the Phase 37 HTTPS
+`stop`, `update`, `deploy-status`, `backup`, `health`, `doctor`,
+`shell [service]`, `env-check`, `restore-help` — plus, from later phases, the Phase 37 HTTPS
 commands (`nginx`, `ssl`, `renew-cert`, `https-status`) and the Phase 38
 hardening commands (`firewall`, `security`; run `zedbot security` after
 enabling HTTPS — see `docs/production-security-phase38.md`). `help` and `restore-help` work even before
@@ -163,6 +163,31 @@ compose, leave empty in `.env`; it does **not** relocate host backups),
   (CLI-only, not recommended): `ZEDBOT_SKIP_PREUPDATE_BACKUP=1 zedbot
   update`. `update.sh` also auto-repairs the backup-dir permissions before
   the gate.
+- **`zedbot update` is now an 11-step self-healing flow** (legacy-upgrade
+  phase): safety archive → verified pre-update backup → pull → append-only
+  `.env` migration → installed-CLI refresh (a refresh failure aborts) →
+  image build with the `GIT_SHA` deployment identity → migrations
+  (`migrate.sh`) → `up -d --force-recreate --remove-orphans` →
+  deployed-SHA recording → post-deploy smoke test (a real verified backup
+  through the running worker; failure keeps the app running but exits
+  non-zero) → doctor. Step list, smoke categories and recovery commands:
+  [legacy-upgrade.md](legacy-upgrade.md).
+- **`zedbot deploy-status`** — read-only report of repository/image/
+  container version alignment (repo HEAD vs installed CLI vs each
+  container's baked `GIT_SHA`) plus the database migration status via the
+  worker `migration-status` CLI. Always exits 0; degrades to
+  `unavailable` with containers down; never prints env values. Sample
+  output and interpretation: [legacy-upgrade.md](legacy-upgrade.md).
+- **`zedbot doctor`** also reports the installed-CLI freshness and one
+  deployment-identity row per app container (`bot|worker GIT_SHA matches
+  repo HEAD`); **`zedbot doctor --fix`** additionally refreshes a stale
+  installed CLI.
+- **Legacy upgrades self-heal.** Installations that predate PR #92 (old
+  containers/CLI/.env after `zedbot update`) converge automatically: the
+  old updater executes the new `scripts/migrate.sh`, whose
+  `legacy_self_heal` migrates the `.env` (append-only), refreshes the CLI,
+  rebuilds with identity and force-recreates the containers. Full design,
+  trigger conditions and guarantees: [legacy-upgrade.md](legacy-upgrade.md).
 - **`zedbot restore-help`** was updated for all three formats (still
   instructions-only). The full procedure lives in
   [backup-restore-runbook.md](backup-restore-runbook.md).
@@ -170,7 +195,9 @@ compose, leave empty in `.env`; it does **not** relocate host backups),
 ### Related documentation
 
 [backup-architecture.md](backup-architecture.md) (queue, state machine,
-retention, scheduled backups), [backup-encryption.md](backup-encryption.md),
+retention, scheduled backups), [legacy-upgrade.md](legacy-upgrade.md)
+(self-healing updater, deployment identity, deploy-status, post-deploy
+smoke), [backup-encryption.md](backup-encryption.md),
 [backup-disaster-recovery.md](backup-disaster-recovery.md),
 [worker-queues.md](worker-queues.md), [system-health.md](system-health.md),
 [operational-logging.md](operational-logging.md),

@@ -327,6 +327,11 @@ clone_or_update_repo() {
   if [ -d "${APP_DIR}/.git" ]; then
     log_info "Repository already present in ${APP_DIR} - fetching updates ..."
     ensure_git_safe_directory
+    # Script modes on this appliance are the installer's job (chmod +x), not
+    # git's. Pre-PR92 installers flipped 644-committed scripts to 755, which
+    # made the tree permanently "dirty" and silently blocked every ff-only
+    # pull - ignore mode bits so upgrades can never wedge on that again.
+    git -C "$APP_DIR" config core.fileMode false
     git -C "$APP_DIR" fetch --all --prune
     # Only switch branches when one was explicitly requested via ZEDBOT_BRANCH;
     # otherwise respect whatever the server is already tracking.
@@ -349,6 +354,9 @@ clone_or_update_repo() {
   else
     log_info "Cloning ${REPO_URL} (branch: ${REPO_BRANCH}) into ${APP_DIR} ..."
     git clone --branch "$REPO_BRANCH" "$REPO_URL" "$APP_DIR"
+    # See the update path above: installer-managed script modes must never
+    # count as local changes.
+    git -C "$APP_DIR" config core.fileMode false
     log_success "Repository cloned."
   fi
 }
@@ -514,6 +522,10 @@ install_cli() {
 
 start_services() {
   detect_compose_command
+  # Bake the deployment identity into the images: docker-compose.yml forwards
+  # GIT_SHA as a build arg and the Dockerfile stores it in its last layers.
+  GIT_SHA="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+  export GIT_SHA
   log_info "Building and starting services (the first build may take a few minutes) ..."
   ( cd "$APP_DIR" && "${COMPOSE_CMD[@]}" up -d --build --remove-orphans )
   log_success "Services started."
@@ -562,6 +574,25 @@ run_migrations_if_available() {
   else
     log_info "No migration command found - skipping (nothing to migrate yet)."
   fi
+}
+
+# Records the repository HEAD SHA in the database Settings via the worker's
+# record-deploy CLI (same call scripts/lib/common.sh makes for updates -
+# kept inline here because install.sh never sources common.sh). Best effort:
+# bookkeeping must never fail an installation.
+record_deployed_sha() {
+  local sha
+  sha="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || true)"
+  if [ -z "$sha" ]; then
+    log_warn "Could not determine the repository HEAD SHA - deployed version not recorded."
+    return 0
+  fi
+  if ( cd "$APP_DIR" && "${COMPOSE_CMD[@]}" run --rm --no-deps worker node apps/worker/dist/cli/record-deploy.js "$sha" ); then
+    log_info "Deployed repository SHA recorded."
+  else
+    log_warn "Could not record the deployed SHA (non-fatal). The next 'zedbot update' records it."
+  fi
+  return 0
 }
 
 print_summary() {
@@ -664,6 +695,7 @@ main() {
   start_services
   sync_postgres_password
   run_migrations_if_available
+  record_deployed_sha
   if [ -x "${APP_DIR}/scripts/doctor.sh" ]; then
     log_info "Running post-install health checks ..."
     bash "${APP_DIR}/scripts/doctor.sh" || log_warn "Doctor reported problems. Run 'zedbot doctor' for details."

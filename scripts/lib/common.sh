@@ -261,6 +261,144 @@ run_migrations_if_available() {
   fi
 }
 
+# --- Deployment identity / legacy self-heal ----------------------------------
+# Helpers for the self-healing update flow: installations that predate the
+# persistent-backup layout (PR #92) keep an old installed CLI, an old .env
+# and stale containers after `zedbot update`. These helpers converge them.
+# All idempotent; none ever prints a secret.
+
+# Prints the repository HEAD SHA; prints nothing (and still returns 0) when
+# it cannot be determined. Registers safe.directory first the way update.sh
+# does - root-invoked git refuses user-owned checkouts otherwise.
+repo_head_sha() {
+  # --add appends duplicates on every run; only add when missing.
+  if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ZEDBOT_APP_DIR"; then
+    git config --global --add safe.directory "$ZEDBOT_APP_DIR" >/dev/null 2>&1 || true
+  fi
+  git -C "$ZEDBOT_APP_DIR" rev-parse HEAD 2>/dev/null || true
+}
+
+# True when the installed CLI (ZEDBOT_CLI_PATH) is missing or its content
+# differs from the repository's scripts/zedbot.sh.
+cli_is_stale() {
+  local src="${ZEDBOT_APP_DIR}/scripts/zedbot.sh"
+  [ -f "$ZEDBOT_CLI_PATH" ] || return 0
+  # Without a repository copy there is nothing to compare against (or to
+  # refresh from) - treat the installed CLI as current.
+  [ -f "$src" ] || return 1
+  local installed_sha repo_sha
+  installed_sha="$(sha256sum "$ZEDBOT_CLI_PATH" 2>/dev/null | awk '{print $1}')"
+  repo_sha="$(sha256sum "$src" 2>/dev/null | awk '{print $1}')"
+  [ -z "$installed_sha" ] || [ -z "$repo_sha" ] || [ "$installed_sha" != "$repo_sha" ]
+}
+
+# Reinstalls the CLI from the repository copy and verifies the result byte
+# for byte. Non-zero on any failure.
+refresh_cli() {
+  local src="${ZEDBOT_APP_DIR}/scripts/zedbot.sh"
+  if [ ! -f "$src" ]; then
+    log_error "Cannot refresh the CLI: ${src} does not exist."
+    return 1
+  fi
+  if ! install -m 0755 "$src" "$ZEDBOT_CLI_PATH"; then
+    log_error "Could not install ${src} to ${ZEDBOT_CLI_PATH}."
+    return 1
+  fi
+  if cli_is_stale; then
+    log_error "CLI refresh verification failed: ${ZEDBOT_CLI_PATH} still differs from ${src}."
+    return 1
+  fi
+  log_success "Installed CLI refreshed: ${ZEDBOT_CLI_PATH}"
+}
+
+# APPEND-ONLY .env migration for installations that predate the persistent
+# backup layout: existing lines are never rewritten, reordered or deleted,
+# the file is never replaced, and its mode stays 600. Only missing keys are
+# appended (with a comment header). Returns 0 always - a skipped migration
+# must never abort an update; `zedbot env-check` reports real problems.
+migrate_legacy_env() {
+  local env_file="${1:-$ZEDBOT_ENV_FILE}"
+  if [ ! -f "$env_file" ]; then
+    log_warn "No .env at ${env_file} - skipping the legacy .env migration."
+    return 0
+  fi
+
+  local -a append_lines=()
+  local -a append_keys=()
+
+  # ZEDBOT_BACKUP_DIR (HOST backup path): honor a legacy BACKUP_DIR that
+  # points at a custom absolute host path (pre-PR92 semantics: BACKUP_DIR
+  # WAS the host location). The in-container mount path must never be
+  # mistaken for a host directory.
+  if ! grep -q '^ZEDBOT_BACKUP_DIR=' "$env_file"; then
+    local legacy_dir backup_dir_value
+    legacy_dir="$(grep '^BACKUP_DIR=' "$env_file" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d "'\"" || true)"
+    backup_dir_value="${ZEDBOT_BASE_DIR}/backups"
+    case "$legacy_dir" in
+      /var/lib/zedbot/backups) : ;; # the in-container path, not a host dir
+      /*) backup_dir_value="$legacy_dir" ;;
+    esac
+    append_lines+=("ZEDBOT_BACKUP_DIR=${backup_dir_value}")
+    append_keys+=("ZEDBOT_BACKUP_DIR")
+  fi
+
+  local pair key
+  for pair in \
+    "ZEDBOT_RUNTIME_UID=1000" \
+    "ZEDBOT_RUNTIME_GID=1000" \
+    "BACKUP_RETENTION_DAYS=14" \
+    "BACKUP_MIN_RETAINED=3" \
+    "BACKUP_MAX_TELEGRAM_MB=45" \
+    "BACKUP_MIN_FREE_DISK_MB=500"; do
+    key="${pair%%=*}"
+    if ! grep -q "^${key}=" "$env_file"; then
+      append_lines+=("$pair")
+      append_keys+=("$key")
+    fi
+  done
+
+  if [ "${#append_lines[@]}" -eq 0 ]; then
+    log_info ".env already carries all persistent-backup keys - nothing to migrate."
+    return 0
+  fi
+
+  {
+    printf '\n# Persistent backup storage (added by zedbot update)\n'
+    printf '%s\n' "${append_lines[@]}"
+  } >> "$env_file"
+  chmod 600 "$env_file"
+  log_success ".env migrated (append-only) - added: ${append_keys[*]}"
+  return 0
+}
+
+# Records the repository HEAD SHA into the database Settings via the
+# worker's record-deploy CLI. Best effort: failures are logged but never
+# abort the caller - a deploy must not fail on a bookkeeping write.
+record_deployed_sha() {
+  local sha
+  sha="$(repo_head_sha)"
+  if [ -z "$sha" ]; then
+    log_warn "Could not determine the repository HEAD SHA - deployed version not recorded."
+    return 0
+  fi
+  if run_compose run --rm --no-deps worker node apps/worker/dist/cli/record-deploy.js "$sha"; then
+    log_success "Deployed repository SHA recorded (${sha})."
+  else
+    log_warn "Could not record the deployed SHA in the database (non-fatal)."
+    log_warn "It will be recorded by the next successful 'zedbot update'."
+  fi
+  return 0
+}
+
+# True on an installation the pre-PR92 updater left half-upgraded: the .env
+# still lacks the persistent-backup keys, or the installed CLI is stale.
+legacy_install_detected() {
+  if [ -f "$ZEDBOT_ENV_FILE" ] && ! grep -q '^ZEDBOT_BACKUP_DIR=' "$ZEDBOT_ENV_FILE"; then
+    return 0
+  fi
+  cli_is_stale
+}
+
 # --- Nginx / HTTPS (Phase 37) ------------------------------------------------
 
 # Consumed by the sourcing scripts (nginx-setup.sh, ssl-setup.sh,

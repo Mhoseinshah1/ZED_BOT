@@ -1,7 +1,15 @@
 import { readFileSync } from "node:fs";
 
 import { connectDatabase, disconnectDatabase, prisma } from "@zedbot/database";
-import { APP_NAME, createLogger, errorMessage, getRedisOptions, intEnv, optionalEnv } from "@zedbot/shared";
+import {
+  APP_NAME,
+  createLogger,
+  errorMessage,
+  getRedisOptions,
+  intEnv,
+  normalizeGitSha,
+  optionalEnv,
+} from "@zedbot/shared";
 import Fastify from "fastify";
 import { Redis } from "ioredis";
 
@@ -134,7 +142,10 @@ async function main(): Promise<void> {
     logger.warn("database not reachable at startup, continuing", { error: errorMessage(err) });
   }
   await app.listen({ port, host });
-  logger.info(`ZED_BOT api service started on http://${host}:${port}`);
+  // Every service must log its running SHA at startup (deploy diagnostics).
+  logger.info(`ZED_BOT api service started on http://${host}:${port}`, {
+    gitSha: normalizeGitSha(process.env.GIT_SHA) ?? "unknown",
+  });
 }
 
 main().catch((err: unknown) => {

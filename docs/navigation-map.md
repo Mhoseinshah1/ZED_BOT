@@ -263,8 +263,10 @@ operation short ids — never raw filenames.
 
 | page | buttons |
 | --- | --- |
-| landing (`admin:reports_backup`) | وضعیت سیستم 🩺 » `admin:rb:health` / ساخت بکاپ دیتابیس 💾 » `admin:rb:backup` / لیست بکاپ‌ها 🧾 » `admin:rb:list:1` / پاکسازی بکاپ‌های قدیمی 🧹 » `admin:rb:cleanup` / راهنمای Restore ♻️ » `admin:rb:restore_help` / تنظیمات بکاپ خودکار ⏰ » `admin:rb:sched` / بازگشت به منوی ادمین » `admin:menu` |
-| وضعیت سیستم 🩺 (`admin:rb:health`, see `docs/system-health.md`) | به‌روزرسانی 🔄 » `admin:rb:health` / بازگشت » `admin:reports_backup` |
+| landing (`admin:reports_backup`) | وضعیت سیستم 🩺 » `admin:rb:health` / ساخت بکاپ دیتابیس 💾 » `admin:rb:backup` / لیست بکاپ‌ها 🧾 » `admin:rb:list:1` / پاکسازی بکاپ‌های قدیمی 🧹 » `admin:rb:cleanup` / راهنمای Restore ♻️ » `admin:rb:restore_help` / تنظیمات بکاپ خودکار ⏰ » `admin:rb:sched` / بررسی نصب و بروزرسانی 🧪 » `admin:rb:deploy` / بازگشت به منوی ادمین » `admin:menu` |
+| وضعیت سیستم 🩺 (`admin:rb:health`, see `docs/system-health.md` — now opens with «نسخه در حال اجرا» + the version-mismatch warning) | به‌روزرسانی 🔄 » `admin:rb:health` / بازگشت » `admin:reports_backup` |
+| بررسی نصب و بروزرسانی 🧪 (`admin:rb:deploy`, deployment diagnostics — repo/bot/worker short SHAs, migration completeness, backup-mount access, pg_dump; admin-readable, see `docs/system-health.md`) | اجرای تست بکاپ » `admin:rb:testbk` (**OWNER**) / بروزرسانی 🔄 » `admin:rb:deploy` / بازگشت » `admin:reports_backup` |
+| اجرای تست بکاپ (`admin:rb:testbk`, confirm — a REAL verified backup through the worker queue, never a dry run) | تایید و اجرا ✅ » `admin:rb:testbk_yes` (reuses the manual-backup path; lands on the live `admin:rb:op:<opSid>` operation page) / انصراف » `admin:rb:deploy` |
 | ساخت بکاپ (`admin:rb:backup`, confirm) | بله، ساخت بکاپ 💾 » `admin:rb:backup_yes` (creates ONE `BackupOperation` + queued job; repeated taps reuse the active operation) / انصراف » `admin:reports_backup` |
 | operation status (`admin:rb:op:<opSid>`) | (while active) بروزرسانی وضعیت 🔄 » `admin:rb:op:<opSid>` / (when a file exists) دریافت فایل 📥 » `admin:rb:dl:<sid>` / لیست بکاپ‌ها 🧾 » `admin:rb:list:1` / بازگشت » `admin:reports_backup` |
 | لیست بکاپ‌ها 🧾 (`admin:rb:list:<page>`, 10/page) | one per file «💾 {sid} \| {size} \| {verify}» » `admin:rb:file:<sid>` · pagination · بازگشت » `admin:reports_backup` |
@@ -275,20 +277,26 @@ operation short ids — never raw filenames.
 | راهنمای Restore ♻️ (`admin:rb:restore_help`, instructions only — nothing executed) | بازگشت » `admin:reports_backup` |
 | تنظیمات بکاپ خودکار ⏰ (`admin:rb:sched` — status, interval, hour UTC, log-group notify, env-managed retention values) | فعال/غیرفعال کردن بکاپ خودکار » `admin:rb:sched:toggle` / هر ۶ ساعت · هر ۱۲ ساعت · روزانه · هفتگی » `admin:rb:sched:int:<6h\|12h\|daily\|weekly>` / تغییر ساعت اجرا 🕒 » `admin:rb:sched:hour` *(flow `rb:sched_hour`, 0–23)* / خاموش/روشن کردن اعلان گروه لاگ » `admin:rb:sched:notify` / بازگشت » `admin:reports_backup` |
 
-### تنظیمات عمومی ⚙️ → تنظیمات گروه لاگ 📝 (ops-logging phase; namespace `admin:lg`)
+### تنظیمات عمومی ⚙️ → تنظیمات گروه لاگ 📝 (log-group wizard phase; namespace `admin:lg` + group-side `lgset:`)
 
-Status page is admin-readable; binding/tests/toggles/disconnect are
-**OWNER-only**. Chat ids are always masked. Binding happens with
-`/setloggroup` sent **inside** the target forum supergroup (bot must be
-admin with manage-topics); see `docs/telegram-log-group.md`.
+The root page is **state-dependent** (unconfigured vs configured
+keyboards). Status page + «بررسی مجدد اتصال ♻️» are admin-readable;
+wizard/tests/toggles/disconnect are **OWNER-only**. Chat ids are always
+masked. Binding completes **inside** the candidate forum supergroup — via
+the wizard's `?startgroup=zedlog` deep link or `/setloggroup` — and only
+on the explicit in-group confirmation; see `docs/telegram-log-group.md`.
 
 | page | buttons |
 | --- | --- |
-| «تنظیمات گروه لاگ 📝» (`admin:lg`; state, group name, masked id, «موضوعات فعال: n از 11», last success/error) | بررسی اتصال 🧪 » `admin:lg:check` (rights check, sends nothing) / ارسال پیام آزمایشی » `admin:lg:test` / ساخت موضوعات پیش‌فرض » `admin:lg:ensure` / همگام‌سازی موضوعات » `admin:lg:sync` / مدیریت موضوعات » `admin:lg:topics` / قطع اتصال گروه » `admin:lg:disc` / بازگشت » `admin:general_settings` |
+| «تنظیمات گروه لاگ 📝» (`admin:lg`, UNCONFIGURED: «وضعیت: تنظیم نشده ❌» + wizard hint) | اتصال گروه لاگ ➕ » `admin:lg:connect` / راهنمای ساخت گروه » `admin:lg:guide` / بررسی مجدد اتصال ♻️ » `admin:lg:recheck` / بازگشت » `admin:general_settings` |
+| «تنظیمات گروه لاگ 📝» (`admin:lg`, CONFIGURED: state, group name, masked id, «موضوعات فعال: n از 11», last success/error) | بررسی اتصال 🧪 » `admin:lg:check` (rights check, sends nothing) / ارسال پیام آزمایشی » `admin:lg:test` / ساخت موضوعات پیش‌فرض » `admin:lg:ensure` / همگام‌سازی موضوعات » `admin:lg:sync` / مدیریت موضوعات » `admin:lg:topics` / تغییر گروه لاگ » `admin:lg:connect` / قطع اتصال گروه » `admin:lg:disc` / بازگشت » `admin:general_settings` |
+| connection wizard (`admin:lg:connect`, **OWNER** — 5-step body; prefixed with the replacement warning when a group is already bound) | افزودن ربات به گروه ➕ » URL `https://t.me/<bot_username>?startgroup=zedlog` / بررسی مجدد اتصال ♻️ » `admin:lg:recheck` / انصراف » `admin:lg` |
+| راهنمای ساخت گروه (`admin:lg:guide`, static 6-step help) | بازگشت » `admin:lg` |
+| بررسی مجدد اتصال ♻️ (`admin:lg:recheck`, read-only wizard poll — re-verifies rights when bound, then re-renders the state-dependent root) | *(lands on `admin:lg`)* |
+| group-side confirmation (sent INSIDE the candidate group after `/setloggroup` or the `/start zedlog` deep link; «این گروه به‌عنوان گروه لاگ ربات ثبت شود؟» + replacement warning when a DIFFERENT group is bound) | تایید اتصال گروه ✅ » `lgset:yes` (re-validates OWNER + environment + presser membership; binds, ensures topics, sends the test, then «بازگشت به ربات» URL button) / انصراف » `lgset:no` |
 | همگام‌سازی موضوعات 🔄 (`admin:lg:sync`, read-only report: ready / بدون موضوع / متصل به گروه دیگر) | بازگشت » `admin:lg` |
 | مدیریت موضوعات (`admin:lg:topics`, one row per stable topic key) | «✅/❌ {title}» toggle » `admin:lg:tt:<KEY>` · ارسال تست » `admin:lg:tx:<KEY>` (KEY ∈ SYSTEM/ERROR/PAYMENT/ORDER/SERVICE/PANEL/SECURITY/BACKUP/SUPPORT/BROADCAST/AUDIT) / بازگشت » `admin:lg` |
 | قطع اتصال (`admin:lg:disc`, confirm «ارسال لاگ‌ها به گروه متوقف می‌شود؛ موضوعات و تاریخچه حذف نمی‌شوند.») | بله، قطع اتصال » `admin:lg:disc_yes` / انصراف » `admin:lg` |
-| replacement confirm (sent INSIDE the new group when a different group is already bound) | تایید جایگزینی ✅ » `admin:lg:rep` (re-validates everything) / انصراف » `admin:lg:rep_no` |
 
 ### تنظیمات عمومی ⚙️ → نوع نمایش منوها (menu-keyboard-mode phases)
 

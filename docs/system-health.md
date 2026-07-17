@@ -26,6 +26,8 @@ construction — its own `W_OK` is deliberately never used.
 
 | Line | Data source | States / thresholds |
 | --- | --- | --- |
+| `نسخه در حال اجرا: <short sha>` / `نامشخص` (rendered **first** — a stale container invalidates every "healthy" line below it) | The bot process's own baked `GIT_SHA` env (Dockerfile build arg, normalized by `normalizeGitSha` — images built without it read as «نامشخص») | — |
+| `نسخه در حال اجرای ربات با نسخه نصب‌شده روی سرور یکسان نیست ⚠️` | Running sha vs the `deployed_repo_sha` Setting (recorded by `zedbot update` / the installer via the worker `record-deploy` CLI). Appears **only** when BOTH shas are known and identify different commits — a shared prefix (short vs full form) counts as same, and an unknown side never warns | fix: `zedbot update` (see [legacy-upgrade.md](legacy-upgrade.md)) |
 | `دیتابیس: ✅ (n ms)` / `دیتابیس: ❌ در دسترس نیست` | One timed `SELECT 1` through the bot's Prisma client | ok + latency, or ❌ |
 | `Redis: ✅ (n ms)` / `Redis: ❌ در دسترس نیست` | One real `PING` on the bot's fail-fast ioredis reader (2 s connect, 5 s command timeout) | ok + latency, or ❌ |
 | `Worker: ✅ فعال — آخرین پاسخ n ثانیه قبل` / `Worker: ❌ پاسخ نمی‌دهد` | Presence of `zedbot:worker:heartbeat` (TTL 45 s — presence alone already means "alive within 45 s"; the value adds the age) | alive iff the key exists |
@@ -41,8 +43,44 @@ construction — its own `W_OK` is deliberately never used.
 | `گروه لاگ: متصل ✅ / خطا در دسترسی / تنظیم نشده` | Setting `log_group_chat_id` (configured?) + the newest `SystemLogDelivery` in `SENT`/`FAILED`/`DEAD_LETTER` by `updatedAt` (last outcome) | «خطا در دسترسی» when the latest terminal delivery failed |
 | `زمان: <UTC timestamp>` | snapshot time | — |
 
+## Deployment diagnostics — «بررسی نصب و بروزرسانی 🧪»
+
+The «گزارشات / بکاپ 🛡» landing gained a dedicated diagnostics page
+(`admin:rb:deploy`, admin-readable, «بروزرسانی 🔄» re-runs it). Data
+assembly: `getDeploymentDiagnostics()` in
+`apps/bot/src/services/backup-health.service.ts`; rendering:
+`renderDeployPage()` in the reports-backup handler. Every unknown renders
+as «نامشخص» — nothing is ever guessed, and only **short** SHAs are shown.
+
+| Row | Data source |
+| --- | --- |
+| `نسخه مخزن` | The `deployed_repo_sha` Setting — the repository HEAD recorded by the **last completed deploy** (`record-deploy` worker CLI, called by `update.sh`/`install.sh`) |
+| `نسخه ربات` | This bot process's own baked `GIT_SHA` env |
+| `نسخه Worker` | The worker image's baked `gitSha` from its published capability snapshot (`zedbot:worker:capabilities`) |
+| `نسخه در حال اجرای ربات با نسخه نصب‌شده روی سرور یکسان نیست ⚠️` | Shown when **any pairwise difference** exists among the non-null shas above (same prefix-tolerant rule as the health page) |
+| `Migration:` `بروزرسانی‌شده ✅` / `ناقص ❌` / `نامشخص` | The shipped migration directories (`packages/database/prisma/migrations`) compared against the applied rows in `_prisma_migrations` — an unreadable directory or table honestly reports «نامشخص» |
+| `Mount بکاپ:` `ربات خواندن ✅/❌ \| Worker نوشتن ✅/❌/نامشخص` | Bot-read `access(R_OK)`+`readdir` probe; worker-write fact from the capability snapshot |
+| `ابزار بکاپ:` `pg_dump آماده ✅` / `نصب نیست ❌` / `نامشخص (Worker در دسترس نیست)` | Worker-published `pgDumpVersion` |
+
+**«اجرای تست بکاپ»** (`admin:rb:testbk` → confirm `admin:rb:testbk_yes`)
+is **OWNER-only** and confirmed first («یک بکاپ واقعی و کامل از دیتابیس
+ساخته و سلامت آن بررسی می‌شود.») — the "test" is a REAL verified database
+backup, never a dry run. It reuses the exact manual-backup queue path
+(`requestManualBackup`: one `BackupOperation` row, CREATE job with jobId =
+operation id, at most one active operation), then lands on the same live
+operation page the manual-backup button uses (`admin:rb:op:<sid>`
+refreshes it). With the queue down it toasts the standard
+queue-unavailable line back on the diagnostics page.
+
+The server-side counterpart of this page is `zedbot deploy-status` — see
+[legacy-upgrade.md](legacy-upgrade.md).
+
 ## Interpreting the common degraded states
 
+- **Version-mismatch warning ⚠️** — a stale running container (the
+  legacy-upgrade bug class): run `zedbot deploy-status` to see exactly
+  what is out of line, then `zedbot update`. See
+  [legacy-upgrade.md](legacy-upgrade.md).
 - **Worker ❌ + everything else ✅** — worker container down or Redis
   unreachable from it: `zedbot logs worker`, `zedbot restart`. Manual
   backups will queue (or fail as `queue-unavailable`) until it returns;

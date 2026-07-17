@@ -37,9 +37,10 @@ export const WORKER_HEARTBEAT_TTL_SECONDS = 45;
 /**
  * Worker-published capability snapshot (JSON, same TTL cadence as the
  * heartbeat): { pgDumpVersion: string|null, backupDirWritable: boolean,
- * backupDir: string, checkedAt: iso }. The bot's health page reads this -
- * the bot's own mount is read-only, so write access and pg_dump presence
- * are the WORKER's facts, never probed from the bot container.
+ * backupDir: string, gitSha: string|null, checkedAt: iso }. The bot's
+ * health page reads this - the bot's own mount is read-only, so write
+ * access and pg_dump presence are the WORKER's facts, never probed from
+ * the bot container. gitSha is the worker image's baked build identity.
  */
 export const WORKER_CAPABILITIES_KEY = "zedbot:worker:capabilities";
 
@@ -47,7 +48,44 @@ export interface WorkerCapabilities {
   pgDumpVersion: string | null;
   backupDirWritable: boolean;
   backupDir: string;
+  /** Baked image build identity (GIT_SHA); null when built without it. */
+  gitSha?: string | null;
   checkedAt: string;
+}
+
+// --- deployment identity ---------------------------------------------------------------------------
+
+/**
+ * Setting key holding the repository HEAD SHA recorded by the LAST completed
+ * deploy (scripts/update.sh / install.sh via the worker record-deploy CLI).
+ * The bot compares its own baked GIT_SHA against this value to detect stale
+ * running containers after an update.
+ */
+export const DEPLOYED_REPO_SHA_SETTING_KEY = "deployed_repo_sha";
+
+/** Setting key with the ISO timestamp of the last deploy-SHA recording. */
+export const DEPLOYED_REPO_SHA_AT_SETTING_KEY = "deployed_repo_sha_recorded_at";
+
+/**
+ * Normalizes a git SHA candidate (env var, CLI arg, capability snapshot):
+ * returns the lowercased hex SHA, or null for empty / placeholder ("unknown")
+ * / non-hex values. Images built without the GIT_SHA build arg carry the
+ * literal "unknown" and must read as "no identity", never as a real version.
+ */
+export function normalizeGitSha(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim().toLowerCase();
+  if (!/^[0-9a-f]{7,40}$/.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
+
+/** Short display form of a git SHA (health page, deploy-status). */
+export function shortGitSha(sha: string): string {
+  return sha.slice(0, 10);
 }
 
 // --- backup files ---------------------------------------------------------------------------------
@@ -81,6 +119,16 @@ export function classifyBackupFileName(
 export function backupDumpFileName(stamp: string, encrypted: boolean): string {
   return `zedbot-db-${stamp}.dump${encrypted ? ".enc" : ""}`;
 }
+
+// --- log group setup -------------------------------------------------------------------------------
+
+/**
+ * Deep-link payload for the log-group connection wizard. The wizard shows a
+ * URL button https://t.me/<bot_username>?startgroup=<payload>; Telegram adds
+ * the bot to the chosen group and posts "/start <payload>" there, which the
+ * group-side setup handler turns into the binding confirmation prompt.
+ */
+export const LOG_GROUP_STARTGROUP_PAYLOAD = "zedlog";
 
 // --- log topics ------------------------------------------------------------------------------------
 

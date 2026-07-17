@@ -12,7 +12,9 @@ import {
   BACKUP_MANIFEST_SUFFIX,
   classifyBackupFileName,
   DEFAULT_CONTAINER_BACKUP_DIR,
+  DEPLOYED_REPO_SHA_SETTING_KEY,
   errorMessage,
+  normalizeGitSha,
   type BackupFileKind,
 } from "@zedbot/shared";
 
@@ -524,6 +526,159 @@ export function buildRestoreInstructions(): string {
   ].join("\n");
 }
 
+// --- deployment identity ---------------------------------------------------------------------
+
+/** This process's baked build identity (GIT_SHA env); null when not baked. */
+export function runningGitSha(): string | null {
+  return normalizeGitSha(process.env.GIT_SHA);
+}
+
+/**
+ * True ONLY when BOTH shas are known and identify different commits.
+ * Normalized shas may have different lengths (short vs full form of the
+ * same commit), so a shared prefix counts as "same" - never a false alarm.
+ */
+function gitShasDiffer(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) {
+    return false;
+  }
+  return !a.startsWith(b) && !b.startsWith(a);
+}
+
+/** The repo HEAD recorded by the last completed deploy; null = never recorded. */
+async function readDeployedSha(): Promise<string | null> {
+  return normalizeGitSha(await getSetting(DEPLOYED_REPO_SHA_SETTING_KEY, ""));
+}
+
+/** Read-probe of the backup directory - the bot's OWN fact (mount is ro). */
+async function probeBackupDirReadable(dir: string = backupDir()): Promise<boolean> {
+  try {
+    await access(dir, constants.R_OK);
+    await readdir(dir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface MigrationStatus {
+  /** false = shipped migrations or the _prisma_migrations table unreadable. */
+  known: boolean;
+  upToDate: boolean;
+  appliedCount: number;
+  pendingCount: number;
+}
+
+// Shipped prisma migrations: the monorepo layout from the repo root and from
+// apps/bot as the working directory (dev/tests). Directories only -
+// migration_lock.toml is a file and never counts.
+const MIGRATIONS_DIR_CANDIDATES = [
+  "packages/database/prisma/migrations",
+  "../../packages/database/prisma/migrations",
+];
+
+async function readShippedMigrationNames(): Promise<string[] | null> {
+  for (const candidate of MIGRATIONS_DIR_CANDIDATES) {
+    try {
+      const entries = await readdir(path.resolve(process.cwd(), candidate), {
+        withFileTypes: true,
+      });
+      return entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort();
+    } catch {
+      // Candidate missing - try the next layout.
+    }
+  }
+  return null;
+}
+
+/**
+ * Compares the shipped migration directories against the applied rows in
+ * _prisma_migrations. Fails honest: an unreadable migrations directory or a
+ * missing/unqueryable table reports known:false instead of guessing.
+ */
+async function readMigrationStatus(): Promise<MigrationStatus> {
+  const unknown: MigrationStatus = {
+    known: false,
+    upToDate: false,
+    appliedCount: 0,
+    pendingCount: 0,
+  };
+  const shipped = await readShippedMigrationNames();
+  if (shipped === null) {
+    return unknown;
+  }
+  let rows: { migration_name: string; finished_at: Date | null }[];
+  try {
+    rows = await prisma.$queryRaw<{ migration_name: string; finished_at: Date | null }[]>`
+      SELECT migration_name, finished_at FROM _prisma_migrations
+    `;
+  } catch (err) {
+    logger.warn("migration status query failed", { error: scrubBackupError(err) });
+    return unknown;
+  }
+  // finished_at NULL = a failed/rolled-back attempt - still pending.
+  const applied = new Set(
+    rows.filter((row) => row.finished_at !== null).map((row) => row.migration_name),
+  );
+  const pendingCount = shipped.filter((name) => !applied.has(name)).length;
+  return {
+    known: true,
+    upToDate: pendingCount === 0,
+    appliedCount: applied.size,
+    pendingCount,
+  };
+}
+
+export interface DeploymentDiagnostics {
+  /** Deployed repo HEAD recorded by scripts/update.sh (Setting). */
+  repoSha: string | null;
+  /** This bot process's baked GIT_SHA. */
+  botSha: string | null;
+  /** The worker image's baked GIT_SHA (capability snapshot). */
+  workerSha: string | null;
+  migration: MigrationStatus;
+  botReadable: boolean;
+  /** Worker-published fact; null = unknown (no capability snapshot). */
+  workerWritable: boolean | null;
+  pgDumpAvailable: boolean | null;
+  pgDumpVersion: string | null;
+  /** Any pairwise difference among the NON-NULL shas above. */
+  mismatch: boolean;
+}
+
+/**
+ * The «بررسی نصب و بروزرسانی 🧪» snapshot: deployment identity of repo /
+ * bot / worker, migration completeness and the backup-mount/pg_dump facts.
+ * Every unknown stays an honest null - nothing is ever guessed.
+ */
+export async function getDeploymentDiagnostics(): Promise<DeploymentDiagnostics> {
+  const [capabilities, migration, botReadable, repoSha] = await Promise.all([
+    readWorkerCapabilities(),
+    readMigrationStatus(),
+    probeBackupDirReadable(),
+    readDeployedSha(),
+  ]);
+  const botSha = runningGitSha();
+  const workerSha = normalizeGitSha(capabilities?.gitSha);
+  return {
+    repoSha,
+    botSha,
+    workerSha,
+    migration,
+    botReadable,
+    workerWritable: capabilities === null ? null : capabilities.backupDirWritable,
+    pgDumpAvailable: capabilities === null ? null : capabilities.pgDumpVersion !== null,
+    pgDumpVersion: capabilities?.pgDumpVersion ?? null,
+    mismatch:
+      gitShasDiffer(repoSha, botSha) ||
+      gitShasDiffer(repoSha, workerSha) ||
+      gitShasDiffer(botSha, workerSha),
+  };
+}
+
 // --- health ------------------------------------------------------------------------------------
 
 export interface SystemHealth {
@@ -570,6 +725,14 @@ export interface SystemHealth {
     /** Latest delivery outcome: true=SENT, false=FAILED/DEAD_LETTER, null=none. */
     lastDeliveryOk: boolean | null;
   };
+  version: {
+    /** This process's baked GIT_SHA identity; null = built without it. */
+    runningSha: string | null;
+    /** Repo HEAD recorded by the last completed deploy; null = never recorded. */
+    deployedSha: string | null;
+    /** True ONLY when both shas are known and differ - stale container. */
+    mismatch: boolean;
+  };
 }
 
 export const LATEST_BACKUP_STALE_HOURS = 48;
@@ -600,14 +763,7 @@ export async function getSystemHealth(): Promise<SystemHealth> {
   ]);
 
   const dir = backupDir();
-  let botReadable = false;
-  try {
-    await access(dir, constants.R_OK);
-    await readdir(dir);
-    botReadable = true;
-  } catch {
-    botReadable = false;
-  }
+  const botReadable = await probeBackupDirReadable(dir);
 
   let disk: SystemHealth["disk"] = {
     ok: false,
@@ -653,6 +809,9 @@ export async function getSystemHealth(): Promise<SystemHealth> {
     latestBackup = null;
   }
 
+  const runningSha = runningGitSha();
+  const deployedSha = await readDeployedSha();
+
   let lastDeliveryOk: boolean | null = null;
   let logGroupConfigured = false;
   try {
@@ -691,5 +850,10 @@ export async function getSystemHealth(): Promise<SystemHealth> {
     latestBackup,
     encryptionEnabled: isBackupEncryptionEnabled(),
     logGroup: { configured: logGroupConfigured, lastDeliveryOk },
+    version: {
+      runningSha,
+      deployedSha,
+      mismatch: gitShasDiffer(runningSha, deployedSha),
+    },
   };
 }
