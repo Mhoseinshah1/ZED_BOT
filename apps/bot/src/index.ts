@@ -5,6 +5,7 @@ import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
 import { runningGitSha } from "./services/backup-health.service.js";
+import { startCheckoutInputRetentionLoop } from "./services/checkout-customer-input.service.js";
 import { startFreeTrialLoop } from "./services/free-trial.service.js";
 import { startFreeTrialCampaignLoop } from "./services/free-trial-campaign.service.js";
 import { startGatewaySettlementLoop } from "./services/gateway-payment.service.js";
@@ -96,6 +97,9 @@ async function run(botToken: string): Promise<void> {
   // the durable campaign/recipient rows - resumable after restarts,
   // cancellation-safe. Same never-throws loop contract.
   startFreeTrialCampaignLoop(bot.api);
+
+  // Hourly redaction of dead-end pre-settlement customer-input rows (same never-throws loop contract).
+  startCheckoutInputRetentionLoop();
 
   await bot.start({
     onStart: (botInfo) => {

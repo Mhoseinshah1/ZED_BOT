@@ -313,6 +313,16 @@ export interface SessionData {
       duplicateCount?: number;
       thresholdEditing?: true;
     };
+    // Pre-settlement customer-input form draft (specialized-workflows phase,
+    // flow "customer_input:form"). In-progress answers live ONLY here until
+    // the final confirm persists them encrypted; values are NEVER logged.
+    customerInputForm?: {
+      checkoutSessionId: string;
+      orderId?: string;
+      fieldIndex: number;
+      answers: Record<string, string>;
+      reviewing?: boolean;
+    };
     [key: string]: unknown;
   };
 }
