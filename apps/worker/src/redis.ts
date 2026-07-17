@@ -14,6 +14,7 @@ import type { Queue } from "bullmq";
 // =============================================================================
 
 export interface RawRedis {
+  ping(): Promise<string>;
   set(key: string, value: string, ...args: Array<string | number>): Promise<string | null>;
   get(key: string): Promise<string | null>;
   del(...keys: string[]): Promise<number>;

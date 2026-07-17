@@ -1,4 +1,4 @@
-import { DEFAULT_CONTAINER_BACKUP_DIR, intEnv, optionalEnv } from "@zedbot/shared";
+import { DEFAULT_CONTAINER_BACKUP_DIR, intEnv, normalizeGitSha, optionalEnv } from "@zedbot/shared";
 
 // =============================================================================
 // Worker configuration - every env read lives here so the rest of the worker
@@ -45,6 +45,11 @@ export function backupEncryptionPassword(): string | null {
 export function botToken(): string | null {
   const value = optionalEnv("BOT_TOKEN");
   return value === "" ? null : value;
+}
+
+/** Baked image build identity (GIT_SHA); null when built without it. */
+export function gitSha(): string | null {
+  return normalizeGitSha(optionalEnv("GIT_SHA"));
 }
 
 /** App version recorded into manifests (APP_VERSION, else GIT_SHA, else null). */

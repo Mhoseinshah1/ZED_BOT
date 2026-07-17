@@ -11,7 +11,7 @@ import {
   type WorkerCapabilities,
 } from "@zedbot/shared";
 
-import { backupDir } from "./config.js";
+import { backupDir, gitSha } from "./config.js";
 import { pgDumpVersion } from "./backup/pg.js";
 import type { RawRedis } from "./redis.js";
 
@@ -46,6 +46,7 @@ async function publishOnce(redis: RawRedis): Promise<void> {
     pgDumpVersion: await pgDumpVersion(),
     backupDirWritable: await probeBackupDirWritable(dir),
     backupDir: dir,
+    gitSha: gitSha(),
     checkedAt: now,
   };
   await redis.set(

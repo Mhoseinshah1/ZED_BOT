@@ -65,4 +65,14 @@ COPY --from=build /repo/apps/worker/dist apps/worker/dist
 COPY packages/database/prisma packages/database/prisma
 RUN pnpm --filter @zedbot/database exec prisma generate
 USER node
+# --- Deployment identity (keep these the LAST layers) ------------------------
+# GIT_SHA is passed by scripts/install.sh, scripts/update.sh and the legacy
+# self-heal in scripts/migrate.sh (they export GIT_SHA before compose build;
+# docker-compose.yml forwards it as a build arg). Placement is deliberate:
+# because these are the final layers, rebuilding with a different GIT_SHA is
+# nearly free - every earlier layer stays cached - which the migrate.sh
+# legacy self-heal relies on to re-stamp images mid-update.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+ENV APP_VERSION=${GIT_SHA}
 CMD ["node", "apps/api/dist/index.js"]

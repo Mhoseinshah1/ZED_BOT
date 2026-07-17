@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ZED_BOT updater:
-#   backup archive -> database backup + verification gate -> pull -> rebuild
-#   -> restart -> migrate -> doctor
+# ZED_BOT updater (self-healing):
+#   safety archive -> database backup + verification gate -> pull
+#   -> migrate legacy .env -> refresh installed CLI -> build (with identity)
+#   -> migrate DB -> force-recreate -> record deploy -> post-deploy smoke
+#   -> doctor
 #
 # The update ABORTS before touching any code when the pre-update database
 # backup cannot be created AND verified - the running installation is left
@@ -101,6 +103,85 @@ pre_update_database_backup() {
   log_success "Pre-update database backup verified: ${newest##*/}"
 }
 
+# Retries a bot-container exec a few times: with a broken bot token the bot
+# process crash-loops by design (it sleeps before exiting, so the container
+# is Running most of the time) - a single exec could hit the restart gap.
+bot_exec_with_retry() {
+  local attempts="${1:-6}" delay="${2:-5}"
+  shift 2
+  local i
+  for ((i = 1; i <= attempts; i++)); do
+    if run_compose exec -T bot "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$i" -lt "$attempts" ] && sleep "$delay"
+  done
+  return 1
+}
+
+# Post-deploy smoke: the worker CLI performs a bounded end-to-end check
+# (redis ping, running-worker heartbeat, backup-dir write, pg_dump/
+# pg_restore, ONE real backup enqueued to the RUNNING worker and verified),
+# then the bot's read-only view of the backup mount is confirmed from the
+# host. On ANY failure the application is deliberately KEPT RUNNING - a
+# failed smoke is a signal to investigate, never a reason to yank a live
+# deployment - but the update exits non-zero.
+post_deploy_smoke() {
+  local smoke_json="" smoke_rc=0
+  # The worker smoke CLI guarantees secret-free one-line JSON, so echoing
+  # its output is safe. Never echo .env values here.
+  smoke_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/deploy-smoke.js)" || smoke_rc=$?
+  if [ -n "$smoke_json" ]; then
+    printf '%s\n' "$smoke_json"
+  fi
+
+  # Bot-side read check through the read-only mount.
+  local bot_read_ok=1
+  if ! bot_exec_with_retry 6 5 sh -c 'ls "${BACKUP_DIR:-/var/lib/zedbot/backups}" >/dev/null'; then
+    bot_read_ok=0
+  fi
+
+  # When the smoke produced a backup file, the bot must see that exact file
+  # through its mount (proves both containers share the host directory).
+  local bot_file_ok=1 smoke_file=""
+  smoke_file="$(printf '%s' "$smoke_json" | grep -o '"filename":"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
+  if [ -n "$smoke_file" ]; then
+    # Validate the name shape before it goes anywhere near a shell command.
+    if printf '%s' "$smoke_file" | grep -Eq '^zedbot-db-[0-9-]*\.dump(\.enc)?$'; then
+      if ! bot_exec_with_retry 6 5 sh -c 'test -f "${BACKUP_DIR:-/var/lib/zedbot/backups}/$1"' _ "$smoke_file"; then
+        bot_file_ok=0
+      fi
+    else
+      log_warn "Smoke reported an unexpected backup file name shape - skipping the bot-side file check."
+    fi
+  fi
+
+  if [ "$smoke_rc" -eq 0 ] && [ "$bot_read_ok" -eq 1 ] && [ "$bot_file_ok" -eq 1 ]; then
+    log_success "Post-deploy smoke passed."
+    return 0
+  fi
+
+  local category=""
+  category="$(printf '%s' "$smoke_json" | grep -o '"failureCategory":"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
+  if [ -n "$category" ]; then
+    log_error "Post-deploy smoke FAILED - failure category: ${category}"
+  else
+    log_error "Post-deploy smoke FAILED."
+  fi
+  if [ "$bot_read_ok" -eq 0 ]; then
+    log_error "bot: cannot read the backup mount (/var/lib/zedbot/backups in-container)."
+  fi
+  if [ "$bot_file_ok" -eq 0 ]; then
+    log_error "bot: the smoke backup file is not visible through the read-only mount."
+  fi
+  log_error "The application was left RUNNING (no rollback). Recovery commands:"
+  log_error "  zedbot doctor --fix       (diagnose; repairs backup dir + stale CLI)"
+  log_error "  zedbot repair backups     (fix backup mount ownership/permissions)"
+  log_error "  zedbot logs worker        (inspect the worker)"
+  log_error "  zedbot update             (retry once fixed)"
+  exit 1
+}
+
 main() {
   require_root
   app_cd
@@ -109,13 +190,13 @@ main() {
 
   log_info "Starting ZED_BOT update ..."
 
-  log_info "[1/7] Creating a safety archive (.env + database) before updating ..."
+  log_info "[1/11] Creating a safety archive (.env + database) before updating ..."
   bash "${SCRIPT_DIR}/backup.sh"
 
-  log_info "[2/7] Creating and verifying a database backup (update gate) ..."
+  log_info "[2/11] Creating and verifying a database backup (update gate) ..."
   pre_update_database_backup
 
-  log_info "[3/7] Pulling the latest code ..."
+  log_info "[3/11] Pulling the latest code ..."
   # --add appends duplicates on every run; only add when missing.
   if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ZEDBOT_APP_DIR"; then
     git config --global --add safe.directory "$ZEDBOT_APP_DIR" >/dev/null 2>&1 || true
@@ -125,16 +206,48 @@ main() {
     log_warn "Could not fast-forward the repository (local modifications?). Continuing with the current code."
   fi
 
-  log_info "[4/7] Building updated images ..."
+  log_info "[4/11] Migrating the .env to the current layout (append-only) ..."
+  migrate_legacy_env
+  # Re-load so freshly appended keys (ZEDBOT_BACKUP_DIR & co) take effect.
+  load_env_if_exists
+  ensure_backup_dir_permissions
+
+  log_info "[5/11] Refreshing the installed zedbot CLI ..."
+  # Failure to refresh the CLI must fail the update: a stale installed CLI
+  # driving new code is exactly the class of bug this updater prevents.
+  if ! refresh_cli; then
+    log_error "Could not refresh ${ZEDBOT_CLI_PATH} from the updated repository - ABORTING the update."
+    log_error "Fix the problem (disk full? read-only /usr/local/bin?) and retry: zedbot update"
+    exit 1
+  fi
+
+  log_info "[6/11] Building updated images (with deployment identity) ..."
+  # GIT_SHA travels into the image as its LAST layers (see Dockerfile), so
+  # identity-only rebuilds stay cheap.
+  GIT_SHA="$(repo_head_sha)"
+  export GIT_SHA="${GIT_SHA:-unknown}"
   run_compose build
 
-  log_info "[5/7] Restarting services ..."
-  run_compose up -d --remove-orphans
+  log_info "[7/11] Applying database migrations (before the new app containers run) ..."
+  # `compose run` inside migrate.sh starts postgres/redis itself. The app
+  # services still run the OLD code at this point - the safe direction (old
+  # code on a newer schema beats new code on an older schema). migrate.sh's
+  # legacy self-heal no-ops here: steps 4-5 already converged env + CLI.
+  bash "${SCRIPT_DIR}/migrate.sh"
 
-  log_info "[6/7] Checking for database migrations ..."
-  run_migrations_if_available
+  log_info "[8/11] Recreating all services with the new images ..."
+  # --force-recreate is THE fix for the stale-container symptom observed in
+  # production: a plain `up -d` can leave the previous containers (previous
+  # image, previous mounts, previous env) running after a rebuild.
+  run_compose up -d --force-recreate --remove-orphans
 
-  log_info "[7/7] Running health checks ..."
+  log_info "[9/11] Recording the deployed version ..."
+  record_deployed_sha
+
+  log_info "[10/11] Running the post-deploy smoke test ..."
+  post_deploy_smoke
+
+  log_info "[11/11] Running health checks ..."
   if bash "${SCRIPT_DIR}/doctor.sh"; then
     log_success "ZED_BOT update completed successfully."
   else

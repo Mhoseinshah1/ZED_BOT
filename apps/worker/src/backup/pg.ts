@@ -43,10 +43,10 @@ export function pgDumpSafeUrl(databaseUrl: string): string {
   }
 }
 
-/** `pg_dump --version` -> "17.2" style string, or null when unavailable. */
-export async function pgDumpVersion(): Promise<string | null> {
+/** `<tool> --version` -> "17.2" style string, or null when unavailable. */
+function pgToolVersion(tool: "pg_dump" | "pg_restore"): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile("pg_dump", ["--version"], { timeout: 10_000 }, (err, stdout) => {
+    execFile(tool, ["--version"], { timeout: 10_000 }, (err, stdout) => {
       if (err !== null) {
         resolve(null);
         return;
@@ -55,6 +55,16 @@ export async function pgDumpVersion(): Promise<string | null> {
       resolve(match !== null ? match[1] : stdout.trim().slice(0, 60) || null);
     });
   });
+}
+
+/** `pg_dump --version` -> "17.2" style string, or null when unavailable. */
+export async function pgDumpVersion(): Promise<string | null> {
+  return pgToolVersion("pg_dump");
+}
+
+/** `pg_restore --version` -> "17.2" style string, or null when unavailable. */
+export async function pgRestoreVersion(): Promise<string | null> {
+  return pgToolVersion("pg_restore");
 }
 
 export interface PgRestoreListResult {

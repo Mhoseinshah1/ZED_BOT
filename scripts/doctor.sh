@@ -68,6 +68,10 @@ check_ubuntu() {
   [ -r /etc/os-release ] && ( . /etc/os-release && [ "${ID:-}" = "ubuntu" ] )
 }
 
+check_cli_fresh() {
+  ! cli_is_stale
+}
+
 check_compose_available() {
   docker compose version >/dev/null 2>&1 || docker_compose_binary_is_v2
 }
@@ -140,6 +144,39 @@ check_backup_dir_mode() {
   [ $(( 0$mode & 0027 )) -eq 0 ] && [ $(( 0$mode & 0700 )) -eq 448 ]
 }
 
+# Deployment identity: one row per app container comparing its baked GIT_SHA
+# (Dockerfile build arg) against the repository HEAD. Three outcomes:
+#   PASS  container runs the repository HEAD
+#   WARN  "version mismatch - run: zedbot update" (stale container/image)
+#   WARN  "unavailable" (container down / exec failed / SHA not determinable)
+report_version_row() {
+  local svc="$1" head_sha="$2" container_sha
+  local label="${svc} GIT_SHA matches repo HEAD"
+  if [ -z "$head_sha" ]; then
+    print_row "WARN" "$_C_YELLOW" "$label" "unavailable - repository SHA not determinable"
+    WARN_COUNT=$((WARN_COUNT + 1))
+    return 0
+  fi
+  if ! compose_service_running "$svc"; then
+    print_row "WARN" "$_C_YELLOW" "$label" "unavailable - container not running"
+    WARN_COUNT=$((WARN_COUNT + 1))
+    return 0
+  fi
+  # "unset" marks images that predate the identity layers; an exec failure
+  # (restart gap) yields an empty string instead.
+  container_sha="$(run_compose exec -T "$svc" sh -c 'printf "%s" "${GIT_SHA:-unset}"' 2>/dev/null | tr -d '[:space:]' || true)"
+  if [ -z "$container_sha" ]; then
+    print_row "WARN" "$_C_YELLOW" "$label" "unavailable - could not read the container GIT_SHA"
+    WARN_COUNT=$((WARN_COUNT + 1))
+  elif [ "$container_sha" = "$head_sha" ]; then
+    print_row "PASS" "$_C_GREEN" "${label} (${container_sha:0:10})"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    print_row "WARN" "$_C_YELLOW" "$label" "version mismatch - run: zedbot update"
+    WARN_COUNT=$((WARN_COUNT + 1))
+  fi
+}
+
 main() {
   require_root
   load_env_if_exists
@@ -180,6 +217,14 @@ main() {
     log_info "--fix: repairing backup directory ownership/permissions (${ZEDBOT_BACKUP_DIR}) ..."
     ensure_backup_dir_permissions
   fi
+  # Installed CLI freshness (a stale /usr/local/bin/zedbot keeps driving old
+  # scripts after an update - the legacy-upgrade bug class).
+  if [ "$FIX_MODE" -eq 1 ] && cli_is_stale; then
+    log_info "--fix: refreshing the installed CLI from the repository copy ..."
+    refresh_cli || log_warn "CLI refresh failed - check ${ZEDBOT_CLI_PATH} permissions."
+  fi
+  optional_check "Installed CLI is fresh (${ZEDBOT_CLI_PATH})" "run: zedbot update (or: zedbot doctor --fix)" check_cli_fresh
+
   optional_check "Backup dir exists (${ZEDBOT_BACKUP_DIR})" "run: zedbot doctor --fix (or: zedbot repair backups)" check_backup_dir_exists
   if [ -d "$ZEDBOT_BACKUP_DIR" ]; then
     optional_check "Backup dir owner is ${ZEDBOT_RUNTIME_UID:-1000}:${ZEDBOT_RUNTIME_GID:-1000} (container runtime user)" "run: zedbot doctor --fix" check_backup_dir_owner
@@ -216,6 +261,12 @@ main() {
       skip_check "API port ${API_PORT:-3000} is listening" "api container not running"
       skip_check "API health endpoint responds" "api container not running"
     fi
+
+    # Deployment identity: running containers vs repository HEAD.
+    local head_sha
+    head_sha="$(repo_head_sha)"
+    report_version_row bot "$head_sha"
+    report_version_row worker "$head_sha"
   fi
 
   echo

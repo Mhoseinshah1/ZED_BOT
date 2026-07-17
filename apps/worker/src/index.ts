@@ -9,6 +9,7 @@ import {
 } from "@zedbot/shared";
 import { Worker } from "bullmq";
 
+import { gitSha } from "./config.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { createLogDeliveryProcessor } from "./log-delivery.js";
 import { setLogDeliveryEnqueuer } from "./ops-log.js";
@@ -104,8 +105,10 @@ async function run(options: RedisConnectionOptions): Promise<void> {
     });
   }
 
+  // Every service must log its running SHA at startup (deploy diagnostics).
   logger.info(
     `ZED_BOT worker service started (queues: ${BACKUP_QUEUE_NAME}, ${LOG_DELIVERY_QUEUE_NAME})`,
+    { gitSha: gitSha() ?? "unknown" },
   );
 
   let shuttingDown = false;

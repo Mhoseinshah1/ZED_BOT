@@ -315,6 +315,8 @@ export async function readWorkerCapabilities(): Promise<WorkerCapabilities | nul
       pgDumpVersion: typeof value.pgDumpVersion === "string" ? value.pgDumpVersion : null,
       backupDirWritable: value.backupDirWritable === true,
       backupDir: typeof value.backupDir === "string" ? value.backupDir : "",
+      // Baked image build identity; older workers do not publish it yet.
+      gitSha: typeof value.gitSha === "string" ? value.gitSha : null,
       checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : "",
     };
   } catch {
