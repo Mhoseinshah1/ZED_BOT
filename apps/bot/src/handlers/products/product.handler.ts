@@ -3,6 +3,9 @@ import {
   Prisma,
   prisma,
   type OtherProductDeliveryType,
+  type OtherProductFulfillmentProfile,
+  type OtherProductKind,
+  type OtherProductStockParser,
   type ProductCategory,
   type ServiceLocation,
   type TrafficResetCycle,
@@ -30,11 +33,16 @@ import {
   updateCategory,
 } from "../../services/category.service.js";
 import {
+  PERSONALIZED_AI_DEFAULT_SCHEMA,
+  TELEGRAM_PREMIUM_DEFAULT_SCHEMA,
+} from "../../services/customer-input-schema.service.js";
+import {
   OTHER_NAMING_POLICIES,
   OTHER_POLICY_INFO,
   OTHER_TEMPLATE_INVALID_TEXT,
   validateOtherNamingTemplate,
 } from "../../services/other-product-naming.service.js";
+import { kindLabel } from "../../services/other-product-profile.service.js";
 import { getPanelByShortId } from "../../services/panel.service.js";
 import {
   createProductAtOrder,
@@ -60,7 +68,10 @@ import {
   categoryPickerKeyboard,
   deliveryKeyboard,
   groupsKeyboard,
+  isStockProfile,
   locationKeyboard,
+  OTHER_KIND_BY_CODE,
+  otherKindKeyboard,
   panelPickerKeyboard,
   productAddTypeKeyboard,
   productDetailKeyboard,
@@ -70,10 +81,16 @@ import {
   productMenuText,
   productMenuKeyboard,
   resetCycleKeyboard,
+  STOCK_PARSER_BY_CODE,
+  stockParserKeyboard,
 } from "./product-views.js";
 
 const HTML = { parseMode: "HTML" as const };
 const STOCK_WARNING = "استوک فعلاً فقط در دیتابیس آماده است و تحویل خودکار بعداً پیاده می‌شود.";
+const INVALID_OPTION_TEXT = "گزینه نامعتبر است.";
+const PRODUCT_NOT_FOUND_TEXT = "محصول پیدا نشد.";
+const OTHER_ONLY_TEXT = "این تنظیم فقط برای محصولات دیگر است.";
+const KIND_EDIT_WARNING = "⚠️ تغییر نوع فقط بر خریدهای آینده اثر دارد.";
 
 export const productHandler = new Composer<BotContext>();
 
@@ -667,6 +684,166 @@ productHandler.callbackQuery(/^admin:prod:setnp:([^:]+):([0-4])$/, async (ctx) =
   await showNamingSelector(ctx, updated);
 });
 
+// --- specialized-workflows detail editing (kind / parser / collect-before) -------------
+
+/**
+ * Server-side re-validation for every specialized-workflows callback: the
+ * short id must resolve to an existing OTHER_PRODUCT even inside the gated
+ * admin area (forged sids answer with a Persian error).
+ */
+async function resolveOtherProduct(
+  ctx: BotContext,
+  sid: string,
+): Promise<ProductWithRelations | null> {
+  const product = await getProductByShortId(sid);
+  if (product === null) {
+    await safeAnswerCallback(ctx, PRODUCT_NOT_FOUND_TEXT);
+    return null;
+  }
+  if (product.type !== "OTHER_PRODUCT") {
+    await safeAnswerCallback(ctx, OTHER_ONLY_TEXT);
+    return null;
+  }
+  return product;
+}
+
+productHandler.callbackQuery(/^admin:prod:kind:(.+)$/, async (ctx) => {
+  const product = await resolveOtherProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const sid = productShortId(product);
+  await safeEditOrReply(
+    ctx,
+    [
+      `نوع فعلی: ${kindLabel(product.otherProductKind ?? "GENERIC")}`,
+      "",
+      "نوع محصول را انتخاب کنید:",
+      "",
+      KIND_EDIT_WARNING,
+    ].join("\n"),
+    otherKindKeyboard((code) => pcb.setKind(sid, code), { label: "بازگشت", cb: pcb.view(sid) }),
+  );
+});
+
+/**
+ * Edit-time defaults per kind - the same profile/parser/flags the wizard
+ * branch applies. Kinds with a wizard sub-question use their stock-backed
+ * default (AI -> ready credentials, gift card -> stocked codes); the parser
+ * selector can adjust the format afterwards. GENERIC only clears the
+ * specialized fields and leaves the legacy delivery/info settings alone.
+ */
+function kindEditDefaults(kind: OtherProductKind): Prisma.ProductUncheckedUpdateInput {
+  if (kind === "GENERIC") {
+    return {
+      otherProductKind: kind,
+      otherProductFulfillmentProfile: null,
+      otherProductStockParser: null,
+      collectInfoBeforeManualApproval: false,
+      customerInputSchema: Prisma.DbNull,
+    };
+  }
+  const profile: OtherProductFulfillmentProfile =
+    kind === "TELEGRAM_PREMIUM" ? "PERSONALIZED_SERVICE" : kind === "GIFT_CARD" ? "STOCK_CODE" : "STOCK_CREDENTIAL";
+  const parser: OtherProductStockParser | null =
+    kind === "APPLE_ID" ? "EMAIL_BOUNDARY" : kind === "TELEGRAM_PREMIUM" ? null : "SINGLE_LINE";
+  const personalized = profile === "PERSONALIZED_SERVICE";
+  return {
+    otherProductKind: kind,
+    otherProductFulfillmentProfile: profile,
+    otherProductStockParser: parser,
+    collectInfoBeforeManualApproval: personalized,
+    requiredUserInfoEnabled: personalized,
+    deliveryType: personalized ? "MANUAL_ADMIN" : "STOCK_ITEM",
+    stockEnabled: !personalized,
+    customerInputSchema:
+      kind === "TELEGRAM_PREMIUM"
+        ? (TELEGRAM_PREMIUM_DEFAULT_SCHEMA as unknown as Prisma.InputJsonValue)
+        : Prisma.DbNull,
+  };
+}
+
+productHandler.callbackQuery(/^admin:prod:setkind:([^:]+):([A-Za-z]+)$/, async (ctx) => {
+  const kind = OTHER_KIND_BY_CODE[ctx.match[2]];
+  if (kind === undefined) {
+    // Forged/unknown code: reject without touching the product.
+    await safeAnswerCallback(ctx, INVALID_OPTION_TEXT);
+    return;
+  }
+  const product = await resolveOtherProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  const updated = await updateProduct(product.id, kindEditDefaults(kind));
+  await safeAnswerCallback(ctx, "نوع محصول بروزرسانی شد ✅");
+  await showProductDetail(ctx, updated);
+});
+
+productHandler.callbackQuery(/^admin:prod:sparser:(.+)$/, async (ctx) => {
+  const product = await resolveOtherProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  if (!isStockProfile(product.otherProductFulfillmentProfile)) {
+    await safeAnswerCallback(ctx, "فرمت موجودی فقط برای پروفایل‌های استوکی قابل تنظیم است.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const sid = productShortId(product);
+  await safeEditOrReply(
+    ctx,
+    "فرمت موجودی را انتخاب کنید:",
+    stockParserKeyboard((code) => pcb.setStockParser(sid, code), {
+      label: "بازگشت",
+      cb: pcb.view(sid),
+    }),
+  );
+});
+
+productHandler.callbackQuery(/^admin:prod:setsp:([^:]+):([A-Za-z]+)$/, async (ctx) => {
+  const parser = STOCK_PARSER_BY_CODE[ctx.match[2]];
+  if (parser === undefined) {
+    await safeAnswerCallback(ctx, INVALID_OPTION_TEXT);
+    return;
+  }
+  const product = await resolveOtherProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  if (!isStockProfile(product.otherProductFulfillmentProfile)) {
+    await safeAnswerCallback(ctx, "فرمت موجودی فقط برای پروفایل‌های استوکی قابل تنظیم است.");
+    return;
+  }
+  const updated = await updateProduct(product.id, { otherProductStockParser: parser });
+  await safeAnswerCallback(ctx, "فرمت موجودی بروزرسانی شد ✅");
+  await showProductDetail(ctx, updated);
+});
+
+productHandler.callbackQuery(/^admin:prod:cba:(.+)$/, async (ctx) => {
+  const product = await resolveOtherProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  // Only meaningful when customer info is collected at all.
+  if (
+    product.otherProductFulfillmentProfile !== "PERSONALIZED_SERVICE" &&
+    !product.requiredUserInfoEnabled
+  ) {
+    await safeAnswerCallback(ctx, "این گزینه فقط برای محصولات دارای فرم اطلاعات مشتری است.");
+    return;
+  }
+  const enabling = !product.collectInfoBeforeManualApproval;
+  const updated = await updateProduct(product.id, { collectInfoBeforeManualApproval: enabling });
+  await safeAnswerCallback(
+    ctx,
+    enabling
+      ? "دریافت اطلاعات قبل از تایید رسید فعال شد ✅"
+      : "دریافت اطلاعات قبل از تایید رسید غیرفعال شد ❌",
+  );
+  await showProductDetail(ctx, updated);
+});
+
 // --- product text-field edits ---------------------------------------------------------
 
 const PRODUCT_TEXT_FIELDS: Record<
@@ -682,6 +859,11 @@ const PRODUCT_TEXT_FIELDS: Record<
     prompt: "این محصول در جایگاه چندم نمایش داده شود؟ عدد بفرستید یا برای انتهای لیست 0 بفرستید.",
   },
   ruip: { prompt: "متنی که بعد از پرداخت از کاربر پرسیده می‌شود را وارد کنید.", otherOnly: true },
+  cmt: {
+    prompt:
+      "پیام تکمیل سفارش را وارد کنید (حداکثر ۵۰۰ کاراکتر). برای خالی کردن «-» بفرستید.",
+    otherOnly: true,
+  },
   ontpl: {
     prompt:
       "قالب نام‌گذاری را وارد کنید. متغیرهای مجاز: {order_short_id} {telegram_id} {telegram_username} {user_short_id} {product_name} {date}",
@@ -765,6 +947,19 @@ function addState(ctx: BotContext, step: ProductAddState["step"]): ProductAddSta
     return null;
   }
   return state;
+}
+
+/**
+ * Specialized kinds fix the delivery type in their own branch, so the legacy
+ * delivery question only remains for GENERIC (and legacy states without a
+ * kind, which behave as GENERIC).
+ */
+function skipsLegacyDelivery(state: ProductAddState): boolean {
+  return (
+    state.kind === "OTHER_PRODUCT" &&
+    state.otherProductKind !== undefined &&
+    state.otherProductKind !== "GENERIC"
+  );
 }
 
 // Categories are NEVER created implicitly. Product creation requires an
@@ -876,9 +1071,193 @@ productHandler.callbackQuery(/^admin:prod:f:cat:(.+)$/, async (ctx) => {
       cancelKeyboard(),
     );
   } else {
-    state.step = "duration";
-    await safeEditOrReply(ctx, "مدت/اعتبار محصول را به روز وارد کنید. اگر ندارد 0 بفرستید.", cancelKeyboard());
+    // Specialized-workflows phase: the kind question comes before duration
+    // and decides which legacy questions still apply.
+    state.step = "otherKind";
+    await safeEditOrReply(
+      ctx,
+      "نوع محصول را انتخاب کنید:",
+      otherKindKeyboard((code) => pcb.flowKind(code), { label: "لغو ❌", cb: PROD_CB.CANCEL }),
+    );
   }
+});
+
+/** Shared continuation: every OTHER_PRODUCT kind branch lands on duration. */
+async function askDurationStep(ctx: BotContext, state: ProductAddState): Promise<void> {
+  state.step = "duration";
+  await safeEditOrReply(
+    ctx,
+    "مدت/اعتبار محصول را به روز وارد کنید. اگر ندارد 0 بفرستید.",
+    cancelKeyboard(),
+  );
+}
+
+// --- specialized-workflows wizard steps (OTHER_PRODUCT kind branching) -----------------
+
+productHandler.callbackQuery(/^admin:prod:f:kind:([A-Za-z]+)$/, async (ctx) => {
+  const kind = OTHER_KIND_BY_CODE[ctx.match[1]];
+  if (kind === undefined) {
+    // Forged/unknown code: reject without touching the wizard state.
+    await safeAnswerCallback(ctx, INVALID_OPTION_TEXT);
+    return;
+  }
+  const state = addState(ctx, "otherKind");
+  if (state === null) {
+    await safeAnswerCallback(ctx, "این مرحله معتبر نیست.");
+    return;
+  }
+  state.otherProductKind = kind;
+  await safeAnswerCallback(ctx);
+  switch (kind) {
+    case "APPLE_ID":
+      // Credential stock, email-boundary bulk parsing, no user info question.
+      state.otherProductFulfillmentProfile = "STOCK_CREDENTIAL";
+      state.otherProductStockParser = "EMAIL_BOUNDARY";
+      state.requiredUserInfoEnabled = false;
+      state.requiredUserInfoPromptText = null;
+      state.collectInfoBeforeManualApproval = false;
+      state.deliveryType = "STOCK_ITEM";
+      await askDurationStep(ctx, state);
+      return;
+    case "AI_ACCOUNT": {
+      state.step = "aiMode";
+      const kb = new InlineKeyboard()
+        .text("اکانت آماده", pcb.flowAiMode("ready"))
+        .row()
+        .text("اکانت شخصی برای مشتری", pcb.flowAiMode("pers"))
+        .row()
+        .text("لغو ❌", PROD_CB.CANCEL);
+      await safeEditOrReply(ctx, "نوع اکانت هوش مصنوعی را انتخاب کنید:", kb);
+      return;
+    }
+    case "TELEGRAM_PREMIUM":
+      // Personalized manual service with the default premium form.
+      state.otherProductFulfillmentProfile = "PERSONALIZED_SERVICE";
+      state.requiredUserInfoEnabled = true;
+      state.collectInfoBeforeManualApproval = true;
+      state.deliveryType = "MANUAL_ADMIN";
+      state.customerInputSchemaPreset = "TELEGRAM_PREMIUM";
+      await askDurationStep(ctx, state);
+      return;
+    case "GIFT_CARD": {
+      state.step = "giftMode";
+      const kb = new InlineKeyboard()
+        .text("کد آماده از موجودی", pcb.flowGiftMode("stock"))
+        .row()
+        .text("تحویل دستی توسط ادمین", pcb.flowGiftMode("manual"))
+        .row()
+        .text("لغو ❌", PROD_CB.CANCEL);
+      await safeEditOrReply(ctx, "روش تحویل گیفت کارت را انتخاب کنید:", kb);
+      return;
+    }
+    default:
+      // GENERIC: exactly the legacy flow (userInfo/delivery questions later).
+      await askDurationStep(ctx, state);
+  }
+});
+
+productHandler.callbackQuery(/^admin:prod:f:ai:([a-z]+)$/, async (ctx) => {
+  const mode = ctx.match[1];
+  if (mode !== "ready" && mode !== "pers") {
+    await safeAnswerCallback(ctx, INVALID_OPTION_TEXT);
+    return;
+  }
+  const state = addState(ctx, "aiMode");
+  if (state === null) {
+    await safeAnswerCallback(ctx, "این مرحله معتبر نیست.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  if (mode === "ready") {
+    state.otherProductFulfillmentProfile = "STOCK_CREDENTIAL";
+    state.requiredUserInfoEnabled = false;
+    state.requiredUserInfoPromptText = null;
+    state.collectInfoBeforeManualApproval = false;
+    state.deliveryType = "STOCK_ITEM";
+    state.step = "stockParser";
+    await safeEditOrReply(
+      ctx,
+      "فرمت موجودی را انتخاب کنید:",
+      stockParserKeyboard((code) => pcb.flowStockParser(code), {
+        label: "لغو ❌",
+        cb: PROD_CB.CANCEL,
+      }),
+    );
+    return;
+  }
+  state.otherProductFulfillmentProfile = "PERSONALIZED_SERVICE";
+  state.requiredUserInfoEnabled = true;
+  state.collectInfoBeforeManualApproval = true;
+  state.deliveryType = "MANUAL_ADMIN";
+  state.step = "formPreset";
+  const kb = new InlineKeyboard()
+    .text("فرم پیش‌فرض اکانت شخصی", pcb.flowFormPreset("AI"))
+    .row()
+    .text("بدون فرم (متن آزاد)", pcb.flowFormPreset("NONE"))
+    .row()
+    .text("لغو ❌", PROD_CB.CANCEL);
+  await safeEditOrReply(ctx, "فرم اطلاعات مشتری:", kb);
+});
+
+productHandler.callbackQuery(/^admin:prod:f:gc:([a-z]+)$/, async (ctx) => {
+  const mode = ctx.match[1];
+  if (mode !== "stock" && mode !== "manual") {
+    await safeAnswerCallback(ctx, INVALID_OPTION_TEXT);
+    return;
+  }
+  const state = addState(ctx, "giftMode");
+  if (state === null) {
+    await safeAnswerCallback(ctx, "این مرحله معتبر نیست.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  if (mode === "stock") {
+    state.otherProductFulfillmentProfile = "STOCK_CODE";
+    state.otherProductStockParser = "SINGLE_LINE";
+    state.requiredUserInfoEnabled = false;
+    state.requiredUserInfoPromptText = null;
+    state.collectInfoBeforeManualApproval = false;
+    state.deliveryType = "STOCK_ITEM";
+  } else {
+    // Manual gift cards keep the legacy userInfo question after the invoice
+    // step; only the delivery question is skipped (already MANUAL_ADMIN).
+    state.otherProductFulfillmentProfile = "MANUAL_DELIVERY";
+    state.collectInfoBeforeManualApproval = false;
+    state.deliveryType = "MANUAL_ADMIN";
+  }
+  await askDurationStep(ctx, state);
+});
+
+productHandler.callbackQuery(/^admin:prod:f:sp:([A-Za-z]+)$/, async (ctx) => {
+  const parser = STOCK_PARSER_BY_CODE[ctx.match[1]];
+  if (parser === undefined) {
+    await safeAnswerCallback(ctx, INVALID_OPTION_TEXT);
+    return;
+  }
+  const state = addState(ctx, "stockParser");
+  if (state === null) {
+    await safeAnswerCallback(ctx, "این مرحله معتبر نیست.");
+    return;
+  }
+  state.otherProductStockParser = parser;
+  await safeAnswerCallback(ctx);
+  await askDurationStep(ctx, state);
+});
+
+productHandler.callbackQuery(/^admin:prod:f:fp:([A-Z]+)$/, async (ctx) => {
+  const code = ctx.match[1];
+  if (code !== "AI" && code !== "NONE") {
+    await safeAnswerCallback(ctx, INVALID_OPTION_TEXT);
+    return;
+  }
+  const state = addState(ctx, "formPreset");
+  if (state === null) {
+    await safeAnswerCallback(ctx, "این مرحله معتبر نیست.");
+    return;
+  }
+  state.customerInputSchemaPreset = code === "AI" ? "PERSONALIZED_AI" : "NONE";
+  await safeAnswerCallback(ctx);
+  await askDurationStep(ctx, state);
 });
 
 // Backward compatibility for old keyboards only: inline category creation is
@@ -931,6 +1310,16 @@ productHandler.callbackQuery(/^admin:prod:f:rui:(y|n)$/, async (ctx) => {
   } else {
     state.requiredUserInfoEnabled = false;
     state.requiredUserInfoPromptText = null;
+    if (skipsLegacyDelivery(state)) {
+      // Delivery already fixed by the kind branch (e.g. manual gift card).
+      state.step = "order";
+      await safeEditOrReply(
+        ctx,
+        "این محصول در جایگاه چندم نمایش داده شود؟ عدد بفرستید یا برای انتهای لیست 0 بفرستید.",
+        cancelKeyboard(),
+      );
+      return;
+    }
     state.step = "delivery";
     await safeEditOrReply(
       ctx,
@@ -971,6 +1360,14 @@ productHandler.callbackQuery("admin:prod:f:save", async (ctx) => {
   // Fix C: the wizard state is consumed BEFORE the create - a double-clicked
   // «ذخیره ✅» finds no state and cannot create the product twice.
   clearProductFlows(ctx);
+  const isOther = state.kind === "OTHER_PRODUCT";
+  const otherProfile = isOther ? (state.otherProductFulfillmentProfile ?? null) : null;
+  const presetSchema =
+    state.customerInputSchemaPreset === "TELEGRAM_PREMIUM"
+      ? TELEGRAM_PREMIUM_DEFAULT_SCHEMA
+      : state.customerInputSchemaPreset === "PERSONALIZED_AI"
+        ? PERSONALIZED_AI_DEFAULT_SCHEMA
+        : null;
   try {
     const product = await createProductAtOrder(
       {
@@ -989,12 +1386,22 @@ productHandler.callbackQuery("admin:prod:f:save", async (ctx) => {
           state.kind === "SERVICE_PRODUCT" && state.panelType === "MARZBAN"
             ? (state.trafficResetCycle ?? null)
             : null,
-        requiredUserInfoEnabled:
-          state.kind === "OTHER_PRODUCT" ? (state.requiredUserInfoEnabled ?? false) : false,
-        requiredUserInfoPromptText:
-          state.kind === "OTHER_PRODUCT" ? (state.requiredUserInfoPromptText ?? null) : null,
-        deliveryType: state.kind === "OTHER_PRODUCT" ? (state.deliveryType ?? null) : null,
-        stockEnabled: false,
+        requiredUserInfoEnabled: isOther ? (state.requiredUserInfoEnabled ?? false) : false,
+        requiredUserInfoPromptText: isOther ? (state.requiredUserInfoPromptText ?? null) : null,
+        deliveryType: isOther ? (state.deliveryType ?? null) : null,
+        // Specialized-workflows phase: kind + profile defaults chosen in the
+        // wizard branch. Stock profiles start with stock delivery enabled
+        // (the legacy flow keeps its stockEnabled=false creation default).
+        otherProductKind: isOther ? (state.otherProductKind ?? "GENERIC") : "GENERIC",
+        otherProductFulfillmentProfile: otherProfile,
+        otherProductStockParser: isOther ? (state.otherProductStockParser ?? null) : null,
+        collectInfoBeforeManualApproval: isOther
+          ? (state.collectInfoBeforeManualApproval ?? false)
+          : false,
+        ...(presetSchema === null
+          ? {}
+          : { customerInputSchema: presetSchema as unknown as Prisma.InputJsonValue }),
+        stockEnabled: isStockProfile(otherProfile),
         isActive: true,
       },
       state.displayOrder ?? 0,
@@ -1195,7 +1602,14 @@ async function handleProductAddText(ctx: BotContext, text: string): Promise<void
         return;
       }
       state.invoiceDescription = description;
-      if (state.kind === "OTHER_PRODUCT") {
+      // The legacy userInfo question remains only for GENERIC (or legacy
+      // states without a kind) and manual gift cards; every other kind branch
+      // fixed the info/delivery flags already and jumps to the order step.
+      const kind = state.otherProductKind ?? "GENERIC";
+      const asksLegacyUserInfo =
+        kind === "GENERIC" ||
+        (kind === "GIFT_CARD" && state.otherProductFulfillmentProfile === "MANUAL_DELIVERY");
+      if (state.kind === "OTHER_PRODUCT" && asksLegacyUserInfo) {
         state.step = "userInfo";
         const kb = new InlineKeyboard()
           .text("اطلاعات از کاربر لازم است ✅", pcb.flowUserInfo("y"))
@@ -1220,6 +1634,16 @@ async function handleProductAddText(ctx: BotContext, text: string): Promise<void
         return;
       }
       state.requiredUserInfoPromptText = value;
+      if (skipsLegacyDelivery(state)) {
+        // Delivery already fixed by the kind branch (e.g. manual gift card).
+        state.step = "order";
+        await safeReply(
+          ctx,
+          "این محصول در جایگاه چندم نمایش داده شود؟ عدد بفرستید یا برای انتهای لیست 0 بفرستید.",
+          cancelKeyboard(),
+        );
+        return;
+      }
       state.step = "delivery";
       await safeReply(
         ctx,
@@ -1277,6 +1701,19 @@ async function handleProductEditText(ctx: BotContext, text: string): Promise<voi
       return;
     }
     await finishProductEdit(ctx, productId, { requiredUserInfoPromptText: value });
+    return;
+  }
+  if (fieldKey === "cmt") {
+    // "-" clears the completion message (falls back to the default copy).
+    if (value === "-") {
+      await finishProductEdit(ctx, productId, { completionMessageTemplate: null });
+      return;
+    }
+    if (value.length === 0 || value.length > 500) {
+      await safeReply(ctx, "متن باید بین ۱ تا ۵۰۰ کاراکتر باشد. دوباره وارد کنید.");
+      return;
+    }
+    await finishProductEdit(ctx, productId, { completionMessageTemplate: value });
     return;
   }
   if (fieldKey === "ontpl") {

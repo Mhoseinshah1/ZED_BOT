@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes, scryptSync } from "node:crypto";
 
 // AES-256-GCM secret encryption for credential-type fields
 // (Panel.passwordEncrypted, Panel.tokenEncrypted, gateway configs, ...).
@@ -74,4 +74,35 @@ export function maskSecretEdges(value: string): string {
     return `${value.slice(0, 4)}...${value.slice(-4)}`;
   }
   return "********";
+}
+
+// --- content fingerprinting ---------------------------------------------------
+
+const FINGERPRINT_CONTEXT = "zedbot.fingerprint.v1";
+
+let cachedFingerprintKey: { secret: string; key: Buffer } | null = null;
+
+function getFingerprintKey(): Buffer {
+  const secret = process.env.APP_SECRET;
+  if (secret === undefined || secret.length === 0) {
+    throw new SecretConfigError();
+  }
+  if (cachedFingerprintKey === null || cachedFingerprintKey.secret !== secret) {
+    cachedFingerprintKey = {
+      secret,
+      key: scryptSync(secret, FINGERPRINT_CONTEXT, 32),
+    };
+  }
+  return cachedFingerprintKey.key;
+}
+
+/**
+ * Deterministic keyed hash (HMAC-SHA256) of a sensitive value, for duplicate
+ * detection without decryption or exposure. The plaintext is normalized
+ * (CRLF -> LF, trimmed) so cosmetically different pastes of the same content
+ * collide. NEVER reversible; safe to store and index, never worth logging.
+ */
+export function fingerprintSecret(value: string): string {
+  const normalized = value.replace(/\r\n/g, "\n").trim();
+  return createHmac("sha256", getFingerprintKey()).update(normalized, "utf8").digest("hex");
 }

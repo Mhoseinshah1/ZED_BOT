@@ -1,5 +1,8 @@
 import type {
   OtherProductDeliveryType,
+  OtherProductFulfillmentProfile,
+  OtherProductKind,
+  OtherProductStockParser,
   PanelType,
   ProductType,
   ServiceLocation,
@@ -33,6 +36,11 @@ export interface ProductAddState {
     | "groups"
     | "location"
     | "category"
+    | "otherKind"
+    | "aiMode"
+    | "giftMode"
+    | "stockParser"
+    | "formPreset"
     | "volume"
     | "duration"
     | "price"
@@ -61,6 +69,12 @@ export interface ProductAddState {
   requiredUserInfoPromptText?: string | null;
   deliveryType?: OtherProductDeliveryType;
   displayOrder?: number;
+  // Specialized-workflows phase (OTHER_PRODUCT wizard branching).
+  otherProductKind?: OtherProductKind;
+  otherProductFulfillmentProfile?: OtherProductFulfillmentProfile;
+  otherProductStockParser?: OtherProductStockParser;
+  collectInfoBeforeManualApproval?: boolean;
+  customerInputSchemaPreset?: "TELEGRAM_PREMIUM" | "PERSONALIZED_AI" | "NONE";
 }
 
 /** Pre-invoice draft (user checkout browsing). No DB rows until "continue". */
