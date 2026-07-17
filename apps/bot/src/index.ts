@@ -5,6 +5,7 @@ import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
 import { startFreeTrialLoop } from "./services/free-trial.service.js";
+import { startFreeTrialCampaignLoop } from "./services/free-trial-campaign.service.js";
 import { startGatewaySettlementLoop } from "./services/gateway-payment.service.js";
 import {
   RECOVERY_RECHECK_DELAY_MS,
@@ -72,6 +73,12 @@ async function run(botToken: string): Promise<void> {
   // provisioning outcomes (exact username + ownership marker) and escalate
   // stale claims to manual review. Same never-throws loop contract.
   startFreeTrialLoop(bot.api);
+
+  // Trial-entitlement campaign queue (free-trial-entitlement-campaign):
+  // processes bulk reset/grant campaigns in small idempotent batches off
+  // the durable campaign/recipient rows - resumable after restarts,
+  // cancellation-safe. Same never-throws loop contract.
+  startFreeTrialCampaignLoop(bot.api);
 
   await bot.start({
     onStart: (botInfo) => {

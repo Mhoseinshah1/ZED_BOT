@@ -27,6 +27,7 @@ import {
 } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 import { failOrderWithRefund, type OrderForProvisioning } from "./provisioning.service.js";
+import { markTrialConversion } from "./trial-conversion.service.js";
 import {
   acquireServiceLock,
   SERVICE_LOCK_BUSY_TEXT,
@@ -260,7 +261,13 @@ export function calculateExtraTime(
 }
 
 export type ExtraTimeOutcome =
-  | { ok: true; service: Service; addedDays: number; alreadyApplied: boolean }
+  | {
+      ok: true;
+      service: Service;
+      addedDays: number;
+      alreadyApplied: boolean;
+      trialConverted?: boolean;
+    }
   | { ok: false; refunded: boolean; error: string };
 
 async function findAppliedExtraTime(orderId: string) {
@@ -483,7 +490,7 @@ async function executeExtraTimeOrderUnlocked(
       : newExpiresAt;
 
   // Persist with one retry (Phase 9.1 rule); still failing -> FAILED + refund.
-  const persist = (): Promise<Service> =>
+  const persist = (): Promise<{ service: Service; trialConverted: boolean }> =>
     prisma.$transaction(async (tx) => {
       const data: Prisma.ServiceUpdateInput = {
         status: nextStatus,
@@ -526,12 +533,15 @@ async function executeExtraTimeOrderUnlocked(
           },
         },
       });
-      return updated;
+      // Trial-lifecycle phase: the first verified paid operation converts
+      // the trial - same transaction as the completion, CAS-exactly-once.
+      const trialConverted = await markTrialConversion(tx, service, order.id, now);
+      return { service: updated, trialConverted };
     });
 
-  let updatedService: Service;
+  let persisted: { service: Service; trialConverted: boolean };
   try {
-    updatedService = await persist();
+    persisted = await persist();
   } catch (err) {
     logger.error("extra time persistence failed after panel success", {
       orderId: order.id,
@@ -539,7 +549,7 @@ async function executeExtraTimeOrderUnlocked(
       error: errorMessage(err),
     });
     try {
-      updatedService = await persist();
+      persisted = await persist();
     } catch (retryErr) {
       logger.error("extra time persistence retry failed", {
         orderId: order.id,
@@ -559,11 +569,17 @@ async function executeExtraTimeOrderUnlocked(
   }
   logger.info("extra time succeeded", {
     orderId: order.id,
-    serviceId: updatedService.id,
+    serviceId: persisted.service.id,
     panelId: panel.id,
     purchasedDays,
   });
-  return { ok: true, service: updatedService, addedDays: purchasedDays, alreadyApplied: false };
+  return {
+    ok: true,
+    service: persisted.service,
+    addedDays: purchasedDays,
+    alreadyApplied: false,
+    trialConverted: persisted.trialConverted,
+  };
 }
 
 /** HTML success message for the user after applied extra time. */

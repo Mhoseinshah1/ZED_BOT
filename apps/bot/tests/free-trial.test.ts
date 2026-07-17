@@ -508,18 +508,21 @@ describe.runIf(hasDeps)("free trial accounts", () => {
     expect(fresh.testAccountsCreatedCount).toBe(1);
     expect(fresh.lastTestAccountCreatedAt).not.toBeNull();
 
-    // Service representation: My Services shows the username; paid-lifecycle
-    // actions are hidden; detail page marks the trial; owner-scoped.
+    // Service representation: My Services shows the username; the detail
+    // page marks the trial; owner-scoped. Trial-lifecycle phase: the
+    // FREE_TRIAL source is no longer a capability blocker - an active
+    // Marzban trial on a capable ACTIVE panel gets the FULL paid-lifecycle
+    // action set (renewal/extras/toggle/regenerate), same rules as paid.
     expect(serviceAccountLabel(service)).toBe(service.username);
     const detail = serviceDetailText(service);
     expect(detail).toContain("نوع سرویس:\nاکانت تست رایگان");
     const actions = await resolveServiceDetailActions(service);
     expect(actions).toEqual({
-      toggleAction: null,
-      canBuyExtraVolume: false,
-      canBuyExtraTime: false,
-      canRegenerateLink: false,
-      canRenew: false,
+      toggleAction: "DISABLE",
+      canBuyExtraVolume: true,
+      canBuyExtraTime: true,
+      canRegenerateLink: true,
+      canRenew: true,
     });
 
     // Live sync path stays available for the trial account.

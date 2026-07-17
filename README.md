@@ -280,6 +280,18 @@ callbacks are re-checked server-side. Design in
 `docs/free-trial-admin-management.md`, threat model in
 `docs/free-trial-security.md`.
 
+**Trial entitlements & lifecycle**: per-user trial allowances
+(`FreeTrialEntitlement` grants with atomic reservation and exactly-once
+release, default-allowance policy preserving the legacy once-per-user
+semantics) with a per-user admin page «مدیریت اکانت تست 🎁»
+(grant/reset/revoke/cooldown/force-resolution, fully audited), OWNER-only
+bulk reset campaigns with typed confirmation and a durable resumable
+queue, and first-class paid lifecycle on trial services — renewal,
+extra volume/time, toggle and link regeneration follow the same
+per-action capability rules as paid services, with exactly-once
+trial-to-paid conversion. `docs/free-trial-entitlements.md`,
+`docs/free-trial-lifecycle.md`, `docs/free-trial-campaigns.md`.
+
 **Configurable user main-menu keyboard**: admins choose («تنظیمات عمومی ⚙️
 → نوع نمایش منوی کاربر») whether the user main menu renders as inline
 glass buttons inside the message (default) or as a persistent reply

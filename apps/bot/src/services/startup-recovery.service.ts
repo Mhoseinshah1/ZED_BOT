@@ -28,6 +28,7 @@ import {
   serviceProvisioningLockKey,
 } from "./service-lock.service.js";
 import { calculateRenewal, RENEWAL_EVENT_TYPE } from "./service-renewal.service.js";
+import { markTrialConversion } from "./trial-conversion.service.js";
 
 // =============================================================================
 // Startup crash recovery for in-request pipelines, with SAFE panel/database
@@ -500,6 +501,16 @@ async function completeReconciledMutation(
       where: { id: order.id, status: OrderStatus.PROVISIONING },
       data: { status: OrderStatus.COMPLETED, completedAt: now },
     });
+    // Trial-lifecycle phase: a reconciled APPLIED verdict is a verified,
+    // completed paid operation - it converts a trial exactly once too (the
+    // CAS makes replays and executor/reconciler races safe). No user
+    // message from reconciliation - only the live operation notifies.
+    await markTrialConversion(
+      tx,
+      { id: service.id, userId: service.userId, panelId: service.panel.id },
+      order.id,
+      now,
+    );
   });
   logger.info("startup recovery: panel mutation reconciled for anchor-less order", {
     orderId: order.id,

@@ -27,6 +27,26 @@ Schema: `packages/database/prisma/schema.prisma`. Background:
 | `FinancialReconciliationCase.duplicatePaymentId` `@unique` | One reconciliation case per duplicate payment | Every sweep/retry files another case; admins drown in duplicates of duplicates | `recordDuplicateSuccess`: re-reads the winning case and returns it (`created = false`) |
 | **WalletTransaction — app-level guard only** | One `CHARGE` ledger row per top-up payment | A pathological re-credit would double a user's balance | **NOT DB-enforced (documented gap).** Guarded by the `findFirst({ relatedPaymentId, reason })` check inside the settlement/approval transaction, itself behind the CAS status flips and the settlement claim. A partial unique index on `(relatedPaymentId, reason)` would add defense-in-depth at the cost of a migration — see [wallet-ledger-integrity.md](wallet-ledger-integrity.md) |
 
+## Trial-entitlement and trial-lifecycle invariants
+
+Not money, but the same discipline: every "at most one" rule that would
+corrupt trial allowances or conversions is DB-enforced or CAS-guarded.
+Schema + `packages/database/prisma/migrations/20260717000000_trial_entitlements_and_lifecycle/migration.sql`;
+background: [free-trial-entitlements.md](free-trial-entitlements.md),
+[free-trial-lifecycle.md](free-trial-lifecycle.md),
+[free-trial-campaigns.md](free-trial-campaigns.md).
+
+| Constraint / guard | Invariant | Who handles the violation |
+| --- | --- | --- |
+| `FreeTrialEntitlement` CHECKs: `allowance >= 0`, `consumed >= 0`, `consumed <= allowance` (migration SQL — Prisma cannot express them) | An allowance can never be overdrawn or negative, even against future code bugs | Reservation uses conditional `UPDATE … WHERE consumed < allowance` under the per-user advisory lock, so the CHECKs are a pure backstop |
+| `FreeTrialResetCampaign` CHECK: `allowance > 0` | A zero-grant campaign is invalid | Builder input validation (1..100) makes it a backstop |
+| `FreeTrialClaim_userId_live_key` partial unique index (**unchanged** by this phase) | One live claim per user (`CLAIMED`/`PROVISIONING`/`ACTIVE`/`MANUAL_REVIEW`) | `insertClaim` insert-first: concurrent claims die on `P2002`, rendered as the in-progress denial |
+| `FreeTrialEntitlement.idempotencyKey` `@unique` | One entitlement per logical admin/campaign operation (`trial-grant:<nonce>` / `trial-reset:<nonce>` / `trial-setrem:<nonce>` / `trial-campaign:<cid>:<uid>`) | Grant/campaign writers catch the `P2002` and converge on the existing row |
+| `FreeTrialEntitlement` `@@unique([campaignId, userId])` | At most one grant per campaign per user (NULL campaignId rows exempt — Postgres treats NULLs as distinct) | Campaign batch re-reads the winner on `P2002` |
+| `FreeTrialCampaignRecipient` `@@unique([campaignId, userId])` | Stable audience snapshot: one recipient row per campaign/user | `createMany({ skipDuplicates })` + re-run convergence |
+| `FreeTrialClaim.allowanceReleasedAt` CAS (`… IS NULL` + status ∈ FAILED/CANCELLED) | A claim's allowance unit is released **at most once**, and only from a released claim state | `releaseClaimAllowance` — CAS losers change nothing; concurrent sweeps cannot double-release |
+| `Service.convertedToPaidAt` CAS (`… IS NULL AND source = 'FREE_TRIAL'`) | Trial-to-paid conversion is marked **exactly once**; `firstPaidOrderId` records the winning order | `markTrialConversion` returns false for losers; replays/reconciliation are no-ops |
+
 ## Notes
 
 - **Nullable uniques are deliberate.** PostgreSQL treats NULLs as

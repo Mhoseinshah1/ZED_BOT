@@ -7,8 +7,12 @@ Threat model and hardening for free-trial VPN accounts. Companion to
 The asset being protected is free remote capacity: every trial is a real
 account on a real panel, so abuse = unpaid resource consumption. The
 guarantees below are enforced in
-`apps/bot/src/services/free-trial.service.ts` and the database schema,
-and locked by `apps/bot/tests/free-trial.test.ts`.
+`apps/bot/src/services/free-trial.service.ts`,
+`apps/bot/src/services/free-trial-entitlement.service.ts`,
+`apps/bot/src/services/free-trial-admin.service.ts` and the database
+schema, and locked by `apps/bot/tests/free-trial.test.ts` and
+`apps/bot/tests/trial-lifecycle-entitlements.test.ts` /
+`trial-campaigns.test.ts`.
 
 ## Anti-abuse
 
@@ -74,6 +78,62 @@ consumption, purchase and membership gates) is advisory rendering; the
 claim path re-runs it and the DB guards decide. Blocked users
 (`UserStatus !== ACTIVE`) are denied outright.
 
+## Entitlement invariants (trial-entitlement phase)
+
+**Reservation is atomic and overdraw-proof.** One allowance unit is
+reserved INSIDE the claim-insert transaction, under the per-user
+advisory lock (`zedbot-free-trial-user:<userId>`), via a conditional
+`UPDATE … WHERE consumed < allowance` — the row update re-checks the
+guard, and the database `CHECK` constraints (`allowance >= 0`,
+`consumed >= 0`, `consumed <= allowance`) are the authoritative
+backstop. The claim row is the reservation receipt: a rollback releases
+everything together, and a retried claim reuses the same reservation.
+Twenty concurrent clicks against ONE remaining unit yield one claim, one
+consumed unit, one account (suite C).
+
+**Barriers are re-checked inside the claim transaction.** A
+revoke/denial/cooldown that lands after the outer eligibility read still
+wins: the transaction re-reads the user row before reserving. Concurrent
+revoke-vs-claim and reset-vs-claim races converge safely (tests C2/C3).
+
+**Release is exactly-once, and only on positive evidence.** The CAS on
+`FreeTrialClaim.allowanceReleasedAt IS NULL` (restricted to
+`FAILED`/`CANCELLED` claims) admits at most one release per claim, under
+any number of concurrent sweeps. Only positively-established
+non-creation releases (pre-remote validation failure, definite remote
+failure, reconciled `NOT_APPLIED`, OWNER-forced not-created); UNKNOWN
+outcomes never release. A released unit reopens a `CONSUMED` grant but
+never resurrects a `REVOKED`/`EXPIRED` one. See
+`docs/free-trial-entitlements.md`.
+
+**Admin mutations are idempotent and audited.** Every grant/reset/
+set-remaining carries a one-shot `idempotencyKey`
+(`trial-grant:` / `trial-reset:` / `trial-setrem:` + nonce; unique in
+the DB) — replayed confirmations converge on the one existing row.
+Every mutation writes an `AuditLog` row (`writeTrialAudit`) with safe
+before/after metadata; grants are capped at 100 per operation and 500
+users per interactive bulk selection.
+
+**Forcing an undecided claim requires OWNER + warning + reason.** Force
+resolution never invents remote state: "created" runs the reconciler
+against the frozen username, "not created" releases the unit exactly
+once after the explicit warning that releasing may lead to more than one
+provisioned trial.
+
+**Destructive bulk operations require a typed confirmation.** A reset
+campaign starts only after the preview, the final warning AND the exact
+phrase `RESET TRIAL`; the start is CAS-guarded so replays are no-ops.
+Campaign grants are triple-idempotent (recipient unique pair,
+entitlement unique pair + idempotency key, CAS status flips) and
+cancellation never claws back granted allowance
+(`docs/free-trial-campaigns.md`).
+
+**Conversion is exactly-once.** `Service.convertedToPaidAt` is stamped
+by a CAS (`… IS NULL`) inside the first verified paid operation's own
+transaction; replays, races and reconciliation cannot double-convert,
+never restore trial allowance and never enable another trial claim
+(`docs/free-trial-lifecycle.md`).
+
 ## Secret hygiene
 
 - **No tokens, passwords or subscription links are ever logged.** Log
@@ -91,6 +151,12 @@ claim path re-runs it and the DB guards decide. Blocked users
   render config and counters; manual-review alerts to OWNER admins carry
   the claim short id, status and attempt count — no usernames, links or
   secrets.
+- **No secrets in audits or admin history pages**: `AuditLog` metadata
+  is safe scalars (counts, dates, reasons, statuses); the per-user
+  history page shows claim ids, panel names, statuses, dates and the
+  frozen username; the trial-services page shows username/status/expiry/
+  converted marker — never subscription URLs, tokens or remote client
+  ids; campaign recipient pages show safe skip/error markers only.
 - Foreign users can never read a trial service: services are
   owner-scoped everywhere (asserted in tests).
 
@@ -100,6 +166,8 @@ claim path re-runs it and the DB guards decide. Blocked users
 | --- | --- |
 | User flow (`user:free_test`, `user:ft:p:<sid>`, `user:ft:go:<sid>`) | registered bot user (`ctx.dbUser`), user status `ACTIVE`, feature enabled + panel ready |
 | Admin trial page and ALL its subroutes (`admin:panel:trial/tren/trdis/trpn/trst`, legacy `ts`, trial field edits/toggles) | active admin with role **OWNER** — enforced per route by `requireOwner`; non-OWNER admins get a data-free toast «دسترسی به این بخش فقط برای مالک مجموعه فعال است.» |
+| Per-user «مدیریت اکانت تست 🎁» (`admin:users:trial:*`) | active admin; **OWNER-only inside**: «تنظیم تعداد تست باقی‌مانده» (set remaining) and every force-resolution/reconcile button — non-OWNERs get «فقط مالک ربات به این بخش دسترسی دارد.» |
+| Quota dashboard + campaigns (`admin:trialent:*`, incl. the campaign text flow) | active admin with role **OWNER** — every callback route and the builder's text handler re-check the role |
 | Non-admins on admin routes | stopped earlier by the admin auth middleware |
 
 The OWNER gate is a local copy of the financial-reconciliation gate;

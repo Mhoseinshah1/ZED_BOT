@@ -178,10 +178,16 @@ export function serviceDetailText(service: Service, staleNotice: string | null =
     `نام سرویس: <code>${escapeHtml(serviceAccountLabel(service))}</code>`,
     "",
   ];
-  // Free-trial phase: trial services are explicitly marked on the detail
-  // page (they never render paid-lifecycle buttons).
+  // Trial-lifecycle phase: the ORIGIN stays visible forever. Before the
+  // first verified paid operation the service is a free trial; after
+  // conversion the label switches but never disappears - `source` is
+  // immutable and only convertedToPaidAt distinguishes the two.
   if (service.source === "FREE_TRIAL") {
-    lines.push("نوع سرویس:\nاکانت تست رایگان");
+    lines.push(
+      service.convertedToPaidAt === null
+        ? "نوع سرویس:\nاکانت تست رایگان"
+        : "نوع سرویس:\nشروع‌شده با اکانت تست",
+    );
   }
   if (service.productNameSnapshot !== null) {
     lines.push(`نام محصول: ${escapeHtml(service.productNameSnapshot)}`);

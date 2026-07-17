@@ -8,13 +8,22 @@ interaction with the payment system**.
 Source of truth:
 `apps/bot/src/services/free-trial.service.ts` (claim, provisioning,
 reconciliation, sweep),
+`apps/bot/src/services/free-trial-entitlement.service.ts`
+(trial-entitlement phase: the shared eligibility/allowance policy,
+reservation and release — see `docs/free-trial-entitlements.md`),
 `apps/bot/src/services/free-trial-settings.service.ts` (global settings),
 `apps/bot/src/handlers/user-free-trial/free-trial.handler.ts` (user flow),
 `packages/database/prisma/schema.prisma` (`FreeTrialClaim`,
-`FreeTrialClaimStatus`, `ServiceSource`, `Panel.test*`) and the migration
-`packages/database/prisma/migrations/20260716000000_free_trial_accounts/`.
-Tests: `apps/bot/tests/free-trial.test.ts` (real PostgreSQL + Redis + mock
-Marzban/XUI panels).
+`FreeTrialClaimStatus`, `FreeTrialEntitlement`, `ServiceSource`,
+`Panel.test*`) and the migrations
+`packages/database/prisma/migrations/20260716000000_free_trial_accounts/`
+and `…/20260717000000_trial_entitlements_and_lifecycle/`.
+Tests: `apps/bot/tests/free-trial.test.ts` and
+`apps/bot/tests/trial-lifecycle-entitlements.test.ts` (real PostgreSQL +
+Redis + mock Marzban/XUI panels). Companions:
+`docs/free-trial-entitlements.md` (allowance model),
+`docs/free-trial-lifecycle.md` (paid operations + conversion),
+`docs/free-trial-campaigns.md` (bulk campaigns).
 
 **The feature is DISABLED by default** — fresh and existing installations
 behave identically until an operator turns it on (see
@@ -25,6 +34,10 @@ behave identically until an operator turns it on (see
 A trial is a **separate entitlement type**, not a discounted purchase:
 
 ```
+FreeTrialEntitlement (permission: allowance/consumed — admin, reset,
+      ▲              campaign, compensation grants; the DEFAULT policy
+      │              allowance stays virtual)
+      │ entitlementId (NULL = default pool)
 FreeTrialClaim  ──provisions──►  remote panel account
       │                                │
       └──────► Service (source FREE_TRIAL, serviceLocation TEST,
@@ -32,22 +45,31 @@ FreeTrialClaim  ──provisions──►  remote panel account
 ```
 
 - The `FreeTrialClaim` row — **not** a `Payment` or `Order` — is the
-  entitlement record. It is created atomically and drives provisioning,
-  reconciliation and expiry.
+  execution record: one actual request/provisioning attempt. It is
+  created atomically and drives provisioning, reconciliation and expiry.
+- Trial-entitlement phase: a `FreeTrialEntitlement` is PERMISSION for
+  one or more claims. The claim transaction reserves exactly one
+  allowance unit (deterministic consumption order, conditional-UPDATE
+  overdraw guard, exactly-once release on positive non-creation) — the
+  full model lives in `docs/free-trial-entitlements.md`.
 - A trial is **never a zero-price checkout**: no `CheckoutSession`, no
   `Order`, no `Payment`, no `WalletTransaction`, no discount usage, no
   referral effects, no paid counters (see the financial-isolation table
   below).
 - The resulting `Service` is real: it appears in «سرویس‌های من», supports
-  live sync, stored subscription links and configs — but it is a
-  **read-only entitlement**: `resolveServiceDetailActions` hides renewal,
-  extra volume, extra time, enable/disable and link regeneration for
-  `source === "FREE_TRIAL"`. Its detail page is explicitly marked
-  «نوع سرویس: اکانت تست رایگان»
+  live sync, stored subscription links and configs. Trial-lifecycle
+  phase: the former blanket action block is REMOVED —
+  `resolveServiceDetailActions` decides renewal, extra volume, extra
+  time, enable/disable and link regeneration **per action** from panel
+  capability/state, remote model, status and quota; `source` never gates
+  capability (`docs/free-trial-lifecycle.md`). The detail page stays
+  explicitly marked «نوع سرویس: اکانت تست رایگان» — and, after the first
+  verified paid operation stamps `Service.convertedToPaidAt`
+  (CAS-exactly-once), «نوع سرویس: شروع‌شده با اکانت تست»
   (`apps/bot/src/handlers/user-services/service-views.ts`).
 - `Service.source` (`ServiceSource`: `PAID` default / `FREE_TRIAL` /
-  `ADMIN_CREATED`) records the entitlement origin; all pre-existing
-  services stay `PAID`.
+  `ADMIN_CREATED`) records the entitlement origin, is immutable, and all
+  pre-existing services stay `PAID`.
 
 ## Claim status machine
 
@@ -77,12 +99,16 @@ FreeTrialClaim  ──provisions──►  remote panel account
 | `CANCELLED` | released before any remote effect | **no — retry allowed** | no |
 | `MANUAL_REVIEW` | reconciliation exhausted, admin alerted | yes (in progress) | yes |
 
-"Consumes entitlement" = the status is in `CONSUMING_STATUSES`
-(`CLAIMED`, `PROVISIONING`, `ACTIVE`, `MANUAL_REVIEW`, `EXPIRED`).
-`FAILED`/`CANCELLED` rows never block a retry. `EXPIRED` rows enforce the
-admin policy: with `free_trial_once_per_user` on (default) they block
-forever; otherwise `free_trial_cooldown_days` applies from the claim's
-`createdAt`.
+"Consumes entitlement" = the status is in `CONSUMING_CLAIM_STATUSES`
+(`CLAIMED`, `PROVISIONING`, `ACTIVE`, `MANUAL_REVIEW`, `EXPIRED`) — these
+claims hold an allowance unit (their `entitlementId` row, or one virtual
+default unit when NULL). `FAILED`/`CANCELLED` rows never block a retry:
+their unit is returned exactly once via the `allowanceReleasedAt` CAS.
+`EXPIRED` rows enforce the admin policy through the default-allowance
+mapping: with `free_trial_once_per_user` on (default) and no explicit
+allowance they exhaust the single default unit; otherwise
+`free_trial_cooldown_days` applies from the claim's `createdAt` (see
+`docs/free-trial-entitlements.md`).
 
 ## The atomic claim (insert-first)
 
@@ -100,13 +126,18 @@ WHERE "status" IN ('CLAIMED', 'PROVISIONING', 'ACTIVE', 'MANUAL_REVIEW');
 
 `insertClaim` inserts FIRST: twenty simultaneous confirms produce one
 insert and nineteen instant `P2002` unique-violation denials (rendered as
-«در حال حاضر ساخت اکانت تست شما در حال انجام است.») with no transaction
-pile-up on the pool. The eligibility reads before the insert are only a
-policy gate (once-per-user / cooldown over `EXPIRED` rows, which the
-index deliberately excludes so that policy stays admin-configurable);
-concurrent duplicates cannot slip through them because they collide on
-the index regardless of what the reads saw. Proven by test 21 (20
-simultaneous confirms → 1 claim, 1 remote create call, 1 service).
+«یک درخواست اکانت تست برای شما در حال پردازش یا بررسی است.») with no
+transaction pile-up on the pool. The eligibility reads before the insert
+are only a policy gate; concurrent duplicates cannot slip through them
+because they collide on the index regardless of what the reads saw.
+Trial-entitlement phase: the SAME transaction then re-checks the admin
+barriers on a fresh user row (revoke / temporary denial / cooldown that
+landed after the outer read wins over the claim) and reserves exactly
+one allowance unit under the per-user advisory lock — the claim row is
+the reservation receipt, so a rollback releases everything together
+(`docs/free-trial-entitlements.md`). Proven by test 21 (20 simultaneous
+confirms → 1 claim, 1 remote create call, 1 service) and suite C of the
+entitlement tests (20 clicks with ONE remaining unit → 1 claim/unit).
 
 **2. Per-panel capacity — advisory lock.** When
 `Panel.testMaxConcurrentAccounts` is set, capacity is decided AFTER the
@@ -115,7 +146,8 @@ insert, in a tiny transaction serialized by
 the oldest claims within the limit (live statuses + unexpired `ACTIVE`)
 win; a losing insert cancels **itself** (`CANCELLED`,
 `failureReasonCode = "capacity-full"`, user text «ظرفیت اکانت تست این
-لوکیشن تکمیل شده است. لطفاً بعداً تلاش کنید.»). Count-then-insert
+لوکیشن تکمیل شده است. لطفاً بعداً تلاش کنید.») and its reserved
+allowance unit is returned exactly once. Count-then-insert
 over-allocation is impossible. `null` capacity = no cap. Slots free up
 when a claim leaves the live set (expiry, failure, cancellation). Proven
 by test 22 (two users race the last slot → exactly one wins).
@@ -209,9 +241,9 @@ reconciliation**:
 
 | Outcome | Evidence | Action |
 | --- | --- | --- |
-| `APPLIED` | account exists remotely | recover: persist the `Service`, claim → `ACTIVE`, notify the user once with the normal success message |
-| `NOT_APPLIED` | positively absent (`notFound`) | claim → `FAILED` (`reconciled-not-applied`) — entitlement released, retry allowed |
-| `UNKNOWN` | panel unreachable / ambiguous | defer; nothing changes |
+| `APPLIED` | account exists remotely | recover: persist the `Service`, claim → `ACTIVE`, notify the user once with the normal success message (allowance stays consumed) |
+| `NOT_APPLIED` | positively absent (`notFound`) | claim → `FAILED` (`reconciled-not-applied`) — the reserved allowance unit is released exactly once (`allowanceReleasedAt` CAS), retry allowed |
+| `UNKNOWN` | panel unreachable / ambiguous | defer; nothing changes — the unit is never released on uncertainty |
 
 Proven by tests 24/25: a create that stores remotely but times out
 reconciles to `APPLIED` with exactly one `Service`; repeated
@@ -222,15 +254,25 @@ reconciliation converges (an already-`ACTIVE` claim is a no-op).
 `startFreeTrialLoop` (wired in `apps/bot/src/index.ts`) reschedules
 `runFreeTrialSweep` every 60 s (batch 20, never throws):
 
+0. **Entitlement expiry** (trial-entitlement phase) —
+   `expireTrialEntitlements`: `ACTIVE` grants past their `expiresAt`
+   become `EXPIRED` deterministically (idempotent; rows never deleted,
+   unused units become unusable).
 1. **Expiry** — `ACTIVE` claims past `expiresAt`: claim → `EXPIRED` and
    the trial `Service` → `EXPIRED` (both CAS). When the panel has
    `testAutoDisableAfterExpiry` on, the remote account is additionally
    disabled via `setServiceStatus` (best-effort; failures are logged and
    retried on no schedule). **Without that flag there is no automatic
    remote deletion or disabling of expired trials** — the remote account
-   simply keeps its own quota/expiry limits.
+   simply keeps its own quota/expiry limits. Trial-lifecycle phase: a
+   **converted** service (`convertedToPaidAt` set, or a paid renewal
+   already moved its `expiresAt` into the future) is a normal
+   paid-lifecycle service — the claim still expires, but the service is
+   never expired or remotely disabled by the sweep
+   (`docs/free-trial-lifecycle.md`).
 2. **Stale claims** — `CLAIMED` rows older than 15 minutes never reached
-   the panel: released as `CANCELLED` (`stale-claim`).
+   the panel: released as `CANCELLED` (`stale-claim`) one by one, so
+   each reserved allowance unit is returned exactly once.
 3. **Reconciliation** — `PROVISIONING` claims idle for ≥ 1 minute are
    reconciled; `APPLIED` recoveries notify the user once.
 4. **Manual-review escalation** — a claim still UNKNOWN after
@@ -316,13 +358,16 @@ the service. Success sends the username, duration, traffic and
 subscription link — to the owner only.
 
 Denial texts (verbatim service constants): «شما قبلاً از اکانت تست
-رایگان استفاده کرده‌اید.» · «در حال حاضر ساخت اکانت تست شما در حال انجام
-است.» · «در حال حاضر پنل فعالی برای ارائه اکانت تست وجود ندارد.» ·
-«ساخت اکانت تست موقتاً امکان‌پذیر نیست. لطفاً کمی بعد دوباره تلاش
-کنید.» · «اکانت تست فقط برای کاربرانی فعال است که قبلاً خرید موفق
-نداشته‌اند.» · «برای دریافت اکانت تست، ابتدا در کانال‌های مشخص‌شده عضو
-شوید.» · «ظرفیت اکانت تست این لوکیشن تکمیل شده است. لطفاً بعداً تلاش
-کنید.»
+رایگان استفاده کرده‌اید.» · «یک درخواست اکانت تست برای شما در حال
+پردازش یا بررسی است.» · «در حال حاضر پنل فعالی برای ارائه اکانت تست
+وجود ندارد.» · «ساخت اکانت تست موقتاً امکان‌پذیر نیست. لطفاً کمی بعد
+دوباره تلاش کنید.» · «اکانت تست فقط برای کاربرانی فعال است که قبلاً
+خرید موفق نداشته‌اند.» · «برای دریافت اکانت تست، ابتدا در کانال‌های
+مشخص‌شده عضو شوید.» · «ظرفیت اکانت تست این لوکیشن تکمیل شده است. لطفاً
+بعداً تلاش کنید.» — plus the trial-entitlement denials (exhausted /
+expired / revoked / panel-scoped allowance, with their own Persian
+texts): the complete ten-reason table lives in
+`docs/free-trial-entitlements.md`.
 
 **Forged/stale callbacks are harmless by construction.** Button
 visibility is presentation only: a user replaying an old `user:free_test`

@@ -17,6 +17,7 @@ import {
   XUI_LEGACY_OPERATION_TEXT,
 } from "./panel-readiness.service.js";
 import { failOrderWithRefund, type OrderForProvisioning } from "./provisioning.service.js";
+import { markTrialConversion } from "./trial-conversion.service.js";
 import {
   acquireServiceLock,
   SERVICE_LOCK_BUSY_TEXT,
@@ -62,7 +63,7 @@ export interface RenewalComputation {
 }
 
 export type RenewalOutcome =
-  | { ok: true; service: Service; alreadyApplied: boolean }
+  | { ok: true; service: Service; alreadyApplied: boolean; trialConverted?: boolean }
   | { ok: false; refunded: boolean; error: string };
 
 const GIB = 1024n * 1024n * 1024n;
@@ -342,7 +343,7 @@ async function executeRenewalOrderUnlocked(
 
   // Panel account is renewed. Persist with one retry; the user must end up
   // with an updated Service + COMPLETED order, or a refund (Phase 9.1 rule).
-  const persist = (): Promise<Service> =>
+  const persist = (): Promise<{ service: Service; trialConverted: boolean }> =>
     prisma.$transaction(async (tx) => {
       const updated = await tx.service.update({
         where: { id: service.id },
@@ -367,12 +368,15 @@ async function executeRenewalOrderUnlocked(
           },
         },
       });
-      return updated;
+      // Trial-lifecycle phase: the first verified paid operation converts
+      // the trial - same transaction as the completion, CAS-exactly-once.
+      const trialConverted = await markTrialConversion(tx, service, order.id, now);
+      return { service: updated, trialConverted };
     });
 
-  let updatedService: Service;
+  let persisted: { service: Service; trialConverted: boolean };
   try {
-    updatedService = await persist();
+    persisted = await persist();
   } catch (err) {
     logger.error("renewal persistence failed after panel success", {
       orderId: order.id,
@@ -380,7 +384,7 @@ async function executeRenewalOrderUnlocked(
       error: errorMessage(err),
     });
     try {
-      updatedService = await persist();
+      persisted = await persist();
     } catch (retryErr) {
       logger.error("renewal persistence retry failed", {
         orderId: order.id,
@@ -401,10 +405,15 @@ async function executeRenewalOrderUnlocked(
   }
   logger.info("renewal succeeded", {
     orderId: order.id,
-    serviceId: updatedService.id,
+    serviceId: persisted.service.id,
     panelId: panel.id,
   });
-  return { ok: true, service: updatedService, alreadyApplied: false };
+  return {
+    ok: true,
+    service: persisted.service,
+    alreadyApplied: false,
+    trialConverted: persisted.trialConverted,
+  };
 }
 
 /** HTML success message for the user after a completed renewal. */
