@@ -221,10 +221,12 @@ describe.runIf(hasDb)("Apple-ID stock import (fingerprint dedup)", () => {
     expect(items.map((i) => i.label).sort()).toEqual(
       [maskEmail(EMAIL_A), maskEmail(EMAIL_B)].sort(),
     );
-    // createMany rows share one createdAt - resolve item A by its masked label.
-    const itemA = items.find((i) => i.label === maskEmail(EMAIL_A));
-    expect(itemA).toBeDefined();
-    expect(decryptSecret(itemA!.contentEncrypted)).toContain(PASSWORD_A);
+    // createMany rows share one createdAt (and A/B mask identically), so
+    // resolve item A by decrypting instead of relying on order or label.
+    const decrypted = items.map((i) => decryptSecret(i.contentEncrypted));
+    const contentA = decrypted.find((c) => c.startsWith(EMAIL_A));
+    expect(contentA).toBeDefined();
+    expect(contentA).toContain(PASSWORD_A);
 
     // Existing duplicates are a BLOCKING preview error.
     const dupPreview = await previewStockImport(
