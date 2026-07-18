@@ -367,7 +367,13 @@ async function requeueFailedAttempt(
         ? { ok: false, safeMessage: ATTEMPT_NOT_FOUND_TEXT }
         : { ok: true, attempt: fresh };
     }
-    claimed = (await prisma.logGroupSetupAttempt.findUnique({ where: { id: attemptId } }))!;
+    const freshClaimed = await prisma.logGroupSetupAttempt.findUnique({ where: { id: attemptId } });
+    if (freshClaimed === null) {
+      // Row deleted concurrently between the claim and this read - fail safely
+      // instead of dereferencing null.
+      return { ok: false, safeMessage: ATTEMPT_NOT_FOUND_TEXT };
+    }
+    claimed = freshClaimed;
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       return { ok: false, safeMessage: SETUP_ALREADY_RUNNING_TEXT };

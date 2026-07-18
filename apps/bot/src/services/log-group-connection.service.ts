@@ -397,7 +397,13 @@ export async function confirmLogGroupConnection(
         ? { ok: false, safeMessage: "عملیات راه‌اندازی پیدا نشد." }
         : { ok: true, attempt: fresh };
     }
-    claimed = (await prisma.logGroupSetupAttempt.findUnique({ where: { id: attemptId } }))!;
+    const freshClaimed = await prisma.logGroupSetupAttempt.findUnique({ where: { id: attemptId } });
+    if (freshClaimed === null) {
+      // Row deleted concurrently between the claim and this read - fail safely
+      // instead of dereferencing null.
+      return { ok: false, safeMessage: "عملیات راه‌اندازی پیدا نشد." };
+    }
+    claimed = freshClaimed;
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       // The unique activeSlot is taken by another running setup.
