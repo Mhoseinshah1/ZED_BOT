@@ -4,6 +4,9 @@ import {
   getRedisOptions,
   LOG_DELIVERY_JOB_NAME,
   LOG_DELIVERY_QUEUE_NAME,
+  LOG_GROUP_SETUP_JOB_NAME,
+  LOG_GROUP_SETUP_QUEUE_NAME,
+  logGroupSetupJobId,
   WORKER_CAPABILITIES_KEY,
   WORKER_HEARTBEAT_KEY,
   type WorkerCapabilities,
@@ -57,6 +60,7 @@ function errorText(err: unknown): string {
 interface QueuePair {
   backup: Queue;
   logDelivery: Queue;
+  logGroupSetup: Queue;
 }
 
 let queues: QueuePair | null = null;
@@ -87,12 +91,13 @@ function getQueues(): QueuePair | null {
   };
   const backup = new Queue(BACKUP_QUEUE_NAME, { connection });
   const logDelivery = new Queue(LOG_DELIVERY_QUEUE_NAME, { connection });
-  for (const queue of [backup, logDelivery]) {
+  const logGroupSetup = new Queue(LOG_GROUP_SETUP_QUEUE_NAME, { connection });
+  for (const queue of [backup, logDelivery, logGroupSetup]) {
     queue.on("error", (err) => {
       logger.warn("ops queue redis error", { queue: queue.name, error: errorText(err) });
     });
   }
-  queues = { backup, logDelivery };
+  queues = { backup, logDelivery, logGroupSetup };
   queuesFingerprint = fingerprint;
   return queues;
 }
@@ -102,6 +107,7 @@ export async function resetOpsQueueForTests(): Promise<void> {
   if (queues !== null) {
     await queues.backup.close().catch(() => undefined);
     await queues.logDelivery.close().catch(() => undefined);
+    await queues.logGroupSetup.close().catch(() => undefined);
     queues = null;
     queuesFingerprint = "";
   }
@@ -222,6 +228,61 @@ export async function enqueueLogDelivery(deliveryId: string): Promise<boolean> {
   } catch (err) {
     logger.warn("log delivery enqueue failed", { deliveryId, error: errorText(err) });
     return false;
+  }
+}
+
+/**
+ * Enqueues the PROVISION_LOG_GROUP job for one LogGroupSetupAttempt. jobId =
+ * log-group-setup:<attemptId>, so a repeated OWNER confirmation of the same
+ * attempt never creates a second provisioning job (BullMQ deduplicates on the
+ * id). Attempts/backoff live in the worker's default job options; the DB row
+ * is the durable resume point, so completed/failed jobs are removed. Returns
+ * false (fail-soft) when Redis is unconfigured or unreachable - the caller
+ * shows a safe error and the QUEUED row can be re-enqueued.
+ */
+export async function enqueueLogGroupSetup(attemptId: string): Promise<boolean> {
+  const pair = getQueues();
+  if (pair === null) {
+    return false;
+  }
+  try {
+    await withTimeout(
+      pair.logGroupSetup.add(
+        LOG_GROUP_SETUP_JOB_NAME,
+        { attemptId },
+        {
+          jobId: logGroupSetupJobId(attemptId),
+          attempts: 3,
+          backoff: { type: "exponential", delay: 15_000 },
+        },
+      ),
+    );
+    return true;
+  } catch (err) {
+    logger.warn("log group setup enqueue failed", { attemptId, error: errorText(err) });
+    return false;
+  }
+}
+
+/** Waiting+active+failed counts for the log-group-setup queue (status page). */
+export async function getLogGroupSetupQueueCounts(): Promise<BackupQueueCounts | null> {
+  const pair = getQueues();
+  if (pair === null) {
+    return null;
+  }
+  try {
+    const counts = await withTimeout(
+      pair.logGroupSetup.getJobCounts("waiting", "active", "delayed", "failed"),
+    );
+    return {
+      waiting: counts.waiting ?? 0,
+      active: counts.active ?? 0,
+      failed: counts.failed ?? 0,
+      delayed: counts.delayed ?? 0,
+    };
+  } catch (err) {
+    logger.warn("log group setup queue counts failed", { error: errorText(err) });
+    return null;
   }
 }
 

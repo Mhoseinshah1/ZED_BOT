@@ -103,6 +103,29 @@ export async function compareAndSetBooleanSetting(
 }
 
 /**
+ * Transaction-aware Setting upsert: writes through the given Prisma client
+ * (a $transaction client, so the write commits atomically with its siblings)
+ * and refreshes the process cache. Used by the atomic log-group activation
+ * where the group-id/title Settings and the LogTopic bindings must switch
+ * together or not at all. Cache is only meaningful after the tx commits;
+ * callers inside a tx should treat the cache write as best-effort (a rollback
+ * leaves a slightly stale cache entry that the 30s TTL corrects).
+ */
+export async function setSettingWithClient(
+  client: Prisma.TransactionClient,
+  key: string,
+  value: string,
+  type: SettingType,
+): Promise<void> {
+  await client.setting.upsert({
+    where: { key },
+    update: { value, type },
+    create: { key, value, type },
+  });
+  cache.set(key, { value, at: Date.now() });
+}
+
+/**
  * Removes a Setting row (missing key is fine) and refreshes the cache so the
  * deletion is visible immediately, like setSetting.
  */

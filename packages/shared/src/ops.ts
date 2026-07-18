@@ -24,10 +24,33 @@ export const LOG_DELIVERY_JOB_NAME = "DELIVER_SYSTEM_LOG";
 /** Repeatable-job id for the scheduled backup (one per installation). */
 export const SCHEDULED_BACKUP_JOB_ID = "scheduled-database-backup";
 
+// Direct-log-group-setup phase: the durable topic-provisioning + activation
+// queue. The bot enqueues one job per LogGroupSetupAttempt (jobId
+// log-group-setup:<attemptId>, so a repeated OWNER confirmation reuses the
+// same job); the worker creates the default forum topics, sends the direct
+// SYSTEM test and activates the group atomically - NEVER inline in a
+// callback.
+export const LOG_GROUP_SETUP_QUEUE_NAME = "telegram-log-group-setup";
+export const LOG_GROUP_SETUP_JOB_NAME = "PROVISION_LOG_GROUP";
+
+/** BullMQ job id for one setup attempt (idempotent across repeated confirms). */
+export function logGroupSetupJobId(attemptId: string): string {
+  return `log-group-setup:${attemptId}`;
+}
+
 // --- locks / heartbeat / capabilities -------------------------------------------------------------
 
 /** Only one database backup may run at a time (worker-held Redis lock). */
 export const BACKUP_LOCK_KEY = "zedbot:backup:database";
+
+/** Only one log-group setup provisioning may run at a time (worker lock). */
+export const LOG_GROUP_SETUP_LOCK_KEY = "zedbot:log-group:setup";
+
+// The log-group binding lives in two Settings; the string keys are shared so
+// BOTH the bot (validation / group-side flows / status page) and the worker
+// (atomic activation) read and write the identical Setting rows.
+export const LOG_GROUP_CHAT_ID_SETTING_KEY = "log_group_chat_id";
+export const LOG_GROUP_TITLE_SETTING_KEY = "log_group_title";
 
 /** Worker liveness: SET with TTL every WORKER_HEARTBEAT_INTERVAL_MS. */
 export const WORKER_HEARTBEAT_KEY = "zedbot:worker:heartbeat";

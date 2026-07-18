@@ -46,6 +46,10 @@ export const OPS_EVENTS = {
   WALLET_MANUAL_ADJUSTED: "wallet.manual_adjustment",
   BACKUP_DELETED: "backup.deleted",
   LOG_GROUP_CHANGED: "log_group.changed",
+  // Direct-log-group-setup phase: the normal queued log emitted right after
+  // a group is activated - it proves SystemLog persistence, SystemLogDelivery
+  // creation, the worker queue, topic routing and Telegram delivery all work.
+  LOG_GROUP_CONNECTED: "log_group.connected",
 } as const;
 export type OpsEventType = (typeof OPS_EVENTS)[keyof typeof OPS_EVENTS];
 
