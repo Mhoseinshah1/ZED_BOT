@@ -2232,6 +2232,33 @@ enum NotificationInteractionType {
 }
 
 /**
+ * Analytics phase (Phase 4) — the kind of evidence-backed conversion an
+ * attribution records. DIRECT_* require hard entity equality (the completed
+ * Order's checkoutSession / service equals the one the notification pointed at);
+ * ASSISTED_WINBACK is a same-user new purchase after a recorded win-back click
+ * within the window (NO entity link — hence "assisted", never "direct"). The
+ * value never asserts the notification CAUSED the purchase, only that recorded
+ * evidence (a persisted click before a completed order) supports attribution.
+ */
+enum NotificationAttributionKind {
+  DIRECT_CHECKOUT
+  DIRECT_SERVICE
+  ASSISTED_WINBACK
+}
+
+/**
+ * Analytics phase (Phase 4) — attribution lifecycle. ACTIVE = a live, evidence-
+ * backed attribution counting toward attributed gross+net revenue. REVERSED =
+ * the underlying Order was later refunded / voided (Order left COMPLETED, or a
+ * refunding WalletTransaction appeared); its revenue is moved to reversed and net
+ * drops to zero. Reversal is idempotent (reversedAt stamped once).
+ */
+enum NotificationAttributionStatus {
+  ACTIVE
+  REVERSED
+}
+
+/**
  * One persisted automated notification. Created SCHEDULED by a worker scan from
  * fresh state, promoted to READY when due + not quiet, and delivered by the
  * delivery worker (CAS SENDING -> SENT/FAILED/DEAD_LETTER). dedupeKey enforces
@@ -2385,6 +2412,79 @@ model CheckoutNotificationPreference {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+/**
+ * Analytics phase (Phase 4): ONE evidence-backed conversion attribution linking a
+ * completed paid Order to the notification whose recorded click preceded it.
+ * Convergence authority (never fabricate a conversion, never double-count):
+ * - orderId is @unique          -> one Order has AT MOST one attribution.
+ * - interactionId is @unique    -> one recorded click backs AT MOST one Order.
+ * Both a low-latency after-commit hook and a periodic reconciler write through
+ * these constraints, so a racing double-write surfaces as P2002 and is resolved
+ * idempotently by re-reading the winner — an Order is never attributed twice.
+ * Every reference (orderId / notificationId / interactionId / userId) is a SOFT
+ * reference (indexed String, NO FK), mirroring AutomatedNotification: notification
+ * history retention cleanup can prune the source notification/interaction rows
+ * WITHOUT cascading into — or being cascaded by — this financial-analytics table.
+ * evidenceSnapshot holds ONLY safe, non-PII evidence (types, kind, the four
+ * timestamps, entity-equality booleans, the window in seconds) — never a service
+ * username, subscription link, price beyond the order's own finalPriceToman, or
+ * any provider payload. Revenue is the Order's finalPriceToman ONLY; gross/net are
+ * attributed revenue, NEVER "profit" (no cost is known here).
+ */
+model NotificationConversionAttribution {
+  id String @id @default(uuid())
+
+  kind   NotificationAttributionKind
+  status NotificationAttributionStatus @default(ACTIVE)
+
+  // The completed paid Order (convergence authority — one Order, one attribution).
+  orderId String @unique
+
+  // Soft references (index-only, no FK) so notification retention cleanup never
+  // cascades into this table. interactionId is unique: one click -> one Order.
+  notificationId String
+  interactionId  String @unique
+  userId         String
+
+  // Denormalized SAFE dimensions for DB-side breakdowns without re-joining a
+  // possibly-pruned notification: the source notification type and the recorded
+  // click action. (category is derivable from the type in the shared contract.)
+  notificationType AutomatedNotificationType
+  interactionType  NotificationInteractionType
+
+  // Attributed revenue (Toman). gross = the Order.finalPriceToman captured at
+  // attribution; reversed is moved here on refund; net = gross - reversed. These
+  // are attributed REVENUE figures, never profit.
+  grossRevenueToman    Int @default(0)
+  reversedRevenueToman Int @default(0)
+  netRevenueToman      Int @default(0)
+
+  // Evidence timestamps: sent -> click -> order-completed (strictly increasing).
+  // notificationSentAt anchors the COHORT view; orderCompletedAt anchors the
+  // CONVERSION-TIMELINE view. windowSeconds = orderCompletedAt - notificationSentAt.
+  notificationSentAt DateTime
+  interactionAt      DateTime
+  orderCompletedAt   DateTime
+  windowSeconds      Int
+
+  // Safe, non-PII evidence used to justify (and later re-verify) the attribution.
+  evidenceSnapshot Json
+
+  attributedAt DateTime  @default(now())
+  reversedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Conversion-timeline view (default reporting anchor) + cohort view.
+  @@index([status, orderCompletedAt])
+  @@index([status, notificationSentAt])
+  @@index([kind, status])
+  @@index([notificationType, status])
+  @@index([userId])
+  @@index([notificationId])
 }
 
 /**

@@ -74,6 +74,15 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   // user receives a win-back message until the OWNER explicitly enables it behind
   // the activation gate. Config (stages, groups, thresholds) is code-defaulted.
   { key: "notification_customer_winback_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Analytics & evidence-based conversion attribution (Phase 4). BOTH switches
+  // seed FALSE: no attribution is ever computed and no CSV export is possible
+  // until the OWNER explicitly enables analytics behind the activation gate.
+  // Enabling stamps `notification_analytics_started_at` ONCE (attribution begins
+  // from that instant forward — never a historical backfill). Config (window,
+  // reporting timezone, reconcile/reversal cadences, retention days) is
+  // code-defaulted in @zedbot/shared, so tuning a default never needs a migration.
+  { key: "notification_analytics_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "notification_analytics_csv_export_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are
