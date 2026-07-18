@@ -70,3 +70,24 @@ read-only estimate (labeled تخمینی); it never creates or sends anything.
 The engine is additive and disabled by default. To fully stand down: master
 switch off (stops all recurring work) — no data migration or redeploy needed.
 The schema, rows, and worker code remain dormant.
+
+## Checkout-payment reminders (Phase 2)
+
+Enable: admin → تنظیمات عمومی → «اعلان‌ها و یادآوری‌ها 🔔» → «یادآوری سفارش ناقص
+🛒» / «یادآوری پرداخت ناموفق 💳». Enable the rule (each behind the fail-safe
+activation gate), tune thresholds/delay/caps, preview the audience (تخمینی), then
+send a test. Both rules are OWNER-only and disabled by default; the master switch
+stays authoritative.
+
+- **Rollback**: disable the rule (or the master switch) — the checkout scheduler
+  is removed within ≤5 min; scheduled reminders cancel at delivery re-validation.
+  No data migration.
+- **Troubleshooting**: a stuck backlog usually means Telegram rate-limiting
+  (drains on its own) or a disabled worker. A reminder that never fires: check
+  the rule enabled + fresh worker status + the checkout still PENDING/unsettled
+  with no pending receipt. Reminders for a settled/paid checkout are impossible
+  (delivery re-validates); if reported, inspect the row's `safeErrorCode`
+  (checkout-settled / payment-competing-success / ...).
+- **Known limitations**: the payment scan bounds itself to failures in the last
+  7 days; a pure usage reset without renewal does not re-open a cycle (Phase 1);
+  quiet-hours/daily-cap deferrals re-arm on the reconcile cadence (≤5 min).

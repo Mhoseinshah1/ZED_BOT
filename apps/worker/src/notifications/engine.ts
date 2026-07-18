@@ -11,6 +11,7 @@ import { Worker, type Job } from "bullmq";
 
 import type { WorkerRedisConnection } from "../queues.js";
 import type { RawRedis } from "../redis.js";
+import { runCheckoutNotificationScan } from "./checkout-scan.js";
 import { createNotificationDeliveryProcessor } from "./delivery.js";
 import { runNotificationCleanup, runNotificationReconcile } from "./maintenance.js";
 import { createNotificationQueues, type NotificationQueues, type PanelSyncJobData } from "./queues.js";
@@ -66,16 +67,23 @@ export function startNotificationEngine(
     { connection, concurrency: 1 },
   );
 
-  // --- scan worker ----------------------------------------------------------
+  // --- scan worker (service + checkout/payment scans) -----------------------
   const scanWorker = new Worker(
     NOTIFICATION_SCAN_QUEUE_NAME,
     async (job: Job): Promise<Record<string, unknown>> => {
-      if (job.name !== NOTIFICATION_JOB_NAMES.SCAN_SERVICE_NOTIFICATIONS) {
-        throw new Error(`unknown job: ${job.name}`);
+      if (job.name === NOTIFICATION_JOB_NAMES.SCAN_SERVICE_NOTIFICATIONS) {
+        const result = await runServiceNotificationScan(queues.deliveryQueue);
+        state.lastServiceScanAt = new Date().toISOString();
+        return result as unknown as Record<string, unknown>;
       }
-      const result = await runServiceNotificationScan(queues.deliveryQueue);
-      state.lastServiceScanAt = new Date().toISOString();
-      return result as unknown as Record<string, unknown>;
+      if (job.name === NOTIFICATION_JOB_NAMES.SCAN_CHECKOUT_NOTIFICATIONS) {
+        const result = await runCheckoutNotificationScan(queues.deliveryQueue);
+        state.lastCheckoutScanAt = new Date().toISOString();
+        state.abandonedCheckoutCandidates = result.abandonedScanned;
+        state.paymentRetryCandidates = result.paymentScanned;
+        return result as unknown as Record<string, unknown>;
+      }
+      throw new Error(`unknown job: ${job.name}`);
     },
     { connection, concurrency: 1 },
   );

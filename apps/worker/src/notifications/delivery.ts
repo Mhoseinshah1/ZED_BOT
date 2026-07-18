@@ -19,6 +19,10 @@ import { Worker, type Job, type Queue } from "bullmq";
 
 import { botToken } from "../config.js";
 import { sendTelegramMessage } from "../telegram.js";
+import {
+  revalidateAbandonedForDelivery,
+  revalidateFailedPaymentForDelivery,
+} from "./checkout-eligibility.js";
 import type { NotificationDeliveryJobData } from "./queues.js";
 import {
   loadUserGates,
@@ -27,7 +31,11 @@ import {
   userGateOpen,
 } from "./preferences.js";
 import { renderNotification } from "./render.js";
-import { isNotificationSystemEnabled } from "./settings.js";
+import {
+  getAbandonedCheckoutConfig,
+  getFailedPaymentConfig,
+  isNotificationSystemEnabled,
+} from "./settings.js";
 
 // =============================================================================
 // Automated-notification DELIVERY (feat/notification-retention-engine, Phase 1).
@@ -63,6 +71,8 @@ interface RevalMeta {
   cycle?: string;
   percent?: number;
   trial?: number;
+  /** Abandoned-checkout reminder stage (Phase 2). */
+  stage?: number;
 }
 
 /** The minimal live service state delivery re-checks against. */
@@ -125,6 +135,49 @@ function sourceStillValid(meta: RevalMeta, service: LiveService): boolean {
     default:
       return true;
   }
+}
+
+/**
+ * Re-validates a checkout/payment reminder against LIVE authoritative financial
+ * state at send time (Phase 2). Reuses the SAME shared evaluator as the scan +
+ * preview. Returns a cancel decision when the reason no longer holds (settled,
+ * order created, receipt pending, reconciliation opened, competing success,
+ * expired, suppressed, or the user re-engaged), else null to proceed. NEVER
+ * mutates a financial row - read-only.
+ */
+async function revalidateCheckoutSource(
+  notification: { type: string; checkoutSessionId: string | null; paymentId: string | null },
+  meta: RevalMeta,
+  now: Date,
+): Promise<Terminal | null> {
+  if (notification.type === "ABANDONED_CHECKOUT") {
+    if (notification.checkoutSessionId === null) {
+      return { kind: "cancel", reason: "checkout-missing" };
+    }
+    const config = await getAbandonedCheckoutConfig();
+    const stage = typeof meta.stage === "number" ? meta.stage : 1;
+    const res = await revalidateAbandonedForDelivery(notification.checkoutSessionId, stage, config, now);
+    if (res === null) {
+      return { kind: "cancel", reason: "checkout-gone" };
+    }
+    if (!res.eligibility.eligible) {
+      return { kind: "cancel", reason: `checkout-${res.eligibility.reason}` };
+    }
+    return null;
+  }
+  // PAYMENT_RETRY
+  if (notification.paymentId === null) {
+    return { kind: "cancel", reason: "payment-missing" };
+  }
+  const config = await getFailedPaymentConfig();
+  const res = await revalidateFailedPaymentForDelivery(notification.paymentId, config, now);
+  if (res === null) {
+    return { kind: "cancel", reason: "payment-gone" };
+  }
+  if (!res.eligibility.eligible) {
+    return { kind: "cancel", reason: `payment-${res.eligibility.reason}` };
+  }
+  return null;
 }
 
 async function markTerminal(id: string, decision: Terminal): Promise<void> {
@@ -243,6 +296,15 @@ export function createNotificationDeliveryProcessor(
       if (!sourceStillValid(meta, service)) {
         await markTerminal(notificationId, { kind: "cancel", reason: "source-stale" });
         return { cancelled: "source-stale" };
+      }
+    }
+
+    // --- checkout / payment source re-validation (Phase 2) -------------------
+    if (notification.type === "ABANDONED_CHECKOUT" || notification.type === "PAYMENT_RETRY") {
+      const decision = await revalidateCheckoutSource(notification, meta, now);
+      if (decision !== null) {
+        await markTerminal(notificationId, decision);
+        return { cancelled: decision.reason };
       }
     }
 

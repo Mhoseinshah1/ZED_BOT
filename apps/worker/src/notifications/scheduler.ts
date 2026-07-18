@@ -4,7 +4,12 @@ import {
   createLogger,
   errorMessage,
 } from "@zedbot/shared";
-import { getScheduleMinutes, isNotificationSystemEnabled } from "./settings.js";
+import {
+  anyCheckoutRuleEnabled,
+  getCheckoutScanMinutes,
+  getScheduleMinutes,
+  isNotificationSystemEnabled,
+} from "./settings.js";
 import type { NotificationQueues } from "./queues.js";
 
 // =============================================================================
@@ -55,6 +60,19 @@ export async function reconcileNotificationSchedulers(queues: NotificationQueues
       { name: NOTIFICATION_JOB_NAMES.CLEANUP_NOTIFICATION_HISTORY, data: {} },
     ),
   ]);
+
+  // Checkout-payment scan runs ONLY while at least one of its two rules is on -
+  // a service-only install schedules no checkout scan at all (Phase 2).
+  if (await anyCheckoutRuleEnabled()) {
+    const checkoutMinutes = await getCheckoutScanMinutes();
+    await queues.scanQueue.upsertJobScheduler(
+      NOTIFICATION_SCHEDULER_IDS.checkoutScan,
+      { every: checkoutMinutes * 60_000 },
+      { name: NOTIFICATION_JOB_NAMES.SCAN_CHECKOUT_NOTIFICATIONS, data: {} },
+    );
+  } else {
+    await queues.scanQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.checkoutScan);
+  }
   return true;
 }
 
@@ -62,6 +80,7 @@ async function removeAllSchedulers(queues: NotificationQueues): Promise<void> {
   await Promise.allSettled([
     queues.serviceSyncQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.serviceSync),
     queues.scanQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.serviceScan),
+    queues.scanQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.checkoutScan),
     queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.reconcile),
     queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.cleanup),
   ]);

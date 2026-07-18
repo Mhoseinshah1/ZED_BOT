@@ -113,3 +113,16 @@ from these labels.
 | `notif_btn_renew_service` | اعلان: تمدید سرویس | تمدید سرویس ♻️ | yes |
 | `notif_btn_buy_extra_volume` | اعلان: خرید حجم اضافه | خرید حجم اضافه ➕ | yes |
 | `notif_btn_dismiss` | اعلان: بستن | بستن ✖️ | yes |
+
+## Checkout-payment reminder buttons (Phase 2)
+
+Callback data is `ntf:<shortId>:<action>` (c=continue/reselect, d=view, n=suppress).
+
+| Key | Title | Default | Editable |
+| --- | --- | --- | --- |
+| `notif_btn_continue_checkout` | اعلان: ادامه پرداخت | ادامه پرداخت 💳 | yes |
+| `notif_btn_checkout_details` | اعلان: مشاهده جزئیات سفارش | مشاهده جزئیات سفارش 🧾 | yes |
+| `notif_btn_stop_checkout_reminders` | اعلان: دیگر یادآوری نکن | دیگر یادآوری نکن 🔕 | yes |
+| `notif_btn_reselect_payment` | اعلان: انتخاب روش پرداخت | انتخاب روش پرداخت 💳 | yes |
+| `notif_btn_view_order` | اعلان: مشاهده سفارش | مشاهده سفارش 🧾 | yes |
+| `notif_btn_stop_payment_reminders` | اعلان: عدم یادآوری این سفارش | عدم یادآوری این سفارش 🔕 | yes |

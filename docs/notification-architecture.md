@@ -165,3 +165,19 @@ recurring Stars subscriptions remain a separate later project.
 | Worker maintenance/scheduler/status | `apps/worker/src/notifications/{maintenance,scheduler,status,engine}.ts` |
 | Bot services | `apps/bot/src/services/notification/*.ts` |
 | Bot UI | `apps/bot/src/handlers/user-notifications/*`, service/renewal/extra-volume/admin settings handlers |
+
+---
+
+## Phase 2 — checkout & payment reminders
+
+Two additional rules (`ABANDONED_CHECKOUT`, `PAYMENT_RETRY`, category PAYMENT)
+extend this engine WITHOUT a second engine: same records, delivery queue + CAS
+worker, quiet hours, daily limits, callback namespace and admin page. A new
+recurring `SCAN_CHECKOUT_NOTIFICATIONS` job on the existing scan queue creates
+dedupe-guarded rows from the shared checkout eligibility evaluators; the delivery
+worker gains a checkout/payment re-validation branch that cancels a reminder when
+the live financial state (settlement / order / receipt / reconciliation /
+competing success / expiry / suppression / re-engagement) no longer warrants it.
+Full detail: [checkout-payment-reminders.md](checkout-payment-reminders.md),
+[abandoned-checkout-rules.md](abandoned-checkout-rules.md),
+[payment-retry-notifications.md](payment-retry-notifications.md).

@@ -6,4 +6,5 @@ export * from "./ops.js";
 export * from "./backup-crypto.js";
 export * from "./log-group-target.js";
 export * from "./notifications.js";
+export * from "./checkout-notifications.js";
 export * from "./template.js";

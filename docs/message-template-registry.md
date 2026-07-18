@@ -53,3 +53,10 @@ Rendered by the worker delivery from a safe snapshot (keys mirror
 | `notif_service_limited` | اعلان محدود شدن سرویس | `{service_name}` | yes |
 | `notif_trial_near_expiry` | اعلان نزدیک شدن انقضای سرویس تست | `{service_name}` `{time_left}` | yes |
 | `notif_trial_expired` | اعلان انقضای سرویس تست | `{service_name}` | yes |
+
+## Checkout-payment reminder templates (Phase 2)
+
+| Key | Title | Variables | Editable |
+| --- | --- | --- | --- |
+| `notification_abandoned_checkout` | اعلان سفارش ناقص | `{checkout_reference}` `{product_name}` `{payable_amount}` `{expires_in}` | yes |
+| `notification_payment_retry` | اعلان پرداخت ناموفق | `{checkout_reference}` `{product_name}` `{payable_amount}` `{payment_method}` | yes |

@@ -121,3 +121,21 @@ Background: [backup-architecture.md](backup-architecture.md),
 - The migration `20260718120000_notification_retention_engine` is **purely
   additive** (4 CREATE TYPE, 4 CREATE TABLE, indexes, 5 FKs; no DROP/ALTER of
   existing columns) and deploys clean on a populated database.
+
+## Checkout-payment reminders (Phase 2)
+
+- Reuses `AutomatedNotification` with `dedupeKey` unique: abandoned =
+  `checkout:<id>:abandoned:v1:<stage>` (one row per checkout per stage), payment
+  retry = `payment:<id>:retry:v1` (one row per failed Payment). Concurrent scans
+  + worker restarts converge to one row. `checkoutSessionId`/`paymentId` stay
+  SOFT references (no FK) — notification data never cascades into financial rows.
+- `CheckoutNotificationPreference.checkoutSessionId` is UNIQUE (one row per
+  checkout); a soft reference (no FK). Suppression instants are stamped once and
+  never hard-deleted; the suppress callback is idempotent (upsert).
+- Migration `20260718175109_checkout_notification_preferences` is additive (1
+  CREATE TABLE + 1 unique index; no DROP/ALTER).
+- Financial authority is UNCHANGED: the reminder engine reads
+  `settledByPaymentId` / `PaymentSettlementStatus` / Order / receipt /
+  reconciliation state but never writes them. `settledByPaymentId` remains the
+  one-settlement-owner CAS anchor; a notification handler never participates in
+  settlement.
