@@ -2,6 +2,8 @@ import {
   AutomatedNotificationStatus,
   Prisma,
   prisma,
+  ServiceStatus,
+  UserStatus,
   type AutomatedNotification,
   type NotificationInteractionType,
 } from "@zedbot/database";
@@ -116,6 +118,29 @@ export async function getNotificationStatusCounts(): Promise<NotificationStatusC
     }
   }
   return counts;
+}
+
+/**
+ * Rough, read-only estimate of how many services would CURRENTLY qualify for a
+ * service notification: a live-ish status paired with an owner who is ACTIVE and
+ * has both the cron master switch and the SERVICE opt-in on. This is NOT the
+ * exact scan audience (no threshold/quiet-hours/dedupe evaluation) - the admin
+ * page labels it تخمینی. A single COUNT, never any row data.
+ */
+export async function estimateNotificationAudience(): Promise<number> {
+  return prisma.service.count({
+    where: {
+      deletedAt: null,
+      status: {
+        in: [ServiceStatus.ACTIVE, ServiceStatus.LIMITED, ServiceStatus.EXPIRED],
+      },
+      user: {
+        status: UserStatus.ACTIVE,
+        cronNotificationsEnabled: true,
+        serviceNotificationsEnabled: true,
+      },
+    },
+  });
 }
 
 /** The newest FAILED/DEAD_LETTER rows for the admin "needs review" list (safe fields only). */

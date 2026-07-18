@@ -85,14 +85,20 @@ renewalHandler.callbackQuery(/^user:renew:list:(\d+)$/, async (ctx) => {
   await renderRenewableList(ctx, Number.parseInt(ctx.match[1], 10));
 });
 
-// Service summary + renewal plans of the SAME panel.
-renewalHandler.callbackQuery(/^user:renew:svc:([0-9a-f-]+)$/, async (ctx) => {
+/**
+ * Renders one service's renewal page (summary + same-panel renewal plans).
+ * Extracted from the `user:renew:svc:*` callback so the notification action
+ * handler (`ntf:<id>:r`) can land on the IDENTICAL page after re-validating the
+ * service owner-scoped; `shortId` is the uuid-prefix short id. Answers the
+ * callback itself and re-validates ownership + plan availability from the DB.
+ */
+export async function renderRenewalServicePage(ctx: BotContext, shortId: string): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     return;
   }
   clearCheckoutState(ctx);
-  const service = await getRenewableServiceByShortId(ctx.match[1], user.id);
+  const service = await getRenewableServiceByShortId(shortId, user.id);
   if (service === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
@@ -108,6 +114,11 @@ renewalHandler.callbackQuery(/^user:renew:svc:([0-9a-f-]+)$/, async (ctx) => {
     return;
   }
   await safeEditOrReply(ctx, renewServiceSummaryText(service), renewalPlansKeyboard(service, plans), HTML);
+}
+
+// Service summary + renewal plans of the SAME panel.
+renewalHandler.callbackQuery(/^user:renew:svc:([0-9a-f-]+)$/, async (ctx) => {
+  await renderRenewalServicePage(ctx, ctx.match[1]);
 });
 
 async function renderRenewalPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {

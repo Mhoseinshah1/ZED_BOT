@@ -654,7 +654,7 @@ describe.runIf(hasDeps)("DETAIL FLOW: auto-sync wiring, fallbacks, finances unto
     const viewRoute = handlerSrc.slice(handlerSrc.indexOf("user:svc:view"));
     expect(viewRoute).toContain("syncServiceForDisplay");
     expect(viewRoute.indexOf("syncServiceForDisplay")).toBeLessThan(
-      viewRoute.indexOf("renderDetail"),
+      viewRoute.indexOf("renderServiceDetail"),
     );
     // ...while the manual refresh route keeps its force-sync path (the TTL
     // never swallows an explicit refresh press).

@@ -1,9 +1,16 @@
-import { UserStatus, prisma, type NotificationPreference, type User } from "@zedbot/database";
+import {
+  UserStatus,
+  prisma,
+  type NotificationPreference,
+  type ServiceNotificationPreference,
+  type User,
+} from "@zedbot/database";
 import {
   buildEffectiveDeliveryPreferences as buildEffectiveDeliveryPreferencesShared,
   isServiceKindGateOpen,
   isUserGateOpenForCategory,
   isUserGateOpenForType,
+  resolveTimezone,
   type EffectiveDeliveryPreferences,
   type NotificationCategory,
   type NotificationPreferenceView,
@@ -135,5 +142,92 @@ export async function toggleUserCategory(
   return prisma.user.update({
     where: { id: userId },
     data: { [field]: !user[field] },
+  });
+}
+
+/** Daily-limit bounds the user-facing cycle enforces (matches the setting UI). */
+export const USER_DAILY_LIMIT_MIN = 1;
+export const USER_DAILY_LIMIT_MAX = 10;
+
+/** Sets the user's timezone override to an allowlisted IANA zone (invalid -> default). */
+export async function setUserTimezone(userId: string, timezone: string): Promise<NotificationPreference> {
+  await getOrCreateNotificationPreference(userId);
+  return prisma.notificationPreference.update({
+    where: { userId },
+    data: { timezone: resolveTimezone(timezone) },
+  });
+}
+
+/**
+ * Enables/disables the user's quiet-hours. Enabling for the first time seeds the
+ * window from the global default (a NotificationPreference with a null window is
+ * ignored by buildEffectiveDeliveryPreferences), so the toggle actually takes
+ * effect without a separate window-editing surface in Phase 1.
+ */
+export async function setUserQuietHoursEnabled(
+  userId: string,
+  enabled: boolean,
+): Promise<NotificationPreference> {
+  const pref = await getOrCreateNotificationPreference(userId);
+  const data: {
+    quietHoursEnabled: boolean;
+    quietHoursStartMinutes?: number;
+    quietHoursEndMinutes?: number;
+  } = { quietHoursEnabled: enabled };
+  if (enabled && (pref.quietHoursStartMinutes === null || pref.quietHoursEndMinutes === null)) {
+    const defaults = await getDefaultQuietHours();
+    data.quietHoursStartMinutes = defaults.startMinutes;
+    data.quietHoursEndMinutes = defaults.endMinutes;
+  }
+  return prisma.notificationPreference.update({ where: { userId }, data });
+}
+
+/** Sets the user's daily automated-notification cap, clamped to [1, 10]. */
+export async function setUserDailyLimit(userId: string, limit: number): Promise<NotificationPreference> {
+  await getOrCreateNotificationPreference(userId);
+  const bounded = Math.min(
+    Math.max(USER_DAILY_LIMIT_MIN, Math.trunc(limit)),
+    USER_DAILY_LIMIT_MAX,
+  );
+  return prisma.notificationPreference.update({
+    where: { userId },
+    data: { dailyAutomatedLimit: bounded },
+  });
+}
+
+// --- per-service overrides (three-state: null=inherit, true=on, false=off) ----
+
+/** The single override field a ServiceNotificationKind maps to. */
+const SERVICE_KIND_FIELD: Record<
+  ServiceNotificationKind,
+  "expiryEnabled" | "trafficEnabled" | "statusEnabled"
+> = {
+  expiry: "expiryEnabled",
+  traffic: "trafficEnabled",
+  status: "statusEnabled",
+};
+
+/** Reads a service's override row (null when no override has ever been set). */
+export async function getServiceNotificationPreference(
+  serviceId: string,
+): Promise<ServiceNotificationPreference | null> {
+  return prisma.serviceNotificationPreference.findUnique({ where: { serviceId } });
+}
+
+/**
+ * Upserts one per-service override kind to on/off/inherit (null). serviceId is
+ * unique, so this is idempotent; the caller has already resolved the service
+ * owner-scoped, so no user id is needed here.
+ */
+export async function setServiceNotificationKind(
+  serviceId: string,
+  kind: ServiceNotificationKind,
+  value: boolean | null,
+): Promise<ServiceNotificationPreference> {
+  const field = SERVICE_KIND_FIELD[kind];
+  return prisma.serviceNotificationPreference.upsert({
+    where: { serviceId },
+    create: { serviceId, [field]: value },
+    update: { [field]: value },
   });
 }

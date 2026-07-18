@@ -2,7 +2,6 @@ import {
   AutomatedNotificationCategory,
   AutomatedNotificationStatus,
   prisma,
-  type Panel,
   type User,
 } from "@zedbot/database";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -32,13 +31,9 @@ function fakeQueue() {
 d("notification maintenance", () => {
   let seq = 0;
   let user: User;
-  let panel: Panel;
 
   beforeAll(async () => {
     user = await prisma.user.create({ data: { telegramId: runTag } });
-    panel = await prisma.panel.create({
-      data: { type: "MARZBAN", name: `ntf-maint-panel-${runTag}`, baseUrl: "https://panel.test" },
-    });
   });
 
   afterAll(async () => {

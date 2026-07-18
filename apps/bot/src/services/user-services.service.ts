@@ -70,6 +70,21 @@ export function serviceShortId(service: Pick<Service, "id">): string {
   return service.id.slice(0, 8);
 }
 
+/**
+ * Resolves a service by its FULL id, scoped to the owner (same visibility
+ * filter: not deleted, not DELETED). Used by the notification action handler,
+ * which carries the full serviceId from the notification row rather than a
+ * short id. Returns null for unknown/deleted/foreign services.
+ */
+export async function getOwnedServiceById(
+  serviceId: string,
+  userId: string,
+): Promise<Service | null> {
+  return prisma.service.findFirst({
+    where: { id: serviceId, ...ownedVisibleWhere(userId) },
+  });
+}
+
 /** Action buttons the detail page may show for one service (Phase 18.1/19). */
 export interface ServiceDetailActions {
   /** Phase 18 enable/disable toggle, or null for none. */

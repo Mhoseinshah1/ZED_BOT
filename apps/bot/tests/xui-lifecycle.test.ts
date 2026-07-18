@@ -1293,7 +1293,7 @@ describe.runIf(hasDeps)("XUI capability gates, legacy compatibility and menu", (
 
     // Every visible button routes to a REAL handler namespace.
     const realRoutes = new RegExp(
-      `^(user:svc:|user:renew:svc:|user:ev:svc:|user:et:svc:|${CB.USER_MENU}$|${CB.USER_SUPPORT}$)`,
+      `^(user:svc:|user:nsvc:|user:renew:svc:|user:ev:svc:|user:et:svc:|${CB.USER_MENU}$|${CB.USER_SUPPORT}$)`,
     );
     for (const button of buttons) {
       expect(button.callback_data).toMatch(realRoutes);

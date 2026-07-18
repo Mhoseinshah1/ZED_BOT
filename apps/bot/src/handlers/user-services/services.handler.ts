@@ -62,8 +62,13 @@ const HTML = { parseMode: "HTML" as const };
 
 export const servicesHandler = new Composer<BotContext>();
 
-/** Detail view; toggle/extra-volume/extra-time buttons only when allowed. */
-async function renderDetail(
+/**
+ * Detail view; toggle/extra-volume/extra-time buttons only when allowed.
+ * Exported so the notification action handler (`ntf:*`) can land on the exact
+ * same service detail page after re-loading the Service owner-scoped. Does NOT
+ * answer the callback query - the caller does (some callers pass a toast).
+ */
+export async function renderServiceDetail(
   ctx: BotContext,
   service: Service,
   staleNotice: string | null = null,
@@ -128,7 +133,7 @@ servicesHandler.callbackQuery(/^user:svc:view:([0-9a-f-]+)$/, async (ctx) => {
   }
   await safeAnswerCallback(ctx);
   const display = await syncServiceForDisplay(service, user.id);
-  await renderDetail(ctx, display.service, display.notice);
+  await renderServiceDetail(ctx, display.service, display.notice);
 });
 
 // Phase 11: refresh now syncs from the PANEL (read-only). A failed sync
@@ -146,7 +151,7 @@ servicesHandler.callbackQuery(/^user:svc:refresh:([0-9a-f-]+)$/, async (ctx) => 
   const sync = await syncServiceFromPanel(owned.id, user.id);
   if (sync.ok) {
     await safeAnswerCallback(ctx, sync.message);
-    await renderDetail(ctx, sync.service);
+    await renderServiceDetail(ctx, sync.service);
     return;
   }
   if (sync.service === null) {
@@ -154,7 +159,7 @@ servicesHandler.callbackQuery(/^user:svc:refresh:([0-9a-f-]+)$/, async (ctx) => 
     return;
   }
   await safeAnswerCallback(ctx, sync.safeUserMessage);
-  await renderDetail(ctx, sync.service);
+  await renderServiceDetail(ctx, sync.service);
 });
 
 // --- Phase 18: enable/disable toggle ----------------------------------------
@@ -176,13 +181,13 @@ async function askToggle(ctx: BotContext, shortId: string, action: ToggleAction)
   // toggle confirmation (the detail keyboard already hides the button).
   if (!serviceSupportsGlobalLifecycle(service)) {
     await safeAnswerCallback(ctx, XUI_LEGACY_OPERATION_TEXT);
-    await renderDetail(ctx, service);
+    await renderServiceDetail(ctx, service);
     return;
   }
   const eligibility = toggleEligibility(service, service.panel.status, action);
   if (!eligibility.eligible) {
     await safeAnswerCallback(ctx, eligibility.safeUserMessage);
-    await renderDetail(ctx, service);
+    await renderServiceDetail(ctx, service);
     return;
   }
   await safeAnswerCallback(ctx);
@@ -213,7 +218,7 @@ async function confirmToggle(
     await safeAnswerCallback(ctx, outcome.safeUserMessage);
     const current = await getOwnedServiceByShortId(shortId, user.id);
     if (current !== null) {
-      await renderDetail(ctx, current);
+      await renderServiceDetail(ctx, current);
     }
     return;
   }
@@ -223,7 +228,7 @@ async function confirmToggle(
       ? TOGGLE_DISABLED_OK_TEXT
       : TOGGLE_ENABLED_OK_TEXT;
   await safeAnswerCallback(ctx, notice);
-  await renderDetail(ctx, outcome.service);
+  await renderServiceDetail(ctx, outcome.service);
 }
 
 servicesHandler.callbackQuery(/^user:svc:disable:([0-9a-f-]+)$/, async (ctx) => {
@@ -263,13 +268,13 @@ servicesHandler.callbackQuery(/^user:svc:regen_link:([0-9a-f-]+)$/, async (ctx) 
   // regeneration confirmation (the detail keyboard already hides the button).
   if (!serviceSupportsGlobalLifecycle(service)) {
     await safeAnswerCallback(ctx, XUI_LEGACY_OPERATION_TEXT);
-    await renderDetail(ctx, service);
+    await renderServiceDetail(ctx, service);
     return;
   }
   const eligibility = linkRegenerationEligibility(service, service.panel.status);
   if (!eligibility.eligible) {
     await safeAnswerCallback(ctx, eligibility.safeUserMessage);
-    await renderDetail(ctx, service);
+    await renderServiceDetail(ctx, service);
     return;
   }
   await safeAnswerCallback(ctx);
@@ -296,7 +301,7 @@ servicesHandler.callbackQuery(/^user:svc:regen_link:([0-9a-f-]+):yes$/, async (c
     await safeAnswerCallback(ctx, outcome.safeUserMessage);
     const current = await getOwnedServiceByShortId(ctx.match[1], user.id);
     if (current !== null) {
-      await renderDetail(ctx, current);
+      await renderServiceDetail(ctx, current);
     }
     return;
   }

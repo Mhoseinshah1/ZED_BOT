@@ -79,6 +79,8 @@ import {
   adminTextSettingsHandler,
   adminTextSettingsTextHandler,
 } from "./handlers/admin-settings/text-settings.handler.js";
+import { adminNotificationsHandler } from "./handlers/admin-settings/notifications.handler.js";
+import { userNotificationsHandler } from "./handlers/user-notifications/notification.handler.js";
 import {
   reportsBackupHandler,
   reportsBackupTextHandler,
@@ -174,6 +176,9 @@ export function createBot(token: string): Bot<BotContext> {
   // Phase 34: general settings + text management («مدیریت متن‌ها ✍️») -
   // must run before the placeholder handler.
   adminArea.use(adminTextSettingsHandler);
+  // Notification-engine phase: «اعلان‌ها و یادآوری‌ها 🔔» admin settings +
+  // health page (admin:ntf*). Reads for any admin; mutations OWNER-only.
+  adminArea.use(adminNotificationsHandler);
   // Direct-log-group-setup phase: the numeric-ID connection UI (admin:lg:id*,
   // admin:lg:op:*). The status-page keyboards (log-group.handler.ts) mount
   // via adminTextSettingsHandler above; this composer owns the new flow.
@@ -304,12 +309,19 @@ export function createBot(token: string): Bot<BotContext> {
   // Free-trial phase: the real trial flow - must run before the placeholder
   // handler, which used to own CB.USER_FREE_TEST.
   userArea.use(freeTrialHandler);
+  // Notification-engine phase: notification action callbacks (ntf:*) + the
+  // user notification settings pages (user:nset:* / user:nsvc:*). Registered
+  // before the placeholder handler so its user:* routes always win.
+  userArea.use(userNotificationsHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());
   // Customer-input form callbacks (cinput:*) go through the same gated user
   // area - the access gates and owner checks apply exactly as for user:*.
   bot.callbackQuery(/^cinput:/, userArea.middleware());
+  // Notification action callbacks (ntf:*) go through the same gated user area,
+  // so the access gates + owner scoping apply exactly as for user:* callbacks.
+  bot.callbackQuery(/^ntf:/, userArea.middleware());
 
   // Any other callback (old keyboards, future features): clear the spinner.
   bot.on("callback_query:data", async (ctx) => {
