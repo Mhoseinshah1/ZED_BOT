@@ -303,6 +303,10 @@ export interface SessionData {
     // Production-backup rework: scheduled-backup text input target (the
     // "rb:sched_hour" flow currently only edits the run hour).
     adminBackupScheduleDraft?: { field: "hour" };
+    // Direct-log-group-setup phase: the numeric-ID connection flow
+    // ("lg:chat_id"). Holds the created attempt id (never the chat id) so the
+    // confirm/progress pages resolve the durable LogGroupSetupAttempt row.
+    adminLogGroupSetupDraft?: { attemptId?: string };
     // Admin stock add-item wizard (Phase 25), bulk add (Phase 27) and
     // low-stock threshold editing (Phase 28); content NEVER logged.
     adminStockDraft?: {

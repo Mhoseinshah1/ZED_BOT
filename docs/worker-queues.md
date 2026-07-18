@@ -1,20 +1,20 @@
 # Worker queues and Redis contract
 
-The worker service (`apps/worker`) consumes two BullMQ queues and publishes
-liveness/capability keys. Every name lives in **one place**:
+The worker service (`apps/worker`) consumes three BullMQ queues and
+publishes liveness/capability keys. Every name lives in **one place**:
 `packages/shared/src/ops.ts` (dependency-free, imported by bot, worker and
 API). The bot is only ever a **producer** and a read-only key consumer —
-pg_dump, verification, cleanup and Telegram log sends all run in the
-worker, never in the bot process.
+pg_dump, verification, cleanup, Telegram log sends and log-group topic
+provisioning all run in the worker, never in the bot process.
 
-## The two queues
+## The three queues
 
-| | `database-backup` | `telegram-operational-logs` |
-| --- | --- | --- |
-| Consumer | worker, **concurrency 1** | worker, **concurrency 1**, limiter **15 jobs / 60 s** |
-| Producers | bot (manual/verify/cleanup), worker scheduler, worker (notify), CLI | bot (`writeSystemLog`), worker (`writeOpsLog`) |
-| Worker default job options | attempts 3, exponential backoff from 10 s | attempts 5, exponential backoff from 30 s |
-| Job retention | `removeOnComplete { age: 7 d, count: 100 }`, `removeOnFail { age: 30 d }` | same |
+| | `database-backup` | `telegram-operational-logs` | `telegram-log-group-setup` |
+| --- | --- | --- | --- |
+| Consumer | worker, **concurrency 1** | worker, **concurrency 1**, limiter **15 jobs / 60 s** | worker, **concurrency 1** |
+| Producers | bot (manual/verify/cleanup), worker scheduler, worker (notify), CLI | bot (`writeSystemLog`), worker (`writeOpsLog`) | bot (`enqueueLogGroupSetup`, on OWNER confirm) |
+| Worker default job options | attempts 3, exponential backoff from 10 s | attempts 5, exponential backoff from 30 s | attempts 3, exponential backoff from 15 s |
+| Job retention | `removeOnComplete { age: 7 d, count: 100 }`, `removeOnFail { age: 30 d }` | same | same |
 
 Connections use `maxRetriesPerRequest: null` (BullMQ requirement so
 blocking commands survive reconnects). The bot wraps every producer
@@ -45,9 +45,58 @@ either way because the **`SystemLogDelivery` row is the durable state**,
 guarded by a status CAS. Full delivery semantics (statuses, 429 pause,
 DLQ, aggregation): [operational-logging.md](operational-logging.md).
 
+## Log-group-setup jobs
+
+One job name: `PROVISION_LOG_GROUP`, data `{ attemptId }`, jobId =
+`log-group-setup-<attemptId>` (`logGroupSetupJobId`) — so a repeated OWNER
+confirmation of the **same** attempt never creates a second provisioning
+job (BullMQ dedupes on the id), and the `LogGroupSetupAttempt` row is the
+durable resume point.
+
+| Job name | Data | jobId | Notes |
+| --- | --- | --- | --- |
+| `PROVISION_LOG_GROUP` | `{ attemptId }` | `log-group-setup-<attemptId>` | Creates the eleven default forum topics (per-topic durable bindings — resume-safe, persisted topics never re-created), sends a direct SYSTEM test, then **atomically** switches the active group (Settings + `LogTopic` together, guarded on the attempt still being non-cancelled) and emits the queued `log_group.connected` self-verification. Attempts 3, exponential backoff from 15 s |
+
+The processor is **idempotent + resume-safe**: it CAS-claims the row
+(`QUEUED`/`PROVISIONING`/`TESTING` → `PROVISIONING`), so a re-delivered or
+crashed job resumes from the saved `topicBindings`; a terminal
+(`ACTIVE`/`CANCELLED`) row is skipped. It holds the single Redis lock
+`zedbot:log-group:setup` (`SET NX PX`, 5-minute TTL) for the duration and
+releases it in `finally`; a lock miss re-throws for BullMQ back-off rather
+than running a second concurrent provision. The active group is switched
+**only** after all topics exist and the direct test send succeeds, so a
+failed setup leaves the previous group untouched.
+
+**Slot never leaks on failure.** The whole post-claim body is wrapped so that
+on the **final** BullMQ attempt *any* terminal throw — a still-held lock from
+a dead worker, a transient activation DB error, an unexpected error — runs
+`failAttempt` (status → `FAILED`, `activeSlot` → `NULL`) before propagating.
+Earlier attempts keep the slot held so the same durable row resumes; it is
+freed only when the attempt is truly terminal. The `PROVISIONING → TESTING`
+transition is a guarded `updateMany` whose zero count is a race check: a cancel
+that lands in that window skips the test send instead of posting it into a group
+no longer being activated. A worker that dies with its job lost is picked up by
+the bot's startup **resume sweep** (`resumeStaleLogGroupSetups` in
+`startup-recovery.service.ts`) — any running attempt stale past
+`STALE_PIPELINE_MINUTES` is re-enqueued (idempotent jobId), so the single-setup
+slot has an automatic reaper and never strands.
+
+One bounded caveat: a crash in the narrow window between a `createForumTopic`
+response and its per-topic persist can orphan **one** empty forum topic
+(Telegram's Bot API exposes no list/dedupe to reconcile it). That topic is never
+bound — activation consumes only persisted bindings — so it is harmless. Full
+lifecycle, cancellation and the activation trust boundary:
+[operational-logging.md](operational-logging.md).
+
+Forum topics are created with the worker's own **fetch-based**
+`createTelegramForumTopic` (`apps/worker/src/telegram.ts`, POST
+`createForumTopic`) — the same token-scrubbing and safe-code classification
+as `sendTelegramMessage`: the bot token appears only in the request URL,
+never in an error, log or return value.
+
 ## Unknown-job policy
 
-Both processors **throw** on any unrecognized job name
+All three processors **throw** on any unrecognized job name
 (`throw new Error("unknown job: <name>")`) so it lands in BullMQ's failed
 set and surfaces in the health page's failed count — never silently
 ignored. This is a deliberate reversal of the original placeholder worker,
@@ -60,6 +109,7 @@ which consumed everything and returned `{ok:false}`.
 | `zedbot:worker:heartbeat` | worker, every **15 s** | ISO timestamp of the last tick; key presence = "worker alive recently" | **45 s** |
 | `zedbot:worker:capabilities` | worker, same cadence | JSON `{ pgDumpVersion, backupDirWritable, backupDir, gitSha, checkedAt }` — the facts only the worker container can know (its mount is rw; the bot's is ro); `gitSha` is the worker image's baked build identity (null when built without it) | 45 s |
 | `zedbot:backup:database` | worker / create-backup CLI | Global single-backup lock: `SET NX PX`, random token, compare-and-delete Lua release (never releases a lock a later run re-acquired) | 30 min (crash safety; a live run always finishes or is SIGKILLed well before) |
+| `zedbot:log-group:setup` | log-group-setup consumer | Global single-setup lock: only one `PROVISION_LOG_GROUP` job provisions at a time; `SET NX PX`, released in `finally`. A contended acquire re-throws for BullMQ back-off | 5 min (comfortably above provisioning 11 topics + one test send) |
 | `zedbot:logagg:<topicKey>:<hash>` | log-delivery consumer | 5-minute aggregation counter per identical log line (INCR; count 1 = send, >1 = skip as `aggregated`) | 300 s |
 
 The worker deliberately holds **no direct ioredis dependency** — it reuses
@@ -104,10 +154,11 @@ patterns and the preflight are documented in
 
 ## Bootstrap and shutdown
 
-Bootstrap (`apps/worker/src/index.ts`): connect Prisma → build both queues
-→ wire the ops-log enqueuer → heartbeat loop → schedule reconciler → both
-workers. Missing Redis configuration logs an error and delays the restart
-loop (60 s) instead of crash-looping.
+Bootstrap (`apps/worker/src/index.ts`): connect Prisma → build all three
+queues → wire the ops-log enqueuer → heartbeat loop → schedule reconciler
+→ all three workers (backup, log-delivery, log-group-setup). Missing Redis
+configuration logs an error and delays the restart loop (60 s) instead of
+crash-looping.
 
 Shutdown (SIGTERM/SIGINT): stop heartbeat + reconciler → close **workers**
 (in-flight jobs finish) → close **queues** → disconnect Prisma → exit 0.

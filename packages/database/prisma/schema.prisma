@@ -2063,6 +2063,69 @@ model BackupOperation {
   @@index([filename])
 }
 
+// Direct-log-group-setup phase: the durable operation behind numeric-ID
+// (and /setloggroup + start-group wizard) log-group connection. Topic
+// creation and the test send run in the BullMQ telegram-log-group-setup
+// queue - NEVER inline in a Telegram callback. The row is the resume point
+// after a worker restart: topicBindings holds ONLY stable-key -> Telegram
+// message-thread-id pairs (never content, tokens or API payloads). The
+// active group is switched atomically ONLY after all topics exist and the
+// direct SYSTEM test send succeeds; a failed setup leaves the previous
+// group untouched. safeErrorCode carries a short scrubbed English marker.
+enum LogGroupSetupStatus {
+  VALIDATED
+  QUEUED
+  PROVISIONING
+  TESTING
+  ACTIVE
+  FAILED
+  CANCELLED
+}
+
+model LogGroupSetupAttempt {
+  id String @id @default(uuid())
+
+  // Full chat id is stored because delivery requires it; admin pages and
+  // logs always use the masked form.
+  chatId    BigInt
+  safeTitle String
+
+  status LogGroupSetupStatus @default(VALIDATED)
+
+  requestedByAdminId String
+
+  // Preserved so a failed replacement can be reported against the group
+  // that stayed active throughout.
+  previousChatId BigInt?
+  previousTitle  String?
+
+  // { "<STABLE_KEY>": <messageThreadId> } - the staged topics created so
+  // far, so a worker restart resumes instead of recreating them.
+  topicBindings     Json?
+  createdTopicCount Int     @default(0)
+  // True once the staged SYSTEM direct test send was accepted by Telegram.
+  directTestOk      Boolean @default(false)
+
+  safeErrorCode  String?
+  idempotencyKey String  @unique
+
+  // DB-authoritative "only one setup running at a time": set to 1 while the
+  // attempt occupies the single active-setup slot (QUEUED/PROVISIONING/
+  // TESTING), NULL otherwise. Prisma treats NULLs as distinct, so any number
+  // of preview/finished/cancelled rows coexist while at most one runs.
+  activeSlot Int?
+
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+  failedAt    DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([activeSlot])
+  @@index([status, createdAt])
+  @@index([chatId])
+}
+
 model AuditLog {
   id              String    @id @default(uuid())
   actorTelegramId BigInt?

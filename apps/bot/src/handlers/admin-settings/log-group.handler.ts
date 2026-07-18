@@ -1,3 +1,4 @@
+import { LogGroupSetupStatus } from "@zedbot/database";
 import {
   LOG_GROUP_STARTGROUP_PAYLOAD,
   OPS_LOG_TOPIC_KEYS,
@@ -8,6 +9,7 @@ import { Composer, InlineKeyboard } from "grammy";
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
+import { getActiveSetupAttempt } from "../../services/log-group-connection.service.js";
 import {
   BOT_NOT_ADMIN_TEXT,
   BOT_RIGHTS_INCOMPLETE_TEXT,
@@ -23,8 +25,23 @@ import {
   syncTopics,
   testLogGroup,
 } from "../../services/log-group.service.js";
+import {
+  getLogGroupSetupQueueCounts,
+  readWorkerHeartbeat,
+} from "../../services/ops-queue.service.js";
 import { OPS_EVENTS, writeSystemLog } from "../../services/system-log.service.js";
 import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
+
+/** Persian label per setup-attempt status (status BODY + progress page). */
+export const LG_ATTEMPT_STATUS_LABELS: Record<LogGroupSetupStatus, string> = {
+  [LogGroupSetupStatus.VALIDATED]: "در انتظار تایید",
+  [LogGroupSetupStatus.QUEUED]: "در صف",
+  [LogGroupSetupStatus.PROVISIONING]: "در حال ساخت تاپیک‌ها",
+  [LogGroupSetupStatus.TESTING]: "در حال ارسال پیام آزمایشی",
+  [LogGroupSetupStatus.ACTIVE]: "فعال",
+  [LogGroupSetupStatus.FAILED]: "ناموفق",
+  [LogGroupSetupStatus.CANCELLED]: "لغو شده",
+};
 
 // =============================================================================
 // «تنظیمات گروه لاگ 📝» (ops-logging phase + log-group wizard) - the admin
@@ -45,6 +62,12 @@ const CONNECTION_OK_TEXT = "اتصال گروه لاگ برقرار است ✅";
 
 export const LG_CB = {
   root: "admin:lg",
+  /**
+   * Direct numeric-ID setup entry (both «اتصال با آیدی عددی گروه 🔢» when
+   * unbound and «تغییر گروه با آیدی عددی 🔄» when bound). The flow itself
+   * lives in log-group-id.handler.ts; the string is registered there.
+   */
+  id: "admin:lg:id",
   /** Connection wizard - also reachable via «تغییر گروه لاگ» when bound. */
   connect: "admin:lg:connect",
   guide: "admin:lg:guide",
@@ -72,20 +95,51 @@ function formatTime(when: Date): string {
 
 export const logGroupHandler = new Composer<BotContext>();
 
-async function renderLogGroupPage(ctx: BotContext, toast?: string): Promise<void> {
+export async function renderLogGroupPage(ctx: BotContext, toast?: string): Promise<void> {
   await safeAnswerCallback(ctx, toast);
-  const status = await getLogGroupStatus();
-  const lines = ["تنظیمات گروه لاگ 📝", ""];
+  // The richer status block: connection state (with an in-flight setup made
+  // visible), topic readiness, worker liveness and the setup-queue depth all
+  // come from the shared services - no chat id ever leaves the page unmasked.
+  const [status, activeAttempt, heartbeat, queueCounts] = await Promise.all([
+    getLogGroupStatus(),
+    getActiveSetupAttempt(),
+    readWorkerHeartbeat(),
+    getLogGroupSetupQueueCounts(),
+  ]);
+  const connectionState =
+    activeAttempt !== null
+      ? "در حال راه‌اندازی"
+      : status.configured
+        ? "متصل ✅"
+        : "تنظیم نشده";
+  const pending = queueCounts === null ? "نامشخص" : String(queueCounts.waiting);
+  const lines = [
+    "تنظیمات گروه لاگ 📝",
+    "",
+    `وضعیت اتصال: ${connectionState}`,
+    `نام گروه: ${status.title ?? "بدون نام"}`,
+    `شناسه گروه: ${status.chatId === null ? "-" : maskChatId(status.chatId)}`,
+    `تاپیک‌های آماده: ${status.enabledTopicCount} از ${status.totalTopicCount}`,
+    // The heartbeat key carries a TTL, so its very presence means "alive
+    // recently" - readWorkerHeartbeat returns null when absent/unreachable.
+    `Worker: ${heartbeat !== null ? "فعال ✅" : "غیرفعال ❌"}`,
+    `صف ارسال لاگ: ${pending} در انتظار`,
+    `آخرین ارسال موفق: ${status.lastSuccessAt === null ? "—" : formatTime(status.lastSuccessAt)}`,
+    `آخرین خطا: ${status.lastError === null ? "—" : `${status.lastError.code} (${formatTime(status.lastError.at)})`}`,
+  ];
+  if (activeAttempt !== null) {
+    lines.push(
+      `عملیات راه‌اندازی: ${LG_ATTEMPT_STATUS_LABELS[activeAttempt.status]}`,
+      `تاپیک‌های ساخته‌شده: ${activeAttempt.createdTopicCount} از ${status.totalTopicCount}`,
+    );
+  }
   const kb = new InlineKeyboard();
   if (!status.configured) {
-    lines.push(
-      "وضعیت: تنظیم نشده ❌",
-      "",
-      "برای اتصال، از «اتصال گروه لاگ ➕» استفاده کنید یا دستور /setloggroup را داخل گروه موردنظر بفرستید.",
-    );
-    // Unconfigured: ONLY the wizard entries - no test/topic actions exist
-    // for a binding that is not there yet.
-    kb.text("اتصال گروه لاگ ➕", LG_CB.connect)
+    // Unconfigured: numeric-ID setup FIRST, then the add-bot wizard / guide /
+    // recheck - no test/topic actions exist for a binding that is not there.
+    kb.text("اتصال با آیدی عددی گروه 🔢", LG_CB.id)
+      .row()
+      .text("افزودن ربات به گروه ➕", LG_CB.connect)
       .row()
       .text("راهنمای ساخت گروه", LG_CB.guide)
       .row()
@@ -93,14 +147,6 @@ async function renderLogGroupPage(ctx: BotContext, toast?: string): Promise<void
       .row()
       .text("بازگشت", CB.ADMIN_GENERAL_SETTINGS);
   } else {
-    lines.push(
-      "وضعیت: متصل ✅",
-      `نام گروه: ${status.title ?? "بدون نام"}`,
-      `شناسه گروه: ${status.chatId === null ? "-" : maskChatId(status.chatId)}`,
-      `موضوعات فعال: ${status.enabledTopicCount} از ${status.totalTopicCount}`,
-      `آخرین ارسال موفق: ${status.lastSuccessAt === null ? "—" : formatTime(status.lastSuccessAt)}`,
-      `آخرین خطا: ${status.lastError === null ? "—" : `${status.lastError.code} (${formatTime(status.lastError.at)})`}`,
-    );
     kb.text("بررسی اتصال 🧪", LG_CB.check)
       .row()
       .text("ارسال پیام آزمایشی", LG_CB.test)
@@ -111,7 +157,9 @@ async function renderLogGroupPage(ctx: BotContext, toast?: string): Promise<void
       .row()
       .text("مدیریت موضوعات", LG_CB.topics)
       .row()
-      .text("تغییر گروه لاگ", LG_CB.connect)
+      .text("تغییر گروه با آیدی عددی 🔄", LG_CB.id)
+      .row()
+      .text("افزودن ربات به گروه دیگر ➕", LG_CB.connect)
       .row()
       .text("قطع اتصال گروه", LG_CB.disconnect)
       .row()

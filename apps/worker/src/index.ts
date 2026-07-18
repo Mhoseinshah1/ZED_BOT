@@ -2,6 +2,7 @@ import { connectDatabase, disconnectDatabase } from "@zedbot/database";
 import {
   BACKUP_QUEUE_NAME,
   LOG_DELIVERY_QUEUE_NAME,
+  LOG_GROUP_SETUP_QUEUE_NAME,
   createLogger,
   errorMessage,
   getRedisOptions,
@@ -12,10 +13,12 @@ import { Worker } from "bullmq";
 import { gitSha } from "./config.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { createLogDeliveryProcessor } from "./log-delivery.js";
+import { createLogGroupSetupProcessor } from "./log-group-setup.js";
 import { setLogDeliveryEnqueuer } from "./ops-log.js";
 import {
   createBackupQueue,
   createLogDeliveryQueue,
+  createLogGroupSetupQueue,
   enqueueLogDelivery,
   type WorkerRedisConnection,
 } from "./queues.js";
@@ -56,11 +59,15 @@ async function run(options: RedisConnectionOptions): Promise<void> {
 
   const backupQueue = createBackupQueue(connection);
   const logQueue = createLogDeliveryQueue(connection);
+  const logGroupSetupQueue = createLogGroupSetupQueue(connection);
   backupQueue.on("error", (err) => {
     logger.warn("backup queue redis error", { error: errorMessage(err) });
   });
   logQueue.on("error", (err) => {
     logger.warn("log queue redis error", { error: errorMessage(err) });
+  });
+  logGroupSetupQueue.on("error", (err) => {
+    logger.warn("log group setup queue redis error", { error: errorMessage(err) });
   });
 
   // Ops logs written anywhere in this process enqueue their Telegram delivery
@@ -84,10 +91,16 @@ async function run(options: RedisConnectionOptions): Promise<void> {
     // Telegram-safe: at most 15 sends per minute, one at a time.
     { connection, concurrency: 1, limiter: { max: 15, duration: 60_000 } },
   );
+  const logGroupSetupWorker = new Worker(
+    LOG_GROUP_SETUP_QUEUE_NAME,
+    createLogGroupSetupProcessor({ redis, setupQueue: logGroupSetupQueue }),
+    { connection, concurrency: 1 },
+  );
 
   for (const [name, worker] of [
     ["backup", backupWorker],
     ["log-delivery", logWorker],
+    ["log-group-setup", logGroupSetupWorker],
   ] as const) {
     worker.on("ready", () => {
       logger.info(`${name} worker ready`);
@@ -107,7 +120,7 @@ async function run(options: RedisConnectionOptions): Promise<void> {
 
   // Every service must log its running SHA at startup (deploy diagnostics).
   logger.info(
-    `ZED_BOT worker service started (queues: ${BACKUP_QUEUE_NAME}, ${LOG_DELIVERY_QUEUE_NAME})`,
+    `ZED_BOT worker service started (queues: ${BACKUP_QUEUE_NAME}, ${LOG_DELIVERY_QUEUE_NAME}, ${LOG_GROUP_SETUP_QUEUE_NAME})`,
     { gitSha: gitSha() ?? "unknown" },
   );
 
@@ -121,8 +134,12 @@ async function run(options: RedisConnectionOptions): Promise<void> {
     stopHeartbeat();
     stopReconciler();
     try {
-      await Promise.allSettled([backupWorker.close(), logWorker.close()]);
-      await Promise.allSettled([backupQueue.close(), logQueue.close()]);
+      await Promise.allSettled([
+        backupWorker.close(),
+        logWorker.close(),
+        logGroupSetupWorker.close(),
+      ]);
+      await Promise.allSettled([backupQueue.close(), logQueue.close(), logGroupSetupQueue.close()]);
       await disconnectDatabase();
     } catch (err) {
       logger.warn("error during shutdown", { error: errorMessage(err) });
