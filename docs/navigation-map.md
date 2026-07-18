@@ -382,3 +382,23 @@ button's visibility (one shared policy with the user menu — see
 | campaign detail (`admin:trialent:camp:v:<sid>`; status + total/granted/skipped/failed/processed counters) | بروزرسانی ♻️ » same / مشاهده موارد ردشده » `admin:trialent:camp:sk:<sid>:1` / مشاهده خطاها » `admin:trialent:camp:fl:<sid>:1` / لغو کمپین » `admin:trialent:camp:cx:<sid>` (»confirm «بله، لغو کمپین» » `…:cx:<sid>:yes`; only DRAFT/PREVIEWED/QUEUED/RUNNING) / کمپین‌ها » `admin:trialent:camps:1` / بازگشت » `admin:trialent:dash` |
 | campaign builder («کمپین ریست اکانت تست 🎁», `admin:trialent:camp:new`) | 8 audience buttons » `admin:trialent:camp:aud:<KIND>` *(date flow for REGISTERED_BEFORE/AFTER, telegram-id-list flow for SELECTED_USERS — max 500 lines)* » allowance *(flow)* » expiry: بدون تاریخ انقضا » `admin:trialent:camp:exp:none` · اعتبار برای چند روز » `…:exp:days` *(flow)* » notify: بدون ارسال پیام / ارسال پیام به کاربر » `admin:trialent:camp:notify:no\|yes` » include: رد شدن / شامل شدن کاربران دارای سهمیه » `admin:trialent:camp:inc:no\|yes` » reason *(flow)* » preview |
 | campaign preview («🎁 پیش‌نمایش کمپین ریست تست», estimated audience + rules + reason) | شروع کمپین ✅ » `admin:trialent:camp:startask` (final warning » ادامه ✅ » `admin:trialent:camp:typed` » typed-confirmation *(flow: exact `RESET TRIAL`)*) / ویرایش تنظیمات » `admin:trialent:camp:edit` *(cancels the persisted draft, restarts)* / لغو » `admin:trialent:camp:abort` / بازگشت » `admin:trial_settings` |
+
+## Notification & retention engine (feat/notification-retention-engine, Phase 1)
+
+**User** — under «سرویس‌های من»:
+
+| Entry | Routes |
+| --- | --- |
+| «تنظیمات اعلان‌ها 🔔» (`user:nset:root`) | اعلان‌های خودکار » `user:nset:toggle:cron` / اعلان سرویس‌ها » `user:nset:toggle:svc` / ساعات سکوت » `user:nset:toggle:quiet` / منطقه زمانی » `user:nset:tz` (cycles allowlist) / سقف روزانه » `user:nset:limit` (cycles 1..10) / بازگشت » `CB.USER_SERVICES` |
+| جزئیات سرویس → «اعلان‌های این سرویس 🔔» (`user:nsvc:<sid>`) | per-kind three-state toggle » `user:nsvc:tg:<sid>:(expiry\|traffic\|status)` / بازگشت به سرویس » `user:svc:view:<sid>` |
+
+**Notification action buttons** (worker-rendered, `ntf:<shortId>:<action>`):
+`s` open → service detail · `r` renew → renewal page (or detail + notice) · `v`
+extra-volume → extra-volume page (or detail + notice) · `x` dismiss → strip
+keyboard. Owner-scoped resolve + live capability re-validation on every click.
+
+**Admin** — پنل ادمین → تنظیمات عمومی:
+
+| Entry | Routes |
+| --- | --- |
+| «اعلان‌ها و یادآوری‌ها 🔔» (`admin:ntf`) | فعال/غیرفعال کردن سیستم » `admin:ntf:enable` / `admin:ntf:disable` (OWNER-only; enable behind the activation gate) / toggle rule » `admin:ntf:rule:(expiry\|traffic\|trial)` (OWNER-only) / بروزرسانی » `admin:ntf` / بازگشت » `CB.ADMIN_GENERAL_SETTINGS` |
