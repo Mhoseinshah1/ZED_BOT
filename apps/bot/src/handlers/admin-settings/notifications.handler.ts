@@ -2,11 +2,16 @@ import { prisma } from "@zedbot/database";
 import {
   errorMessage,
   NOTIF_CHECKOUT_TEMPLATE_KEYS,
+  NOTIF_WINBACK_TEMPLATE_KEY,
+  parseWinbackConfig,
+  WINBACK_USER_GROUP_VALUES,
   type AbandonedExclusionReason,
   type CheckoutNotificationRuleKey,
   type NotificationRuleKey,
   type NotificationWorkerStatus,
   type PaymentRetryExclusionReason,
+  type WinbackConfig,
+  type WinbackExclusionReason,
 } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
@@ -17,6 +22,7 @@ import {
   previewAbandonedAudience,
   previewPaymentAudience,
 } from "../../services/checkout-notification.service.js";
+import { previewWinbackAudience } from "../../services/winback.service.js";
 import {
   estimateNotificationAudience,
   getNotificationStatusCounts,
@@ -28,13 +34,18 @@ import {
   compareAndSetNotificationSystemEnabled,
   getAbandonedCheckoutConfig,
   getFailedPaymentConfig,
+  getRetentionScanMinutes,
+  getWinbackConfig,
   isCheckoutRuleEnabled,
   isNotificationRuleEnabled,
   isNotificationSystemEnabled,
+  isWinbackRuleEnabled,
   setAbandonedCheckoutConfig,
   setCheckoutRuleEnabled,
   setFailedPaymentConfig,
   setNotificationRuleEnabled,
+  setWinbackConfig,
+  setWinbackRuleEnabled,
 } from "../../services/notification/notification-settings.service.js";
 import {
   pingOpsRedis,
@@ -88,6 +99,25 @@ const CO_NTF_CB = {
 
 /** currentFlow value for the numeric config-input step (routed from app.ts). */
 const CO_CFG_FLOW = "admin_ntf_co:cfg";
+
+/**
+ * Customer win-back rule-page callbacks (Phase 3). All under the admin:ntf:wb:
+ * namespace, carrying only a short field/group code - never a user, config value
+ * or price. Mirrors CO_NTF_CB.
+ */
+const WB_NTF_CB = {
+  page: "admin:ntf:wb",
+  toggle: "admin:ntf:wb:tg",
+  preview: "admin:ntf:wb:prev",
+  template: "admin:ntf:wb:tpl",
+  test: "admin:ntf:wb:test",
+  edit: (field: string): string => `admin:ntf:wb:e:${field}`,
+  groups: "admin:ntf:wb:groups",
+  groupToggle: (g: string): string => `admin:ntf:wb:g:${g}`,
+} as const;
+
+/** currentFlow value for the win-back numeric/list config-input step. */
+const WB_CFG_FLOW = "admin_ntf_wb:cfg";
 
 const OWNER_ONLY_TEXT = "این عملیات فقط برای مالک مجموعه مجاز است.";
 
@@ -211,6 +241,7 @@ function renderKeyboard(view: AdminNotificationView, owner: boolean): InlineKeyb
   // navigation buttons are always shown; the pages OWNER-gate every mutation.
   kb.text("یادآوری سفارش ناقص 🛒", CO_NTF_CB.page("abandoned")).row();
   kb.text("یادآوری پرداخت ناموفق 💳", CO_NTF_CB.page("payment")).row();
+  kb.text("بازگرداندن مشتریان غیرفعال 👋", WB_NTF_CB.page).row();
   kb.text("بروزرسانی ♻️", NTF_ADMIN_CB.root).row();
   kb.text("بازگشت به تنظیمات عمومی", CB.ADMIN_GENERAL_SETTINGS);
   return kb;
@@ -825,11 +856,504 @@ adminNotificationsHandler.callbackQuery(
   },
 );
 
+// =============================================================================
+// Customer win-back rule page (Phase 3, MARKETING): «بازگرداندن مشتریان غیرفعال
+// 👋». READ (status, thresholds, last retention scan, dry-run audience) is open
+// to any admin; every MUTATION (enable/disable, config edit, group toggle,
+// template navigation) is OWNER-only. Enabling passes evaluateWinbackRuleGate;
+// disabling is always allowed. Config edits validate through the shared parser
+// before persisting, and the test send uses SAMPLE variables only - no row, no
+// dedupe, no audience send.
+// =============================================================================
+
+/** Latin -> Persian digits for the admin win-back page counts. */
+function toFaDigits(value: string | number): string {
+  return String(value).replace(/[0-9]/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)]);
+}
+
+const WINBACK_REASON_LABELS: Record<WinbackExclusionReason, string> = {
+  "ineligible-status": "وضعیت کاربر نامعتبر",
+  "ineligible-group": "گروه کاربری غیرمجاز",
+  "never-paid": "بدون خرید قبلی",
+  "trial-only": "فقط اکانت تست",
+  "marketing-opt-out": "انصراف از بازاریابی",
+  snoozed: "توقف موقت فعال",
+  "financial-hold": "در حال بررسی مالی",
+  "purchase-in-progress": "خرید در جریان",
+  "active-service": "دارای سرویس فعال",
+  "service-uncertain": "وضعیت سرویس نامشخص",
+  "too-early": "هنوز زمان یادآوری نرسیده",
+  "cron-disabled": "اعلان‌های خودکار خاموش",
+  "max-cycle-reached": "به سقف چرخه رسیده",
+  "no-stage-due": "مرحله‌ای برای ارسال نیست",
+};
+
+const WINBACK_GROUP_TITLES: Record<string, string> = {
+  F: "کاربران عادی (F)",
+  N: "نماینده (N)",
+  N2: "نماینده (N2)",
+};
+
+const WB_CONFIG_PROMPTS: Record<string, string> = {
+  stages: "روزهای مراحل یادآوری را با «،» یا فاصله وارد کنید (مثال: ۳۰ ۶۰ ۹۰). بین ۷ تا ۷۳۰، یکتا و حداکثر ۶ مورد:",
+  minorders: "حداقل تعداد خرید موفق برای واجد شرایط شدن را وارد کنید (بین ۱ تا ۱۰۰):",
+  minspend: "حداقل مجموع خرید (تومان) را وارد کنید (۰ برای بدون حد):",
+  snooze: "مدت توقف موقت (روز) را وارد کنید (بین ۱ تا ۳۶۵):",
+  max: "حداکثر تعداد یادآوری در هر چرخه را وارد کنید (حداکثر برابر تعداد مراحل):",
+};
+
+const WINBACK_CONFIG_INVALID_TEXT =
+  "مقدار واردشده معتبر نیست. لطفاً محدوده‌های مجاز را رعایت کنید.";
+
+/** The single message shown when the win-back activation gate refuses (per spec). */
+const WINBACK_GATE_FAIL_TEXT =
+  "امکان فعال‌سازی وجود ندارد. ابتدا وضعیت Worker، همگام‌سازی سرویس و ارسال تلگرام را بررسی کنید.";
+
+/** Clears any pending win-back config-input flow (called on every navigation). */
+function clearWbCfgFlow(ctx: BotContext): void {
+  if (ctx.session.currentFlow === WB_CFG_FLOW) {
+    ctx.session.currentFlow = null;
+  }
+  delete ctx.session.temp.adminWinbackNtfDraft;
+}
+
+/** Normalizes Persian/Arabic digits to ASCII for parsing. */
+function normalizeDigits(raw: string): string {
+  return raw
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
+}
+
+/** Parses a non-negative integer (accepts Persian/Arabic digits); null when invalid. */
+function parseNonNegativeInt(raw: string): number | null {
+  const normalized = normalizeDigits(raw.trim());
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+  const n = Number.parseInt(normalized, 10);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+/** Parses a comma/space/Persian-comma separated list of positive integers. */
+function parseStageList(raw: string): number[] | null {
+  const parts = normalizeDigits(raw)
+    .split(/[,\s،]+/)
+    .map((p) => p.trim())
+    .filter((p) => p !== "");
+  if (parts.length === 0) {
+    return null;
+  }
+  const nums: number[] = [];
+  for (const p of parts) {
+    if (!/^\d+$/.test(p)) {
+      return null;
+    }
+    const n = Number.parseInt(p, 10);
+    if (!Number.isInteger(n)) {
+      return null;
+    }
+    nums.push(n);
+  }
+  return nums;
+}
+
+/**
+ * Runs the shared parser with a unique sentinel fallback: a returned sentinel
+ * means the candidate config was invalid (the parser rejected it). This lets the
+ * edit REJECT invalid input instead of silently resetting to defaults.
+ */
+function validateWinbackConfig(candidate: WinbackConfig): WinbackConfig | null {
+  const sentinel = {} as WinbackConfig;
+  const parsed = parseWinbackConfig(candidate, sentinel);
+  return parsed === sentinel ? null : parsed;
+}
+
+function winbackActionKeyboard(enabled: boolean, owner: boolean): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  if (owner) {
+    kb.text(enabled ? "غیرفعال کردن ⛔" : "فعال کردن ✅", WB_NTF_CB.toggle).row();
+    kb.text("تنظیم مراحل (روز)", WB_NTF_CB.edit("stages"))
+      .text("گروه‌های مجاز", WB_NTF_CB.groups)
+      .row();
+    kb.text("حداقل خرید", WB_NTF_CB.edit("minorders"))
+      .text("حداقل مبلغ", WB_NTF_CB.edit("minspend"))
+      .row();
+    kb.text("مدت توقف موقت", WB_NTF_CB.edit("snooze"))
+      .text("سقف هر چرخه", WB_NTF_CB.edit("max"))
+      .row();
+    kb.text("ویرایش متن پیام ✏️", WB_NTF_CB.template).row();
+  }
+  kb.text("پیش‌نمایش مخاطبان 👁", WB_NTF_CB.preview).row();
+  kb.text("ارسال آزمایشی 📨", WB_NTF_CB.test).row();
+  kb.text("وضعیت موتور و صف ⚙️", NTF_ADMIN_CB.root).row();
+  kb.text("بازگشت", NTF_ADMIN_CB.root);
+  return kb;
+}
+
+async function renderWinbackPage(ctx: BotContext, opts: RulePageOptions): Promise<void> {
+  const [enabled, config, scanMinutes, status, preview] = await Promise.all([
+    isWinbackRuleEnabled(),
+    getWinbackConfig(),
+    getRetentionScanMinutes(),
+    readNotificationWorkerStatus(),
+    previewWinbackAudience(),
+  ]);
+  const lines = [
+    "👋 بازگرداندن مشتریان غیرفعال",
+    "",
+    `وضعیت: ${enabled ? "فعال ✅" : "غیرفعال ❌"}`,
+    `مراحل یادآوری (روز): ${config.stageDays.map((d) => toFaDigits(d)).join("، ")}`,
+    `گروه‌های کاربری مجاز: ${config.allowedUserGroups.join("، ")}`,
+    `حداقل خرید موفق: ${toFaDigits(config.minimumCompletedPaidOrders)}`,
+    `حداقل مجموع خرید: ${toFaDigits(config.minimumLifetimeSpendToman)} تومان`,
+    `مدت توقف موقت: ${toFaDigits(config.snoozeDays)} روز`,
+    `حداکثر یادآوری در هر چرخه: ${toFaDigits(config.maximumNotificationsPerLapseCycle)}`,
+    `فاصله اسکن بازگشت: ${toFaDigits(scanMinutes)} دقیقه`,
+    `آخرین اسکن بازگشت: ${formatInstant(status?.lastRetentionScanAt ?? null)}`,
+    "",
+    `مخاطبان واجد شرایط (تخمینی): ${toFaDigits(preview.eligible)}`,
+    `کاربران بررسی‌شده: ${toFaDigits(preview.scanned)}${preview.capped ? " (به سقف اسکن رسید)" : ""}`,
+    `قالب پیام: ${NOTIF_WINBACK_TEMPLATE_KEY}`,
+  ];
+  if (opts.showBreakdown === true) {
+    const perStage = config.stageDays.map(
+      (d) => `• مرحله ${toFaDigits(d)} روز: ${toFaDigits(preview.perStage[String(d)] ?? 0)}`,
+    );
+    lines.push("", "واجد شرایط به تفکیک مرحله:", ...perStage);
+    const breakdown = formatExclusions(preview.exclusions, WINBACK_REASON_LABELS);
+    lines.push(
+      "",
+      breakdown.length > 0
+        ? "دلایل خارج‌شدن از فهرست:"
+        : "همه‌ی موارد بررسی‌شده واجد شرایط بودند یا موردی یافت نشد.",
+      ...breakdown,
+    );
+  }
+  if (opts.gateReason !== undefined) {
+    lines.push("", "⛔ فعال‌سازی ممکن نشد:", opts.gateReason);
+  }
+  await safeAnswerCallback(ctx, opts.toast);
+  await safeEditOrReply(ctx, lines.join("\n"), winbackActionKeyboard(enabled, isOwner(ctx)));
+}
+
+async function renderWinbackGroupsPage(ctx: BotContext, toast?: string): Promise<void> {
+  const config = await getWinbackConfig();
+  const owner = isOwner(ctx);
+  const lines = [
+    "👥 گروه‌های کاربری مجاز برای بازگشت",
+    "",
+    "گروه‌هایی که پیام بازگشت دریافت می‌کنند را انتخاب کنید. حداقل یک گروه باید فعال بماند.",
+    "",
+    ...WINBACK_USER_GROUP_VALUES.map(
+      (g) =>
+        `${WINBACK_GROUP_TITLES[g] ?? g}: ${config.allowedUserGroups.includes(g) ? "فعال ✅" : "غیرفعال ❌"}`,
+    ),
+  ];
+  const kb = new InlineKeyboard();
+  if (owner) {
+    for (const g of WINBACK_USER_GROUP_VALUES) {
+      kb.text(
+        `${WINBACK_GROUP_TITLES[g] ?? g}: ${config.allowedUserGroups.includes(g) ? "✅" : "❌"}`,
+        WB_NTF_CB.groupToggle(g),
+      ).row();
+    }
+  }
+  kb.text("بازگشت", WB_NTF_CB.page);
+  await safeAnswerCallback(ctx, toast);
+  await safeEditOrReply(ctx, lines.join("\n"), kb);
+}
+
+/**
+ * The win-back activation gate (mirrors evaluateCheckoutRuleGate): master on,
+ * Redis reachable, worker heartbeat fresh, engine status fresh, retention
+ * scheduler active (when a fresh status is available), the win-back template
+ * resolvable, config valid (parser-guaranteed) and at least one allowed group.
+ * Returns the first failing reason (for the log); the page shows a fixed message.
+ */
+async function evaluateWinbackRuleGate(): Promise<GateResult> {
+  if (!(await isNotificationSystemEnabled())) {
+    return { ok: false, reason: "master-disabled" };
+  }
+  if (!(await pingOpsRedis()).ok) {
+    return { ok: false, reason: "redis-down" };
+  }
+  if ((await readWorkerHeartbeat()) === null) {
+    return { ok: false, reason: "heartbeat-missing" };
+  }
+  const status = await readNotificationWorkerStatus();
+  if (!isStatusFresh(status)) {
+    return { ok: false, reason: "status-stale" };
+  }
+  if (status !== null && status.schedulerActive !== true) {
+    return { ok: false, reason: "scheduler-inactive" };
+  }
+  const rendered = await getMessageTemplate(NOTIF_WINBACK_TEMPLATE_KEY);
+  if (rendered.trim() === "") {
+    return { ok: false, reason: "template-missing" };
+  }
+  const config = await getWinbackConfig();
+  if (config.allowedUserGroups.length === 0) {
+    return { ok: false, reason: "no-allowed-group" };
+  }
+  return { ok: true };
+}
+
+async function toggleWinbackRule(ctx: BotContext): Promise<void> {
+  const admin = ctx.admin;
+  if (admin === null) {
+    return;
+  }
+  if (!isOwner(ctx)) {
+    await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
+    return;
+  }
+  if (await isWinbackRuleEnabled()) {
+    // Disabling is always allowed and never gated.
+    await setWinbackRuleEnabled(false);
+    clearSettingsCache();
+    logger.info("winback rule disabled", { adminId: admin.id });
+    await renderWinbackPage(ctx, { toast: "قانون غیرفعال شد." });
+    return;
+  }
+  const gate = await evaluateWinbackRuleGate();
+  if (!gate.ok) {
+    logger.info("winback rule enable refused by gate", { adminId: admin.id, reason: gate.reason });
+    // The rule stays OFF; show the fixed activation-failure message.
+    await renderWinbackPage(ctx, { toast: "فعال‌سازی انجام نشد.", gateReason: WINBACK_GATE_FAIL_TEXT });
+    return;
+  }
+  await setWinbackRuleEnabled(true);
+  clearSettingsCache();
+  logger.info("winback rule enabled", { adminId: admin.id });
+  await renderWinbackPage(ctx, { toast: "قانون فعال شد ✅" });
+}
+
+async function toggleWinbackGroup(ctx: BotContext, group: string): Promise<void> {
+  const admin = ctx.admin;
+  if (admin === null) {
+    return;
+  }
+  if (!isOwner(ctx)) {
+    await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
+    return;
+  }
+  const cfg = await getWinbackConfig();
+  const has = cfg.allowedUserGroups.includes(group);
+  let nextGroups: string[];
+  if (has) {
+    nextGroups = cfg.allowedUserGroups.filter((g) => g !== group);
+    if (nextGroups.length === 0) {
+      // Never allow an empty group set.
+      await safeAnswerCallback(ctx, "حداقل یک گروه باید فعال بماند.");
+      return;
+    }
+  } else {
+    nextGroups = [...cfg.allowedUserGroups, group];
+  }
+  const validated = validateWinbackConfig({ ...cfg, allowedUserGroups: nextGroups });
+  if (validated === null) {
+    await safeAnswerCallback(ctx, WINBACK_CONFIG_INVALID_TEXT);
+    return;
+  }
+  await setWinbackConfig(validated);
+  clearSettingsCache();
+  logger.info("winback allowed groups updated", { adminId: admin.id, group, enabled: !has });
+  await renderWinbackGroupsPage(ctx, "ذخیره شد ✅");
+}
+
+async function startWinbackConfigEdit(ctx: BotContext, field: string): Promise<void> {
+  if (!isOwner(ctx)) {
+    await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
+    return;
+  }
+  const prompt = WB_CONFIG_PROMPTS[field];
+  if (prompt === undefined) {
+    await safeAnswerCallback(ctx, "مورد نامعتبر است.");
+    return;
+  }
+  ctx.session.currentFlow = WB_CFG_FLOW;
+  ctx.session.temp.adminWinbackNtfDraft = { field };
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(ctx, prompt, new InlineKeyboard().text("انصراف", WB_NTF_CB.page));
+}
+
+/** Applies one win-back config edit, validated through the shared parser. */
+async function applyWinbackEdit(field: string, raw: string): Promise<EditResult> {
+  const cfg = await getWinbackConfig();
+  let candidate: WinbackConfig;
+  if (field === "stages") {
+    const stages = parseStageList(raw);
+    if (stages === null) {
+      return { ok: false, error: "فهرست روزها نامعتبر است؛ اعداد را با «،» یا فاصله جدا کنید." };
+    }
+    candidate = { ...cfg, stageDays: stages };
+  } else {
+    const value = parseNonNegativeInt(raw);
+    if (value === null) {
+      return { ok: false, error: "عدد نامعتبر است. یک عدد صحیح وارد کنید." };
+    }
+    if (field === "minorders") {
+      candidate = { ...cfg, minimumCompletedPaidOrders: value };
+    } else if (field === "minspend") {
+      candidate = { ...cfg, minimumLifetimeSpendToman: value };
+    } else if (field === "snooze") {
+      candidate = { ...cfg, snoozeDays: value };
+    } else if (field === "max") {
+      candidate = { ...cfg, maximumNotificationsPerLapseCycle: value };
+    } else {
+      return { ok: false, error: "مورد نامعتبر است." };
+    }
+  }
+  const validated = validateWinbackConfig(candidate);
+  if (validated === null) {
+    return { ok: false, error: WINBACK_CONFIG_INVALID_TEXT };
+  }
+  await setWinbackConfig(validated);
+  return { ok: true };
+}
+
+async function routeWinbackTemplateEdit(ctx: BotContext): Promise<void> {
+  if (!isOwner(ctx)) {
+    await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
+    return;
+  }
+  const key = NOTIF_WINBACK_TEMPLATE_KEY;
+  const row = await prisma.messageTemplate.findUnique({ where: { key }, select: { id: true } });
+  await safeAnswerCallback(ctx);
+  const kb = new InlineKeyboard();
+  if (row !== null) {
+    // Same literal text-editor callback format as the checkout template route.
+    kb.text("ویرایش متن پیام ✏️", `admin:texts:t:${row.id.slice(0, 8)}`).row();
+  }
+  kb.text("بازگشت", WB_NTF_CB.page);
+  const note =
+    row !== null
+      ? "برای ویرایش متن این اعلان از دکمه زیر استفاده کنید."
+      : "قالب پیام هنوز در پایگاه‌داده ثبت نشده است؛ از «مدیریت متن‌ها» آن را ویرایش کنید.";
+  await safeEditOrReply(ctx, `کلید قالب پیام:\n${key}\n\n${note}`, kb);
+}
+
+async function sendWinbackTestMessage(ctx: BotContext): Promise<void> {
+  const chatId = ctx.from?.id;
+  if (chatId === undefined) {
+    await safeAnswerCallback(ctx, "شناسه چت مدیر در دسترس نیست.");
+    return;
+  }
+  // Sample display variables ONLY - never a real user, service or price.
+  const variables: Record<string, string | number> = {
+    inactive_days: "۳۰",
+    last_service_name: "نمونه",
+    last_product_name: "پلن نمونه",
+  };
+  const text = await getMessageTemplate(NOTIF_WINBACK_TEMPLATE_KEY, undefined, variables);
+  try {
+    await ctx.api.sendMessage(chatId, `🧪 پیام آزمایشی بازگرداندن مشتری\n\n${text}`);
+    await safeAnswerCallback(ctx, "پیام آزمایشی ارسال شد ✅");
+  } catch (err) {
+    logger.warn("winback test message failed", { error: errorMessage(err) });
+    await safeAnswerCallback(ctx, "ارسال پیام آزمایشی ناموفق بود.");
+  }
+}
+
+adminNotificationsHandler.callbackQuery(WB_NTF_CB.page, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearWbCfgFlow(ctx);
+  await renderWinbackPage(ctx, {});
+});
+
+adminNotificationsHandler.callbackQuery(WB_NTF_CB.toggle, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearWbCfgFlow(ctx);
+  await toggleWinbackRule(ctx);
+});
+
+adminNotificationsHandler.callbackQuery(WB_NTF_CB.preview, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearWbCfgFlow(ctx);
+  await renderWinbackPage(ctx, { showBreakdown: true });
+});
+
+adminNotificationsHandler.callbackQuery(WB_NTF_CB.template, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearWbCfgFlow(ctx);
+  await routeWinbackTemplateEdit(ctx);
+});
+
+adminNotificationsHandler.callbackQuery(WB_NTF_CB.test, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearWbCfgFlow(ctx);
+  await sendWinbackTestMessage(ctx);
+});
+
+adminNotificationsHandler.callbackQuery(WB_NTF_CB.groups, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearWbCfgFlow(ctx);
+  await renderWinbackGroupsPage(ctx);
+});
+
+adminNotificationsHandler.callbackQuery(/^admin:ntf:wb:g:(F|N|N2)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  clearWbCfgFlow(ctx);
+  await toggleWinbackGroup(ctx, ctx.match[1]);
+});
+
+adminNotificationsHandler.callbackQuery(/^admin:ntf:wb:e:([a-z]+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  await startWinbackConfigEdit(ctx, ctx.match[1]);
+});
+
 // --- numeric config input (flow "admin_ntf_co:cfg", routed from app.ts) -------
 
 export const adminNotificationsTextHandler = new Composer<BotContext>();
 
 adminNotificationsTextHandler.on("message:text", async (ctx, next) => {
+  // Win-back config input (flow "admin_ntf_wb:cfg"). Accepts a comma/space list
+  // for stages or a single number for the other fields; validated by the shared
+  // parser (invalid -> rejected, never a silent reset). OWNER-only.
+  if (ctx.session.currentFlow === WB_CFG_FLOW) {
+    const draft = ctx.session.temp.adminWinbackNtfDraft;
+    if (ctx.admin === null || draft === undefined) {
+      clearWbCfgFlow(ctx);
+      return next();
+    }
+    const text = ctx.message.text;
+    if (text.startsWith("/")) {
+      clearWbCfgFlow(ctx);
+      return next();
+    }
+    if (!isOwner(ctx)) {
+      clearWbCfgFlow(ctx);
+      await safeReply(ctx, OWNER_ONLY_TEXT);
+      return;
+    }
+    const result = await applyWinbackEdit(draft.field, text);
+    if (!result.ok) {
+      await safeReply(ctx, result.error);
+      return; // keep the flow so the admin can retry.
+    }
+    clearSettingsCache();
+    logger.info("winback config updated", { adminId: ctx.admin.id, field: draft.field });
+    clearWbCfgFlow(ctx);
+    await safeReply(ctx, "ذخیره شد ✅");
+    await renderWinbackPage(ctx, {});
+    return;
+  }
   if (ctx.session.currentFlow !== CO_CFG_FLOW) {
     return next();
   }

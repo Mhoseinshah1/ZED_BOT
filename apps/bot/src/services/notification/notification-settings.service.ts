@@ -42,6 +42,13 @@ import {
   type AbandonedCheckoutConfig,
   type CheckoutNotificationRuleKey,
   type FailedPaymentConfig,
+  DEFAULT_RETENTION_SCAN_MINUTES,
+  DEFAULT_WINBACK_CONFIG,
+  NOTIF_RETENTION_SCAN_MINUTES_KEY,
+  NOTIF_WINBACK_CONFIG_KEY,
+  NOTIF_WINBACK_ENABLED_KEY,
+  parseWinbackConfig,
+  type WinbackConfig,
 } from "@zedbot/shared";
 
 import {
@@ -232,4 +239,37 @@ export async function getFailedPaymentConfig(): Promise<FailedPaymentConfig> {
 export async function setFailedPaymentConfig(cfg: FailedPaymentConfig): Promise<void> {
   const validated = parseFailedPaymentConfig(cfg, DEFAULT_FAILED_PAYMENT_CONFIG);
   await setSetting(NOTIF_PAYMENT_RETRY_CONFIG_KEY, JSON.stringify(validated), "JSON");
+}
+
+// =============================================================================
+// Customer win-back (Phase 3). One MARKETING rule switch + a validated JSON
+// config, mirroring the Phase-2 helpers. The rule defaults FALSE (no marketing
+// until the OWNER enables it). Writes ONLY the win-back Setting keys.
+// =============================================================================
+
+export async function isWinbackRuleEnabled(): Promise<boolean> {
+  return getBooleanSetting(NOTIF_WINBACK_ENABLED_KEY, false);
+}
+
+export async function setWinbackRuleEnabled(enabled: boolean): Promise<void> {
+  await setSetting(NOTIF_WINBACK_ENABLED_KEY, enabled ? "true" : "false", "BOOLEAN");
+}
+
+export async function getWinbackConfig(): Promise<WinbackConfig> {
+  return parseWinbackConfig(await getSetting(NOTIF_WINBACK_CONFIG_KEY, ""), DEFAULT_WINBACK_CONFIG);
+}
+
+/** Validates via the shared parser (defaulting invalid input) before persisting the full JSON. */
+export async function setWinbackConfig(cfg: WinbackConfig): Promise<void> {
+  const validated = parseWinbackConfig(cfg, DEFAULT_WINBACK_CONFIG);
+  await setSetting(NOTIF_WINBACK_CONFIG_KEY, JSON.stringify(validated), "JSON");
+}
+
+export async function getRetentionScanMinutes(): Promise<number> {
+  const raw = await getSetting(NOTIF_RETENTION_SCAN_MINUTES_KEY, "");
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isInteger(n) || n < 60 || n > 7 * 24 * 60) {
+    return DEFAULT_RETENTION_SCAN_MINUTES;
+  }
+  return n;
 }

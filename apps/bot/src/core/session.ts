@@ -303,6 +303,9 @@ export interface SessionData {
     // Checkout-payment reminder config edit (Phase 2, flow "admin_ntf_co:cfg").
     // Holds which rule + which numeric field the next admin text message edits.
     adminCheckoutNtfDraft?: { rule: "abandoned" | "payment"; field: string };
+    // Customer win-back config edit (Phase 3, flow "admin_ntf_wb:cfg"). Holds
+    // which win-back config field the next admin text message edits.
+    adminWinbackNtfDraft?: { field: string };
     // Production-backup rework: scheduled-backup text input target (the
     // "rb:sched_hour" flow currently only edits the run hour).
     adminBackupScheduleDraft?: { field: "hour" };

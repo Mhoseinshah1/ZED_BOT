@@ -400,6 +400,10 @@ export async function readNotificationWorkerStatus(): Promise<NotificationWorker
           : 0,
       paymentRetryCandidates:
         typeof value.paymentRetryCandidates === "number" ? value.paymentRetryCandidates : 0,
+      // Customer win-back (Phase 3). Optional so an older worker's snapshot still
+      // parses; the admin win-back page renders "نامشخص" when absent.
+      lastRetentionScanAt:
+        typeof value.lastRetentionScanAt === "string" ? value.lastRetentionScanAt : null,
     };
   } catch {
     return null;
