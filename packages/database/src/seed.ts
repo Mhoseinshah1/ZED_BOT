@@ -70,6 +70,10 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   // values (thresholds, delays, caps) are code-defaulted, never seeded.
   { key: "notification_abandoned_checkout_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
   { key: "notification_payment_retry_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Customer win-back campaigns (Phase 3). The MARKETING rule seeds FALSE - no
+  // user receives a win-back message until the OWNER explicitly enables it behind
+  // the activation gate. Config (stages, groups, thresholds) is code-defaulted.
+  { key: "notification_customer_winback_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are

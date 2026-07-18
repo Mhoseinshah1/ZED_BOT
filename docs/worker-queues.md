@@ -203,3 +203,21 @@ them on the SAME delivery queue + worker. Delivery re-validates live financial
 state before send (`revalidateCheckoutSource`). No new delivery/quiet-hours/
 limit/retry logic. Heartbeat gains `lastCheckoutScanAt`,
 `abandonedCheckoutCandidates`, `paymentRetryCandidates`.
+
+### Customer win-back (Phase 3)
+
+Reuses the existing `automated-notification-scan` queue — no new queue. The
+reserved scheduler `notif-sched-retention-scan` emits `SCAN_RETENTION_NOTIFICATIONS`
+(default every 1440 min / daily) on the scan queue, registered ONLY while
+`notification_customer_winback_enabled` is on (removed otherwise). The processor
+(`winback-scan.ts` → `winback-eligibility.ts`) cursor-paginates narrowed candidate
+users, builds each `CustomerLifecycleSnapshot` from authoritative rows, calls the
+shared resolver, and creates dedupe-guarded `CUSTOMER_WINBACK` rows (category
+MARKETING) for genuine lapsed paying customers, enqueuing them on the SAME
+delivery queue + worker. A stale paid-service state enqueues a **priority
+`SYNC_PANEL_SERVICES`** (reusing the Phase 1 service-sync queue) and skips the
+candidate — never guessing inactivity. Delivery re-validates live state
+(`revalidateWinbackSource`): cancel on a new usable service / changed lapse cycle,
+suppress on opt-out/snooze, defer on uncertain state. No new delivery/quiet-hours/
+limit/retry logic. Heartbeat gains `lastRetentionScanAt`, `winbackCandidates`,
+`winbackScheduled`, `winbackExcludedUncertainService`, `retentionScanFailures`.

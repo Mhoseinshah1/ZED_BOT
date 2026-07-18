@@ -378,14 +378,21 @@ with a CAS worker, quiet hours, daily limits, the `ntf:*` callback namespace, an
 one admin health page. Phase 1 covers service-expiry / traffic / status / trial
 reminders. Phase 2 adds **abandoned-checkout** and **failed-payment** reminders
 (category PAYMENT): a checkout scan on the existing scan queue plus a delivery
-re-validation branch. Every reminder can navigate a user back into an existing
-checkout but never settles a payment, creates an order, approves a receipt,
-spends the wallet, reserves inventory, provisions a service, or alters
-reconciliation — the financial system stays authoritative. Both new rules are
-OWNER-only and stay off until explicitly enabled behind a fail-safe activation
+re-validation branch. Phase 3 adds automated **customer win-back** campaigns
+(category MARKETING, lowest priority): a daily retention scan identifies genuine
+previous paying VPN customers who currently have no usable service — measured from
+authoritative paid Service/Order history with a fresh-state requirement that
+never guesses inactivity — and sends multi-stage reminders (with a lapse-cycle
+fingerprint, catch-up, per-user snooze and the existing permanent marketing
+opt-out) that re-introduce the storefront. Every reminder can navigate a user back
+into the storefront or wallet but never settles a payment, creates an order or
+checkout, approves a receipt, spends the wallet, provisions a service, or alters
+reconciliation — the financial system stays authoritative. Every new rule is
+OWNER-only and stays off until explicitly enabled behind a fail-safe activation
 gate. See `docs/customer-retention-engine.md`,
 `docs/checkout-payment-reminders.md`, `docs/abandoned-checkout-rules.md`,
-`docs/payment-retry-notifications.md`.
+`docs/payment-retry-notifications.md`, `docs/customer-winback-rules.md`,
+`docs/customer-lifecycle-segmentation.md`, `docs/customer-winback-operations.md`.
 
 ### Persian bot copy
 

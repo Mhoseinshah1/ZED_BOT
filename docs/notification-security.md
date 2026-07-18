@@ -91,3 +91,32 @@ Same guarantees extended to the two new rules:
   immutable. An open reconciliation case blocks retry navigation.
 - Both rules are OWNER-only to mutate and disabled by default; enabling passes a
   fail-safe activation gate. Raw gateway errors never reach users.
+
+## Customer win-back (Phase 3)
+
+Same guarantees extended to the MARKETING rule:
+
+- Payload snapshots + callbacks carry only safe display values (`inactive_days`,
+  an optional safe `last_service_name` = the user's own service note, an optional
+  `last_product_name` snapshot) — never a subscription URL/token, panel data,
+  price, **lifetime spend**, internal customer-value/segment, provider payload,
+  receipt content, Telegram id, or full user/order id. The lapse-cycle fingerprint
+  is HASHED before it enters the dedupe key, payload meta or any log
+  (`winback-delivery.test.ts` asserts neither the anchor order id nor the raw
+  fingerprint appears in the sent body).
+- Callback data is `ntf:<shortId>:<action>` with `g` (view plans → the existing
+  storefront), `w` (wallet → the existing wallet page), `z` (snooze), `o`
+  (marketing opt-out); confirmations use `wb:<verb>:<shortId>`. Every click
+  re-resolves the notification owner-scoped — a foreign/absent short id gets the
+  same safe toast (no existence reveal). Persian labels are never action ids.
+- Navigation NEVER creates a payment, checkout, order or service, spends the
+  wallet, or starts auto-renewal. Snooze writes ONLY
+  `CustomerRetentionPreference.winbackSnoozedUntil` (win-back only, idempotent);
+  the permanent opt-out writes ONLY `User.marketingMessagesEnabled` and leaves
+  service/payment/support notifications untouched.
+- Current eligibility is re-checked from authoritative rows at delivery — the
+  snapshot is never trusted for it; opt-out, snooze and fresh service state are
+  all re-validated before send. The admin preview and test-send create no audience
+  notification, no dedupe, no lifecycle history; the test-send goes only to the
+  requesting OWNER with sample values. The rule is OWNER-only to mutate, disabled
+  by default, behind a fail-safe activation gate.

@@ -543,34 +543,36 @@ model User {
   updatedAt DateTime @updatedAt
 
   // Relations
-  walletTransactions       WalletTransaction[]
-  orders                   Order[]
-  payments                 Payment[]
-  services                 Service[]
-  checkoutSessions         CheckoutSession[]
-  discountCodeUsages       DiscountCodeUsage[]
-  manualReceipts           ManualReceipt[]
-  hiddenPanels             UserHiddenPanel[]
-  hiddenPaymentGateways    UserHiddenPaymentGateway[]
-  referralsAsReferrer      Referral[]                   @relation("ReferralReferrer")
-  referralAsReferred       Referral?                    @relation("ReferralReferred")
-  commissionsAsReferrer    ReferralCommission[]         @relation("CommissionReferrer")
-  commissionsAsReferred    ReferralCommission[]         @relation("CommissionReferred")
-  freeTrialClaims          FreeTrialClaim[]
-  freeTrialEntitlements    FreeTrialEntitlement[]
-  freeTrialCampaignRows    FreeTrialCampaignRecipient[]
-  wheelSpinHistories       WheelSpinHistory[]
-  supportTickets           SupportTicket[]
-  checkoutCustomerInputs   CheckoutCustomerInput[]
-  supportMessages          SupportMessage[]
-  broadcastRecipients      BroadcastRecipient[]
-  serviceRatings           ServiceRating[]
-  serviceEventLogs         ServiceEventLog[]
-  otherProductOrders       OtherProductOrder[]
+  walletTransactions          WalletTransaction[]
+  orders                      Order[]
+  payments                    Payment[]
+  services                    Service[]
+  checkoutSessions            CheckoutSession[]
+  discountCodeUsages          DiscountCodeUsage[]
+  manualReceipts              ManualReceipt[]
+  hiddenPanels                UserHiddenPanel[]
+  hiddenPaymentGateways       UserHiddenPaymentGateway[]
+  referralsAsReferrer         Referral[]                   @relation("ReferralReferrer")
+  referralAsReferred          Referral?                    @relation("ReferralReferred")
+  commissionsAsReferrer       ReferralCommission[]         @relation("CommissionReferrer")
+  commissionsAsReferred       ReferralCommission[]         @relation("CommissionReferred")
+  freeTrialClaims             FreeTrialClaim[]
+  freeTrialEntitlements       FreeTrialEntitlement[]
+  freeTrialCampaignRows       FreeTrialCampaignRecipient[]
+  wheelSpinHistories          WheelSpinHistory[]
+  supportTickets              SupportTicket[]
+  checkoutCustomerInputs      CheckoutCustomerInput[]
+  supportMessages             SupportMessage[]
+  broadcastRecipients         BroadcastRecipient[]
+  serviceRatings              ServiceRating[]
+  serviceEventLogs            ServiceEventLog[]
+  otherProductOrders          OtherProductOrder[]
   // Notification/retention engine (feat/notification-retention-engine).
-  automatedNotifications   AutomatedNotification[]
-  notificationInteractions NotificationInteraction[]
-  notificationPreference   NotificationPreference?
+  automatedNotifications      AutomatedNotification[]
+  notificationInteractions    NotificationInteraction[]
+  notificationPreference      NotificationPreference?
+  // Customer win-back (feat/customer-winback-automation, Phase 3).
+  customerRetentionPreference CustomerRetentionPreference?
 
   @@index([status])
   @@index([group])
@@ -2222,6 +2224,11 @@ enum NotificationInteractionType {
   CONTINUE_CHECKOUT
   VIEW_PRODUCTS
   DISMISS
+  // Phase 3 (customer win-back). VIEW_PRODUCTS is reused for the "view plans"
+  // action; these are the win-back-specific interactions.
+  VIEW_WALLET
+  SNOOZE_WINBACK
+  MARKETING_OPT_OUT
 }
 
 /**
@@ -2375,6 +2382,30 @@ model CheckoutNotificationPreference {
   paymentRetrySuppressedAt      DateTime?
 
   suppressedByNotificationId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * Customer win-back (Phase 3): per-user retention state that is NOT already
+ * represented on the User model. The permanent marketing opt-out stays on
+ * `User.marketingMessagesEnabled` (authoritative) - this side table only holds
+ * the temporary win-back snooze. `winbackSnoozedUntil` suppresses CUSTOMER_WINBACK
+ * ONLY; it never affects Service notifications, payment reminders or support.
+ * The snooze is a history-preserving upsert on the unique userId (a repeated
+ * snooze callback is idempotent - the instant is not extended unless the user
+ * starts a new snooze). Derived lifecycle segments are NEVER persisted here; they
+ * are always recomputed from authoritative rows.
+ */
+model CustomerRetentionPreference {
+  id String @id @default(uuid())
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  winbackSnoozedUntil         DateTime?
+  lastSnoozedByNotificationId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -139,3 +139,25 @@ Background: [backup-architecture.md](backup-architecture.md),
   reconciliation state but never writes them. `settledByPaymentId` remains the
   one-settlement-owner CAS anchor; a notification handler never participates in
   settlement.
+
+## Customer win-back (Phase 3)
+
+- Reuses `AutomatedNotification` with `dedupeKey` unique: win-back =
+  `user:<userId>:winback:<lapseCycleFingerprint>:s<stageDays>` (one row per user
+  per stage per lapse cycle). `lapseCycleFingerprint` is a SHA-256 of
+  `latestCompletedPaidServiceOrderId + "|" + effectiveEnd.epoch`, truncated to 16
+  hex chars — so a new completed purchase or a renewal produces a NEW fingerprint
+  (a new cycle) while no raw order id enters the key. Concurrent scans + worker
+  restarts converge to one row.
+- `CustomerRetentionPreference.userId` is UNIQUE (one row per user); a real FK to
+  `User` with `onDelete: Cascade`. It holds ONLY the temporary win-back snooze
+  (`winbackSnoozedUntil`); the permanent marketing opt-out stays on
+  `User.marketingMessagesEnabled` (never duplicated). The snooze upsert is
+  idempotent and history is never hard-deleted.
+- Migration `20260718193906_customer_retention_preference` is additive (3
+  `NotificationInteractionType` enum values + 1 CREATE TABLE + 1 unique index + 1
+  FK; no DROP/ALTER of existing columns).
+- The financial + provisioning systems are UNCHANGED: the win-back engine reads
+  Order / Service / Payment / CheckoutSession / receipt / reconciliation state but
+  never writes them, and never creates a payment, checkout, order or service.
+  Lifecycle segments are derived on every evaluation, never persisted.

@@ -23,11 +23,18 @@ spend wallet, provision, or alter reconciliation. See
 [abandoned-checkout-rules.md](abandoned-checkout-rules.md),
 [payment-retry-notifications.md](payment-retry-notifications.md).
 
-## Phase 3 — Customer win-back (planned, `feat/customer-winback-automation`)
+## Phase 3 — Customer win-back (this branch, `feat/customer-winback-automation`)
 
-Inactive-customer identification, win-back rules, marketing cooldowns, lifecycle
-segmentation, campaign suppression + safety. Category MARKETING
-(`CUSTOMER_WINBACK` enum already reserved).
+`CUSTOMER_WINBACK` (category MARKETING, lowest priority). Authoritative
+inactive-customer identification from paid Service/Order history, lifecycle
+segmentation, multi-stage reminders with a lapse-cycle fingerprint + catch-up,
+per-user snooze, the existing `marketingMessagesEnabled` permanent opt-out, fresh
+service-state gating (priority sync + never-guess), and a `SCAN_RETENTION_NOTIFICATIONS`
+scan on the existing scan queue. Disabled by default; targets only genuine
+previous paying VPN customers who currently have no usable service. See
+[customer-winback-rules.md](customer-winback-rules.md),
+[customer-lifecycle-segmentation.md](customer-lifecycle-segmentation.md),
+[customer-winback-operations.md](customer-winback-operations.md).
 
 ## Phase 4 — Analytics & reporting (planned, `feat/notification-analytics-reporting`)
 
