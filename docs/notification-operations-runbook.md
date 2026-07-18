@@ -112,3 +112,12 @@ safe log events, user controls, rollback, limitations, Phase 4) lives in
   cancels `winback-cycle-changed` / `winback-active-service`). A large
   `winbackExcludedUncertainService` means panels are stale/unreachable (priority
   syncs are being enqueued; nothing is guessed).
+
+## Phase 4 — analytics & attribution
+
+Analytics is off by default. Enable/disable, read reports (cohort vs conversion
+views), export the aggregate CSV (OWNER) and trigger a manual reconcile from
+`گزارشات / بکاپ 🛡 → تحلیل اعلان‌ها 📈`. Full operator guide:
+[notification-analytics-operations.md](notification-analytics-operations.md);
+metric formulas: [analytics-metric-definitions.md](analytics-metric-definitions.md);
+attribution contract: [conversion-attribution.md](conversion-attribution.md).

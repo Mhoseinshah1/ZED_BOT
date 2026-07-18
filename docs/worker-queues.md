@@ -221,3 +221,21 @@ candidate — never guessing inactivity. Delivery re-validates live state
 suppress on opt-out/snooze, defer on uncertain state. No new delivery/quiet-hours/
 limit/retry logic. Heartbeat gains `lastRetentionScanAt`, `winbackCandidates`,
 `winbackScheduled`, `winbackExcludedUncertainService`, `retentionScanFailures`.
+
+## Phase 4 — attribution maintenance jobs
+
+The analytics/attribution phase adds four job names on the **existing**
+`automated-notification-maintenance` queue (no new queue). All are gated on the
+analytics master switch — a disabled install runs none:
+
+| Job | Cadence | Purpose |
+|-----|---------|---------|
+| `RECONCILE_NOTIFICATION_ATTRIBUTION` | on demand | one completed Order (after-commit hook, `{ orderId }`, jobId per-order) |
+| `RECONCILE_NOTIFICATION_ATTRIBUTION_BATCH` | 15 min | catch-all sweep of recently-completed Orders (newest first, excludes already-attributed) |
+| `RECONCILE_NOTIFICATION_ATTRIBUTION_REVERSALS` | 60 min | flip refunded Orders' attributions to REVERSED (idempotent SQL) |
+| `CLEANUP_NOTIFICATION_ATTRIBUTION` | daily | prune attributions past retention (standalone deleteMany, no cascade) |
+
+Scheduler ids: `attributionBatch` / `attributionReversals` / `attributionCleanup`.
+The bot enqueues the per-order hook + a manual reconcile through
+`ops-queue.service.ts` (fail-soft producer). See
+[conversion-attribution.md](conversion-attribution.md).

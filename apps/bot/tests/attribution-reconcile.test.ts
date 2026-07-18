@@ -303,6 +303,129 @@ d("notification conversion attribution — reconciler", () => {
     expect(res.deleted).toBeGreaterThanOrEqual(1);
     expect(await attributionFor(order.id)).toBeNull();
   });
+
+  it("attributes a completed checkout to its abandoned-checkout click (DIRECT_CHECKOUT)", async () => {
+    const user = await makeUser();
+    const checkout = await prisma.checkoutSession.create({
+      data: { userId: user.id, purpose: "ORDER_PAYMENT", finalPriceToman: 90000, status: "COMPLETED", expiresAt: new Date() },
+    });
+    await makeSentClick({
+      user, type: "ABANDONED_CHECKOUT", category: AutomatedNotificationCategory.PAYMENT,
+      interactionType: "CONTINUE_CHECKOUT", checkoutSessionId: checkout.id,
+      sentAt: new Date(Date.now() - 5 * HOUR), clickAt: new Date(Date.now() - 4 * HOUR),
+    });
+    const order = await makeCompletedOrder({
+      user, type: "SERVICE_PURCHASE", checkoutSessionId: checkout.id, finalPriceToman: 90000,
+      completedAt: new Date(Date.now() - 1 * HOUR),
+    });
+    expect(await reconcileOrderAttribution(order.id)).toMatchObject({ status: "attributed", kind: "DIRECT_CHECKOUT" });
+  });
+
+  it("attributes a new purchase after a win-back click (ASSISTED_WINBACK)", async () => {
+    const user = await makeUser();
+    await makeSentClick({
+      user, type: "CUSTOMER_WINBACK", category: AutomatedNotificationCategory.MARKETING,
+      interactionType: "VIEW_PRODUCTS",
+      sentAt: new Date(Date.now() - 5 * DAY), clickAt: new Date(Date.now() - 4 * DAY),
+    });
+    const order = await makeCompletedOrder({
+      user, type: "SERVICE_PURCHASE", finalPriceToman: 300000, completedAt: new Date(Date.now() - 1 * HOUR),
+    });
+    expect(await reconcileOrderAttribution(order.id)).toMatchObject({ status: "attributed", kind: "ASSISTED_WINBACK" });
+  });
+
+  it("does not attribute without any recorded click (temporal proximity alone)", async () => {
+    const user = await makeUser();
+    const svc = await makeService(user);
+    // A SENT service notice exists, but the user never clicked.
+    await prisma.automatedNotification.create({
+      data: {
+        type: "SERVICE_EXPIRY", category: AutomatedNotificationCategory.SERVICE,
+        status: AutomatedNotificationStatus.SENT, userId: user.id, serviceId: svc.id,
+        dedupeKey: `attr-noclick-${runTag}-${(seq += 1)}`, scheduledFor: new Date(Date.now() - 5 * HOUR),
+        sentAt: new Date(Date.now() - 5 * HOUR), payloadSnapshot: {},
+      },
+    });
+    const order = await makeCompletedOrder({
+      user, type: "SERVICE_RENEWAL", serviceId: svc.id, completedAt: new Date(Date.now() - 1 * HOUR),
+    });
+    expect(await reconcileOrderAttribution(order.id)).toMatchObject({
+      status: "skipped",
+      reason: "no-eligible-interaction",
+    });
+  });
+
+  it("does not attribute a click recorded AFTER the order completed", async () => {
+    const user = await makeUser();
+    const svc = await makeService(user);
+    await makeSentClick({
+      user, type: "SERVICE_EXPIRY", category: AutomatedNotificationCategory.SERVICE,
+      interactionType: "RENEW_SERVICE", serviceId: svc.id,
+      sentAt: new Date(Date.now() - 5 * HOUR), clickAt: new Date(Date.now() - 30 * 60_000), // 30 min ago
+    });
+    const order = await makeCompletedOrder({
+      user, type: "SERVICE_RENEWAL", serviceId: svc.id, completedAt: new Date(Date.now() - 1 * HOUR), // 1h ago
+    });
+    expect(await reconcileOrderAttribution(order.id)).toMatchObject({ status: "skipped" });
+    expect(await attributionFor(order.id)).toBeNull();
+  });
+
+  it("two concurrent reconciles for one order create exactly one attribution", async () => {
+    const user = await makeUser();
+    const svc = await makeService(user);
+    await makeSentClick({
+      user, type: "SERVICE_EXPIRY", category: AutomatedNotificationCategory.SERVICE,
+      interactionType: "RENEW_SERVICE", serviceId: svc.id,
+      sentAt: new Date(Date.now() - 5 * HOUR), clickAt: new Date(Date.now() - 4 * HOUR),
+    });
+    const order = await makeCompletedOrder({
+      user, type: "SERVICE_RENEWAL", serviceId: svc.id, completedAt: new Date(Date.now() - 1 * HOUR),
+    });
+    await Promise.all([reconcileOrderAttribution(order.id), reconcileOrderAttribution(order.id)]);
+    expect(await prisma.notificationConversionAttribution.count({ where: { orderId: order.id } })).toBe(1);
+  });
+
+  it("prefers DIRECT_CHECKOUT over ASSISTED_WINBACK for one order (precedence)", async () => {
+    const user = await makeUser();
+    const checkout = await prisma.checkoutSession.create({
+      data: { userId: user.id, purpose: "ORDER_PAYMENT", finalPriceToman: 120000, status: "COMPLETED", expiresAt: new Date() },
+    });
+    // A win-back click AND a checkout click both precede the same purchase.
+    await makeSentClick({
+      user, type: "CUSTOMER_WINBACK", category: AutomatedNotificationCategory.MARKETING,
+      interactionType: "VIEW_PRODUCTS",
+      sentAt: new Date(Date.now() - 6 * HOUR), clickAt: new Date(Date.now() - 5 * HOUR),
+    });
+    await makeSentClick({
+      user, type: "ABANDONED_CHECKOUT", category: AutomatedNotificationCategory.PAYMENT,
+      interactionType: "CONTINUE_CHECKOUT", checkoutSessionId: checkout.id,
+      sentAt: new Date(Date.now() - 4 * HOUR), clickAt: new Date(Date.now() - 3 * HOUR),
+    });
+    const order = await makeCompletedOrder({
+      user, type: "SERVICE_PURCHASE", checkoutSessionId: checkout.id, completedAt: new Date(Date.now() - 1 * HOUR),
+    });
+    expect(await reconcileOrderAttribution(order.id)).toMatchObject({ status: "attributed", kind: "DIRECT_CHECKOUT" });
+  });
+
+  it("reverses when the order status leaves COMPLETED (defensive terminal signal)", async () => {
+    const user = await makeUser();
+    const svc = await makeService(user);
+    await makeSentClick({
+      user, type: "SERVICE_EXPIRY", category: AutomatedNotificationCategory.SERVICE,
+      interactionType: "RENEW_SERVICE", serviceId: svc.id,
+      sentAt: new Date(Date.now() - 5 * HOUR), clickAt: new Date(Date.now() - 4 * HOUR),
+    });
+    const order = await makeCompletedOrder({
+      user, type: "SERVICE_RENEWAL", serviceId: svc.id, finalPriceToman: 175000,
+      completedAt: new Date(Date.now() - 1 * HOUR),
+    });
+    await reconcileOrderAttribution(order.id);
+    await prisma.order.update({ where: { id: order.id }, data: { status: "FAILED" } });
+    await runAttributionReversals();
+    const row = await attributionFor(order.id);
+    expect(row?.status).toBe("REVERSED");
+    expect(row?.netRevenueToman).toBe(0);
+  });
 });
 
 function MINUTE(): number {

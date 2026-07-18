@@ -137,3 +137,19 @@ never clobbered:
 - No ticket UI (support stays in private-chat mode; tables are ready).
 - Seed intentionally ships only minimal Persian template/button baselines —
   final copy arrives with the bot-menu phase.
+
+## Phase 4 — NotificationConversionAttribution
+
+Additive model (migration `20260718220000_notification_conversion_attribution`)
+linking a completed paid `Order` to the notification whose recorded click preceded
+it. Enums `NotificationAttributionKind` (`DIRECT_CHECKOUT` / `DIRECT_SERVICE` /
+`ASSISTED_WINBACK`) and `NotificationAttributionStatus` (`ACTIVE` / `REVERSED`).
+Key columns: `orderId @unique`, `interactionId @unique`, soft `notificationId` /
+`userId`, denormalized `notificationType` / `interactionType`,
+`grossRevenueToman` / `reversedRevenueToman` / `netRevenueToman`, the evidence
+timestamps (`notificationSentAt` / `interactionAt` / `orderCompletedAt`),
+`windowSeconds`, safe `evidenceSnapshot` Json, `attributedAt` / `reversedAt`.
+Indexes on `(status, orderCompletedAt)`, `(status, notificationSentAt)`,
+`(kind, status)`, `(notificationType, status)`, `userId`, `notificationId`. No
+existing table/column/enum is altered. See
+[conversion-attribution.md](conversion-attribution.md).

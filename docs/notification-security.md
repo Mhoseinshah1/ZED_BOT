@@ -120,3 +120,23 @@ Same guarantees extended to the MARKETING rule:
   notification, no dedupe, no lifecycle history; the test-send goes only to the
   requesting OWNER with sample values. The rule is OWNER-only to mutate, disabled
   by default, behind a fail-safe activation gate.
+
+## Phase 4 — analytics & attribution
+
+- **No fabricated engagement**: no open/read/impression is ever recorded or
+  reported. The strongest delivery fact is `status = SENT`. Every attribution
+  requires a persisted `NotificationInteraction` (click) — proximity alone never
+  attributes.
+- **No PII in analytics output**: reports and the CSV contain only aggregate
+  counts, type/kind labels and Toman sums — never a user id, order id,
+  notification id, service name or Telegram id.
+- **`evidenceSnapshot` is safe**: only types, kind, four timestamps,
+  entity-equality booleans and window seconds — never a price beyond the order's
+  own `finalPriceToman`, a subscription link, credential or provider payload.
+- **CSV export** is OWNER-only + separately switchable; it neutralises formula
+  injection (`= + - @` / control-char prefixes), RFC-4180 quotes, and is written
+  to a `0600` temp file removed after send.
+- **After-commit hook** carries only `orderId`, is fail-soft and non-blocking —
+  analytics can never delay or fail a payment fulfillment.
+- **Attribution table** uses soft references (no FK), so retention cleanup never
+  cascades between notification/financial rows and analytics.

@@ -389,10 +389,21 @@ into the storefront or wallet but never settles a payment, creates an order or
 checkout, approves a receipt, spends the wallet, provisions a service, or alters
 reconciliation — the financial system stays authoritative. Every new rule is
 OWNER-only and stays off until explicitly enabled behind a fail-safe activation
-gate. See `docs/customer-retention-engine.md`,
+gate. Phase 4 adds a **read-only** analytics layer over the same history:
+**evidence-based conversion attribution** (an additive
+`NotificationConversionAttribution` linking a completed paid order to the
+notification whose recorded click preceded it — converging on `orderId`/
+`interactionId` uniqueness so nothing is double-counted and no conversion is ever
+fabricated from opens, reads or proximity) plus admin **تحلیل اعلان‌ها 📈** reports
+(delivery funnel, CTR, direct/assisted conversions, attributed gross/net revenue —
+never profit) in cohort and conversion-timeline views, with an OWNER-only PII-free
+CSV export. It is disabled by default and never sends a user-facing message. See
+`docs/customer-retention-engine.md`,
 `docs/checkout-payment-reminders.md`, `docs/abandoned-checkout-rules.md`,
 `docs/payment-retry-notifications.md`, `docs/customer-winback-rules.md`,
-`docs/customer-lifecycle-segmentation.md`, `docs/customer-winback-operations.md`.
+`docs/customer-lifecycle-segmentation.md`, `docs/customer-winback-operations.md`,
+`docs/notification-analytics.md`, `docs/conversion-attribution.md`,
+`docs/analytics-metric-definitions.md`, `docs/notification-analytics-operations.md`.
 
 ### Persian bot copy
 
