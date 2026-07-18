@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { errorMessage } from "@zedbot/shared";
+import type { CheckoutSession } from "@zedbot/database";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -487,18 +488,18 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
   }
 });
 
-checkoutHandler.callbackQuery(/^user:co:view:([0-9a-f-]+)$/, async (ctx) => {
-  const user = ctx.dbUser;
-  if (user === null) {
-    return;
-  }
-  const checkout = await getCheckoutByShortId(ctx.match[1], user.id);
-  if (checkout === null) {
-    await safeAnswerCallback(ctx, "مورد یافت نشد.");
-    return;
-  }
-  await safeAnswerCallback(ctx);
-
+/**
+ * Renders the read-only checkout detail page for an ALREADY owner-resolved
+ * checkout. The primary action, when the checkout is still payable, is
+ * «انتخاب روش پرداخت» (the method-selection surface); a pending-review receipt or
+ * an expired checkout render the corresponding notice with no pay button.
+ * Exported so the notification "view details/order" (`d`) action lands on the
+ * exact same page. Read-only - never settles or mutates anything.
+ */
+export async function renderCheckoutView(
+  ctx: BotContext,
+  checkout: CheckoutSession,
+): Promise<void> {
   // Payment state decides what the view offers next.
   const pendingReview = await getPendingReviewPayment(checkout.id);
   const expired = checkout.status === "PENDING" && checkout.expiresAt.getTime() <= Date.now();
@@ -513,6 +514,20 @@ checkoutHandler.callbackQuery(/^user:co:view:([0-9a-f-]+)$/, async (ctx) => {
   }
   kb.text("بازگشت به منوی اصلی", CB.USER_MENU);
   await safeEditOrReply(ctx, checkoutViewText(checkout) + statusLine, kb, HTML);
+}
+
+checkoutHandler.callbackQuery(/^user:co:view:([0-9a-f-]+)$/, async (ctx) => {
+  const user = ctx.dbUser;
+  if (user === null) {
+    return;
+  }
+  const checkout = await getCheckoutByShortId(ctx.match[1], user.id);
+  if (checkout === null) {
+    await safeAnswerCallback(ctx, "مورد یافت نشد.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await renderCheckoutView(ctx, checkout);
 });
 
 // =============================================================================

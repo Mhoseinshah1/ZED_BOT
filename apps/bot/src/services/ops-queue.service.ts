@@ -390,6 +390,16 @@ export async function readNotificationWorkerStatus(): Promise<NotificationWorker
       deliveryFailed: typeof value.deliveryFailed === "number" ? value.deliveryFailed : 0,
       deadLetter: typeof value.deadLetter === "number" ? value.deadLetter : 0,
       checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : "",
+      // Checkout-payment reminders (Phase 2). Optional so a Phase-1 worker's
+      // snapshot still parses; the admin page renders "نامشخص" / 0 when absent.
+      lastCheckoutScanAt:
+        typeof value.lastCheckoutScanAt === "string" ? value.lastCheckoutScanAt : null,
+      abandonedCheckoutCandidates:
+        typeof value.abandonedCheckoutCandidates === "number"
+          ? value.abandonedCheckoutCandidates
+          : 0,
+      paymentRetryCandidates:
+        typeof value.paymentRetryCandidates === "number" ? value.paymentRetryCandidates : 0,
     };
   } catch {
     return null;

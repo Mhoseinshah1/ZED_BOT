@@ -32,6 +32,16 @@ import {
   type ExpiryThreshold,
   type NotificationRuleKey,
   type QuietHoursConfig,
+  DEFAULT_ABANDONED_CHECKOUT_CONFIG,
+  DEFAULT_FAILED_PAYMENT_CONFIG,
+  NOTIF_ABANDONED_CONFIG_KEY,
+  NOTIF_CHECKOUT_RULE_ENABLED_KEYS,
+  NOTIF_PAYMENT_RETRY_CONFIG_KEY,
+  parseAbandonedCheckoutConfig,
+  parseFailedPaymentConfig,
+  type AbandonedCheckoutConfig,
+  type CheckoutNotificationRuleKey,
+  type FailedPaymentConfig,
 } from "@zedbot/shared";
 
 import {
@@ -167,4 +177,59 @@ export async function getRetentionDays(): Promise<NotificationRetentionDays> {
     getIntSetting(NOTIF_DEAD_LETTER_RETENTION_DAYS_KEY, DEFAULT_DEAD_LETTER_RETENTION_DAYS, 1, 3650),
   ]);
   return { history, failed, deadLetter };
+}
+
+// =============================================================================
+// Checkout-payment reminders (Phase 2). Two independent rule switches +
+// validated JSON configs, mirroring the Phase-1 rule helpers above. Both rules
+// default FALSE (the parsers own all validation, so a malformed stored value
+// falls back to the shared default and the engine never sees invalid config).
+// These write ONLY their own Setting keys - never the master switch and never a
+// service-notification rule.
+// =============================================================================
+
+export async function isCheckoutRuleEnabled(rule: CheckoutNotificationRuleKey): Promise<boolean> {
+  return getBooleanSetting(NOTIF_CHECKOUT_RULE_ENABLED_KEYS[rule], false);
+}
+
+export async function setCheckoutRuleEnabled(
+  rule: CheckoutNotificationRuleKey,
+  enabled: boolean,
+): Promise<void> {
+  await setSetting(NOTIF_CHECKOUT_RULE_ENABLED_KEYS[rule], enabled ? "true" : "false", "BOOLEAN");
+}
+
+/** True when either checkout-payment rule (abandoned OR payment-retry) is on. */
+export async function anyCheckoutRuleEnabled(): Promise<boolean> {
+  const [abandoned, payment] = await Promise.all([
+    isCheckoutRuleEnabled("abandoned"),
+    isCheckoutRuleEnabled("payment"),
+  ]);
+  return abandoned || payment;
+}
+
+export async function getAbandonedCheckoutConfig(): Promise<AbandonedCheckoutConfig> {
+  return parseAbandonedCheckoutConfig(
+    await getSetting(NOTIF_ABANDONED_CONFIG_KEY, ""),
+    DEFAULT_ABANDONED_CHECKOUT_CONFIG,
+  );
+}
+
+/** Validates via the shared parser (defaulting invalid input) before persisting the full JSON. */
+export async function setAbandonedCheckoutConfig(cfg: AbandonedCheckoutConfig): Promise<void> {
+  const validated = parseAbandonedCheckoutConfig(cfg, DEFAULT_ABANDONED_CHECKOUT_CONFIG);
+  await setSetting(NOTIF_ABANDONED_CONFIG_KEY, JSON.stringify(validated), "JSON");
+}
+
+export async function getFailedPaymentConfig(): Promise<FailedPaymentConfig> {
+  return parseFailedPaymentConfig(
+    await getSetting(NOTIF_PAYMENT_RETRY_CONFIG_KEY, ""),
+    DEFAULT_FAILED_PAYMENT_CONFIG,
+  );
+}
+
+/** Validates via the shared parser (defaulting invalid input) before persisting the full JSON. */
+export async function setFailedPaymentConfig(cfg: FailedPaymentConfig): Promise<void> {
+  const validated = parseFailedPaymentConfig(cfg, DEFAULT_FAILED_PAYMENT_CONFIG);
+  await setSetting(NOTIF_PAYMENT_RETRY_CONFIG_KEY, JSON.stringify(validated), "JSON");
 }

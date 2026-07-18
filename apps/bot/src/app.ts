@@ -79,7 +79,10 @@ import {
   adminTextSettingsHandler,
   adminTextSettingsTextHandler,
 } from "./handlers/admin-settings/text-settings.handler.js";
-import { adminNotificationsHandler } from "./handlers/admin-settings/notifications.handler.js";
+import {
+  adminNotificationsHandler,
+  adminNotificationsTextHandler,
+} from "./handlers/admin-settings/notifications.handler.js";
 import { userNotificationsHandler } from "./handlers/user-notifications/notification.handler.js";
 import {
   reportsBackupHandler,
@@ -207,6 +210,9 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(adminSupportTextHandler);
   adminFlowText.use(adminBroadcastTextHandler);
   adminFlowText.use(adminTextSettingsTextHandler);
+  // Checkout-payment reminders (Phase 2): numeric config input for the two
+  // checkout rule pages ("admin_ntf_co:cfg"). Self-gates on currentFlow.
+  adminFlowText.use(adminNotificationsTextHandler);
   // Production-backup rework: scheduled-backup hour input.
   adminFlowText.use(reportsBackupTextHandler);
   // Direct-log-group-setup phase: numeric chat-id input ("lg:chat_id"). Self-
