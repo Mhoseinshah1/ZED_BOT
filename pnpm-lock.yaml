@@ -94,6 +94,9 @@ importers:
       '@zedbot/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@zedbot/panel-adapters':
+        specifier: workspace:*
+        version: link:../../packages/panel-adapters
       '@zedbot/shared':
         specifier: workspace:*
         version: link:../../packages/shared

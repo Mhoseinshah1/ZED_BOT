@@ -159,6 +159,11 @@ export function serviceListKeyboard(pageData: ServiceListPage): InlineKeyboard {
     }
     kb.row();
   }
+  // Notification-engine phase: user notification settings live UNDER My Services
+  // (not a top-level menu button). Callback owned by user-notifications/
+  // notification.handler.ts - a literal here avoids a keyboard<->handler import
+  // cycle (the handler imports the detail renderer from services.handler.ts).
+  kb.text("تنظیمات اعلان‌ها 🔔", "user:nset:root").row();
   kb.text("بازگشت به منو", CB.USER_MENU);
   return kb;
 }
@@ -284,6 +289,10 @@ export function serviceDetailKeyboard(
   } else if (actions.toggleAction === "ENABLE") {
     kb.text("روشن کردن سرویس ▶️", svcCb.enable(sid)).row();
   }
+  // Row 7a: per-service notification settings (notification-engine phase).
+  // Callback owned by user-notifications/notification.handler.ts; literal here
+  // for the same import-cycle reason as the list keyboard above.
+  kb.text("اعلان‌های این سرویس 🔔", `user:nsvc:${sid}`).row();
   // Row 7: support entry - routes into the existing ticket flow (tutorials
   // slot hidden - placeholder only).
   kb.text("مشکل دارم", CB.USER_SUPPORT).row();

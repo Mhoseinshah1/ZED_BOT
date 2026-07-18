@@ -39,3 +39,17 @@ current values are never overwritten (see `docs/text-system.md`).
 | `support_empty_tickets_text` | پیام نبود تیکت (پشتیبانی) | هنوز تیکتی ثبت نکرده‌اید. | — | yes |
 | `support_ticket_created_text` | پیام ثبت تیکت | تیکت شما با موفقیت ثبت شد ✅ | — | yes |
 | `history_landing_text` | متن صفحه سوابق | سوابق سفارش‌ها، پرداخت‌ها و تراکنش‌های کیف پول شما در این بخش قابل مشاهده است. | — | yes |
+
+## Automated notification templates (feat/notification-retention-engine, Phase 1)
+
+Rendered by the worker delivery from a safe snapshot (keys mirror
+`@zedbot/shared` `NOTIF_TEMPLATE_KEYS`). Variables are safe display values only.
+
+| Key | Title | Variables | Editable |
+| --- | --- | --- | --- |
+| `notif_service_expiry` | اعلان نزدیک شدن انقضای سرویس | `{service_name}` `{time_left}` | yes |
+| `notif_service_expired` | اعلان انقضای سرویس | `{service_name}` | yes |
+| `notif_service_traffic` | اعلان مصرف حجم سرویس | `{service_name}` `{percent}` | yes |
+| `notif_service_limited` | اعلان محدود شدن سرویس | `{service_name}` | yes |
+| `notif_trial_near_expiry` | اعلان نزدیک شدن انقضای سرویس تست | `{service_name}` `{time_left}` | yes |
+| `notif_trial_expired` | اعلان انقضای سرویس تست | `{service_name}` | yes |

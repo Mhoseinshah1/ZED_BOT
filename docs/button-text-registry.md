@@ -100,3 +100,16 @@ overwritten (see `docs/text-system.md`).
 | `admin_general_settings` | منوی ادمین: تنظیمات عمومی | تنظیمات عمومی ⚙️ | yes |
 | `admin_reports_backup` | منوی ادمین: گزارشات / بکاپ | گزارشات / بکاپ 📊 | yes |
 | `admin_return_user_menu` | منوی ادمین: بازگشت به منوی کاربر | بازگشت به منوی کاربر 👤 | yes |
+
+## Automated notification buttons (feat/notification-retention-engine, Phase 1)
+
+Rendered into a notification's inline keyboard (keys mirror `@zedbot/shared`
+`NOTIF_BUTTON_KEYS`). Callback data is `ntf:<shortId>:<action>` — never derived
+from these labels.
+
+| Key | Title | Default | Editable |
+| --- | --- | --- | --- |
+| `notif_btn_open_service` | اعلان: مشاهده سرویس | مشاهده سرویس 👁 | yes |
+| `notif_btn_renew_service` | اعلان: تمدید سرویس | تمدید سرویس ♻️ | yes |
+| `notif_btn_buy_extra_volume` | اعلان: خرید حجم اضافه | خرید حجم اضافه ➕ | yes |
+| `notif_btn_dismiss` | اعلان: بستن | بستن ✖️ | yes |

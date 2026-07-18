@@ -372,6 +372,77 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     defaultContent: "در حال حاضر روش پرداخت فعالی وجود ندارد. لطفاً با پشتیبانی تماس بگیرید.",
     allowedVariables: [],
   },
+  // Automated notification / retention engine (feat/notification-retention-
+  // engine, Phase 1). Keys duplicated from @zedbot/shared NOTIF_TEMPLATE_KEYS
+  // (this package carries no workspace deps). Every message is transactional +
+  // safe: only the friendly service name + a remaining-time / percentage
+  // variable, never a subscription link, token, panel data or price.
+  {
+    key: "notif_service_expiry",
+    title: "اعلان نزدیک شدن انقضای سرویس",
+    category: "notification",
+    defaultContent:
+      "⏳ یادآوری تمدید سرویس\n" +
+      "\n" +
+      "سرویس «{service_name}» تا {time_left} دیگر منقضی می‌شود.\n" +
+      "برای جلوگیری از قطع شدن، همین حالا آن را تمدید کنید.",
+    allowedVariables: ["service_name", "time_left"],
+  },
+  {
+    key: "notif_service_expired",
+    title: "اعلان انقضای سرویس",
+    category: "notification",
+    defaultContent:
+      "🔴 سرویس شما منقضی شد\n" +
+      "\n" +
+      "سرویس «{service_name}» منقضی شده است.\n" +
+      "برای فعال‌سازی مجدد، آن را تمدید کنید.",
+    allowedVariables: ["service_name"],
+  },
+  {
+    key: "notif_service_traffic",
+    title: "اعلان مصرف حجم سرویس",
+    category: "notification",
+    defaultContent:
+      "📊 هشدار مصرف حجم\n" +
+      "\n" +
+      "مصرف حجم سرویس «{service_name}» به {percent}٪ رسید.\n" +
+      "برای جلوگیری از محدود شدن، حجم اضافه تهیه کنید.",
+    allowedVariables: ["service_name", "percent"],
+  },
+  {
+    key: "notif_service_limited",
+    title: "اعلان محدود شدن سرویس",
+    category: "notification",
+    defaultContent:
+      "🚫 سرویس محدود شد\n" +
+      "\n" +
+      "سرویس «{service_name}» به دلیل اتمام حجم محدود شده است.\n" +
+      "برای ادامه استفاده، حجم اضافه تهیه کنید یا سرویس را تمدید کنید.",
+    allowedVariables: ["service_name"],
+  },
+  {
+    key: "notif_trial_near_expiry",
+    title: "اعلان نزدیک شدن انقضای سرویس تست",
+    category: "notification",
+    defaultContent:
+      "⏳ سرویس تست شما رو به پایان است\n" +
+      "\n" +
+      "سرویس تست «{service_name}» تا {time_left} دیگر منقضی می‌شود.\n" +
+      "برای ادامه، می‌توانید یک اشتراک تهیه کنید.",
+    allowedVariables: ["service_name", "time_left"],
+  },
+  {
+    key: "notif_trial_expired",
+    title: "اعلان انقضای سرویس تست",
+    category: "notification",
+    defaultContent:
+      "🔴 سرویس تست شما منقضی شد\n" +
+      "\n" +
+      "سرویس تست «{service_name}» به پایان رسید.\n" +
+      "برای ادامه استفاده، یک اشتراک تهیه کنید.",
+    allowedVariables: ["service_name"],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -448,4 +519,12 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
     title: "منوی ادمین: بازگشت به منوی کاربر",
     text: "بازگشت به منوی کاربر 👤",
   },
+  // Automated notification / retention engine (Phase 1). Keys duplicated from
+  // @zedbot/shared NOTIF_BUTTON_KEYS. Rendered by the worker into a notification
+  // inline keyboard; the callback data is ntf:<shortId>:<action>, never derived
+  // from these labels.
+  { key: "notif_btn_open_service", title: "اعلان: مشاهده سرویس", text: "مشاهده سرویس 👁" },
+  { key: "notif_btn_renew_service", title: "اعلان: تمدید سرویس", text: "تمدید سرویس ♻️" },
+  { key: "notif_btn_buy_extra_volume", title: "اعلان: خرید حجم اضافه", text: "خرید حجم اضافه ➕" },
+  { key: "notif_btn_dismiss", title: "اعلان: بستن", text: "بستن ✖️" },
 ];

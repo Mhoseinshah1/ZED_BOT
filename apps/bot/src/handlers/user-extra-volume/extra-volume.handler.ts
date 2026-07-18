@@ -89,14 +89,23 @@ extraVolumeHandler.callbackQuery(/^user:ev:list:(\d+)$/, async (ctx) => {
   await renderEligibleList(ctx, Number.parseInt(ctx.match[1], 10));
 });
 
-// Service summary + packages of the SAME panel.
-extraVolumeHandler.callbackQuery(/^user:ev:svc:([0-9a-f-]+)$/, async (ctx) => {
+/**
+ * Renders one service's extra-volume page (summary + same-panel packages).
+ * Extracted from the `user:ev:svc:*` callback so the notification action handler
+ * (`ntf:<id>:v`) can land on the IDENTICAL page after re-validating the service
+ * owner-scoped; `shortId` is the uuid-prefix short id. Answers the callback
+ * itself and re-validates ownership + package availability from the DB.
+ */
+export async function renderExtraVolumeServicePage(
+  ctx: BotContext,
+  shortId: string,
+): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     return;
   }
   clearCheckoutState(ctx);
-  const service = await getExtraVolumeServiceByShortId(ctx.match[1], user.id);
+  const service = await getExtraVolumeServiceByShortId(shortId, user.id);
   if (service === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
@@ -112,6 +121,11 @@ extraVolumeHandler.callbackQuery(/^user:ev:svc:([0-9a-f-]+)$/, async (ctx) => {
     return;
   }
   await safeEditOrReply(ctx, extraVolumeSummaryText(service), packageListKeyboard(service, packages), HTML);
+}
+
+// Service summary + packages of the SAME panel.
+extraVolumeHandler.callbackQuery(/^user:ev:svc:([0-9a-f-]+)$/, async (ctx) => {
+  await renderExtraVolumeServicePage(ctx, ctx.match[1]);
 });
 
 async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {

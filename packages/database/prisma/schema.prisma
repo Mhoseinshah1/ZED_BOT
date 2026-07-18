@@ -543,30 +543,34 @@ model User {
   updatedAt DateTime @updatedAt
 
   // Relations
-  walletTransactions     WalletTransaction[]
-  orders                 Order[]
-  payments               Payment[]
-  services               Service[]
-  checkoutSessions       CheckoutSession[]
-  discountCodeUsages     DiscountCodeUsage[]
-  manualReceipts         ManualReceipt[]
-  hiddenPanels           UserHiddenPanel[]
-  hiddenPaymentGateways  UserHiddenPaymentGateway[]
-  referralsAsReferrer    Referral[]                   @relation("ReferralReferrer")
-  referralAsReferred     Referral?                    @relation("ReferralReferred")
-  commissionsAsReferrer  ReferralCommission[]         @relation("CommissionReferrer")
-  commissionsAsReferred  ReferralCommission[]         @relation("CommissionReferred")
-  freeTrialClaims        FreeTrialClaim[]
-  freeTrialEntitlements  FreeTrialEntitlement[]
-  freeTrialCampaignRows  FreeTrialCampaignRecipient[]
-  wheelSpinHistories     WheelSpinHistory[]
-  supportTickets         SupportTicket[]
-  checkoutCustomerInputs CheckoutCustomerInput[]
-  supportMessages        SupportMessage[]
-  broadcastRecipients    BroadcastRecipient[]
-  serviceRatings         ServiceRating[]
-  serviceEventLogs       ServiceEventLog[]
-  otherProductOrders     OtherProductOrder[]
+  walletTransactions       WalletTransaction[]
+  orders                   Order[]
+  payments                 Payment[]
+  services                 Service[]
+  checkoutSessions         CheckoutSession[]
+  discountCodeUsages       DiscountCodeUsage[]
+  manualReceipts           ManualReceipt[]
+  hiddenPanels             UserHiddenPanel[]
+  hiddenPaymentGateways    UserHiddenPaymentGateway[]
+  referralsAsReferrer      Referral[]                   @relation("ReferralReferrer")
+  referralAsReferred       Referral?                    @relation("ReferralReferred")
+  commissionsAsReferrer    ReferralCommission[]         @relation("CommissionReferrer")
+  commissionsAsReferred    ReferralCommission[]         @relation("CommissionReferred")
+  freeTrialClaims          FreeTrialClaim[]
+  freeTrialEntitlements    FreeTrialEntitlement[]
+  freeTrialCampaignRows    FreeTrialCampaignRecipient[]
+  wheelSpinHistories       WheelSpinHistory[]
+  supportTickets           SupportTicket[]
+  checkoutCustomerInputs   CheckoutCustomerInput[]
+  supportMessages          SupportMessage[]
+  broadcastRecipients      BroadcastRecipient[]
+  serviceRatings           ServiceRating[]
+  serviceEventLogs         ServiceEventLog[]
+  otherProductOrders       OtherProductOrder[]
+  // Notification/retention engine (feat/notification-retention-engine).
+  automatedNotifications   AutomatedNotification[]
+  notificationInteractions NotificationInteraction[]
+  notificationPreference   NotificationPreference?
 
   @@index([status])
   @@index([group])
@@ -1293,11 +1297,13 @@ model Service {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  ratings          ServiceRating[]
-  eventLogs        ServiceEventLog[]
-  relatedOrders    Order[]           @relation("ServiceTargetOrders")
-  checkoutSessions CheckoutSession[] @relation("ServiceCheckoutSessions")
-  freeTrialClaims  FreeTrialClaim[]
+  ratings                ServiceRating[]
+  eventLogs              ServiceEventLog[]
+  relatedOrders          Order[]                        @relation("ServiceTargetOrders")
+  checkoutSessions       CheckoutSession[]              @relation("ServiceCheckoutSessions")
+  freeTrialClaims        FreeTrialClaim[]
+  // Notification/retention engine: optional per-service notification prefs.
+  notificationPreference ServiceNotificationPreference?
 
   @@index([userId])
   @@index([panelId])
@@ -2152,4 +2158,200 @@ model Setting {
   isPublic  Boolean     @default(false)
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
+}
+
+// =============================================================================
+// Automated notification / customer-retention engine
+// (feat/notification-retention-engine). Additive: existing installs default to
+// the whole system DISABLED (Setting automated_notifications_enabled=false) and
+// no historical rows are fabricated. Every notification is generated from fresh
+// authoritative state, persisted BEFORE delivery, deduplicated by a stable
+// dedupeKey, delivered asynchronously by the worker and safely retryable.
+// payloadSnapshot carries ONLY safe render data - never subscription URLs /
+// tokens / panel credentials / provider payloads / raw user input.
+// =============================================================================
+
+/**
+ * Language-neutral notification kind. Category + delivery are derived.
+ */
+enum AutomatedNotificationType {
+  SERVICE_EXPIRY
+  SERVICE_TRAFFIC
+  SERVICE_EXPIRED
+  SERVICE_LIMITED
+  TRIAL_NEAR_EXPIRY
+  TRIAL_EXPIRED
+  ABANDONED_CHECKOUT
+  PAYMENT_RETRY
+  CUSTOMER_WINBACK
+}
+
+/**
+ * The user-preference category a notification is gated by.
+ */
+enum AutomatedNotificationCategory {
+  SERVICE
+  PAYMENT
+  MARKETING
+}
+
+/**
+ * Notification lifecycle. SCHEDULED->READY->SENDING->SENT is the happy path;
+ * FAILED/DEAD_LETTER are retry/exhaustion; CANCELLED/SUPPRESSED/EXPIRED are the
+ * pre-delivery cancellations (stale source, preference off, past availability).
+ */
+enum AutomatedNotificationStatus {
+  SCHEDULED
+  READY
+  SENDING
+  SENT
+  FAILED
+  DEAD_LETTER
+  CANCELLED
+  SUPPRESSED
+  EXPIRED
+}
+
+/**
+ * The stable click action a notification button records + routes to.
+ */
+enum NotificationInteractionType {
+  OPEN_SERVICE
+  RENEW_SERVICE
+  BUY_EXTRA_VOLUME
+  CONTINUE_CHECKOUT
+  VIEW_PRODUCTS
+  DISMISS
+}
+
+/**
+ * One persisted automated notification. Created SCHEDULED by a worker scan from
+ * fresh state, promoted to READY when due + not quiet, and delivered by the
+ * delivery worker (CAS SENDING -> SENT/FAILED/DEAD_LETTER). dedupeKey enforces
+ * "one per (service|checkout|payment|user), threshold and cycle" across worker
+ * restarts, scan retries, duplicate schedulers, timezone math and concurrent
+ * scans. The source id columns are OPTIONAL soft references (no hard FK) so
+ * cleanup/retention never cascades into business rows; userId is the one hard
+ * relation (owner scoping + settings suppression).
+ */
+model AutomatedNotification {
+  id String @id @default(uuid())
+
+  type     AutomatedNotificationType
+  category AutomatedNotificationCategory
+  status   AutomatedNotificationStatus   @default(SCHEDULED)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Soft references (index-only, no FK) - the notification survives its source
+  // row's cleanup and never cascades a delete into business tables.
+  serviceId         String?
+  checkoutSessionId String?
+  paymentId         String?
+
+  // "one per source + threshold + cycle" - see docs/service-notification-rules.md.
+  dedupeKey String @unique
+
+  // Bumped when a rule's dedupe/eligibility semantics change so old dedupe keys
+  // do not suppress a corrected notification.
+  ruleVersion Int @default(1)
+
+  scheduledFor   DateTime
+  // After this instant the notification is no longer relevant (rendered stale)
+  // and is EXPIRED instead of sent.
+  availableUntil DateTime?
+
+  // Safe render data ONLY (masked names, percentages, remaining bytes/time,
+  // action eligibility). NEVER credentials / links / provider payloads.
+  payloadSnapshot Json
+
+  attempts Int @default(0)
+
+  safeErrorCode     String?
+  telegramMessageId Int?
+
+  sentAt       DateTime?
+  failedAt     DateTime?
+  cancelledAt  DateTime?
+  suppressedAt DateTime?
+  // Set when the row is moved to SENDING, so a crashed/orphaned SENDING row
+  // is safely re-claimable by the reconcile job after a bounded age.
+  claimedAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  interactions NotificationInteraction[]
+
+  @@index([status, scheduledFor])
+  @@index([userId, createdAt])
+  @@index([serviceId, type])
+  @@index([checkoutSessionId, type])
+  @@index([paymentId, type])
+}
+
+/**
+ * A recorded button click on a notification. Unique per (notification, action)
+ * so callback retries never inflate click metrics; a genuinely repeatable
+ * action (none today) would relax this.
+ */
+model NotificationInteraction {
+  id String @id @default(uuid())
+
+  notificationId String
+  notification   AutomatedNotification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type   NotificationInteractionType
+
+  createdAt DateTime @default(now())
+
+  @@unique([notificationId, type])
+  @@index([userId, createdAt])
+}
+
+/**
+ * Per-user automated-notification delivery preferences that do NOT already live
+ * on the User model (the five User.*NotificationsEnabled/marketingMessagesEnabled
+ * booleans remain authoritative for their categories). Quiet-hours are stored as
+ * minutes-since-local-midnight; timezone is an allowlisted IANA name (null =>
+ * the global default). Absent row => all defaults (no quiet hours, global limit).
+ */
+model NotificationPreference {
+  id String @id @default(uuid())
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  timezone               String?
+  quietHoursEnabled      Boolean @default(false)
+  quietHoursStartMinutes Int?
+  quietHoursEndMinutes   Int?
+
+  dailyAutomatedLimit Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * Optional per-service override of the user's global service-notification
+ * preferences. A null field inherits the user's global setting; only an
+ * explicit false disables that service's category. Kept in a side table so the
+ * Service model never accumulates notification booleans.
+ */
+model ServiceNotificationPreference {
+  id String @id @default(uuid())
+
+  serviceId String  @unique
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  expiryEnabled  Boolean?
+  trafficEnabled Boolean?
+  statusEnabled  Boolean?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

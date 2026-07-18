@@ -55,6 +55,16 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   { key: "support_username", value: "", type: SettingType.STRING, isPublic: true },
   { key: "force_join_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
   { key: "support_mode", value: "PRIVATE_CHAT", type: SettingType.STRING, isPublic: false },
+  // Automated notification / retention engine (feat/notification-retention-
+  // engine, Phase 1). The master switch and every per-rule switch seed FALSE:
+  // an install is fully dormant until an operator explicitly enables the engine
+  // from the admin panel. Config values (timezone, thresholds, quiet hours,
+  // cadences, retention) are intentionally NOT seeded - the code defaults own
+  // them, so tuning the defaults never requires a data migration.
+  { key: "automated_notifications_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "notification_rule_expiry_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "notification_rule_traffic_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "notification_rule_trial_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are

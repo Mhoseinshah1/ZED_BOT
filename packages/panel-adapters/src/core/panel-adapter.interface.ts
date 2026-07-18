@@ -73,6 +73,21 @@ export interface PanelAdapter {
    */
   getServiceAccount(input: GetServiceAccountInput): Promise<GetServiceAccountResult>;
 
+  /**
+   * OPTIONAL bulk read: every service account the panel exposes in ONE call,
+   * each normalized exactly like getServiceAccount (keyed by the panel-side
+   * username in `username`). For worker-side batch synchronization of panels
+   * whose API has a whole-inventory endpoint (XUI clients/list). Returns null
+   * on an auth/read failure so the caller falls back to bounded per-user
+   * reads. Adapters whose panel has NO bulk endpoint (Marzban, which is
+   * per-user only) leave this undefined; callers must feature-detect it and
+   * degrade to getServiceAccount per service. Read-only, never throws, never
+   * includes credentials.
+   */
+  listServiceAccounts?(input?: {
+    subscriptionBaseUrl?: string | null;
+  }): Promise<GetServiceAccountResult[] | null>;
+
   // --- unified sync surface (service-live-sync phase) -----------------------
   // syncService returns the FULL normalized snapshot; the targeted accessors
   // below are projections of the same single read (implemented via the

@@ -45,6 +45,7 @@ import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { cb as panelCb } from "../panels/panel-cb.js";
 import { LG_CB, logGroupHandler } from "./log-group.handler.js";
+import { NTF_ADMIN_CB } from "./notifications.handler.js";
 import {
   TRIAL_ENT_CAMPAIGN_START_CB,
   TRIAL_ENT_DASHBOARD_CB,
@@ -114,6 +115,8 @@ export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     .text("نوع نمایش منوها", TX_CB.menuMode)
     .row()
     .text("تنظیمات اکانت تست 🎁", TRIAL_SETTINGS_CB.root)
+    .row()
+    .text("اعلان‌ها و یادآوری‌ها 🔔", NTF_ADMIN_CB.root)
     .row()
     .text("تنظیمات گروه لاگ 📝", LG_CB.root)
     .row()

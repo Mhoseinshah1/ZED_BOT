@@ -51,11 +51,22 @@ function classifyTelegramError(status: number, body: TelegramApiResponse): Teleg
  * Sends a plain-text message (no parse_mode - operator text may contain
  * characters that would break Markdown/HTML entity parsing).
  */
+/**
+ * A minimal inline keyboard (rows of {text, callback_data}). Passed through to
+ * Telegram's reply_markup verbatim - the caller builds only safe callback data
+ * (never a secret / full entity id). Plain-text messages, no parse_mode, so the
+ * label + callback are the only surface.
+ */
+export interface InlineKeyboardMarkup {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+}
+
 export async function sendTelegramMessage(input: {
   token: string;
   chatId: string;
   text: string;
   messageThreadId?: number;
+  replyMarkup?: InlineKeyboardMarkup;
 }): Promise<TelegramSendResult> {
   const payload: Record<string, unknown> = {
     chat_id: input.chatId,
@@ -64,6 +75,9 @@ export async function sendTelegramMessage(input: {
   };
   if (input.messageThreadId !== undefined) {
     payload.message_thread_id = input.messageThreadId;
+  }
+  if (input.replyMarkup !== undefined) {
+    payload.reply_markup = input.replyMarkup;
   }
   let response: Response;
   try {

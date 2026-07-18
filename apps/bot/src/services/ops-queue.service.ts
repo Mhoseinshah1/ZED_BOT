@@ -7,8 +7,10 @@ import {
   LOG_GROUP_SETUP_JOB_NAME,
   LOG_GROUP_SETUP_QUEUE_NAME,
   logGroupSetupJobId,
+  NOTIFICATION_WORKER_STATUS_KEY,
   WORKER_CAPABILITIES_KEY,
   WORKER_HEARTBEAT_KEY,
+  type NotificationWorkerStatus,
   type WorkerCapabilities,
 } from "@zedbot/shared";
 import { Queue } from "bullmq";
@@ -350,6 +352,44 @@ export async function readWorkerHeartbeat(): Promise<WorkerHeartbeat | null> {
     return {
       at: new Date(millis),
       ageSeconds: Math.max(0, Math.round((Date.now() - millis) / 1000)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads the worker-published notification-engine status snapshot (the live view
+ * behind the admin notification page). Mirrors readWorkerHeartbeat: the JSON is
+ * parsed defensively and any absence/parse error becomes null - the admin page
+ * must never crash or hang on a missing/malformed key. The key carries the
+ * heartbeat TTL, so caller freshness is judged from the parsed checkedAt.
+ */
+export async function readNotificationWorkerStatus(): Promise<NotificationWorkerStatus | null> {
+  const redis = getReader();
+  if (redis === null) {
+    return null;
+  }
+  try {
+    const raw = await withTimeout(redis.get(NOTIFICATION_WORKER_STATUS_KEY));
+    if (raw === null) {
+      return null;
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    const value = parsed as Record<string, unknown>;
+    return {
+      schedulerActive: value.schedulerActive === true,
+      lastServiceSyncAt:
+        typeof value.lastServiceSyncAt === "string" ? value.lastServiceSyncAt : null,
+      lastServiceScanAt:
+        typeof value.lastServiceScanAt === "string" ? value.lastServiceScanAt : null,
+      deliveryWaiting: typeof value.deliveryWaiting === "number" ? value.deliveryWaiting : 0,
+      deliveryFailed: typeof value.deliveryFailed === "number" ? value.deliveryFailed : 0,
+      deadLetter: typeof value.deadLetter === "number" ? value.deadLetter : 0,
+      checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : "",
     };
   } catch {
     return null;

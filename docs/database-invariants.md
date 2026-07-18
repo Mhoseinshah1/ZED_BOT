@@ -98,3 +98,26 @@ Background: [backup-architecture.md](backup-architecture.md),
   first and **fails safely** on pre-existing duplicates — the audit
   queries in [financial-reconciliation.md](financial-reconciliation.md)
   find and explain every row that can block it.
+
+## Automated notifications (feat/notification-retention-engine, Phase 1)
+
+- `AutomatedNotification.dedupeKey` is **UNIQUE**. The scan relies on this: it
+  `create`s and treats a `P2002` as "already scheduled this cycle". This makes
+  concurrent scans converge to exactly one row per (service, threshold, cycle).
+- Status is a strict lifecycle: `SCHEDULED → SENDING → SENT`, with terminal
+  branches `FAILED`(→retry)/`DEAD_LETTER`/`CANCELLED`/`SUPPRESSED`/`EXPIRED`.
+  Delivery claims `SCHEDULED/READY/SENDING/FAILED → SENDING` with a
+  `updateMany` compare-and-set; `count == 0` means another worker won — **at
+  most one send**.
+- `userId` is a hard FK (`onDelete: Cascade`). `serviceId` / `checkoutSessionId`
+  / `paymentId` are **soft** references (plain strings, no FK) — a notification
+  survives its source row's cleanup and never cascades a delete into business
+  tables.
+- `NotificationInteraction` has a UNIQUE `(notificationId, type)` — a callback
+  retry records the click once (no metric inflation) and cascades on notification
+  delete.
+- `NotificationPreference.userId` and `ServiceNotificationPreference.serviceId`
+  are UNIQUE (one row each). A `null` per-service override field means *inherit*.
+- The migration `20260718120000_notification_retention_engine` is **purely
+  additive** (4 CREATE TYPE, 4 CREATE TABLE, indexes, 5 FKs; no DROP/ALTER of
+  existing columns) and deploys clean on a populated database.

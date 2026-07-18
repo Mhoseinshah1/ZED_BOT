@@ -125,3 +125,12 @@ Related: `zedbot doctor` covers the host-side equivalents (directory
 existence/owner/mode, containers, connectivity) — see
 [production-install-phase36.md](production-install-phase36.md);
 key/TTL details in [worker-queues.md](worker-queues.md).
+
+## Notification engine status (feat/notification-retention-engine, Phase 1)
+
+The worker publishes `zedbot:notif:worker-status` (JSON, heartbeat TTL) read by
+the admin «اعلان‌ها و یادآوری‌ها 🔔» page via `readNotificationWorkerStatus()`:
+`schedulerActive`, `lastServiceSyncAt`, `lastServiceScanAt`, `deliveryWaiting`,
+`deliveryFailed`, `deadLetter`, `checkedAt`. A missing/stale key ⇒ the page
+shows "بدون گزارش/قدیمی" and the master-enable activation gate refuses. See
+[notification-operations-runbook.md](notification-operations-runbook.md).
