@@ -62,10 +62,13 @@ these, never to the human messages:
 | `backup.deleted` | WARN | AUDIT | admin deleted a backup file from Telegram |
 | `log_group.changed` | WARN | SECURITY | log group (re)configured or disconnected |
 
-Worker events (all topic BACKUP): `backup_started` (INFO),
+Worker events — backups (all topic BACKUP): `backup_started` (INFO),
 `backup_completed` (INFO), `backup_verified` (INFO), `backup_corrupt`
 (ERROR), `backup_failed` (ERROR), `backup_cleanup` (INFO),
-`scheduled_backup_missed` (WARN).
+`scheduled_backup_missed` (WARN). Log-group setup: `log_group.topic_created`
+(INFO, topic SECURITY — one per staged forum topic) and
+`log_group.connected` (INFO, topic SYSTEM — the queued self-verification
+emitted after a successful atomic activation, see below).
 
 Topics `ERROR`, `SUPPORT` and `BROADCAST` currently have **no emitters**
 (reserved keys — they exist, can be toggled and test-messaged, but nothing
@@ -162,6 +165,89 @@ is reported only through the local JSON logger and the
 logs about failing to deliver logs, forever. The same rule holds for the
 writers: their catch blocks log locally and never re-enter
 `writeSystemLog`/`writeOpsLog`.
+
+## Log-group setup: the persistent setup attempt
+
+Binding the log group via a numeric chat id (and, converged onto the same
+policy, `/setloggroup` + the wizard — see
+[telegram-log-group.md](telegram-log-group.md)) runs as a **durable
+operation**, not an inline callback: one `LogGroupSetupAttempt` row drives
+one `PROVISION_LOG_GROUP` worker job. Topic creation and the test send are
+the worker's job (`apps/worker/src/log-group-setup.ts`), never the bot's;
+the DB row is the source of truth and the resume point.
+
+**Lifecycle** (`LogGroupSetupStatus`):
+
+```
+VALIDATED ──confirm (CAS + activeSlot=1)──► QUEUED ──worker claim──► PROVISIONING
+                                                                         │
+                                              all topics staged ─────────┤
+                                                                         ▼
+                                                                      TESTING ──test ok──► ACTIVE
+   any of VALIDATED/QUEUED/PROVISIONING/TESTING ──cancel──► CANCELLED
+   provisioning / test failure (final attempt)  ──────────► FAILED
+```
+
+- `VALIDATED` — the preview: the target passed the shared policy, but
+  nothing is bound and the active slot is free (several previews may
+  coexist).
+- `QUEUED` — the OWNER confirmed; the attempt claimed the single active
+  slot (`activeSlot = 1`) and the job was enqueued.
+- `PROVISIONING` — the worker CAS-claimed the row and is creating the
+  eleven default forum topics.
+- `TESTING` — all topics exist; the worker is sending the direct SYSTEM
+  test.
+- `ACTIVE` — the atomic activation committed; the group is live.
+- `FAILED` — a step failed on the final attempt; a safe English
+  `safeErrorCode` is recorded and the active slot is freed.
+- `CANCELLED` — the OWNER cancelled before activation.
+
+**Staged topic provisioning (per-topic durable bindings, resume-safe,
+never re-create).** For each stable OPS key not already present in the
+attempt's `topicBindings`, the worker calls `createForumTopic` and writes
+the resulting `{ "<KEY>": <messageThreadId> }` binding (plus
+`createdTopicCount`) to the row **immediately, before the next create**. A
+crashed or retried job re-reads `topicBindings` and skips every key it
+already holds — so a worker restart resumes mid-way and no topic is ever
+created twice. `topicBindings` holds **only** stable-key → thread-id
+pairs — never content, tokens or API payloads.
+
+**Atomic activation (the trust boundary).** The currently active group is
+**never overwritten until the staged group is fully provisioned *and* the
+direct SYSTEM test send has succeeded.** Activation is one transaction that
+switches the `log_group_chat_id` + `log_group_title` Settings **and** the
+`LogTopic` rows together, guarded by a CAS on the attempt still being in a
+running (`PROVISIONING`/`TESTING`) state. If a cancel or a concurrent
+activation moved the row first, the guarded update matches zero rows and
+the **whole transaction rolls back** — nothing is written, so a partial
+switch is impossible. A setup that fails at any earlier step therefore
+leaves the previously active log group working, untouched.
+
+**Retries.** The job runs with 3 attempts, exponential backoff from 15 s.
+A retryable Telegram failure (rate-limit, network, 5xx) on a non-final
+attempt re-throws so BullMQ backs off and the next attempt resumes from
+the saved bindings; a permanent failure, or any failure on the final
+attempt, marks the attempt `FAILED` with the safe code and frees the slot.
+The single Redis lock `zedbot:log-group:setup` serializes provisioning; a
+lock miss is a retryable back-off, never a second concurrent run.
+
+**Cancellation.** Cancelling a not-yet-active attempt
+(VALIDATED/QUEUED/PROVISIONING/TESTING) flips it to `CANCELLED`, frees the
+active slot and **preserves everything else**: the currently active group
+stays bound, the attempt row is kept as audit history, and already-created
+staged forum topics are **never deleted** — they remain recorded in
+`topicBindings` so a later retry reuses them.
+
+**Queued self-verification.** After activation the worker emits a normal
+`log_group.connected` ops log
+(«گروه لاگ با موفقیت متصل و فعال شد ✅») through `writeOpsLog` — i.e. the
+**same** `SystemLog` → `SystemLogDelivery` → BullMQ `DELIVER_SYSTEM_LOG` →
+`sendMessage` pipeline as every operational event. Its arrival in the
+group's SYSTEM topic thus proves the whole chain — log persistence,
+delivery-row creation, the delivery queue, topic routing and real Telegram
+delivery — end to end, not just that the group is reachable. (The earlier
+direct test send during `TESTING` bypasses the queue; this final event
+does not.)
 
 ## Limitations
 

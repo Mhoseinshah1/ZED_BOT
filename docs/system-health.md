@@ -43,6 +43,29 @@ construction — its own `W_OK` is deliberately never used.
 | `گروه لاگ: متصل ✅ / خطا در دسترسی / تنظیم نشده` | Setting `log_group_chat_id` (configured?) + the newest `SystemLogDelivery` in `SENT`/`FAILED`/`DEAD_LETTER` by `updatedAt` (last outcome) | «خطا در دسترسی» when the latest terminal delivery failed |
 | `زمان: <UTC timestamp>` | snapshot time | — |
 
+## Log-group status and in-flight setup
+
+The health page's `گروه لاگ:` line above reports the **bound** group only
+(configured? + the newest terminal `SystemLogDelivery` outcome). The direct
+numeric-ID setup feature adds a small status surface for an **in-flight**
+or **failed** setup, read from these facts (all grounded in existing
+building blocks; the exact labels/placement are finalized in the log-group
+admin UI):
+
+| Field | Data source |
+| --- | --- |
+| Connection status — `متصل ✅` / `تنظیم نشده` / **`در حال راه‌اندازی`** | `getLogGroupStatus().configured` (Setting `log_group_chat_id`) for the bound state; the "provisioning" label is derived from `getActiveSetupAttempt()` returning a row in `QUEUED`/`PROVISIONING`/`TESTING`. The `در حال راه‌اندازی` literal is **not yet in code** — it is the planned label for the active-attempt state |
+| Ready topics (`n از 11`) | `getLogGroupStatus().enabledTopicCount` of `totalTopicCount` (= `OPS_LOG_TOPIC_KEYS.length` = 11); during a setup the active attempt's `createdTopicCount` shows how many of the 11 are staged so far |
+| Worker heartbeat | Presence of `zedbot:worker:heartbeat` (TTL 45 s) — the same fact as the page's `Worker:` line; a setup only makes progress while the worker is alive |
+| Setup-queue pending | `getLogGroupSetupQueueCounts()` — `waiting`/`active`/`delayed`/`failed` on the `telegram-log-group-setup` queue (bot producer connection; `null` when Redis is unavailable) |
+| Last success / last error | `getLogGroupStatus().lastSuccessAt` (newest `SENT` delivery) and `lastError` (newest `FAILED`/`DEAD_LETTER` delivery: safe code + time) |
+| Active-attempt progress | `getActiveSetupAttempt()` → `status`, `createdTopicCount`, `directTestOk`, `safeErrorCode` (masked chat id only, never the full id) |
+
+A `FAILED` attempt carries a safe English `safeErrorCode` and leaves the
+previously bound group untouched; a running attempt occupies the single
+active-setup slot (see [database-invariants.md](database-invariants.md)).
+The full lifecycle is in [operational-logging.md](operational-logging.md).
+
 ## Deployment diagnostics — «بررسی نصب و بروزرسانی 🧪»
 
 The «گزارشات / بکاپ 🛡» landing gained a dedicated diagnostics page

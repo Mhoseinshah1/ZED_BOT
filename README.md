@@ -171,10 +171,15 @@ directory permissions. Line-by-line reference: `docs/system-health.md`.
 
 **Telegram log group** — operational events (payments, orders, services,
 panels, security, backups, audit) are delivered by the worker into an
-operator-owned forum supergroup, one topic per category: promote the bot
-to admin with manage-topics and send `/setloggroup` inside the group, then
-manage topics/tests from «تنظیمات عمومی ⚙️ → تنظیمات گروه لاگ 📝». Setup
-guide: `docs/telegram-log-group.md`; pipeline:
+operator-owned forum supergroup, one topic per category. **Recommended
+setup: direct numeric chat-ID.** Build a private forum supergroup, add the
+bot as admin with manage-topics, then from «تنظیمات عمومی ⚙️ → تنظیمات
+گروه لاگ 📝» paste the group's `-100…` id — the bot validates it, and a
+durable background operation creates the default topics, sends a test and
+switches the group over atomically (the previous group stays active until
+the new one is fully ready). `/setloggroup` inside the group and the
+start-group wizard remain as fallbacks. Then manage topics/tests from the
+same page. Setup guide: `docs/telegram-log-group.md`; pipeline:
 `docs/operational-logging.md`.
 
 **Restore is intentionally manual.** Neither the bot nor the CLI executes a

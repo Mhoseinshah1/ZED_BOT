@@ -291,19 +291,37 @@ operation short ids — never raw filenames.
 | راهنمای Restore ♻️ (`admin:rb:restore_help`, instructions only — nothing executed) | بازگشت » `admin:reports_backup` |
 | تنظیمات بکاپ خودکار ⏰ (`admin:rb:sched` — status, interval, hour UTC, log-group notify, env-managed retention values) | فعال/غیرفعال کردن بکاپ خودکار » `admin:rb:sched:toggle` / هر ۶ ساعت · هر ۱۲ ساعت · روزانه · هفتگی » `admin:rb:sched:int:<6h\|12h\|daily\|weekly>` / تغییر ساعت اجرا 🕒 » `admin:rb:sched:hour` *(flow `rb:sched_hour`, 0–23)* / خاموش/روشن کردن اعلان گروه لاگ » `admin:rb:sched:notify` / بازگشت » `admin:reports_backup` |
 
-### تنظیمات عمومی ⚙️ → تنظیمات گروه لاگ 📝 (log-group wizard phase; namespace `admin:lg` + group-side `lgset:`)
+### تنظیمات عمومی ⚙️ → تنظیمات گروه لاگ 📝 (log-group wizard + direct numeric-ID phase; namespace `admin:lg` + group-side `lgset:`)
 
 The root page is **state-dependent** (unconfigured vs configured
 keyboards). Status page + «بررسی مجدد اتصال ♻️» are admin-readable;
-wizard/tests/toggles/disconnect are **OWNER-only**. Chat ids are always
-masked. Binding completes **inside** the candidate forum supergroup — via
-the wizard's `?startgroup=zedlog` deep link or `/setloggroup` — and only
-on the explicit in-group confirmation; see `docs/telegram-log-group.md`.
+wizard/tests/toggles/disconnect and the **numeric-ID setup** are
+**OWNER-only**. Chat ids are always masked. Three converging entry points
+bind the group: the **recommended direct numeric-ID flow** (paste the
+`-100…` id in the bot's private chat — no in-group step), the wizard's
+`?startgroup=zedlog` deep link, and `/setloggroup`; the latter two complete
+**inside** the candidate forum supergroup on the explicit in-group
+confirmation. See `docs/telegram-log-group.md`.
+
+> **Provisional (numeric-ID handler being finalized in parallel).** The
+> routes `admin:lg:id`, `id_confirm`, `id_cancel`, `id_pubok`, `id_retry`,
+> `id_cancel_op`, `admin:lg:op:<sid>` and the `lg:chat_id` text flow, plus
+> the reworked state-dependent root keyboards (unconfigured: numeric-ID
+> entry listed **first**; configured: numeric-ID under «تغییر/افزودن»), are
+> the planned scheme from the design; the exact callback strings/labels may
+> shift when `log-group-id.handler.ts` lands. The shared services they call
+> (`prepareLogGroupConnection` / `createLogGroupSetupAttempt` /
+> `confirmLogGroupConnection` / `cancelSetupAttempt`, `attemptShortId` →
+> 8-char `<sid>`) and the safe texts are stable.
 
 | page | buttons |
 | --- | --- |
 | «تنظیمات گروه لاگ 📝» (`admin:lg`, UNCONFIGURED: «وضعیت: تنظیم نشده ❌» + wizard hint) | اتصال گروه لاگ ➕ » `admin:lg:connect` / راهنمای ساخت گروه » `admin:lg:guide` / بررسی مجدد اتصال ♻️ » `admin:lg:recheck` / بازگشت » `admin:general_settings` |
-| «تنظیمات گروه لاگ 📝» (`admin:lg`, CONFIGURED: state, group name, masked id, «موضوعات فعال: n از 11», last success/error) | بررسی اتصال 🧪 » `admin:lg:check` (rights check, sends nothing) / ارسال پیام آزمایشی » `admin:lg:test` / ساخت موضوعات پیش‌فرض » `admin:lg:ensure` / همگام‌سازی موضوعات » `admin:lg:sync` / مدیریت موضوعات » `admin:lg:topics` / تغییر گروه لاگ » `admin:lg:connect` / قطع اتصال گروه » `admin:lg:disc` / بازگشت » `admin:general_settings` |
+| «تنظیمات گروه لاگ 📝» (`admin:lg`, CONFIGURED: state, group name, masked id, «موضوعات فعال: n از 11», last success/error) | بررسی اتصال 🧪 » `admin:lg:check` (rights check, sends nothing) / ارسال پیام آزمایشی » `admin:lg:test` / ساخت موضوعات پیش‌فرض » `admin:lg:ensure` / همگام‌سازی موضوعات » `admin:lg:sync` / مدیریت موضوعات » `admin:lg:topics` / اتصال با آیدی عددی *(provisional `admin:lg:id`, **OWNER**)* / تغییر گروه لاگ » `admin:lg:connect` / قطع اتصال گروه » `admin:lg:disc` / بازگشت » `admin:general_settings` |
+| numeric-ID entry *(provisional `admin:lg:id`, **OWNER**)* → opens the bounded text flow **`lg:chat_id`** (`adminLogGroupSetupDraft`, OWNER-only, cleared on success/cancel/escape). Paste `-100…`; malformed → «آیدی گروه معتبر نیست.\n\nآیدی عددی سوپرگروه باید با -100 شروع شود.» (flow stays open). Valid → probe + shared policy → confirmation preview (or first failing safe message; nothing saved) | *(text flow — no buttons on the prompt itself; a preview or a safe error follows)* |
+| public-group warning *(shown only when the target has a public `@username`; recommends a private group)* | ادامه » *(provisional `id_pubok`)* / انصراف » *(provisional `id_cancel`)* |
+| confirmation preview *(safe title + masked id + topic count + replacement warning when a different group is bound; creates a `VALIDATED` attempt, binds nothing)* | تایید » *(provisional `id_confirm`)* — re-validates, CAS `VALIDATED→QUEUED` (+ activeSlot), enqueues `log-group-setup:<attemptId>`, lands on the progress page / انصراف » *(provisional `id_cancel`)* |
+| setup progress/status *(provisional `admin:lg:op:<sid>`, `<sid>` = 8-char attempt short id; mirrors the backup `admin:rb:op:<sid>` page)* | بروزرسانی 🔄 » `admin:lg:op:<sid>` (while running) / لغو راه‌اندازی » *(provisional `id_cancel_op`)* (preserves active group + history, never deletes topics) / تلاش مجدد » *(provisional `id_retry`, on FAILED)* / بازگشت » `admin:lg` |
 | connection wizard (`admin:lg:connect`, **OWNER** — 5-step body; prefixed with the replacement warning when a group is already bound) | افزودن ربات به گروه ➕ » URL `https://t.me/<bot_username>?startgroup=zedlog` / بررسی مجدد اتصال ♻️ » `admin:lg:recheck` / انصراف » `admin:lg` |
 | راهنمای ساخت گروه (`admin:lg:guide`, static 6-step help) | بازگشت » `admin:lg` |
 | بررسی مجدد اتصال ♻️ (`admin:lg:recheck`, read-only wizard poll — re-verifies rights when bound, then re-renders the state-dependent root) | *(lands on `admin:lg`)* |

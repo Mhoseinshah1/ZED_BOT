@@ -13,11 +13,223 @@ page + connection wizard),
 topic keys/titles and the `zedlog` deep-link payload in
 `packages/shared/src/ops.ts`.
 
-## Operator setup flow (connection wizard)
+The **direct numeric chat-ID setup** (recommended, below) adds a shared
+validation/lifecycle layer that all three entry points converge on:
+`packages/shared/src/log-group-target.ts` (numeric-id normalization + the
+one acceptance policy + the safe Persian error messages),
+`apps/bot/src/services/log-group-connection.service.ts` (probe / prepare /
+create-attempt / confirm / cancel / the atomic activation), the durable
+worker processor `apps/worker/src/log-group-setup.ts`
+(`PROVISION_LOG_GROUP`) with its fetch-based
+`createTelegramForumTopic` (`apps/worker/src/telegram.ts`), and the
+`LogGroupSetupAttempt` row (`packages/database/prisma/schema.prisma`,
+migration `20260718000000_direct_log_group_id_setup`). The numeric-ID
+admin UI itself lives in
+`apps/bot/src/handlers/admin-settings/log-group.handler.ts` (reworked
+state-dependent keyboards) + a dedicated `log-group-id.handler.ts` numeric
+input/preview/progress handler.
 
-The binding starts from the admin page and **completes inside the
-candidate group** with an explicit confirmation — nothing binds
-instantly. Two equivalent group-side entry points exist:
+## Direct numeric chat-ID setup (recommended)
+
+The fastest, most reliable way to bind the log group: paste the group's
+numeric `-100…` chat id into the bot once, and everything after —
+validation, the eleven default forum topics, a direct test send and the
+atomic switch-over — runs on a **durable background operation** so it
+survives a worker restart and never half-binds. Unlike the wizard, you do
+not have to enter the group and press a button there; you drive the whole
+flow from the bot's private chat. `/setloggroup` and the start-group
+wizard both **remain** as equivalent fallbacks (see below) — all three
+share the same validation policy and the same atomic activation.
+
+### 1. Get the group's numeric id (`-100…`)
+
+Build a **private forum supergroup** (Topics enabled) and get its numeric
+chat id, which always starts with `-100`. Any of:
+
+- Add the bot, then read the id from a group-info bot, or forward any
+  message from the group to a "userinfo"/"get-id" bot.
+- Open the group's invite/message link and read the internal id from it.
+- Any admin tool that reports the raw `chat_id`.
+
+The input box is forgiving: Persian (`۰-۹`) and Arabic (`٠-٩`) digits are
+folded to Latin, Unicode minus look-alikes become `-`, and surrounding
+whitespace / zero-width / bidi marks are stripped
+(`normalizeChatIdInput`). Only a value matching `^-100[0-9]{6,20}$`
+(after normalization, and ≤ 64 characters raw) is accepted; usernames,
+`t.me/…` links, invite links, positive ids, decimals and scientific
+notation are rejected. The id is always kept as a **string** — it is never
+`Number()`-converted (a 64-bit id would lose precision as a float).
+
+### 2. Prerequisite bot permissions
+
+Before entering the id, the group must satisfy **all** of:
+
+- The group is a **supergroup** with **Topics / Forum mode enabled**.
+- The **bot is a member** of the group.
+- The **bot is an administrator** (or creator) of the group.
+- The bot admin right **Manage Topics** (`can_manage_topics`) is on.
+- The **main OWNER** admin of the bot is also a member of the group.
+
+These are exactly what validation checks, in this order (see below).
+
+### 3. The numeric-ID entry flow
+
+`input → validation → (public-group warning) → confirmation preview →
+provisioning progress → active`
+
+1. **Input.** From «تنظیمات گروه لاگ 📝» choose the numeric-ID entry
+   («اتصال با آیدی عددی», provisional route `admin:lg:id`, OWNER-only).
+   The bot opens a bounded text flow (`lg:chat_id`) and you paste the
+   `-100…` id. A malformed id is rejected immediately with «آیدی گروه
+   معتبر نیست.\n\nآیدی عددی سوپرگروه باید با -100 شروع شود.» and the flow
+   stays open for a retry.
+2. **Validation.** The bot **probes** Telegram
+   (`getChat` + two `getChatMember` calls) and runs the shared acceptance
+   policy (`evaluateLogGroupTarget`). The first unmet requirement is
+   reported as a safe Persian line (table below); nothing is persisted.
+3. **Public-group warning (optional).** If the target has a public
+   `@username`, an extra confirmation is shown recommending a **private**
+   group (a public log group leaks operational events to anyone who finds
+   it); proceeding requires an explicit acknowledgement (provisional route
+   `id_pubok`).
+4. **Confirmation preview.** On success the bot shows the group's safe
+   title, its **masked** id (`maskChatId` — first 4 + last 2 digits) and
+   the number of default topics that will be created, plus — when a
+   *different* group is already bound — a replacement warning naming the
+   current group. This preview creates a **`VALIDATED`** setup attempt but
+   binds nothing. Press confirm (provisional route `id_confirm`) or cancel
+   (`id_cancel`).
+5. **Provisioning progress.** Confirming re-validates the group, claims
+   the single active-setup slot (`VALIDATED → QUEUED`) and enqueues the
+   worker job; the bot answers instantly and shows a live progress page
+   (provisional route `admin:lg:op:<sid>`, `<sid>` = the attempt's 8-char
+   short id) that you refresh. The worker creates the topics one at a
+   time, sends a direct test («پیام آزمایشی راه‌اندازی گروه لاگ ✅») and
+   activates the group. You can cancel a running setup from this page
+   (`id_cancel_op`); a failed setup offers a retry (`id_retry`).
+6. **Active.** When activation completes the worker emits the normal
+   queued `log_group.connected` event
+   («گروه لاگ با موفقیت متصل و فعال شد ✅»), which travels the **same**
+   delivery pipeline as every operational log and thus self-verifies the
+   whole chain end to end. The progress page then shows success
+   (spec text «گروه لاگ با موفقیت راه‌اندازی شد ✅» + the topic count). If
+   the group is bound but that queued test has not yet been confirmed
+   delivered, the page shows «گروه متصل شد، اما ارسال آزمایشی از صف هنوز
+   تایید نشده است ⚠️» (the worker may be down — deliveries are the
+   worker's job).
+
+> The admin-UI callback routes and button labels above (`admin:lg:id`,
+> `id_confirm`, `id_cancel`, `id_pubok`, `id_retry`, `id_cancel_op`,
+> `admin:lg:op:<sid>`, the `lg:chat_id` text flow) are **provisional** —
+> the numeric-ID handler is being finalized in parallel; the shared
+> service functions and safe texts they call are stable. See
+> [navigation-map.md](navigation-map.md).
+
+### Validation sequence and safe error messages
+
+Checked strictly in order — the **first** failure is the one reported
+(`evaluateLogGroupTarget`, `LOG_GROUP_SAFE_MESSAGES`, both verbatim from
+`packages/shared/src/log-group-target.ts`):
+
+| Order | Check | `safeCode` | Message shown |
+| --- | --- | --- | --- |
+| 1 | `getChat` succeeded (group exists, bot can see it) | `NOT_FOUND` | «گروه پیدا نشد.\n\nمطمئن شوید آیدی صحیح است و ربات داخل گروه حضور دارد.» |
+| 2 | Chat type is `supergroup` | `NOT_SUPERGROUP` | «گروه انتخاب‌شده سوپرگروه نیست.» |
+| 3 | Topics/Forum enabled (`is_forum`) | `TOPICS_DISABLED` | «قابلیت موضوعات گروه فعال نیست.\n\nابتدا Topics را در تنظیمات گروه فعال کنید.» |
+| 4 | Bot is a member (status not left/kicked/unknown) | `BOT_NOT_MEMBER` | «ربات داخل این گروه عضو نیست.\n\nابتدا ربات را به گروه اضافه کنید.» |
+| 5 | Bot is `administrator` (or `creator`) | `BOT_NOT_ADMIN` | «ربات باید در این گروه مدیر باشد.» |
+| 6 | Bot has `can_manage_topics` | `MISSING_TOPIC_PERMISSION` | «دسترسی مدیریت موضوعات برای ربات فعال نیست.» |
+| 7 | Bot send not explicitly denied | `SEND_UNAVAILABLE` | «ربات اجازه ارسال پیام در این گروه را ندارد.» |
+| 8 | The bot OWNER is a member of the group | `OWNER_NOT_MEMBER` | «مدیر اصلی ربات باید عضو گروه انتخاب‌شده باشد.» |
+
+The probe never surfaces raw Telegram payloads: a "chat not found"
+`getChat` failure becomes `found:false` (→ `NOT_FOUND`), and a
+bot-membership lookup failure leaves `botStatus` null (→ `BOT_NOT_MEMBER`).
+For supergroups Telegram exposes no per-admin "can send" flag, so send is
+treated as allowed unless an explicit deny is observed (a restricted
+member with `can_post_messages:false`); administrator status honestly
+implies send rights.
+
+### Private-group recommendation
+
+Use a **private** supergroup. Operational logs contain payment, order,
+service, security and audit events; a public group with a `@username`
+exposes them to anyone who finds the group, so validation flags a public
+target and asks for an explicit extra confirmation before continuing.
+
+### How this maps to the durable operation
+
+Everything after "confirm" is one **persistent `LogGroupSetupAttempt`**
+row driving a worker job — the full lifecycle (VALIDATED → QUEUED →
+PROVISIONING → TESTING → ACTIVE / FAILED / CANCELLED), the per-topic
+durable resume, the **atomic activation trust boundary** (the currently
+active group is never overwritten until the staged group is fully
+provisioned *and* the direct test send succeeds, so a failed setup leaves
+the previous group working untouched) and the queued self-verification are
+documented in [operational-logging.md](operational-logging.md); the queue,
+job options and lock in [worker-queues.md](worker-queues.md); the row's
+invariants in [database-invariants.md](database-invariants.md).
+
+### Flow diagram
+
+```
+ OWNER pastes -100… id
+        │
+        ▼
+  normalizeChatIdInput ──✗──► «آیدی گروه معتبر نیست…» (retry, nothing saved)
+        │ ok (string, never Number())
+        ▼
+  probe + evaluateLogGroupTarget ──✗──► first failing safe message (nothing saved)
+        │ ok
+        ▼
+  (public @username?) ──► extra "prefer a private group" confirm
+        │
+        ▼
+  confirmation preview  ── creates VALIDATED attempt (masked id + topic count)
+        │ confirm
+        ▼
+  CAS VALIDATED→QUEUED (+ activeSlot=1) ── enqueue log-group-setup:<attemptId>
+        │                                    (bot answers instantly)
+        ▼
+  ┌─────────────── WORKER (PROVISION_LOG_GROUP, concurrency 1, lock) ───────────┐
+  │  PROVISIONING: createForumTopic × missing keys, persist each binding        │
+  │  TESTING:      direct SYSTEM test send                                       │
+  │  ACTIVE:       atomic tx — switch Settings + LogTopic together (guarded)     │
+  └─────────────────────────────────────────────────────────────────────────────┘
+        │ activated
+        ▼
+  queued log_group.connected  ──► normal delivery pipeline  ──► ✅ verified in the group
+        (old group stayed active the whole time; a failure leaves it untouched)
+```
+
+### Numeric-ID troubleshooting
+
+Each validation/setup failure maps to a concrete operator fix:
+
+| Message / state | Fix |
+| --- | --- |
+| «آیدی گروه معتبر نیست…» | Re-copy the raw numeric id; it must start with `-100`. Do not paste a username, `t.me/…` link or invite link |
+| «گروه پیدا نشد…» (`NOT_FOUND`) | Add the bot to the group; double-check the id belongs to *this* group |
+| «گروه انتخاب‌شده سوپرگروه نیست.» (`NOT_SUPERGROUP`) | Convert/rebuild as a supergroup (a basic group upgrades to a supergroup when Topics are enabled) |
+| «قابلیت موضوعات گروه فعال نیست…» (`TOPICS_DISABLED`) | Group settings → enable **Topics** |
+| «ربات داخل این گروه عضو نیست…» (`BOT_NOT_MEMBER`) | Add the bot to the group |
+| «ربات باید در این گروه مدیر باشد.» (`BOT_NOT_ADMIN`) | Promote the bot to administrator |
+| «دسترسی مدیریت موضوعات برای ربات فعال نیست.» (`MISSING_TOPIC_PERMISSION`) | In the bot's admin rights, enable **Manage Topics** |
+| «ربات اجازه ارسال پیام در این گروه را ندارد.» (`SEND_UNAVAILABLE`) | Remove the send restriction on the bot |
+| «مدیر اصلی ربات باید عضو گروه انتخاب‌شده باشد.» (`OWNER_NOT_MEMBER`) | Join the group with the main OWNER account |
+| «یک عملیات راه‌اندازی گروه لاگ در حال انجام است…» | Another setup already holds the single active slot — wait for it (or cancel it) before confirming a new one |
+| «صف راه‌اندازی در دسترس نیست…» | Redis/worker is down — the `QUEUED` claim is rolled back; start `worker` + Redis, then retry |
+| «گروه متصل شد، اما ارسال آزمایشی از صف هنوز تایید نشده است ⚠️» | The atomic switch succeeded but the queued verification test has not been confirmed sent — check the worker is running (`zedbot logs worker`) |
+| «راه‌اندازی گروه لاگ کامل نشد ❌\n\nاتصال قبلی تغییری نکرده است.» | Setup failed before activation; fix the reported cause (`safeErrorCode`) and press retry — the previous group is still active |
+
+## Operator setup flow (connection wizard — fallback)
+
+These two group-side entry points **remain fully supported** as fallbacks
+to the recommended numeric-ID flow above; all three converge on the same
+validation policy and the same atomic activation. Here the binding starts
+from the admin page and **completes inside the candidate group** with an
+explicit confirmation — nothing binds instantly. Two equivalent group-side
+entry points exist:
 
 1. **The wizard (recommended).** On the admin page press «اتصال گروه لاگ
    ➕» (`admin:lg:connect`, OWNER-only). The wizard page shows the exact

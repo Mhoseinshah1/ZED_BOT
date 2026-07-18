@@ -67,13 +67,21 @@ background: [specialized-product-workflows.md](specialized-product-workflows.md)
 ## Ops invariants (backups + operational logging)
 
 Same discipline as above, applied by the production-backup/Telegram-logging
-phase. Background: [backup-architecture.md](backup-architecture.md),
-[operational-logging.md](operational-logging.md).
+phase and the direct log-group-ID setup
+(`packages/database/prisma/migrations/20260718000000_direct_log_group_id_setup/migration.sql`).
+Background: [backup-architecture.md](backup-architecture.md),
+[operational-logging.md](operational-logging.md),
+[telegram-log-group.md](telegram-log-group.md).
 
 | Constraint / guard | Invariant | Who handles the violation |
 | --- | --- | --- |
 | `SystemLogDelivery` `@@unique([systemLogId, logTopicId])` | At most one Telegram delivery tracker per log × topic — a re-entrant `writeSystemLog`/`writeOpsLog` can never double-deliver one event | Bot writer catches the `P2002` and reuses the winner's id; worker writer uses `createMany({ skipDuplicates })` + `findUnique` recovery. Send-side idempotency is the status CAS (`PENDING`/`FAILED`/`SENDING` → `SENDING`) plus the terminal `SENT` check — a known-successful send never repeats |
 | `LogTopic.key` `@unique` | One topic row per stable key (`SYSTEM`, `PAYMENT`, …); behavior binds to keys, never titles | All writers `upsert` on `key`, so the constraint is a pure backstop |
+| `LogGroupSetupAttempt` `@@unique([activeSlot])` (nullable) | **Only one log-group setup runs at a time.** `activeSlot = 1` while an attempt occupies the running slot (`QUEUED`/`PROVISIONING`/`TESTING`), `NULL` otherwise — so any number of `VALIDATED` previews and finished/failed/cancelled rows coexist while at most one runs | `confirmLogGroupConnection` sets `activeSlot = 1` in the same CAS `VALIDATED → QUEUED` write; a second concurrent confirm hits `P2002` and is told «یک عملیات راه‌اندازی گروه لاگ در حال انجام است…». Freed (`NULL`) on activation, failure and cancellation |
+| `LogGroupSetupAttempt.idempotencyKey` `@unique` | One attempt per logical setup request (minted `randomUUID` at preview) | Set once at `VALIDATED` creation; combined with the BullMQ jobId `log-group-setup:<attemptId>`, a repeated OWNER confirm reuses the same attempt + job rather than duplicating work |
+| `LogGroupSetupAttempt` status CASes (`VALIDATED → QUEUED` on confirm; `QUEUED`/`PROVISIONING`/`TESTING` → `PROVISIONING` worker claim; `PROVISIONING`/`TESTING` → `ACTIVE` activation; non-terminal → `CANCELLED`) | Every transition applies once; a re-delivered/crashed job resumes from the row instead of double-provisioning, and a cancel/concurrent-activation race can never produce a partial switch | `log-group-connection.service.ts` (bot) + `log-group-setup.ts` (worker) — each transition is a status-guarded `updateMany`; a zero-match claim means "already moved" and the caller converges on the live state or aborts |
+| `LogGroupSetupAttempt.topicBindings` (JSON, content invariant) | Holds **only** stable-key → Telegram message-thread-id pairs — never content, tokens or API payloads — and is written per-topic **before** the next create, so a restart resumes and no topic is re-created | Parsers on both sides keep only keys in `OPS_LOG_TOPIC_KEYS` whose value is a number; the worker persists each binding + `createdTopicCount` immediately after each `createForumTopic` |
+| Activation transaction (atomic, guarded) | The active-group `Setting` rows (`log_group_chat_id` + `log_group_title`) and the `LogTopic` rows are switched **together** in one transaction, conditional on the attempt still being running — a partial activation is impossible, and a failed setup leaves the previous group untouched | `activateStagedGroup` (worker) / `activateLogGroupBindings` (bot, shared): a guarded `updateMany` to `ACTIVE` inside the tx; if it matches zero rows (cancelled/already activated) the whole tx rolls back and nothing is written |
 | **BackupOperation — no extra DB unique (documented)** | At most one backup runs at a time, and one operation is executed at most once | Deliberately NOT a DB constraint: single-flight is the Redis lock `zedbot:backup:database` (SET NX PX + compare-and-delete release), the BullMQ jobId = operation id (repeated taps dedupe on the job), the bot's "one active operation" pre-check, and the `updateMany` status CAS (`QUEUED`/`RUNNING` → `RUNNING`) that turns re-delivered jobs into no-ops. A queue outage closes fresh rows as `FAILED "queue-unavailable"` so nothing can rot in `QUEUED` |
 
 ## Notes
