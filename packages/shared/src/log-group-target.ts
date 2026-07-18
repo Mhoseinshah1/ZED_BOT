@@ -14,10 +14,14 @@ const ARABIC_DIGITS = "٠١٢٣٤٥٦٧٨٩";
 
 // Every Unicode dash/minus variant a copy-paste can carry, folded to ASCII
 // '-': hyphen-minus is left as-is; these are the look-alikes.
-const MINUS_VARIANTS = /[‐‑‒–—―−⁃﹘﹣－]/g;
+const MINUS_VARIANTS = /[\u2010-\u2015\u2212\u2043\uFE58\uFE63\uFF0D]/g;
 
-// Whitespace incl. NBSP, zero-width and RTL/LTR marks that frame pasted ids.
-const STRIP_CHARS = /[\s ​‌‍‎‏‪-‮⁦-⁩﻿]/g;
+// Whitespace incl. NBSP + zero-width/bidi/format marks that frame pasted ids
+// (\s covers ordinary spaces/tabs/newlines; the rest are explicit \u code
+// points STRIPPED individually - the ZWJ trips no-misleading-character-class
+// which does not apply here since nothing is meant to combine).
+// eslint-disable-next-line no-misleading-character-class
+const STRIP_CHARS = /[\s\u00A0\u200B\u200C\u200D\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
 
 /**
  * A Telegram supergroup chat id after normalization: `-100` followed by
