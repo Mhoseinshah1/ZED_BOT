@@ -67,3 +67,17 @@ in the bulk path rather than corrupted — safe-by-untouched.
 
 Every log carries only a short (8-char) panel id and safe counts/codes — never a
 username, subscription URL, token, or panel credential.
+
+## Reuse by customer win-back (Phase 3)
+
+Customer win-back is a **negative assertion** — it targets customers with NO
+usable paid service — so it depends on fresh state. It reuses this same machinery
+rather than adding a second sync: `classifyPaidServiceForWinback` treats a paid
+service whose panel-backed state is older than `serviceStateMaxAgeMinutes`
+(default 20) as `SERVICE_STATE_UNCERTAIN`; the win-back scan then enqueues a
+**priority `enqueuePanelSync`** for that panel and skips the candidate, and a later
+retention scan re-evaluates once the state is fresh. A future expiry / unlimited
+service always blocks win-back regardless of freshness (owning a service is not a
+negative assertion); only the "expired/past-expiry" evidence needs freshness. A
+panel being unreachable therefore never causes a "guess" of inactivity — the
+candidate simply waits.

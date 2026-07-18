@@ -88,6 +88,12 @@ export interface NotificationWorkerStatus {
   lastCheckoutScanAt?: string | null;
   abandonedCheckoutCandidates?: number;
   paymentRetryCandidates?: number;
+  // Customer win-back phase (Phase 3). Optional for rolling upgrades.
+  lastRetentionScanAt?: string | null;
+  winbackCandidates?: number;
+  winbackScheduled?: number;
+  winbackExcludedUncertainService?: number;
+  retentionScanFailures?: number;
 }
 
 // --- Setting keys ------------------------------------------------------------
@@ -704,6 +710,15 @@ export const NTF_ACTION_CODES = {
   // preference change).
   VIEW_CHECKOUT: "d",
   SUPPRESS_CHECKOUT: "n",
+  // Customer win-back phase (Phase 3, MARKETING). g = view plans/storefront;
+  // w = open wallet; z = snooze win-back reminders (temporary); o = permanent
+  // marketing opt-out. Routed by the CUSTOMER_WINBACK notification type; none
+  // creates a payment/checkout/order. ("p"/VIEW_PRODUCTS is reserved for the
+  // service flow, so win-back "view plans" gets its own code.)
+  VIEW_PLANS: "g",
+  VIEW_WALLET: "w",
+  SNOOZE_WINBACK: "z",
+  MARKETING_OPT_OUT: "o",
 } as const;
 export type NtfActionCode = (typeof NTF_ACTION_CODES)[keyof typeof NTF_ACTION_CODES];
 
@@ -769,6 +784,11 @@ export const NOTIF_BUTTON_KEYS = {
   RESELECT_PAYMENT: "notif_btn_reselect_payment",
   VIEW_ORDER: "notif_btn_view_order",
   STOP_PAYMENT_REMINDERS: "notif_btn_stop_payment_reminders",
+  // Customer win-back phase (Phase 3).
+  WINBACK_VIEW_PLANS: "notif_btn_winback_view_plans",
+  WINBACK_WALLET: "notif_btn_winback_wallet",
+  WINBACK_SNOOZE: "notif_btn_winback_snooze",
+  WINBACK_OPT_OUT: "notif_btn_winback_opt_out",
 } as const;
 
 /** Action code -> the DEFAULT ButtonText key (fallback when a button spec omits
@@ -783,6 +803,10 @@ export const NTF_ACTION_BUTTON_KEY: Record<NtfActionCode, string> = {
   [NTF_ACTION_CODES.SUPPRESS_CHECKOUT]: NOTIF_BUTTON_KEYS.STOP_CHECKOUT_REMINDERS,
   [NTF_ACTION_CODES.VIEW_PRODUCTS]: NOTIF_BUTTON_KEYS.OPEN_SERVICE,
   [NTF_ACTION_CODES.DISMISS]: NOTIF_BUTTON_KEYS.DISMISS,
+  [NTF_ACTION_CODES.VIEW_PLANS]: NOTIF_BUTTON_KEYS.WINBACK_VIEW_PLANS,
+  [NTF_ACTION_CODES.VIEW_WALLET]: NOTIF_BUTTON_KEYS.WINBACK_WALLET,
+  [NTF_ACTION_CODES.SNOOZE_WINBACK]: NOTIF_BUTTON_KEYS.WINBACK_SNOOZE,
+  [NTF_ACTION_CODES.MARKETING_OPT_OUT]: NOTIF_BUTTON_KEYS.WINBACK_OPT_OUT,
 };
 
 /** Template keys for the Phase-2 checkout/payment reminder messages. */
@@ -790,6 +814,9 @@ export const NOTIF_CHECKOUT_TEMPLATE_KEYS = {
   ABANDONED_CHECKOUT: "notification_abandoned_checkout",
   PAYMENT_RETRY: "notification_payment_retry",
 } as const;
+
+/** Template key for the Phase-3 customer win-back message (MARKETING). */
+export const NOTIF_WINBACK_TEMPLATE_KEY = "notification_customer_winback";
 
 // --- misc safety -------------------------------------------------------------
 

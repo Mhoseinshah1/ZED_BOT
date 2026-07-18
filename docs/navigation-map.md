@@ -426,3 +426,30 @@ existence reveal.
 | --- | --- |
 | «یادآوری سفارش ناقص 🛒» (`admin:ntf:co:abandoned`) | فعال/غیرفعال » `admin:ntf:co:tg:abandoned` (OWNER-only; enable behind the per-rule activation gate) / تنظیم زمان یادآوری اول·دوم·حداکثر تعداد·حداکثر عمر » `admin:ntf:co:e:abandoned:(t1\|t2\|max\|age)` *(flow `admin_ntf_co:cfg`)* / ویرایش متن پیام » `admin:ntf:co:tpl:abandoned` / پیش‌نمایش مخاطبان » `admin:ntf:co:prev:abandoned` / ارسال آزمایشی » `admin:ntf:co:test:abandoned` / بازگشت » `admin:ntf` |
 | «یادآوری پرداخت ناموفق 💳» (`admin:ntf:co:payment`) | فعال/غیرفعال » `admin:ntf:co:tg:payment` (OWNER-only; gated) / تنظیم تأخیر·سقف هر پرداخت·سقف روزانه هر سفارش » `admin:ntf:co:e:payment:(delay\|maxpay\|maxday)` *(flow `admin_ntf_co:cfg`)* / ویرایش متن پیام » `admin:ntf:co:tpl:payment` / پیش‌نمایش مخاطبان » `admin:ntf:co:prev:payment` / ارسال آزمایشی » `admin:ntf:co:test:payment` / بازگشت » `admin:ntf` |
+
+## Customer win-back (feat/customer-winback-automation, Phase 3)
+
+Same foundation as Phase 1/2 — the `ntf:<shortId>:<action>` namespace and the
+admin «اعلان‌ها و یادآوری‌ها 🔔» page. One new MARKETING rule (`CUSTOMER_WINBACK`,
+lowest priority), OWNER-only and disabled by default. Reminders navigate a lapsed
+paying customer to the storefront/wallet but never create a payment, checkout or
+order.
+
+**Win-back notification action buttons** (worker-rendered, `ntf:<shortId>:<action>`,
+routed by the `CUSTOMER_WINBACK` type before any service/checkout branch):
+`g` view plans → the existing storefront (`startBuyFlow`; no checkout created) ·
+`w` wallet → the existing wallet page (`renderWallet`; never charges) · `z` snooze →
+a confirmation (`wb:snz:<shortId>` تایید / `wb:cancel:<shortId>` انصراف) then a
+temporary win-back snooze · `o` opt out → a confirmation (`wb:opt:<shortId>` /
+`wb:cancel:<shortId>`) then the permanent marketing opt-out. A foreign/expired/
+cross-type callback answers the same safe "این اعلان دیگر معتبر نیست." toast.
+
+**User** — the «تنظیمات اعلان‌ها 🔔» page (`user:nset:root`) gains a marketing
+toggle » `user:nset:toggle:mkt` (flips `marketingMessagesEnabled`, the authoritative
+permanent opt-out) and, while snoozed, «لغو توقف موقت» » `user:nset:unsnooze`.
+
+**Admin** — پنل ادمین → تنظیمات عمومی → «اعلان‌ها و یادآوری‌ها 🔔»:
+
+| Entry | Routes |
+| --- | --- |
+| «بازگرداندن مشتریان غیرفعال 👋» (`admin:ntf:wb`) | فعال/غیرفعال » `admin:ntf:wb:tg` (OWNER-only; enable behind the activation gate) / تنظیم مراحل·حداقل خرید·حداقل مبلغ·مدت توقف موقت·سقف هر چرخه » `admin:ntf:wb:e:(stages\|minorders\|minspend\|snooze\|max)` *(flow `admin_ntf_wb:cfg`)* / گروه‌های مجاز » `admin:ntf:wb:groups` → toggle » `admin:ntf:wb:g:(F\|N\|N2)` (never empty) / ویرایش متن پیام » `admin:ntf:wb:tpl` / پیش‌نمایش مخاطبان » `admin:ntf:wb:prev` / ارسال آزمایشی » `admin:ntf:wb:test` (OWNER only) / بازگشت » `admin:ntf` |

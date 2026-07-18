@@ -181,3 +181,22 @@ competing success / expiry / suppression / re-engagement) no longer warrants it.
 Full detail: [checkout-payment-reminders.md](checkout-payment-reminders.md),
 [abandoned-checkout-rules.md](abandoned-checkout-rules.md),
 [payment-retry-notifications.md](payment-retry-notifications.md).
+
+## Phase 3 — customer win-back
+
+One additional rule (`CUSTOMER_WINBACK`, category MARKETING, lowest priority)
+extends this engine WITHOUT a second engine: same records, delivery queue + CAS
+worker, quiet hours, daily limits, priority system, callback namespace and admin
+page. A new recurring `SCAN_RETENTION_NOTIFICATIONS` job (default daily) on the
+existing scan queue cursor-paginates narrowed candidate users, builds each
+`CustomerLifecycleSnapshot` from authoritative paid Service/Order history, and
+creates dedupe-guarded rows from the shared win-back resolver (one resolver for
+the scan, the delivery re-validation and the admin preview). Because win-back is a
+negative assertion ("no usable paid service"), a stale paid-service state enqueues
+a priority sync (reusing the Phase 1 `service-sync` queue) and skips the candidate
+— never guessing inactivity. The delivery worker gains a win-back re-validation
+branch that cancels on a new usable service / changed lapse cycle, suppresses on
+opt-out/snooze, and defers on uncertain state. Full detail:
+[customer-winback-rules.md](customer-winback-rules.md),
+[customer-lifecycle-segmentation.md](customer-lifecycle-segmentation.md),
+[customer-winback-operations.md](customer-winback-operations.md).

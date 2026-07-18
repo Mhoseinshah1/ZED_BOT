@@ -60,3 +60,4 @@ Rendered by the worker delivery from a safe snapshot (keys mirror
 | --- | --- | --- | --- |
 | `notification_abandoned_checkout` | اعلان سفارش ناقص | `{checkout_reference}` `{product_name}` `{payable_amount}` `{expires_in}` | yes |
 | `notification_payment_retry` | اعلان پرداخت ناموفق | `{checkout_reference}` `{product_name}` `{payable_amount}` `{payment_method}` | yes |
+| `notification_customer_winback` | اعلان بازگشت مشتری | `{inactive_days}` `{last_service_name}` `{last_product_name}` | yes |

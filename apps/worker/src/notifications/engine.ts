@@ -12,6 +12,7 @@ import { Worker, type Job } from "bullmq";
 import type { WorkerRedisConnection } from "../queues.js";
 import type { RawRedis } from "../redis.js";
 import { runCheckoutNotificationScan } from "./checkout-scan.js";
+import { runWinbackScan } from "./winback-scan.js";
 import { createNotificationDeliveryProcessor } from "./delivery.js";
 import { runNotificationCleanup, runNotificationReconcile } from "./maintenance.js";
 import { createNotificationQueues, type NotificationQueues, type PanelSyncJobData } from "./queues.js";
@@ -83,6 +84,19 @@ export function startNotificationEngine(
         state.paymentRetryCandidates = result.paymentScanned;
         return result as unknown as Record<string, unknown>;
       }
+      if (job.name === NOTIFICATION_JOB_NAMES.SCAN_RETENTION_NOTIFICATIONS) {
+        try {
+          const result = await runWinbackScan(queues.deliveryQueue, queues.serviceSyncQueue);
+          state.lastRetentionScanAt = new Date().toISOString();
+          state.winbackCandidates = result.scanned;
+          state.winbackScheduled = result.created;
+          state.winbackExcludedUncertainService = result.excludedUncertainService;
+          return result as unknown as Record<string, unknown>;
+        } catch (err) {
+          state.retentionScanFailures = (state.retentionScanFailures ?? 0) + 1;
+          throw err;
+        }
+      }
       throw new Error(`unknown job: ${job.name}`);
     },
     { connection, concurrency: 1 },
@@ -91,7 +105,10 @@ export function startNotificationEngine(
   // --- delivery worker (Telegram-rate-limited, one at a time) ---------------
   const deliveryWorker = new Worker(
     NOTIFICATION_DELIVERY_QUEUE_NAME,
-    createNotificationDeliveryProcessor({ deliveryQueue: queues.deliveryQueue }),
+    createNotificationDeliveryProcessor({
+      deliveryQueue: queues.deliveryQueue,
+      serviceSyncQueue: queues.serviceSyncQueue,
+    }),
     { connection, concurrency: 1, limiter: { max: 15, duration: 60_000 } },
   );
 

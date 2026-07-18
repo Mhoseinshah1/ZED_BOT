@@ -23,7 +23,8 @@ import {
   revalidateAbandonedForDelivery,
   revalidateFailedPaymentForDelivery,
 } from "./checkout-eligibility.js";
-import type { NotificationDeliveryJobData } from "./queues.js";
+import { revalidateWinbackForDelivery } from "./winback-eligibility.js";
+import { enqueuePanelSync, type NotificationDeliveryJobData } from "./queues.js";
 import {
   loadUserGates,
   resolveEffectiveDeliveryPreferences,
@@ -34,6 +35,7 @@ import { renderNotification } from "./render.js";
 import {
   getAbandonedCheckoutConfig,
   getFailedPaymentConfig,
+  getWinbackConfig,
   isNotificationSystemEnabled,
 } from "./settings.js";
 
@@ -73,6 +75,8 @@ interface RevalMeta {
   trial?: number;
   /** Abandoned-checkout reminder stage (Phase 2). */
   stage?: number;
+  /** Win-back stage key, e.g. "s30" (Phase 3). */
+  stageKey?: string;
 }
 
 /** The minimal live service state delivery re-checks against. */
@@ -180,6 +184,44 @@ async function revalidateCheckoutSource(
   return null;
 }
 
+/**
+ * Re-validates a CUSTOMER_WINBACK (marketing) notification against LIVE state at
+ * send time (Phase 3). Reuses the SAME shared resolver as the scan + preview.
+ * Returns a terminal decision when it must not send (a new usable service, opt-
+ * out, snooze, a changed lapse cycle, or a financial/purchase-in-progress state),
+ * "defer" when the service state is UNCERTAIN (re-arm after a priority sync), or
+ * null to proceed. Read-only.
+ */
+async function revalidateWinbackSource(
+  notification: { userId: string },
+  meta: RevalMeta,
+  now: Date,
+): Promise<Terminal | { defer: true; panelIds: string[] } | null> {
+  const config = await getWinbackConfig();
+  const res = await revalidateWinbackForDelivery(notification.userId, config, now);
+  if (res === null) {
+    return { kind: "cancel", reason: "winback-user-gone" };
+  }
+  // Uncertain service state defers FIRST (an uncertain service yields no lapse
+  // anchor, so the fingerprint would look "changed"): never guess, re-arm.
+  if (!res.eligibility.eligible && res.eligibility.reason === "service-uncertain") {
+    return { defer: true, panelIds: res.needsSyncPanelIds };
+  }
+  // A changed lapse cycle (a new purchase / renewal happened) invalidates the
+  // notice - the old cycle is finished.
+  if (meta.cycle !== undefined && res.currentFingerprint !== meta.cycle) {
+    return { kind: "cancel", reason: "winback-cycle-changed" };
+  }
+  if (res.eligibility.eligible) {
+    return null;
+  }
+  const reason = res.eligibility.reason;
+  if (reason === "marketing-opt-out" || reason === "snoozed") {
+    return { kind: "suppress", reason: `winback-${reason}` };
+  }
+  return { kind: "cancel", reason: `winback-${reason}` };
+}
+
 async function markTerminal(id: string, decision: Terminal): Promise<void> {
   const now = new Date();
   const status =
@@ -225,7 +267,12 @@ function nextLocalMidnight(now: Date, timezone: string): Date {
 
 export interface NotificationDeliveryDeps {
   deliveryQueue: Queue;
+  /** For re-arming a win-back notice whose service state is uncertain (Phase 3). */
+  serviceSyncQueue?: Queue;
 }
+
+/** How long a win-back notice waits when the service state is uncertain. */
+const WINBACK_UNCERTAIN_DEFER_MS = 30 * 60_000;
 
 export function createNotificationDeliveryProcessor(
   deps: NotificationDeliveryDeps,
@@ -305,6 +352,27 @@ export function createNotificationDeliveryProcessor(
       if (decision !== null) {
         await markTerminal(notificationId, decision);
         return { cancelled: decision.reason };
+      }
+    }
+
+    // --- customer win-back re-validation (Phase 3) ---------------------------
+    if (notification.type === "CUSTOMER_WINBACK") {
+      const decision = await revalidateWinbackSource(notification, meta, now);
+      if (decision !== null && "defer" in decision) {
+        // Uncertain service state: enqueue a priority sync (if wired) and re-arm.
+        if (deps.serviceSyncQueue !== undefined) {
+          for (const panelId of decision.panelIds) {
+            await enqueuePanelSync(deps.serviceSyncQueue, panelId);
+          }
+        }
+        await deferTo(notificationId, new Date(now.getTime() + WINBACK_UNCERTAIN_DEFER_MS));
+        return { deferred: "winback-uncertain" };
+      }
+      if (decision !== null) {
+        await markTerminal(notificationId, decision);
+        return decision.kind === "suppress"
+          ? { suppressed: decision.reason }
+          : { cancelled: decision.reason };
       }
     }
 

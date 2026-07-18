@@ -45,6 +45,13 @@ import {
   type AbandonedCheckoutConfig,
   type CheckoutNotificationRuleKey,
   type FailedPaymentConfig,
+  DEFAULT_RETENTION_SCAN_MINUTES,
+  DEFAULT_WINBACK_CONFIG,
+  NOTIF_RETENTION_SCAN_MINUTES_KEY,
+  NOTIF_WINBACK_CONFIG_KEY,
+  NOTIF_WINBACK_ENABLED_KEY,
+  parseWinbackConfig,
+  type WinbackConfig,
 } from "@zedbot/shared";
 
 // =============================================================================
@@ -189,4 +196,20 @@ export async function getFailedPaymentConfig(): Promise<FailedPaymentConfig> {
 
 export async function getCheckoutScanMinutes(): Promise<number> {
   return intSetting(NOTIF_CHECKOUT_SCAN_MINUTES_KEY, DEFAULT_CHECKOUT_SCAN_MINUTES, 1, 24 * 60);
+}
+
+// --- customer win-back (Phase 3) ---------------------------------------------
+
+/** The win-back MARKETING rule switch (false until the OWNER enables it). */
+export async function isWinbackRuleEnabled(): Promise<boolean> {
+  return toBool(await settingValue(NOTIF_WINBACK_ENABLED_KEY));
+}
+
+export async function getWinbackConfig(): Promise<WinbackConfig> {
+  return parseWinbackConfig(await settingValue(NOTIF_WINBACK_CONFIG_KEY), DEFAULT_WINBACK_CONFIG);
+}
+
+/** Retention (win-back) scan cadence, in minutes (daily by default). */
+export async function getRetentionScanMinutes(): Promise<number> {
+  return intSetting(NOTIF_RETENTION_SCAN_MINUTES_KEY, DEFAULT_RETENTION_SCAN_MINUTES, 60, 7 * 24 * 60);
 }

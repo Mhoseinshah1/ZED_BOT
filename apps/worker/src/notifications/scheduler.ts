@@ -7,8 +7,10 @@ import {
 import {
   anyCheckoutRuleEnabled,
   getCheckoutScanMinutes,
+  getRetentionScanMinutes,
   getScheduleMinutes,
   isNotificationSystemEnabled,
+  isWinbackRuleEnabled,
 } from "./settings.js";
 import type { NotificationQueues } from "./queues.js";
 
@@ -73,6 +75,19 @@ export async function reconcileNotificationSchedulers(queues: NotificationQueues
   } else {
     await queues.scanQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.checkoutScan);
   }
+
+  // Customer win-back (retention) scan runs ONLY while its MARKETING rule is on -
+  // a non-marketing install schedules no retention scan at all (Phase 3).
+  if (await isWinbackRuleEnabled()) {
+    const retentionMinutes = await getRetentionScanMinutes();
+    await queues.scanQueue.upsertJobScheduler(
+      NOTIFICATION_SCHEDULER_IDS.retentionScan,
+      { every: retentionMinutes * 60_000 },
+      { name: NOTIFICATION_JOB_NAMES.SCAN_RETENTION_NOTIFICATIONS, data: {} },
+    );
+  } else {
+    await queues.scanQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.retentionScan);
+  }
   return true;
 }
 
@@ -81,6 +96,7 @@ async function removeAllSchedulers(queues: NotificationQueues): Promise<void> {
     queues.serviceSyncQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.serviceSync),
     queues.scanQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.serviceScan),
     queues.scanQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.checkoutScan),
+    queues.scanQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.retentionScan),
     queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.reconcile),
     queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.cleanup),
   ]);

@@ -126,3 +126,7 @@ Callback data is `ntf:<shortId>:<action>` (c=continue/reselect, d=view, n=suppre
 | `notif_btn_reselect_payment` | اعلان: انتخاب روش پرداخت | انتخاب روش پرداخت 💳 | yes |
 | `notif_btn_view_order` | اعلان: مشاهده سفارش | مشاهده سفارش 🧾 | yes |
 | `notif_btn_stop_payment_reminders` | اعلان: عدم یادآوری این سفارش | عدم یادآوری این سفارش 🔕 | yes |
+| `notif_btn_winback_view_plans` | اعلان: مشاهده پلن‌ها | مشاهده پلن‌ها 🔐 | yes |
+| `notif_btn_winback_wallet` | اعلان: کیف پول من | کیف پول من 🏦 | yes |
+| `notif_btn_winback_snooze` | اعلان: توقف موقت یادآوری بازگشت | فعلاً یادآوری نکن | yes |
+| `notif_btn_winback_opt_out` | اعلان: عدم دریافت پیشنهادها | عدم دریافت پیشنهادها | yes |

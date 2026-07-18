@@ -29,6 +29,12 @@ export interface NotificationEngineState {
   lastCheckoutScanAt: string | null;
   abandonedCheckoutCandidates: number;
   paymentRetryCandidates: number;
+  // Customer win-back (Phase 3).
+  lastRetentionScanAt: string | null;
+  winbackCandidates: number;
+  winbackScheduled: number;
+  winbackExcludedUncertainService: number;
+  retentionScanFailures: number;
 }
 
 export function createEngineState(): NotificationEngineState {
@@ -38,6 +44,11 @@ export function createEngineState(): NotificationEngineState {
     lastCheckoutScanAt: null,
     abandonedCheckoutCandidates: 0,
     paymentRetryCandidates: 0,
+    lastRetentionScanAt: null,
+    winbackCandidates: 0,
+    winbackScheduled: 0,
+    winbackExcludedUncertainService: 0,
+    retentionScanFailures: 0,
   };
 }
 
@@ -64,6 +75,11 @@ export async function publishNotificationWorkerStatus(
     lastCheckoutScanAt: state.lastCheckoutScanAt,
     abandonedCheckoutCandidates: state.abandonedCheckoutCandidates,
     paymentRetryCandidates: state.paymentRetryCandidates,
+    lastRetentionScanAt: state.lastRetentionScanAt,
+    winbackCandidates: state.winbackCandidates,
+    winbackScheduled: state.winbackScheduled,
+    winbackExcludedUncertainService: state.winbackExcludedUncertainService,
+    retentionScanFailures: state.retentionScanFailures,
   };
   await redis.set(
     NOTIFICATION_WORKER_STATUS_KEY,

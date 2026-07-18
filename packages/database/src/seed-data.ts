@@ -479,6 +479,22 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
       "می‌توانید دوباره یک روش پرداخت انتخاب کنید.",
     allowedVariables: ["checkout_reference", "product_name", "payable_amount", "payment_method"],
   },
+  // Customer win-back (Phase 3, category MARKETING). Only safe display variables:
+  // no price, no service username when sensitive, no lifetime spend. Every
+  // variable renders safely when missing (the optional last-service line is only
+  // shown by the worker when a safe display name exists).
+  {
+    key: "notification_customer_winback",
+    title: "اعلان بازگشت مشتری",
+    category: "notification",
+    defaultContent:
+      "مدتی است سرویس فعالی ندارید 👋\n" +
+      "\n" +
+      "پلن‌ها و لوکیشن‌های فعال برای خرید در دسترس هستند.\n" +
+      "\n" +
+      "برای استفاده دوباره می‌توانید پلن‌های موجود را مشاهده کنید.",
+    allowedVariables: ["inactive_days", "last_service_name", "last_product_name"],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -571,4 +587,10 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "notif_btn_reselect_payment", title: "اعلان: انتخاب روش پرداخت", text: "انتخاب روش پرداخت 💳" },
   { key: "notif_btn_view_order", title: "اعلان: مشاهده سفارش", text: "مشاهده سفارش 🧾" },
   { key: "notif_btn_stop_payment_reminders", title: "اعلان: عدم یادآوری این سفارش", text: "عدم یادآوری این سفارش 🔕" },
+  // Customer win-back (Phase 3). Keys duplicated from @zedbot/shared
+  // NOTIF_BUTTON_KEYS. Callback data is ntf:<shortId>:<action>, never the label.
+  { key: "notif_btn_winback_view_plans", title: "اعلان: مشاهده پلن‌ها", text: "مشاهده پلن‌ها 🔐" },
+  { key: "notif_btn_winback_wallet", title: "اعلان: کیف پول من", text: "کیف پول من 🏦" },
+  { key: "notif_btn_winback_snooze", title: "اعلان: توقف موقت یادآوری بازگشت", text: "فعلاً یادآوری نکن" },
+  { key: "notif_btn_winback_opt_out", title: "اعلان: عدم دریافت پیشنهادها", text: "عدم دریافت پیشنهادها" },
 ];
