@@ -99,3 +99,4 @@ overwritten (see `docs/text-system.md`).
 | `admin_broadcast` | منوی ادمین: پیام همگانی | پیام همگانی 📣 | yes |
 | `admin_general_settings` | منوی ادمین: تنظیمات عمومی | تنظیمات عمومی ⚙️ | yes |
 | `admin_reports_backup` | منوی ادمین: گزارشات / بکاپ | گزارشات / بکاپ 📊 | yes |
+| `admin_return_user_menu` | منوی ادمین: بازگشت به منوی کاربر | بازگشت به منوی کاربر 👤 | yes |

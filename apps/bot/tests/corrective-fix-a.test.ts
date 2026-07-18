@@ -69,6 +69,9 @@ describe("admin root / finance nesting (Fix A)", () => {
       [CB.ADMIN_OTHER_PRODUCTS],
       [CB.ADMIN_SUPPORT, CB.ADMIN_BROADCAST],
       [CB.ADMIN_GENERAL_SETTINGS, CB.ADMIN_REPORTS_BACKUP],
+      // Two-way navigation: the final full-width return-to-user row reuses the
+      // existing user-area CB.USER_MENU callback.
+      [CB.USER_MENU],
     ]);
     expect(callbacks(kb)).not.toContain(CB.ADMIN_RECEIPTS);
   });

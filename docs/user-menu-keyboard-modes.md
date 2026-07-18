@@ -255,6 +255,19 @@ actions — admin actions never route through it (the tests prove that
 typing «پنل ادمین» resolves nothing) — and all deeper admin pages keep
 their inline keyboards in every mode.
 
+**Two-way navigation (return to the user menu).** The admin main menu's final
+full-width row «بازگشت به منوی کاربر 👤» exits back to this user menu, closing
+the loop PR #96 opened with «پنل مدیریت 🛠» in the user menu. The return
+destination renders in **this** setting's mode
+(`user_main_menu_keyboard_mode`), independent of the admin mode, so all four
+Admin×User INLINE/REPLY combinations are supported: Admin REPLY → User REPLY
+replaces the persistent admin keyboard directly with the user one; Admin
+REPLY → User INLINE removes the admin keyboard exactly once then renders the
+inline user menu. It reuses the same `showUserMenu` as `/menu` (so the
+viewer-aware admin-entry row reappears for an active admin), and the
+user-access gates apply first — admin access never bypasses them. See
+`docs/admin-menu-keyboard-mode.md`.
+
 ## Security notes
 
 - **Matching text never authorizes anything.** A label match only selects

@@ -439,4 +439,13 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "admin_broadcast", title: "منوی ادمین: پیام همگانی", text: "پیام همگانی 📣" },
   { key: "admin_general_settings", title: "منوی ادمین: تنظیمات عمومی", text: "تنظیمات عمومی ⚙️" },
   { key: "admin_reports_backup", title: "منوی ادمین: گزارشات / بکاپ", text: "گزارشات / بکاپ 📊" },
+  // Two-way User/Admin navigation: the final admin main-menu row returns to
+  // the user surface. Its inline callback is the existing CB.USER_MENU; in
+  // REPLY mode the label routes via the RETURN_TO_USER_MENU action. Editable
+  // like every other main-menu label (kept in the admin duplicate-label scope).
+  {
+    key: "admin_return_user_menu",
+    title: "منوی ادمین: بازگشت به منوی کاربر",
+    text: "بازگشت به منوی کاربر 👤",
+  },
 ];

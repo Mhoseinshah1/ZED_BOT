@@ -15,7 +15,12 @@ import { getButtonText } from "../services/text.service.js";
 // never authorizes anything by itself.
 // =============================================================================
 
-/** Language-neutral identity of every admin main-menu action. */
+/**
+ * Language-neutral identity of every admin main-menu action. Every action
+ * except RETURN_TO_USER_MENU opens an admin SECTION; RETURN_TO_USER_MENU is
+ * the two-way-navigation exit that reuses the existing user-area entry
+ * (CB.USER_MENU inline, showUserMenu after the user-access gates in REPLY).
+ */
 export type AdminMainMenuAction =
   | "FINANCE"
   | "USERS"
@@ -25,7 +30,8 @@ export type AdminMainMenuAction =
   | "SUPPORT_TICKETS"
   | "BROADCAST"
   | "GENERAL_SETTINGS"
-  | "REPORTS_BACKUP";
+  | "REPORTS_BACKUP"
+  | "RETURN_TO_USER_MENU";
 
 export interface AdminMainMenuButton {
   action: AdminMainMenuAction;
@@ -51,6 +57,13 @@ export const ADMIN_MAIN_MENU_ACTION_WIRING: Record<
   BROADCAST: { buttonKey: "admin_broadcast", callback: CB.ADMIN_BROADCAST },
   GENERAL_SETTINGS: { buttonKey: "admin_general_settings", callback: CB.ADMIN_GENERAL_SETTINGS },
   REPORTS_BACKUP: { buttonKey: "admin_reports_backup", callback: CB.ADMIN_REPORTS_BACKUP },
+  // Two-way navigation exit. The inline callback is the EXISTING user-area
+  // CB.USER_MENU (no new callback), so an inline tap flows through
+  // userAccessMiddleware -> menuHandler -> showUserMenu exactly like /menu; the
+  // REPLY-mode label resolves to this action and is handled in
+  // admin-menu-actions.ts (ensureUserAccess -> showUserMenu), never as a
+  // business section.
+  RETURN_TO_USER_MENU: { buttonKey: "admin_return_user_menu", callback: CB.USER_MENU },
 };
 
 /** The 9 admin main-menu ButtonText keys (duplicate-label guard scope). */
@@ -65,6 +78,9 @@ const APPROVED_ROWS: AdminMainMenuAction[][] = [
   ["OTHER_PRODUCTS"],
   ["SUPPORT_TICKETS", "BROADCAST"],
   ["GENERAL_SETTINGS", "REPORTS_BACKUP"],
+  // The two-way-navigation exit is ALWAYS the final full-width row - never
+  // beside a sensitive section, so it can never be mis-tapped for one.
+  ["RETURN_TO_USER_MENU"],
 ];
 
 /**
