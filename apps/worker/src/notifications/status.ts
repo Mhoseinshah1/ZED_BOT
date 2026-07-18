@@ -10,6 +10,7 @@ import {
 
 import type { RawRedis } from "../redis.js";
 import type { NotificationQueues } from "./queues.js";
+import { isNotificationAnalyticsEnabled } from "./settings.js";
 
 // =============================================================================
 // Notification worker STATUS publisher (feat/notification-retention-engine,
@@ -35,6 +36,10 @@ export interface NotificationEngineState {
   winbackScheduled: number;
   winbackExcludedUncertainService: number;
   retentionScanFailures: number;
+  // Analytics / attribution (Phase 4).
+  lastAttributionBatchAt: string | null;
+  lastAttributionReversalsAt: string | null;
+  attributionReconcileFailures: number;
 }
 
 export function createEngineState(): NotificationEngineState {
@@ -49,6 +54,9 @@ export function createEngineState(): NotificationEngineState {
     winbackScheduled: 0,
     winbackExcludedUncertainService: 0,
     retentionScanFailures: 0,
+    lastAttributionBatchAt: null,
+    lastAttributionReversalsAt: null,
+    attributionReconcileFailures: 0,
   };
 }
 
@@ -58,12 +66,16 @@ export async function publishNotificationWorkerStatus(
   state: NotificationEngineState,
   schedulerActive: boolean,
 ): Promise<void> {
-  const [waiting, delayed, deliveryFailed, deadLetter] = await Promise.all([
-    queues.deliveryQueue.getWaitingCount(),
-    queues.deliveryQueue.getDelayedCount(),
-    prisma.automatedNotification.count({ where: { status: AutomatedNotificationStatus.FAILED } }),
-    prisma.automatedNotification.count({ where: { status: AutomatedNotificationStatus.DEAD_LETTER } }),
-  ]);
+  const [waiting, delayed, deliveryFailed, deadLetter, analyticsEnabled, attributionsActive, attributionsReversed] =
+    await Promise.all([
+      queues.deliveryQueue.getWaitingCount(),
+      queues.deliveryQueue.getDelayedCount(),
+      prisma.automatedNotification.count({ where: { status: AutomatedNotificationStatus.FAILED } }),
+      prisma.automatedNotification.count({ where: { status: AutomatedNotificationStatus.DEAD_LETTER } }),
+      isNotificationAnalyticsEnabled(),
+      prisma.notificationConversionAttribution.count({ where: { status: "ACTIVE" } }),
+      prisma.notificationConversionAttribution.count({ where: { status: "REVERSED" } }),
+    ]);
   const snapshot: NotificationWorkerStatus = {
     schedulerActive,
     lastServiceSyncAt: state.lastServiceSyncAt,
@@ -80,6 +92,12 @@ export async function publishNotificationWorkerStatus(
     winbackScheduled: state.winbackScheduled,
     winbackExcludedUncertainService: state.winbackExcludedUncertainService,
     retentionScanFailures: state.retentionScanFailures,
+    analyticsEnabled,
+    lastAttributionBatchAt: state.lastAttributionBatchAt,
+    lastAttributionReversalsAt: state.lastAttributionReversalsAt,
+    attributionsActive,
+    attributionsReversed,
+    attributionReconcileFailures: state.attributionReconcileFailures,
   };
   await redis.set(
     NOTIFICATION_WORKER_STATUS_KEY,

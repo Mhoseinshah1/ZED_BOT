@@ -4,6 +4,7 @@ import {
   NOTIFICATION_MAINTENANCE_QUEUE_NAME,
   NOTIFICATION_SCAN_QUEUE_NAME,
   SERVICE_STATE_SYNC_QUEUE_NAME,
+  attributionReconcileJobId,
   notificationDeliveryJobId,
   panelSyncJobId,
 } from "@zedbot/shared";
@@ -30,6 +31,10 @@ export interface PanelSyncJobData {
 
 export interface NotificationDeliveryJobData {
   notificationId: string;
+}
+
+export interface AttributionReconcileJobData {
+  orderId: string;
 }
 
 /** Panel sync: 2 attempts (a panel blip should not spam) - the next scheduled
@@ -110,5 +115,23 @@ export async function enqueueNotificationDelivery(
   await deliveryQueue.add(NOTIFICATION_JOB_NAMES.DELIVER_AUTOMATED_NOTIFICATION, data, {
     jobId: notificationDeliveryJobId(notificationId),
     delay: delayMs !== undefined && delayMs > 0 ? delayMs : undefined,
+  });
+}
+
+/**
+ * Enqueue the after-commit attribution evaluation for ONE completed Order
+ * (jobId = per-order, so the hook + any retry collapse onto one job). The
+ * `orderId @unique` attribution constraint is the durable convergence anchor;
+ * completed jobs are removed so a re-completion (rare) can re-enqueue.
+ */
+export async function enqueueAttributionReconcile(
+  maintenanceQueue: Queue,
+  orderId: string,
+): Promise<void> {
+  const data: AttributionReconcileJobData = { orderId };
+  await maintenanceQueue.add(NOTIFICATION_JOB_NAMES.RECONCILE_NOTIFICATION_ATTRIBUTION, data, {
+    jobId: attributionReconcileJobId(orderId),
+    removeOnComplete: true,
+    removeOnFail: { age: 24 * 3600 },
   });
 }

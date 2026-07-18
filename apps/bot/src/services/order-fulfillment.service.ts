@@ -1,7 +1,9 @@
 import { OrderType, prisma, type Order, type User } from "@zedbot/database";
-import { errorMessage } from "@zedbot/shared";
+import { errorMessage, NOTIF_ANALYTICS_ENABLED_KEY } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
+import { enqueueAttributionReconcile } from "./ops-queue.service.js";
+import { getBooleanSetting } from "./settings.service.js";
 import { TRIAL_CONVERTED_USER_TEXT } from "./trial-conversion.service.js";
 import {
   buildExtraTimeSuccessMessage,
@@ -274,7 +276,32 @@ export async function dispatchPaidOrderFulfillment(
 ): Promise<DispatchResult> {
   const result = await dispatchPaidOrderFulfillmentInner(api, orderId, options);
   logDispatchOpsEvent(orderId, result);
+  // Analytics phase (Phase 4): fire the after-commit attribution hook. Runs AFTER
+  // the fulfillment (and its own completion transaction) committed, carries only
+  // the orderId, is fail-soft and non-blocking, and only fires when analytics is
+  // enabled (the periodic batch reconciler is the authoritative catch-all for
+  // every completion path, so a missed hook is never a lost attribution).
+  void maybeEnqueueAttribution(orderId, result);
   return result;
+}
+
+/** Enqueues attribution for a dispatch that (re)completed a real Order, gated on
+ * the analytics master switch. Never throws — a hook failure never affects the
+ * user's fulfillment. */
+async function maybeEnqueueAttribution(orderId: string, result: DispatchResult): Promise<void> {
+  // A "NONE" outcome means no real paid order was fulfilled here; the completed
+  // SERVICE / OTHER_PRODUCT paths are the ones the worker may attribute.
+  if (result.kind === "NONE") {
+    return;
+  }
+  try {
+    if (!(await getBooleanSetting(NOTIF_ANALYTICS_ENABLED_KEY, false))) {
+      return;
+    }
+    await enqueueAttributionReconcile(orderId);
+  } catch (err) {
+    logger.warn("attribution hook enqueue skipped", { orderId, error: errorMessage(err) });
+  }
 }
 
 async function dispatchPaidOrderFulfillmentInner(

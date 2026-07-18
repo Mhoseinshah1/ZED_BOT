@@ -1,4 +1,5 @@
 import {
+  attributionReconcileJobId,
   BACKUP_JOB_NAMES,
   BACKUP_QUEUE_NAME,
   getRedisOptions,
@@ -7,6 +8,8 @@ import {
   LOG_GROUP_SETUP_JOB_NAME,
   LOG_GROUP_SETUP_QUEUE_NAME,
   logGroupSetupJobId,
+  NOTIFICATION_JOB_NAMES,
+  NOTIFICATION_MAINTENANCE_QUEUE_NAME,
   NOTIFICATION_WORKER_STATUS_KEY,
   WORKER_CAPABILITIES_KEY,
   WORKER_HEARTBEAT_KEY,
@@ -63,6 +66,7 @@ interface QueuePair {
   backup: Queue;
   logDelivery: Queue;
   logGroupSetup: Queue;
+  notifMaintenance: Queue;
 }
 
 let queues: QueuePair | null = null;
@@ -80,6 +84,8 @@ function getQueues(): QueuePair | null {
   if (queues !== null) {
     void queues.backup.close().catch(() => undefined);
     void queues.logDelivery.close().catch(() => undefined);
+    void queues.logGroupSetup.close().catch(() => undefined);
+    void queues.notifMaintenance.close().catch(() => undefined);
     queues = null;
   }
   // BullMQ requires maxRetriesPerRequest: null on its connections.
@@ -94,12 +100,13 @@ function getQueues(): QueuePair | null {
   const backup = new Queue(BACKUP_QUEUE_NAME, { connection });
   const logDelivery = new Queue(LOG_DELIVERY_QUEUE_NAME, { connection });
   const logGroupSetup = new Queue(LOG_GROUP_SETUP_QUEUE_NAME, { connection });
-  for (const queue of [backup, logDelivery, logGroupSetup]) {
+  const notifMaintenance = new Queue(NOTIFICATION_MAINTENANCE_QUEUE_NAME, { connection });
+  for (const queue of [backup, logDelivery, logGroupSetup, notifMaintenance]) {
     queue.on("error", (err) => {
       logger.warn("ops queue redis error", { queue: queue.name, error: errorText(err) });
     });
   }
-  queues = { backup, logDelivery, logGroupSetup };
+  queues = { backup, logDelivery, logGroupSetup, notifMaintenance };
   queuesFingerprint = fingerprint;
   return queues;
 }
@@ -110,6 +117,7 @@ export async function resetOpsQueueForTests(): Promise<void> {
     await queues.backup.close().catch(() => undefined);
     await queues.logDelivery.close().catch(() => undefined);
     await queues.logGroupSetup.close().catch(() => undefined);
+    await queues.notifMaintenance.close().catch(() => undefined);
     queues = null;
     queuesFingerprint = "";
   }
@@ -262,6 +270,37 @@ export async function enqueueLogGroupSetup(attemptId: string): Promise<boolean> 
     return true;
   } catch (err) {
     logger.warn("log group setup enqueue failed", { attemptId, error: errorText(err) });
+    return false;
+  }
+}
+
+/**
+ * Analytics phase (Phase 4): the AFTER-COMMIT attribution hook. Enqueues the
+ * evidence-based attribution evaluation of ONE completed Order onto the worker's
+ * notification-maintenance queue, carrying ONLY the orderId (never revenue, user
+ * or notification data). jobId = per-order (idempotent), so repeated dispatches
+ * of the same completed order collapse onto one job; the `orderId @unique`
+ * attribution row is the durable convergence anchor regardless. Fail-soft: Redis
+ * unconfigured/unreachable returns false and the periodic batch reconciler picks
+ * the order up later — payment fulfillment must never wait on or fail because of
+ * analytics. NEVER call inside the payment transaction (this runs after commit).
+ */
+export async function enqueueAttributionReconcile(orderId: string): Promise<boolean> {
+  const pair = getQueues();
+  if (pair === null) {
+    return false;
+  }
+  try {
+    await withTimeout(
+      pair.notifMaintenance.add(
+        NOTIFICATION_JOB_NAMES.RECONCILE_NOTIFICATION_ATTRIBUTION,
+        { orderId },
+        { jobId: attributionReconcileJobId(orderId), removeOnComplete: true, removeOnFail: { age: 24 * 3600 } },
+      ),
+    );
+    return true;
+  } catch (err) {
+    logger.warn("attribution reconcile enqueue failed", { orderId, error: errorText(err) });
     return false;
   }
 }
