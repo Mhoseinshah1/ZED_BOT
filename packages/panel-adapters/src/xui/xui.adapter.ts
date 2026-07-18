@@ -644,10 +644,80 @@ export class XuiAdapter implements PanelAdapter {
       };
     }
 
+    const result = this.normalizeClientAccount(input.username, matches, input.subscriptionBaseUrl);
+
+    // Live config links from the panel's own link builder (service-live-sync
+    // phase) - global-model clients only (legacy per-inbound labels would
+    // yield a partial set) and strictly best-effort: a failed/empty links
+    // call never fails the read and never clears stored links. This extra
+    // per-client call is deliberately NOT done in the bulk listServiceAccounts
+    // path, which stays a single inventory read.
+    const primary = matches.find((c) => c.email === input.username) ?? matches[0];
+    if (primary.email === input.username) {
+      const links = await this.client.getClientLinks(session.auth, primary.email);
+      if (links.ok && Array.isArray(links.envelope?.obj)) {
+        const urls = (links.envelope.obj as unknown[]).filter(
+          (l): l is string => typeof l === "string" && l !== "",
+        );
+        if (urls.length > 0) {
+          result.configLinks = urls;
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Bulk read of the ENTIRE global-client inventory in ONE clients/list call,
+   * mapping each client to a GetServiceAccountResult with the exact same
+   * normalization getServiceAccount uses (via the shared
+   * normalizeClientAccount helper), keyed by the client's own email. Callers
+   * (the worker service-state sync) match these by service username. Config
+   * links are intentionally omitted here to keep this a single request - the
+   * per-service getServiceAccount path is used when links are needed. Returns
+   * null on an authentication or inventory-read failure so the caller can fall
+   * back to bounded per-user reads.
+   */
+  async listServiceAccounts(input?: {
+    subscriptionBaseUrl?: string | null;
+  }): Promise<GetServiceAccountResult[] | null> {
+    const session = await this.client.authenticate();
+    if (!session.ok || session.auth === undefined) {
+      return null;
+    }
+    const listed = await this.fetchClients(session.auth);
+    if (!listed.ok) {
+      return null;
+    }
+    const subscriptionBaseUrl = input?.subscriptionBaseUrl;
+    const results: GetServiceAccountResult[] = [];
+    for (const client of listed.clients) {
+      if (typeof client.email !== "string" || client.email === "") {
+        // A client without a usable email cannot be keyed to a service.
+        continue;
+      }
+      results.push(this.normalizeClientAccount(client.email, [client], subscriptionBaseUrl));
+    }
+    return results;
+  }
+
+  /**
+   * Shared, purely synchronous normalization of a matched set of global-client
+   * rows into a GetServiceAccountResult (total/used/remaining/expiry/status/
+   * subscription token+url/lastConnected/remoteMetadata). Both the single-read
+   * getServiceAccount and the bulk listServiceAccounts go through this so the
+   * two paths never drift. Config links are NOT fetched here (that requires an
+   * extra per-client call the caller adds when appropriate).
+   */
+  private normalizeClientAccount(
+    username: string,
+    matches: XuiClientWithAttachments[],
+    subscriptionBaseUrl: string | null | undefined,
+  ): GetServiceAccountResult {
     // Global model: exactly one client carries the truth. Legacy services
     // (pre-migration per-inbound clients) aggregate across their labels.
-    const primary = matches.find((c) => c.email === input.username) ?? matches[0];
-    const result: GetServiceAccountResult = { ok: true, username: input.username };
+    const primary = matches.find((c) => c.email === username) ?? matches[0];
+    const result: GetServiceAccountResult = { ok: true, username };
 
     const totalRaw = typeof primary.totalGB === "number" ? primary.totalGB : undefined;
     if (totalRaw !== undefined) {
@@ -704,24 +774,9 @@ export class XuiAdapter implements PanelAdapter {
     const subId = typeof primary.subId === "string" && primary.subId !== "" ? primary.subId : undefined;
     if (subId !== undefined) {
       result.subscriptionToken = subId;
-      const subscriptionUrl = this.subscriptionUrlFor(input.subscriptionBaseUrl, subId);
+      const subscriptionUrl = this.subscriptionUrlFor(subscriptionBaseUrl, subId);
       if (subscriptionUrl !== undefined) {
         result.subscriptionUrl = subscriptionUrl;
-      }
-    }
-    // Live config links from the panel's own link builder (service-live-sync
-    // phase) - global-model clients only (legacy per-inbound labels would
-    // yield a partial set) and strictly best-effort: a failed/empty links
-    // call never fails the read and never clears stored links.
-    if (primary.email === input.username) {
-      const links = await this.client.getClientLinks(session.auth, primary.email);
-      if (links.ok && Array.isArray(links.envelope?.obj)) {
-        const urls = (links.envelope.obj as unknown[]).filter(
-          (l): l is string => typeof l === "string" && l !== "",
-        );
-        if (urls.length > 0) {
-          result.configLinks = urls;
-        }
       }
     }
     result.remoteMetadata = {

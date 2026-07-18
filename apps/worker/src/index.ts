@@ -14,6 +14,7 @@ import { gitSha } from "./config.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { createLogDeliveryProcessor } from "./log-delivery.js";
 import { createLogGroupSetupProcessor } from "./log-group-setup.js";
+import { startNotificationEngine } from "./notifications/engine.js";
 import { setLogDeliveryEnqueuer } from "./ops-log.js";
 import {
   createBackupQueue,
@@ -80,6 +81,11 @@ async function run(options: RedisConnectionOptions): Promise<void> {
   const stopHeartbeat = startHeartbeat(redis);
   const stopReconciler = startScheduleReconciler(backupQueue);
 
+  // Automated-notification / retention engine (own queues + workers +
+  // settings-driven scheduler). Dormant until the operator enables the master
+  // switch - the scheduler removes every recurring job while it is off.
+  const notificationEngine = startNotificationEngine(connection, redis);
+
   const backupWorker = new Worker(
     BACKUP_QUEUE_NAME,
     createBackupProcessor({ redis, backupQueue }),
@@ -134,6 +140,7 @@ async function run(options: RedisConnectionOptions): Promise<void> {
     stopHeartbeat();
     stopReconciler();
     try {
+      await notificationEngine.stop();
       await Promise.allSettled([
         backupWorker.close(),
         logWorker.close(),

@@ -1,13 +1,21 @@
 import { UserStatus, prisma, type NotificationPreference, type User } from "@zedbot/database";
 import {
-  NOTIFICATION_TYPE_CATEGORY,
-  resolveTimezone,
+  buildEffectiveDeliveryPreferences as buildEffectiveDeliveryPreferencesShared,
+  isServiceKindGateOpen,
+  isUserGateOpenForCategory,
+  isUserGateOpenForType,
+  type EffectiveDeliveryPreferences,
   type NotificationCategory,
+  type NotificationPreferenceView,
   type NotificationType,
-  type QuietHoursConfig,
+  type NotificationUserGates,
+  type ServiceKindOverrides,
+  type ServiceNotificationKind,
 } from "@zedbot/shared";
 
 import { getDailyLimitDefault, getDefaultQuietHours, getDefaultTimezone } from "./notification-settings.service.js";
+
+export type { EffectiveDeliveryPreferences, ServiceNotificationKind } from "@zedbot/shared";
 
 // =============================================================================
 // Preference hierarchy (feat/notification-retention-engine, Phase 1). The five
@@ -27,17 +35,15 @@ export interface UserPreferenceView {
   marketingMessagesEnabled: boolean;
 }
 
-function categoryBoolean(user: UserPreferenceView, category: NotificationCategory): boolean {
-  switch (category) {
-    case "SERVICE":
-      return user.serviceNotificationsEnabled;
-    case "PAYMENT":
-      return user.paymentNotificationsEnabled;
-    case "MARKETING":
-      return user.marketingMessagesEnabled;
-    default:
-      return false;
-  }
+/** Maps the DB-shaped view (UserStatus) to the pure shared gate booleans. */
+function toGates(user: UserPreferenceView): NotificationUserGates {
+  return {
+    active: user.status === UserStatus.ACTIVE,
+    cronNotificationsEnabled: user.cronNotificationsEnabled,
+    serviceNotificationsEnabled: user.serviceNotificationsEnabled,
+    paymentNotificationsEnabled: user.paymentNotificationsEnabled,
+    marketingMessagesEnabled: user.marketingMessagesEnabled,
+  };
 }
 
 /**
@@ -49,27 +55,15 @@ export function isUserEligibleForCategory(
   user: UserPreferenceView,
   category: NotificationCategory,
 ): boolean {
-  if (user.status !== UserStatus.ACTIVE) {
-    return false;
-  }
-  if (!user.cronNotificationsEnabled) {
-    return false;
-  }
-  return categoryBoolean(user, category);
+  return isUserGateOpenForCategory(toGates(user), category);
 }
 
 export function isUserEligibleForType(user: UserPreferenceView, type: NotificationType): boolean {
-  return isUserEligibleForCategory(user, NOTIFICATION_TYPE_CATEGORY[type]);
+  return isUserGateOpenForType(toGates(user), type);
 }
-
-export type ServiceNotificationKind = "expiry" | "traffic" | "status";
 
 /** Per-service override view (null field = inherit the user's global SERVICE opt-in). */
-export interface ServiceNotificationPreferenceView {
-  expiryEnabled: boolean | null;
-  trafficEnabled: boolean | null;
-  statusEnabled: boolean | null;
-}
+export type ServiceNotificationPreferenceView = ServiceKindOverrides;
 
 /**
  * Effective per-service enable for a single kind: the user's global SERVICE
@@ -81,28 +75,10 @@ export function isServiceKindEnabled(
   kind: ServiceNotificationKind,
   servicePref: ServiceNotificationPreferenceView | null,
 ): boolean {
-  if (!isUserEligibleForCategory(user, "SERVICE")) {
-    return false;
-  }
-  if (servicePref === null) {
-    return true; // no override row -> inherit (enabled)
-  }
-  const override =
-    kind === "expiry"
-      ? servicePref.expiryEnabled
-      : kind === "traffic"
-        ? servicePref.trafficEnabled
-        : servicePref.statusEnabled;
-  return override === null || override === undefined ? true : override;
+  return isServiceKindGateOpen(toGates(user), kind, servicePref);
 }
 
 // --- effective delivery preferences (timezone / quiet hours / daily limit) ---
-
-export interface EffectiveDeliveryPreferences {
-  timezone: string;
-  quietHours: QuietHoursConfig;
-  dailyLimit: number;
-}
 
 /**
  * Resolves the user's effective quiet-hours / timezone / daily-limit by layering
@@ -125,32 +101,16 @@ export async function resolveEffectiveDeliveryPreferences(
   });
 }
 
-/** Pure layering (unit-testable): user row over provided global defaults. */
+/**
+ * Pure layering (unit-testable): user row over provided global defaults.
+ * Thin adapter over the shared implementation so the bot and worker layer
+ * preferences identically.
+ */
 export function buildEffectiveDeliveryPreferences(
-  pref: Pick<
-    NotificationPreference,
-    "timezone" | "quietHoursEnabled" | "quietHoursStartMinutes" | "quietHoursEndMinutes" | "dailyAutomatedLimit"
-  > | null,
+  pref: NotificationPreferenceView | null,
   defaults: EffectiveDeliveryPreferences,
 ): EffectiveDeliveryPreferences {
-  if (pref === null) {
-    return defaults;
-  }
-  const timezone = resolveTimezone(pref.timezone, defaults.timezone);
-  const hasUserQuiet =
-    pref.quietHoursStartMinutes !== null && pref.quietHoursEndMinutes !== null;
-  const quietHours: QuietHoursConfig = hasUserQuiet
-    ? {
-        enabled: pref.quietHoursEnabled,
-        startMinutes: pref.quietHoursStartMinutes as number,
-        endMinutes: pref.quietHoursEndMinutes as number,
-      }
-    : defaults.quietHours;
-  const dailyLimit =
-    pref.dailyAutomatedLimit !== null && pref.dailyAutomatedLimit > 0
-      ? pref.dailyAutomatedLimit
-      : defaults.dailyLimit;
-  return { timezone, quietHours, dailyLimit };
+  return buildEffectiveDeliveryPreferencesShared(pref, defaults);
 }
 
 // --- preference row helpers (user-facing settings UI writes through these) ----

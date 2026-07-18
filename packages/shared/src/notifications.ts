@@ -556,6 +556,133 @@ export function evaluateQuietHours(
   };
 }
 
+// --- preference gates (pure; bot + worker share one decision) ----------------
+
+/**
+ * The authoritative per-user notification switches, as plain booleans (the bot
+ * maps User.status === ACTIVE to `active`; the worker reads the same columns).
+ * cronNotificationsEnabled is the master gate for EVERY automated notification
+ * from this engine - direct transactional replies never flow through here.
+ */
+export interface NotificationUserGates {
+  active: boolean;
+  cronNotificationsEnabled: boolean;
+  serviceNotificationsEnabled: boolean;
+  paymentNotificationsEnabled: boolean;
+  marketingMessagesEnabled: boolean;
+}
+
+function categoryGateBoolean(gates: NotificationUserGates, category: NotificationCategory): boolean {
+  switch (category) {
+    case "SERVICE":
+      return gates.serviceNotificationsEnabled;
+    case "PAYMENT":
+      return gates.paymentNotificationsEnabled;
+    case "MARKETING":
+      return gates.marketingMessagesEnabled;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Whether the user may receive an automated notification of `category`: ACTIVE
+ * user + cron master switch + the category-specific opt-in. Never looks at
+ * quiet hours / daily limits (those are delivery-time concerns).
+ */
+export function isUserGateOpenForCategory(
+  gates: NotificationUserGates,
+  category: NotificationCategory,
+): boolean {
+  if (!gates.active || !gates.cronNotificationsEnabled) {
+    return false;
+  }
+  return categoryGateBoolean(gates, category);
+}
+
+export function isUserGateOpenForType(
+  gates: NotificationUserGates,
+  type: NotificationType,
+): boolean {
+  return isUserGateOpenForCategory(gates, NOTIFICATION_TYPE_CATEGORY[type]);
+}
+
+export type ServiceNotificationKind = "expiry" | "traffic" | "status";
+
+/** Per-service override view (null field = inherit the user's SERVICE opt-in). */
+export interface ServiceKindOverrides {
+  expiryEnabled: boolean | null;
+  trafficEnabled: boolean | null;
+  statusEnabled: boolean | null;
+}
+
+/**
+ * Effective per-service enable for one kind: the user's global SERVICE opt-in
+ * AND (the per-service override, or inherit when null). A service override can
+ * only ever TIGHTEN the user's global setting, never loosen it.
+ */
+export function isServiceKindGateOpen(
+  gates: NotificationUserGates,
+  kind: ServiceNotificationKind,
+  override: ServiceKindOverrides | null,
+): boolean {
+  if (!isUserGateOpenForCategory(gates, "SERVICE")) {
+    return false;
+  }
+  if (override === null) {
+    return true;
+  }
+  const value =
+    kind === "expiry"
+      ? override.expiryEnabled
+      : kind === "traffic"
+        ? override.trafficEnabled
+        : override.statusEnabled;
+  return value === null || value === undefined ? true : value;
+}
+
+// --- effective delivery preferences (timezone / quiet hours / daily limit) ---
+
+export interface EffectiveDeliveryPreferences {
+  timezone: string;
+  quietHours: QuietHoursConfig;
+  dailyLimit: number;
+}
+
+/** Plain view of a NotificationPreference row (bot + worker map to this). */
+export interface NotificationPreferenceView {
+  timezone: string | null;
+  quietHoursEnabled: boolean;
+  quietHoursStartMinutes: number | null;
+  quietHoursEndMinutes: number | null;
+  dailyAutomatedLimit: number | null;
+}
+
+/** Pure layering (unit-testable): the user row over the provided global defaults. */
+export function buildEffectiveDeliveryPreferences(
+  pref: NotificationPreferenceView | null,
+  defaults: EffectiveDeliveryPreferences,
+): EffectiveDeliveryPreferences {
+  if (pref === null) {
+    return defaults;
+  }
+  const timezone = resolveTimezone(pref.timezone, defaults.timezone);
+  const hasUserQuiet =
+    pref.quietHoursStartMinutes !== null && pref.quietHoursEndMinutes !== null;
+  const quietHours: QuietHoursConfig = hasUserQuiet
+    ? {
+        enabled: pref.quietHoursEnabled,
+        startMinutes: pref.quietHoursStartMinutes as number,
+        endMinutes: pref.quietHoursEndMinutes as number,
+      }
+    : defaults.quietHours;
+  const dailyLimit =
+    pref.dailyAutomatedLimit !== null && pref.dailyAutomatedLimit > 0
+      ? pref.dailyAutomatedLimit
+      : defaults.dailyLimit;
+  return { timezone, quietHours, dailyLimit };
+}
+
 // --- payload snapshot contract (scan -> delivery -> bot) ---------------------
 
 /** Short, stable callback action codes (kept out of the enum so callback data
@@ -595,6 +722,47 @@ export interface NotificationPayloadSnapshot {
 export function notificationCallbackData(shortId: string, action: NtfActionCode): string {
   return `ntf:${shortId}:${action}`;
 }
+
+// --- MessageTemplate / ButtonText key registry (Phase 1) ---------------------
+// The stable keys the scan puts in a payload snapshot and the delivery worker
+// renders. Default Persian content lives in the seed registry
+// (packages/database seed-data.ts) under the SAME literal keys - duplicated
+// there on purpose because @zedbot/database carries no workspace deps (a test
+// asserts the two lists stay in sync).
+
+export const NOTIF_TEMPLATE_KEYS: Record<
+  "SERVICE_EXPIRY" | "SERVICE_EXPIRED" | "SERVICE_TRAFFIC" | "SERVICE_LIMITED" | "TRIAL_NEAR_EXPIRY" | "TRIAL_EXPIRED",
+  string
+> = {
+  SERVICE_EXPIRY: "notif_service_expiry",
+  SERVICE_EXPIRED: "notif_service_expired",
+  SERVICE_TRAFFIC: "notif_service_traffic",
+  SERVICE_LIMITED: "notif_service_limited",
+  TRIAL_NEAR_EXPIRY: "notif_trial_near_expiry",
+  TRIAL_EXPIRED: "notif_trial_expired",
+};
+
+/** Template key for a Phase-1 notification type (undefined for out-of-phase types). */
+export function notificationTemplateKey(type: NotificationType): string | undefined {
+  return (NOTIF_TEMPLATE_KEYS as Record<string, string | undefined>)[type];
+}
+
+export const NOTIF_BUTTON_KEYS = {
+  OPEN_SERVICE: "notif_btn_open_service",
+  RENEW_SERVICE: "notif_btn_renew_service",
+  BUY_EXTRA_VOLUME: "notif_btn_buy_extra_volume",
+  DISMISS: "notif_btn_dismiss",
+} as const;
+
+/** Action code -> the ButtonText key whose label the delivery worker renders. */
+export const NTF_ACTION_BUTTON_KEY: Record<NtfActionCode, string> = {
+  [NTF_ACTION_CODES.OPEN_SERVICE]: NOTIF_BUTTON_KEYS.OPEN_SERVICE,
+  [NTF_ACTION_CODES.RENEW_SERVICE]: NOTIF_BUTTON_KEYS.RENEW_SERVICE,
+  [NTF_ACTION_CODES.BUY_EXTRA_VOLUME]: NOTIF_BUTTON_KEYS.BUY_EXTRA_VOLUME,
+  [NTF_ACTION_CODES.CONTINUE_CHECKOUT]: NOTIF_BUTTON_KEYS.OPEN_SERVICE,
+  [NTF_ACTION_CODES.VIEW_PRODUCTS]: NOTIF_BUTTON_KEYS.OPEN_SERVICE,
+  [NTF_ACTION_CODES.DISMISS]: NOTIF_BUTTON_KEYS.DISMISS,
+};
 
 // --- misc safety -------------------------------------------------------------
 
