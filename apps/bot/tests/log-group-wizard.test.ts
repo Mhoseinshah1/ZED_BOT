@@ -323,16 +323,19 @@ describe.runIf(hasDb)("log-group setup wizard", () => {
 
   // --- the admin page (items 11 + the configured toolset) ---------------------------------------
 
-  it("11. unconfigured page offers ONLY the wizard actions - no test/topic buttons", async () => {
+  it("11. unconfigured page offers ONLY the numeric-ID + wizard actions - no test/topic buttons", async () => {
+    // Direct-log-group-setup rework: the numeric-ID entry is FIRST, then the
+    // add-bot wizard / guide / recheck. Still NO test/topic actions unbound.
     const { ctx, sent } = callbackCtx(LG_CB.root, privateChat, { admin: owner });
     await dispatchAdminPage(ctx);
     expect(sent).toHaveLength(1);
-    expect(sent[0].text).toContain("وضعیت: تنظیم نشده ❌");
+    expect(sent[0].text).toContain("وضعیت اتصال: تنظیم نشده");
     const rows = inlineButtons(sent[0]);
     expect(
       rows.map((row) => row.map((b) => ({ text: b.text, callback: b.callback_data }))),
     ).toEqual([
-      [{ text: "اتصال گروه لاگ ➕", callback: LG_CB.connect }],
+      [{ text: "اتصال با آیدی عددی گروه 🔢", callback: LG_CB.id }],
+      [{ text: "افزودن ربات به گروه ➕", callback: LG_CB.connect }],
       [{ text: "راهنمای ساخت گروه", callback: LG_CB.guide }],
       [{ text: "بررسی مجدد اتصال ♻️", callback: LG_CB.recheck }],
       [{ text: "بازگشت", callback: CB.ADMIN_GENERAL_SETTINGS }],
@@ -344,11 +347,11 @@ describe.runIf(hasDb)("log-group setup wizard", () => {
     }
   });
 
-  it("configured page shows exactly the 8-button toolset", async () => {
+  it("configured page shows exactly the 9-button toolset", async () => {
     await saveLogGroup(String(chatA.id), chatA.title);
     const { ctx, sent } = callbackCtx(LG_CB.root, privateChat, { admin: owner });
     await dispatchAdminPage(ctx);
-    expect(sent[0].text).toContain("وضعیت: متصل ✅");
+    expect(sent[0].text).toContain("وضعیت اتصال: متصل ✅");
     expect(sent[0].text).toContain(maskChatId(String(chatA.id)));
     expect(sent[0].text).not.toContain(String(chatA.id)); // masked, never raw
     const rows = inlineButtons(sent[0]);
@@ -360,11 +363,12 @@ describe.runIf(hasDb)("log-group setup wizard", () => {
       [{ text: "ساخت موضوعات پیش‌فرض", callback: LG_CB.ensure }],
       [{ text: "همگام‌سازی موضوعات", callback: LG_CB.sync }],
       [{ text: "مدیریت موضوعات", callback: LG_CB.topics }],
-      [{ text: "تغییر گروه لاگ", callback: LG_CB.connect }],
+      [{ text: "تغییر گروه با آیدی عددی 🔄", callback: LG_CB.id }],
+      [{ text: "افزودن ربات به گروه دیگر ➕", callback: LG_CB.connect }],
       [{ text: "قطع اتصال گروه", callback: LG_CB.disconnect }],
       [{ text: "بازگشت", callback: CB.ADMIN_GENERAL_SETTINGS }],
     ]);
-    expect(flatButtons(sent[0])).toHaveLength(8);
+    expect(flatButtons(sent[0])).toHaveLength(9);
   });
 
   // --- the wizard page + deep link (item 12) -----------------------------------------------------

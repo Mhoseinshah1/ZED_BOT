@@ -85,6 +85,10 @@ import {
 } from "./handlers/admin-reports-backup/reports-backup.handler.js";
 import { logGroupSetupHandler } from "./handlers/admin-settings/log-group-setup.handler.js";
 import {
+  logGroupIdHandler,
+  logGroupIdTextHandler,
+} from "./handlers/admin-settings/log-group-id.handler.js";
+import {
   walletHandler,
   walletTopupTextHandler,
 } from "./handlers/user-wallet/wallet.handler.js";
@@ -170,6 +174,10 @@ export function createBot(token: string): Bot<BotContext> {
   // Phase 34: general settings + text management («مدیریت متن‌ها ✍️») -
   // must run before the placeholder handler.
   adminArea.use(adminTextSettingsHandler);
+  // Direct-log-group-setup phase: the numeric-ID connection UI (admin:lg:id*,
+  // admin:lg:op:*). The status-page keyboards (log-group.handler.ts) mount
+  // via adminTextSettingsHandler above; this composer owns the new flow.
+  adminArea.use(logGroupIdHandler);
   // Phase 35: backup / health («گزارشات / بکاپ 🛡»).
   adminArea.use(reportsBackupHandler);
   adminArea.use(adminPlaceholdersHandler);
@@ -196,6 +204,9 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(adminTextSettingsTextHandler);
   // Production-backup rework: scheduled-backup hour input.
   adminFlowText.use(reportsBackupTextHandler);
+  // Direct-log-group-setup phase: numeric chat-id input ("lg:chat_id"). Self-
+  // gates on currentFlow, so it passes through for every other admin flow.
+  adminFlowText.use(logGroupIdTextHandler);
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {
