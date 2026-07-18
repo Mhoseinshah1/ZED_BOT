@@ -2355,3 +2355,27 @@ model ServiceNotificationPreference {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+/**
+ * Checkout-payment reminders phase (Phase 2): per-checkout reminder suppression.
+ * The «دیگر یادآوری نکن» / «عدم یادآوری این سفارش» buttons persist a suppression
+ * instant HERE - never touching the user's global payment-notification switch or
+ * any other checkout. checkoutSessionId is a SOFT reference (unique String, no
+ * FK) matching the AutomatedNotification convention: notification data never
+ * cascades into (or is cascaded by) financial rows. Suppression history is never
+ * hard-deleted; a repeated suppression callback is idempotent (upsert on the
+ * unique checkoutSessionId, timestamp stamped once).
+ */
+model CheckoutNotificationPreference {
+  id String @id @default(uuid())
+
+  checkoutSessionId String @unique
+
+  abandonedReminderSuppressedAt DateTime?
+  paymentRetrySuppressedAt      DateTime?
+
+  suppressedByNotificationId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

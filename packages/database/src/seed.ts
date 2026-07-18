@@ -65,6 +65,11 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   { key: "notification_rule_expiry_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
   { key: "notification_rule_traffic_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
   { key: "notification_rule_trial_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Checkout-payment reminders phase (Phase 2). Both new rules seed FALSE - the
+  // engine stays dormant until an operator explicitly enables each. Config
+  // values (thresholds, delays, caps) are code-defaulted, never seeded.
+  { key: "notification_abandoned_checkout_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "notification_payment_retry_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are

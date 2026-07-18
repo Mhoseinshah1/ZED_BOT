@@ -33,6 +33,18 @@ import {
   type ExpiryThreshold,
   type NotificationRuleKey,
   type QuietHoursConfig,
+  DEFAULT_ABANDONED_CHECKOUT_CONFIG,
+  DEFAULT_CHECKOUT_SCAN_MINUTES,
+  DEFAULT_FAILED_PAYMENT_CONFIG,
+  NOTIF_ABANDONED_CONFIG_KEY,
+  NOTIF_CHECKOUT_RULE_ENABLED_KEYS,
+  NOTIF_CHECKOUT_SCAN_MINUTES_KEY,
+  NOTIF_PAYMENT_RETRY_CONFIG_KEY,
+  parseAbandonedCheckoutConfig,
+  parseFailedPaymentConfig,
+  type AbandonedCheckoutConfig,
+  type CheckoutNotificationRuleKey,
+  type FailedPaymentConfig,
 } from "@zedbot/shared";
 
 // =============================================================================
@@ -144,4 +156,37 @@ export async function getRetentionDays(): Promise<NotificationRetentionDays> {
     intSetting(NOTIF_DEAD_LETTER_RETENTION_DAYS_KEY, DEFAULT_DEAD_LETTER_RETENTION_DAYS, 1, 3650),
   ]);
   return { history, failed, deadLetter };
+}
+
+// --- checkout-payment reminders (Phase 2) ------------------------------------
+
+export async function isCheckoutRuleEnabled(rule: CheckoutNotificationRuleKey): Promise<boolean> {
+  return toBool(await settingValue(NOTIF_CHECKOUT_RULE_ENABLED_KEYS[rule]));
+}
+
+/** True when either the abandoned-checkout OR the payment-retry rule is enabled. */
+export async function anyCheckoutRuleEnabled(): Promise<boolean> {
+  const [abandoned, payment] = await Promise.all([
+    isCheckoutRuleEnabled("abandoned"),
+    isCheckoutRuleEnabled("payment"),
+  ]);
+  return abandoned || payment;
+}
+
+export async function getAbandonedCheckoutConfig(): Promise<AbandonedCheckoutConfig> {
+  return parseAbandonedCheckoutConfig(
+    await settingValue(NOTIF_ABANDONED_CONFIG_KEY),
+    DEFAULT_ABANDONED_CHECKOUT_CONFIG,
+  );
+}
+
+export async function getFailedPaymentConfig(): Promise<FailedPaymentConfig> {
+  return parseFailedPaymentConfig(
+    await settingValue(NOTIF_PAYMENT_RETRY_CONFIG_KEY),
+    DEFAULT_FAILED_PAYMENT_CONFIG,
+  );
+}
+
+export async function getCheckoutScanMinutes(): Promise<number> {
+  return intSetting(NOTIF_CHECKOUT_SCAN_MINUTES_KEY, DEFAULT_CHECKOUT_SCAN_MINUTES, 1, 24 * 60);
 }

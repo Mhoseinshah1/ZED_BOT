@@ -83,6 +83,11 @@ export interface NotificationWorkerStatus {
   deliveryFailed: number;
   deadLetter: number;
   checkedAt: string;
+  // Checkout-payment reminders phase (Phase 2). Optional so a Phase-1 worker's
+  // snapshot still parses; the admin page renders "نامشخص" when absent.
+  lastCheckoutScanAt?: string | null;
+  abandonedCheckoutCandidates?: number;
+  paymentRetryCandidates?: number;
 }
 
 // --- Setting keys ------------------------------------------------------------
@@ -694,6 +699,11 @@ export const NTF_ACTION_CODES = {
   CONTINUE_CHECKOUT: "c",
   VIEW_PRODUCTS: "p",
   DISMISS: "x",
+  // Checkout-payment reminders phase (Phase 2). d = open the checkout detail
+  // page; n = suppress this ONE checkout's future reminders (not a global
+  // preference change).
+  VIEW_CHECKOUT: "d",
+  SUPPRESS_CHECKOUT: "n",
 } as const;
 export type NtfActionCode = (typeof NTF_ACTION_CODES)[keyof typeof NTF_ACTION_CODES];
 
@@ -752,17 +762,34 @@ export const NOTIF_BUTTON_KEYS = {
   RENEW_SERVICE: "notif_btn_renew_service",
   BUY_EXTRA_VOLUME: "notif_btn_buy_extra_volume",
   DISMISS: "notif_btn_dismiss",
+  // Checkout-payment reminders phase (Phase 2).
+  CONTINUE_CHECKOUT: "notif_btn_continue_checkout",
+  CHECKOUT_DETAILS: "notif_btn_checkout_details",
+  STOP_CHECKOUT_REMINDERS: "notif_btn_stop_checkout_reminders",
+  RESELECT_PAYMENT: "notif_btn_reselect_payment",
+  VIEW_ORDER: "notif_btn_view_order",
+  STOP_PAYMENT_REMINDERS: "notif_btn_stop_payment_reminders",
 } as const;
 
-/** Action code -> the ButtonText key whose label the delivery worker renders. */
+/** Action code -> the DEFAULT ButtonText key (fallback when a button spec omits
+ * its own key). A notification's own button spec key wins - the abandoned and
+ * payment-retry messages carry different labels for the same action codes. */
 export const NTF_ACTION_BUTTON_KEY: Record<NtfActionCode, string> = {
   [NTF_ACTION_CODES.OPEN_SERVICE]: NOTIF_BUTTON_KEYS.OPEN_SERVICE,
   [NTF_ACTION_CODES.RENEW_SERVICE]: NOTIF_BUTTON_KEYS.RENEW_SERVICE,
   [NTF_ACTION_CODES.BUY_EXTRA_VOLUME]: NOTIF_BUTTON_KEYS.BUY_EXTRA_VOLUME,
-  [NTF_ACTION_CODES.CONTINUE_CHECKOUT]: NOTIF_BUTTON_KEYS.OPEN_SERVICE,
+  [NTF_ACTION_CODES.CONTINUE_CHECKOUT]: NOTIF_BUTTON_KEYS.CONTINUE_CHECKOUT,
+  [NTF_ACTION_CODES.VIEW_CHECKOUT]: NOTIF_BUTTON_KEYS.CHECKOUT_DETAILS,
+  [NTF_ACTION_CODES.SUPPRESS_CHECKOUT]: NOTIF_BUTTON_KEYS.STOP_CHECKOUT_REMINDERS,
   [NTF_ACTION_CODES.VIEW_PRODUCTS]: NOTIF_BUTTON_KEYS.OPEN_SERVICE,
   [NTF_ACTION_CODES.DISMISS]: NOTIF_BUTTON_KEYS.DISMISS,
 };
+
+/** Template keys for the Phase-2 checkout/payment reminder messages. */
+export const NOTIF_CHECKOUT_TEMPLATE_KEYS = {
+  ABANDONED_CHECKOUT: "notification_abandoned_checkout",
+  PAYMENT_RETRY: "notification_payment_retry",
+} as const;
 
 // --- misc safety -------------------------------------------------------------
 

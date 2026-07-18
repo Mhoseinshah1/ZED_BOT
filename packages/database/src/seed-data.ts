@@ -443,6 +443,42 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
       "برای ادامه استفاده، یک اشتراک تهیه کنید.",
     allowedVariables: ["service_name"],
   },
+  // Checkout-payment reminders phase (Phase 2). Keys duplicated from
+  // @zedbot/shared NOTIF_CHECKOUT_TEMPLATE_KEYS. Safe display variables only -
+  // never a checkout id, provider authority, receipt content, card data or
+  // customer-form values.
+  {
+    key: "notification_abandoned_checkout",
+    title: "اعلان سفارش ناقص",
+    category: "notification",
+    defaultContent:
+      "سفارش شما هنوز تکمیل نشده است 🛒\n" +
+      "\n" +
+      "محصول:\n" +
+      "{product_name}\n" +
+      "\n" +
+      "مبلغ قابل پرداخت:\n" +
+      "{payable_amount}\n" +
+      "\n" +
+      "در صورت تمایل می‌توانید پرداخت این سفارش را ادامه دهید.",
+    allowedVariables: ["checkout_reference", "product_name", "payable_amount", "expires_in"],
+  },
+  {
+    key: "notification_payment_retry",
+    title: "اعلان پرداخت ناموفق",
+    category: "notification",
+    defaultContent:
+      "پرداخت سفارش شما تکمیل نشد.\n" +
+      "\n" +
+      "محصول:\n" +
+      "{product_name}\n" +
+      "\n" +
+      "مبلغ:\n" +
+      "{payable_amount}\n" +
+      "\n" +
+      "می‌توانید دوباره یک روش پرداخت انتخاب کنید.",
+    allowedVariables: ["checkout_reference", "product_name", "payable_amount", "payment_method"],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -527,4 +563,12 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "notif_btn_renew_service", title: "اعلان: تمدید سرویس", text: "تمدید سرویس ♻️" },
   { key: "notif_btn_buy_extra_volume", title: "اعلان: خرید حجم اضافه", text: "خرید حجم اضافه ➕" },
   { key: "notif_btn_dismiss", title: "اعلان: بستن", text: "بستن ✖️" },
+  // Checkout-payment reminders phase (Phase 2). Keys duplicated from
+  // @zedbot/shared NOTIF_BUTTON_KEYS. Callback data is ntf:<shortId>:<action>.
+  { key: "notif_btn_continue_checkout", title: "اعلان: ادامه پرداخت", text: "ادامه پرداخت 💳" },
+  { key: "notif_btn_checkout_details", title: "اعلان: مشاهده جزئیات سفارش", text: "مشاهده جزئیات سفارش 🧾" },
+  { key: "notif_btn_stop_checkout_reminders", title: "اعلان: دیگر یادآوری نکن", text: "دیگر یادآوری نکن 🔕" },
+  { key: "notif_btn_reselect_payment", title: "اعلان: انتخاب روش پرداخت", text: "انتخاب روش پرداخت 💳" },
+  { key: "notif_btn_view_order", title: "اعلان: مشاهده سفارش", text: "مشاهده سفارش 🧾" },
+  { key: "notif_btn_stop_payment_reminders", title: "اعلان: عدم یادآوری این سفارش", text: "عدم یادآوری این سفارش 🔕" },
 ];

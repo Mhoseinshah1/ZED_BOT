@@ -26,10 +26,19 @@ const log = createLogger("worker:notif-status");
 export interface NotificationEngineState {
   lastServiceSyncAt: string | null;
   lastServiceScanAt: string | null;
+  lastCheckoutScanAt: string | null;
+  abandonedCheckoutCandidates: number;
+  paymentRetryCandidates: number;
 }
 
 export function createEngineState(): NotificationEngineState {
-  return { lastServiceSyncAt: null, lastServiceScanAt: null };
+  return {
+    lastServiceSyncAt: null,
+    lastServiceScanAt: null,
+    lastCheckoutScanAt: null,
+    abandonedCheckoutCandidates: 0,
+    paymentRetryCandidates: 0,
+  };
 }
 
 export async function publishNotificationWorkerStatus(
@@ -52,6 +61,9 @@ export async function publishNotificationWorkerStatus(
     deliveryFailed,
     deadLetter,
     checkedAt: new Date().toISOString(),
+    lastCheckoutScanAt: state.lastCheckoutScanAt,
+    abandonedCheckoutCandidates: state.abandonedCheckoutCandidates,
+    paymentRetryCandidates: state.paymentRetryCandidates,
   };
   await redis.set(
     NOTIFICATION_WORKER_STATUS_KEY,
