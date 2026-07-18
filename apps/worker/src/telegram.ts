@@ -90,3 +90,50 @@ export async function sendTelegramMessage(input: {
   }
   return classifyTelegramError(response.status, body);
 }
+
+export type TelegramForumTopicResult =
+  | { ok: true; messageThreadId: number }
+  | { ok: false; safeErrorCode: string; retryable: boolean; retryAfterMs?: number };
+
+/**
+ * Creates a forum topic in the target supergroup for the direct-log-group
+ * setup provisioning. Same token-scrubbing + safe-code classification as
+ * sendTelegramMessage - the token appears only in the request URL, never in
+ * an error, log or return value.
+ */
+export async function createTelegramForumTopic(input: {
+  token: string;
+  chatId: string;
+  name: string;
+}): Promise<TelegramForumTopicResult> {
+  let response: Response;
+  try {
+    response = await fetch(`https://api.telegram.org/bot${input.token}/createForumTopic`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: input.chatId, name: input.name.slice(0, 128) }),
+    });
+  } catch (err) {
+    logger.warn("telegram createForumTopic network error", {
+      error: errorMessage(err).slice(0, 120),
+    });
+    return { ok: false, safeErrorCode: "network-error", retryable: true };
+  }
+  let body: (TelegramApiResponse & { result?: { message_thread_id?: number } }) = {};
+  try {
+    body = (await response.json()) as typeof body;
+  } catch {
+    // Non-JSON body - fall through to status handling.
+  }
+  if (response.ok && body.ok === true) {
+    const threadId = body.result?.message_thread_id;
+    if (typeof threadId === "number") {
+      return { ok: true, messageThreadId: threadId };
+    }
+    return { ok: false, safeErrorCode: "bad-response", retryable: true };
+  }
+  const classified = classifyTelegramError(response.status, body);
+  // classifyTelegramError returns a send-shaped failure; reshape to the topic
+  // result (identical fields).
+  return classified as TelegramForumTopicResult;
+}

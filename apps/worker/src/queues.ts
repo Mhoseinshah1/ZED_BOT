@@ -3,6 +3,7 @@ import {
   BACKUP_QUEUE_NAME,
   LOG_DELIVERY_JOB_NAME,
   LOG_DELIVERY_QUEUE_NAME,
+  LOG_GROUP_SETUP_QUEUE_NAME,
 } from "@zedbot/shared";
 import { Queue, type DefaultJobOptions } from "bullmq";
 
@@ -26,6 +27,10 @@ export interface LogDeliveryJobData {
   deliveryId: string;
 }
 
+export interface LogGroupSetupJobData {
+  attemptId: string;
+}
+
 /** Backup jobs: 3 attempts, exponential backoff from 10s. */
 export const BACKUP_DEFAULT_JOB_OPTIONS: DefaultJobOptions = {
   attempts: 3,
@@ -38,6 +43,16 @@ export const BACKUP_DEFAULT_JOB_OPTIONS: DefaultJobOptions = {
 export const LOG_DELIVERY_DEFAULT_JOB_OPTIONS: DefaultJobOptions = {
   attempts: 5,
   backoff: { type: "exponential", delay: 30_000 },
+  removeOnComplete: { age: 7 * 24 * 3600, count: 100 },
+  removeOnFail: { age: 30 * 24 * 3600 },
+};
+
+/** Log-group setup: 3 attempts, exponential backoff from 15s. The DB attempt
+ * row (topicBindings) is the durable resume point, so a retried/duplicated
+ * job re-reads it and never recreates a topic. */
+export const LOG_GROUP_SETUP_DEFAULT_JOB_OPTIONS: DefaultJobOptions = {
+  attempts: 3,
+  backoff: { type: "exponential", delay: 15_000 },
   removeOnComplete: { age: 7 * 24 * 3600, count: 100 },
   removeOnFail: { age: 30 * 24 * 3600 },
 };
@@ -61,6 +76,13 @@ export function createLogDeliveryQueue(connection: WorkerRedisConnection): Queue
   return new Queue(LOG_DELIVERY_QUEUE_NAME, {
     connection,
     defaultJobOptions: LOG_DELIVERY_DEFAULT_JOB_OPTIONS,
+  });
+}
+
+export function createLogGroupSetupQueue(connection: WorkerRedisConnection): Queue {
+  return new Queue(LOG_GROUP_SETUP_QUEUE_NAME, {
+    connection,
+    defaultJobOptions: LOG_GROUP_SETUP_DEFAULT_JOB_OPTIONS,
   });
 }
 

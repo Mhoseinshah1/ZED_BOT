@@ -61,6 +61,33 @@ export async function releaseBackupLock(redis: RawRedis, lock: BackupLock): Prom
   }
 }
 
+// --- generic named lock (SET NX PX + compare-and-delete release) -------------
+
+export interface HeldLock {
+  key: string;
+  token: string;
+}
+
+/** SET NX PX on an arbitrary key; null when another holder currently owns it. */
+export async function acquireLock(
+  redis: RawRedis,
+  key: string,
+  ttlMs: number,
+): Promise<HeldLock | null> {
+  const token = randomUUID();
+  const result = await redis.set(key, token, "PX", ttlMs, "NX");
+  return result === "OK" ? { key, token } : null;
+}
+
+/** Releases a generic lock only when we still own it. Never throws. */
+export async function releaseLock(redis: RawRedis, lock: HeldLock): Promise<void> {
+  try {
+    await redis.eval(RELEASE_LOCK_LUA, 1, lock.key, lock.token);
+  } catch {
+    // TTL frees it; nothing else to do.
+  }
+}
+
 // --- log aggregation counters ------------------------------------------------
 
 export const LOG_AGGREGATION_WINDOW_SECONDS = 300;
