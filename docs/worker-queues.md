@@ -162,3 +162,31 @@ crash-looping.
 
 Shutdown (SIGTERM/SIGINT): stop heartbeat + reconciler → close **workers**
 (in-flight jobs finish) → close **queues** → disconnect Prisma → exit 0.
+
+---
+
+## Notification / retention engine queues (Phase 1)
+
+The worker also owns four notification queues (started by
+`apps/worker/src/notifications/engine.ts`, dormant while the master switch is
+off). See [notification-architecture.md](notification-architecture.md).
+
+| Queue | Job(s) | Concurrency | Default job opts |
+|-------|--------|-------------|------------------|
+| `service-state-sync` | `SYNC_PANEL_SERVICES` (`{panelId?}` — one panel or all) | 1 | 2 attempts, 15 s backoff |
+| `automated-notification-scan` | `SCAN_SERVICE_NOTIFICATIONS` | 1 | 1 attempt |
+| `automated-notification-delivery` | `DELIVER_AUTOMATED_NOTIFICATION` (`{notificationId}`) | 1 + limiter 15/60 s | 5 attempts, 30 s backoff |
+| `automated-notification-maintenance` | `RECONCILE_FAILED_NOTIFICATIONS`, `CLEANUP_NOTIFICATION_HISTORY` | 1 | 1 attempt |
+
+Job ids are derived from the entity id (`psync-<panelId>`,
+`ntfdel-<notificationId>`) so a retried/duplicated enqueue collapses onto the
+same job — the DB row + its `dedupeKey` are the durable idempotency anchors.
+
+**Scheduler** (`scheduler.ts`) reconciles the recurring jobs every 5 min from
+Settings (`upsertJobScheduler`), and removes them all while the master switch is
+off. **Redis keys**: `zedbot:panel-sync:<id>` (per-panel sync lock),
+`zedbot:panel-breaker:<id>` (circuit-breaker counter, `INCR`+`EXPIRE 600s`),
+`zedbot:notif:worker-status` (JSON status snapshot, heartbeat TTL — read by the
+admin health page).
+
+Shutdown closes the notification workers + queues alongside the existing ones.
