@@ -401,4 +401,28 @@ keyboard. Owner-scoped resolve + live capability re-validation on every click.
 
 | Entry | Routes |
 | --- | --- |
-| «اعلان‌ها و یادآوری‌ها 🔔» (`admin:ntf`) | فعال/غیرفعال کردن سیستم » `admin:ntf:enable` / `admin:ntf:disable` (OWNER-only; enable behind the activation gate) / toggle rule » `admin:ntf:rule:(expiry\|traffic\|trial)` (OWNER-only) / بروزرسانی » `admin:ntf` / بازگشت » `CB.ADMIN_GENERAL_SETTINGS` |
+| «اعلان‌ها و یادآوری‌ها 🔔» (`admin:ntf`) | فعال/غیرفعال کردن سیستم » `admin:ntf:enable` / `admin:ntf:disable` (OWNER-only; enable behind the activation gate) / toggle rule » `admin:ntf:rule:(expiry\|traffic\|trial)` (OWNER-only) / صفحهٔ قانون سفارش/پرداخت » `admin:ntf:co:(abandoned\|payment)` / بروزرسانی » `admin:ntf` / بازگشت » `CB.ADMIN_GENERAL_SETTINGS` |
+
+## Checkout & payment reminders (feat/checkout-payment-reminders, Phase 2)
+
+Same foundation as Phase 1 — the `ntf:<shortId>:<action>` namespace and the admin
+«اعلان‌ها و یادآوری‌ها 🔔» page. Two new rules (category PAYMENT), both OWNER-only
+and disabled by default. Reminders navigate a user back into an existing checkout
+but never settle, create orders, approve receipts, spend wallet, provision, or
+alter reconciliation.
+
+**Checkout notification action buttons** (worker-rendered, `ntf:<shortId>:<action>`):
+`c` continue → resume service re-checks LIVE state and hands off to the existing
+method-selection surface (never creates a new checkout; falls back to a safe page
+if the checkout is settled/expired/under review) · `d` details → owner-scoped
+checkout view · `n` stop → suppress THIS checkout's reminders of this kind (strips
+the keyboard, one-kind, never the user's global preference). A foreign/expired/
+detached notification answers the same safe "این اعلان دیگر معتبر نیست." toast — no
+existence reveal.
+
+**Admin** — پنل ادمین → تنظیمات عمومی → «اعلان‌ها و یادآوری‌ها 🔔»:
+
+| Entry | Routes |
+| --- | --- |
+| «یادآوری سفارش ناقص 🛒» (`admin:ntf:co:abandoned`) | فعال/غیرفعال » `admin:ntf:co:tg:abandoned` (OWNER-only; enable behind the per-rule activation gate) / تنظیم زمان یادآوری اول·دوم·حداکثر تعداد·حداکثر عمر » `admin:ntf:co:e:abandoned:(t1\|t2\|max\|age)` *(flow `admin_ntf_co:cfg`)* / ویرایش متن پیام » `admin:ntf:co:tpl:abandoned` / پیش‌نمایش مخاطبان » `admin:ntf:co:prev:abandoned` / ارسال آزمایشی » `admin:ntf:co:test:abandoned` / بازگشت » `admin:ntf` |
+| «یادآوری پرداخت ناموفق 💳» (`admin:ntf:co:payment`) | فعال/غیرفعال » `admin:ntf:co:tg:payment` (OWNER-only; gated) / تنظیم تأخیر·سقف هر پرداخت·سقف روزانه هر سفارش » `admin:ntf:co:e:payment:(delay\|maxpay\|maxday)` *(flow `admin_ntf_co:cfg`)* / ویرایش متن پیام » `admin:ntf:co:tpl:payment` / پیش‌نمایش مخاطبان » `admin:ntf:co:prev:payment` / ارسال آزمایشی » `admin:ntf:co:test:payment` / بازگشت » `admin:ntf` |

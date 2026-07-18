@@ -300,6 +300,9 @@ export interface SessionData {
     adminBroadcastDraft?: { text?: string };
     // Admin text-settings edit target (Phase 34).
     adminTextEditDraft?: { kind: "template" | "button"; id: string };
+    // Checkout-payment reminder config edit (Phase 2, flow "admin_ntf_co:cfg").
+    // Holds which rule + which numeric field the next admin text message edits.
+    adminCheckoutNtfDraft?: { rule: "abandoned" | "payment"; field: string };
     // Production-backup rework: scheduled-backup text input target (the
     // "rb:sched_hour" flow currently only edits the run hour).
     adminBackupScheduleDraft?: { field: "hour" };

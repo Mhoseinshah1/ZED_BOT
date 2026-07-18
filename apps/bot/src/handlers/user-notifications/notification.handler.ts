@@ -1,5 +1,6 @@
 import {
   NotificationInteractionType,
+  type AutomatedNotification,
   type ServiceNotificationPreference,
 } from "@zedbot/database";
 import {
@@ -11,6 +12,9 @@ import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
+import { suppressCheckoutReminders } from "../../services/checkout-notification.service.js";
+import { resumeCheckoutForUser } from "../../services/checkout-resume.service.js";
+import { getOwnedCheckout } from "../../services/checkout.service.js";
 import {
   getOwnedNotificationByShortId,
   recordNotificationInteraction,
@@ -37,6 +41,7 @@ import {
 import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
 import { renderExtraVolumeServicePage } from "../user-extra-volume/extra-volume.handler.js";
 import { renderRenewalServicePage } from "../user-renewal/renewal.handler.js";
+import { renderCheckoutView } from "../user-checkout/checkout.handler.js";
 import { serviceAccountLabel, svcCb } from "../user-services/service-views.js";
 import { renderServiceDetail } from "../user-services/services.handler.js";
 
@@ -65,16 +70,17 @@ const SERVICE_GONE_TEXT = "سرویس یافت نشد";
 const RENEW_UNAVAILABLE_NOTICE = "تمدید این سرویس در حال حاضر امکان‌پذیر نیست.";
 const VOLUME_UNAVAILABLE_NOTICE = "خرید حجم اضافه برای این سرویس در حال حاضر امکان‌پذیر نیست.";
 const DISMISS_TEXT = "بسته شد ✖️";
+const CHECKOUT_SUPPRESS_TEXT = "دیگر برای این سفارش یادآوری ارسال نمی‌شود.";
 
 // =============================================================================
 // 1. Notification action callbacks: ntf:<shortId>:<action>
 // =============================================================================
 
 /**
- * Action code -> recorded interaction. Only the four Phase-1 actions record;
- * c (continue-checkout) / p (view-products) have no Phase-1 flow of their own,
- * so they record nothing and fall through to opening the service (a safe,
- * always-real landing).
+ * Action code -> recorded interaction for the SERVICE actions. The checkout
+ * actions (c/d/n) record inside handleCheckoutNotificationAction and never reach
+ * this map; p (view-products) has no Phase-1 flow of its own, so it records
+ * nothing and falls through to opening the service (a safe, always-real landing).
  */
 const ACTION_INTERACTION: Record<string, NotificationInteractionType | undefined> = {
   s: NotificationInteractionType.OPEN_SERVICE,
@@ -83,7 +89,60 @@ const ACTION_INTERACTION: Record<string, NotificationInteractionType | undefined
   x: NotificationInteractionType.DISMISS,
 };
 
-userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpx])$/, async (ctx) => {
+/**
+ * Checkout-payment reminder actions (Phase 2): c = continue/reselect payment,
+ * d = view the checkout detail page, n = suppress THIS checkout's future reminders
+ * of this kind. Every path re-resolves ownership + LIVE financial state (via the
+ * resume service / owner-scoped loads), never trusting the notification snapshot,
+ * and records the click idempotently. A notification with no checkout attached is
+ * treated as an unknown/expired notification (no leak).
+ */
+async function handleCheckoutNotificationAction(
+  ctx: BotContext,
+  notification: AutomatedNotification,
+  userId: string,
+  action: "c" | "d" | "n",
+): Promise<void> {
+  const checkoutId = notification.checkoutSessionId;
+  if (checkoutId === null) {
+    await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+    return;
+  }
+  // Idempotent per (notification, type): continue/view -> CONTINUE_CHECKOUT,
+  // suppress -> DISMISS.
+  const interaction =
+    action === "n"
+      ? NotificationInteractionType.DISMISS
+      : NotificationInteractionType.CONTINUE_CHECKOUT;
+  await recordNotificationInteraction(notification.id, userId, interaction);
+
+  if (action === "c") {
+    await resumeCheckoutForUser(ctx, checkoutId);
+    return;
+  }
+  if (action === "d") {
+    const checkout = await getOwnedCheckout(checkoutId, userId);
+    if (checkout === null) {
+      await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+      return;
+    }
+    await safeAnswerCallback(ctx);
+    await renderCheckoutView(ctx, checkout);
+    return;
+  }
+  // action === "n": suppress only this checkout's reminders of this kind.
+  const kind = notification.type === "PAYMENT_RETRY" ? "payment" : "abandoned";
+  await suppressCheckoutReminders(checkoutId, kind, notification.id);
+  try {
+    // Strip the inline keyboard so the buttons cannot be clicked again.
+    await ctx.editMessageReplyMarkup();
+  } catch {
+    // Message deleted / not modifiable - the toast is still the real result.
+  }
+  await safeAnswerCallback(ctx, CHECKOUT_SUPPRESS_TEXT);
+}
+
+userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpxdn])$/, async (ctx) => {
   const user = ctx.dbUser;
   if (user === null) {
     return;
@@ -96,6 +155,12 @@ userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpx])$/, asyn
   const notification = await getOwnedNotificationByShortId(shortId, user.id);
   if (notification === null) {
     await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+    return;
+  }
+
+  // Checkout-payment reminder actions own their recording + routing.
+  if (action === "c" || action === "d" || action === "n") {
+    await handleCheckoutNotificationAction(ctx, notification, user.id, action);
     return;
   }
 
@@ -190,6 +255,7 @@ async function renderUserNotificationSettings(ctx: BotContext): Promise<void> {
     "🔔 تنظیمات اعلان‌ها",
     "",
     "مشخص کنید کدام یادآوری‌های خودکار را دریافت کنید. این تنظیمات فقط روی اعلان‌های خودکار اثر دارد.",
+    "یادآوری پرداخت شامل سفارش‌های ناقص و پرداخت‌های ناموفق است.",
     "",
     `اعلان‌های خودکار: ${onOff(user.cronNotificationsEnabled)}`,
     `اعلان سرویس‌ها: ${onOff(user.serviceNotificationsEnabled)}`,

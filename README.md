@@ -372,6 +372,21 @@ inventory park as AWAITING_STOCK and complete automatically on refill.
 Legacy generic products keep their exact previous behavior. See
 `docs/specialized-product-workflows.md`.
 
+**Customer-retention notification engine** (disabled by default): a single
+phased engine — persistent `AutomatedNotification` records, one delivery queue
+with a CAS worker, quiet hours, daily limits, the `ntf:*` callback namespace, and
+one admin health page. Phase 1 covers service-expiry / traffic / status / trial
+reminders. Phase 2 adds **abandoned-checkout** and **failed-payment** reminders
+(category PAYMENT): a checkout scan on the existing scan queue plus a delivery
+re-validation branch. Every reminder can navigate a user back into an existing
+checkout but never settles a payment, creates an order, approves a receipt,
+spends the wallet, reserves inventory, provisions a service, or alters
+reconciliation — the financial system stays authoritative. Both new rules are
+OWNER-only and stay off until explicitly enabled behind a fail-safe activation
+gate. See `docs/customer-retention-engine.md`,
+`docs/checkout-payment-reminders.md`, `docs/abandoned-checkout-rules.md`,
+`docs/payment-retry-notifications.md`.
+
 ### Persian bot copy
 
 All Telegram-visible user and admin texts are Persian and aligned with the
