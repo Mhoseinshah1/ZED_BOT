@@ -69,3 +69,25 @@ prefixes, status codes, counts, durations. No usernames, links, tokens,
 credentials, message bodies, or full ids. The anti-recursion discipline of the
 log-delivery pipeline is preserved (the notification engine never writes
 SystemLog rows about its own delivery).
+
+## Checkout-payment reminders (Phase 2)
+
+Same guarantees extended to the two new rules:
+
+- Payload snapshots + callbacks carry only safe display values (product name,
+  payable amount, a short checkout reference, a payment-method LABEL) — never a
+  full checkout/payment/user/product/panel/Telegram id, provider authority,
+  external reference, callback payload, receipt content, card data, customer-form
+  values or a per-user price. (`checkout-notification-delivery.test.ts` asserts a
+  provider authority appears in neither the sent body nor the snapshot.)
+- Callback data is `ntf:<shortId>:<action>` with `c` (continue/reselect), `d`
+  (view checkout), `n` (suppress this checkout). Every click re-resolves the
+  notification owner-scoped, reloads the checkout owner-scoped, and re-validates
+  live financial state — visibility is never authorization, the snapshot is
+  never financial truth.
+- Notification handlers NEVER settle a payment, create an Order, approve a
+  receipt, spend Wallet, provision, or alter reconciliation. A retry is a NEW
+  Payment created only by the existing method-selection flow. Failed Payments are
+  immutable. An open reconciliation case blocks retry navigation.
+- Both rules are OWNER-only to mutate and disabled by default; enabling passes a
+  fail-safe activation gate. Raw gateway errors never reach users.

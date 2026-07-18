@@ -219,3 +219,15 @@ the external settlement reference. Gateway config, API keys, signatures and
 authorities are never displayed. Manual receipts keep their existing review
 flow; financial reports include settled gateway payments like any other
 approved payment.
+
+## Reminders (Notification Engine Phase 2) — read-only observers
+
+Abandoned-checkout and failed-payment reminders OBSERVE the payment lifecycle;
+they never drive it. They read `CheckoutStatus`, `settledByPaymentId`,
+`PaymentStatus`, `PaymentSettlementStatus`, Order, `ManualReceipt` and
+`FinancialReconciliationCase` state to decide eligibility, and route a user back
+into the EXISTING method-selection flow (`showPaymentMethods`) — which is the
+only path that creates a new Payment. No reminder or its callback mutates a
+Payment/CheckoutSession/Order/receipt/reconciliation row, reuses a failed
+authority, or participates in settlement. See
+[checkout-payment-reminders.md](checkout-payment-reminders.md).

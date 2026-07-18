@@ -134,3 +134,11 @@ the admin «اعلان‌ها و یادآوری‌ها 🔔» page via `readNoti
 `deliveryFailed`, `deadLetter`, `checkedAt`. A missing/stale key ⇒ the page
 shows "بدون گزارش/قدیمی" and the master-enable activation gate refuses. See
 [notification-operations-runbook.md](notification-operations-runbook.md).
+
+## Checkout-payment reminder status (Phase 2)
+
+The worker status snapshot (`zedbot:notif:worker-status`) gains
+`lastCheckoutScanAt`, `abandonedCheckoutCandidates` and `paymentRetryCandidates`.
+The admin «اعلان‌ها و یادآوری‌ها 🔔» page shows «آخرین بررسی سفارش‌های ناقص» /
+«آخرین بررسی پرداخت‌های ناموفق» + candidate counts. Enabling either checkout rule
+requires the same fresh-status activation gate as the Phase-1 rules.

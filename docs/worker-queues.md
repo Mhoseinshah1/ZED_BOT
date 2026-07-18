@@ -190,3 +190,16 @@ off. **Redis keys**: `zedbot:panel-sync:<id>` (per-panel sync lock),
 admin health page).
 
 Shutdown closes the notification workers + queues alongside the existing ones.
+
+### Checkout-payment reminders (Phase 2)
+
+Reuses the existing `automated-notification-scan` queue — no new queue. A second
+recurring scheduler `notif-sched-checkout-scan` emits `SCAN_CHECKOUT_NOTIFICATIONS`
+(default every 10 min) on the scan queue, registered ONLY while at least one of
+the two checkout rules is enabled (removed otherwise). The processor
+(`checkout-scan.ts`) creates dedupe-guarded `AutomatedNotification` rows
+(category PAYMENT) for abandoned checkouts + failed online payments and enqueues
+them on the SAME delivery queue + worker. Delivery re-validates live financial
+state before send (`revalidateCheckoutSource`). No new delivery/quiet-hours/
+limit/retry logic. Heartbeat gains `lastCheckoutScanAt`,
+`abandonedCheckoutCandidates`, `paymentRetryCandidates`.
