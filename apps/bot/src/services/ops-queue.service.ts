@@ -233,7 +233,7 @@ export async function enqueueLogDelivery(deliveryId: string): Promise<boolean> {
 
 /**
  * Enqueues the PROVISION_LOG_GROUP job for one LogGroupSetupAttempt. jobId =
- * log-group-setup:<attemptId>, so a repeated OWNER confirmation of the same
+ * log-group-setup-<attemptId>, so a repeated OWNER confirmation of the same
  * attempt never creates a second provisioning job (BullMQ deduplicates on the
  * id). Attempts/backoff live in the worker's default job options; the DB row
  * is the durable resume point, so completed/failed jobs are removed. Returns

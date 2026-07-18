@@ -1,4 +1,5 @@
 import {
+  LogGroupSetupStatus,
   OrderStatus,
   OrderType,
   prisma,
@@ -13,6 +14,7 @@ import { errorMessage } from "@zedbot/shared";
 import { logger } from "../core/logger.js";
 import { calculateExtraTime, EXTRA_TIME_EVENT_TYPE } from "./extra-time.service.js";
 import { calculateExtraVolume, EXTRA_VOLUME_EVENT_TYPE } from "./extra-volume.service.js";
+import { enqueueLogGroupSetup } from "./ops-queue.service.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import {
   failOrderWithRefund,
@@ -690,6 +692,46 @@ export async function failStaleRunningBroadcasts(olderThan: Date): Promise<numbe
   return failed.count;
 }
 
+/** The log-group-setup states that hold the single active-setup slot. */
+const LOG_GROUP_SETUP_RUNNING_STATUSES: LogGroupSetupStatus[] = [
+  LogGroupSetupStatus.QUEUED,
+  LogGroupSetupStatus.PROVISIONING,
+  LogGroupSetupStatus.TESTING,
+];
+
+/**
+ * Resumes any log-group setup attempt stuck in a running state
+ * (QUEUED/PROVISIONING/TESTING) since before `olderThan` by RE-ENQUEUEing its
+ * durable worker job. A live setup finishes in seconds and bumps updatedAt with
+ * every per-topic persist, so "running + stale" means the worker died with the
+ * job lost (crash before the final BullMQ attempt, or a drained/flushed queue)
+ * - the row would otherwise hold the unique activeSlot=1 forever with no reaper,
+ * blocking all future setups. Re-enqueue is idempotent (jobId = the attempt id)
+ * and resume-safe: the worker re-claims the row and never recreates a persisted
+ * topic, and a genuinely-broken target now frees the slot on its final attempt.
+ * Never fails the sweep - a stuck row is retried on the next startup.
+ */
+export async function resumeStaleLogGroupSetups(olderThan: Date): Promise<number> {
+  const stuck = await prisma.logGroupSetupAttempt.findMany({
+    where: { status: { in: LOG_GROUP_SETUP_RUNNING_STATUSES }, updatedAt: { lt: olderThan } },
+    select: { id: true },
+    orderBy: { updatedAt: "asc" },
+  });
+  let resumed = 0;
+  for (const attempt of stuck) {
+    if (await enqueueLogGroupSetup(attempt.id)) {
+      resumed += 1;
+    }
+  }
+  if (resumed > 0) {
+    logger.info("startup recovery: stale log-group setups re-enqueued for resume", {
+      count: resumed,
+      stale: stuck.length,
+    });
+  }
+  return resumed;
+}
+
 /**
  * One full recovery sweep. Never throws - recovery is best-effort and must
  * not take the bot down; problems are logged and retried on the next run.
@@ -699,6 +741,14 @@ export async function runStartupRecovery(now: Date = new Date()): Promise<Startu
   try {
     const orders = await recoverStaleProvisioningOrders(olderThan);
     const failedBroadcasts = await failStaleRunningBroadcasts(olderThan);
+    // Resume any log-group setup whose worker died with the job lost (no
+    // report field - it is a best-effort resume, logged inside the helper).
+    await resumeStaleLogGroupSetups(olderThan).catch((err) => {
+      logger.error("startup recovery: log-group resume sweep failed", {
+        error: errorMessage(err),
+      });
+      return 0;
+    });
     const report = { ...orders, failedBroadcasts };
     if (report.checkedOrders > 0 || report.failedBroadcasts > 0) {
       logger.info("startup recovery finished", { ...report });

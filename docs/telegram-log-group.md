@@ -188,7 +188,7 @@ invariants in [database-invariants.md](database-invariants.md).
   confirmation preview  ── creates VALIDATED attempt (masked id + topic count)
         │ confirm
         ▼
-  CAS VALIDATED→QUEUED (+ activeSlot=1) ── enqueue log-group-setup:<attemptId>
+  CAS VALIDATED→QUEUED (+ activeSlot=1) ── enqueue log-group-setup-<attemptId>
         │                                    (bot answers instantly)
         ▼
   ┌─────────────── WORKER (PROVISION_LOG_GROUP, concurrency 1, lock) ───────────┐

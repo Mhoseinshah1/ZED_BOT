@@ -63,6 +63,18 @@ export interface LogGroupSettings {
   title: string | null;
 }
 
+/**
+ * The bot-side view of the active group binding. Reads go through the settings
+ * cache (30s TTL), so after a WORKER-side activation (the numeric-ID path
+ * commits log_group_chat_id/title in its own process) this bot process can
+ * serve the PREVIOUS group's chat id/title for up to the TTL - there is no
+ * cross-process cache invalidation. This is bounded and safe: it only affects
+ * bot-side DISPLAY reads (status page, an admin test send, the
+ * boundToCurrentGroup comparison) and always lags toward the previous group
+ * (never a not-yet-active one). The safety-critical delivery routing is
+ * unaffected - the worker's log-delivery reads the log_group_chat_id Setting
+ * directly from the database, never this cache.
+ */
 export async function getLogGroupSettings(): Promise<LogGroupSettings> {
   const chatId = await getSetting(LOG_GROUP_CHAT_ID_KEY, "");
   const title = await getSetting(LOG_GROUP_TITLE_KEY, "");

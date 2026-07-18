@@ -48,14 +48,14 @@ DLQ, aggregation): [operational-logging.md](operational-logging.md).
 ## Log-group-setup jobs
 
 One job name: `PROVISION_LOG_GROUP`, data `{ attemptId }`, jobId =
-`log-group-setup:<attemptId>` (`logGroupSetupJobId`) — so a repeated OWNER
+`log-group-setup-<attemptId>` (`logGroupSetupJobId`) — so a repeated OWNER
 confirmation of the **same** attempt never creates a second provisioning
 job (BullMQ dedupes on the id), and the `LogGroupSetupAttempt` row is the
 durable resume point.
 
 | Job name | Data | jobId | Notes |
 | --- | --- | --- | --- |
-| `PROVISION_LOG_GROUP` | `{ attemptId }` | `log-group-setup:<attemptId>` | Creates the eleven default forum topics (per-topic durable bindings — resume-safe, never re-created), sends a direct SYSTEM test, then **atomically** switches the active group (Settings + `LogTopic` together, guarded on the attempt still being non-cancelled) and emits the queued `log_group.connected` self-verification. Attempts 3, exponential backoff from 15 s |
+| `PROVISION_LOG_GROUP` | `{ attemptId }` | `log-group-setup-<attemptId>` | Creates the eleven default forum topics (per-topic durable bindings — resume-safe, persisted topics never re-created), sends a direct SYSTEM test, then **atomically** switches the active group (Settings + `LogTopic` together, guarded on the attempt still being non-cancelled) and emits the queued `log_group.connected` self-verification. Attempts 3, exponential backoff from 15 s |
 
 The processor is **idempotent + resume-safe**: it CAS-claims the row
 (`QUEUED`/`PROVISIONING`/`TESTING` → `PROVISIONING`), so a re-delivered or
@@ -65,8 +65,27 @@ crashed job resumes from the saved `topicBindings`; a terminal
 releases it in `finally`; a lock miss re-throws for BullMQ back-off rather
 than running a second concurrent provision. The active group is switched
 **only** after all topics exist and the direct test send succeeds, so a
-failed setup leaves the previous group untouched. Full lifecycle,
-cancellation and the activation trust boundary:
+failed setup leaves the previous group untouched.
+
+**Slot never leaks on failure.** The whole post-claim body is wrapped so that
+on the **final** BullMQ attempt *any* terminal throw — a still-held lock from
+a dead worker, a transient activation DB error, an unexpected error — runs
+`failAttempt` (status → `FAILED`, `activeSlot` → `NULL`) before propagating.
+Earlier attempts keep the slot held so the same durable row resumes; it is
+freed only when the attempt is truly terminal. The `PROVISIONING → TESTING`
+transition is a guarded `updateMany` whose zero count is a race check: a cancel
+that lands in that window skips the test send instead of posting it into a group
+no longer being activated. A worker that dies with its job lost is picked up by
+the bot's startup **resume sweep** (`resumeStaleLogGroupSetups` in
+`startup-recovery.service.ts`) — any running attempt stale past
+`STALE_PIPELINE_MINUTES` is re-enqueued (idempotent jobId), so the single-setup
+slot has an automatic reaper and never strands.
+
+One bounded caveat: a crash in the narrow window between a `createForumTopic`
+response and its per-topic persist can orphan **one** empty forum topic
+(Telegram's Bot API exposes no list/dedupe to reconcile it). That topic is never
+bound — activation consumes only persisted bindings — so it is harmless. Full
+lifecycle, cancellation and the activation trust boundary:
 [operational-logging.md](operational-logging.md).
 
 Forum topics are created with the worker's own **fetch-based**

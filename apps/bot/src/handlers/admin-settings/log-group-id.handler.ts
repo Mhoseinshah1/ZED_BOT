@@ -15,7 +15,9 @@ import {
   cancelSetupAttempt,
   confirmLogGroupConnection,
   createLogGroupSetupAttempt,
+  freeSlotBestEffort,
   getSetupAttemptByShortId,
+  INVALID_CHAT_ID_TEXT,
   prepareLogGroupConnection,
   SETUP_ALREADY_RUNNING_TEXT,
   SETUP_QUEUE_UNAVAILABLE_TEXT,
@@ -374,16 +376,10 @@ async function requeueFailedAttempt(
   }
   const enqueued = await enqueueLogGroupSetup(attemptId);
   if (!enqueued) {
-    // Free the slot so a later retry is not blocked once Redis is back.
-    await prisma.logGroupSetupAttempt.updateMany({
-      where: { id: attemptId, status: LogGroupSetupStatus.QUEUED },
-      data: {
-        status: LogGroupSetupStatus.FAILED,
-        activeSlot: null,
-        safeErrorCode: "redis-unavailable",
-        failedAt: new Date(),
-      },
-    });
+    // Free the slot so a later retry is not blocked once Redis is back. The
+    // rollback is best-effort (a throw here - same outage - would otherwise
+    // strand the QUEUED slot); the startup resume sweep reclaims it if so.
+    await freeSlotBestEffort(attemptId, "redis-unavailable");
     return { ok: false, safeMessage: SETUP_QUEUE_UNAVAILABLE_TEXT };
   }
   return { ok: true, attempt: claimed };
@@ -629,6 +625,12 @@ logGroupIdTextHandler.on("message:text", async (ctx, next) => {
     previous: prepared.previous,
   });
   if (!created.ok) {
+    if (created.reason === "invalid-input") {
+      // Defensive (probe-gated flow never produces this): a chat id that would
+      // overflow the column - re-prompt rather than crash.
+      await safeReply(ctx, INVALID_CHAT_ID_TEXT, inputKeyboard());
+      return;
+    }
     const sid = attemptShortId(created.activeAttempt.id);
     await safeReply(
       ctx,

@@ -26,7 +26,7 @@ export const SCHEDULED_BACKUP_JOB_ID = "scheduled-database-backup";
 
 // Direct-log-group-setup phase: the durable topic-provisioning + activation
 // queue. The bot enqueues one job per LogGroupSetupAttempt (jobId
-// log-group-setup:<attemptId>, so a repeated OWNER confirmation reuses the
+// log-group-setup-<attemptId>, so a repeated OWNER confirmation reuses the
 // same job); the worker creates the default forum topics, sends the direct
 // SYSTEM test and activates the group atomically - NEVER inline in a
 // callback.
@@ -35,7 +35,7 @@ export const LOG_GROUP_SETUP_JOB_NAME = "PROVISION_LOG_GROUP";
 
 /** BullMQ job id for one setup attempt (idempotent across repeated confirms). */
 export function logGroupSetupJobId(attemptId: string): string {
-  return `log-group-setup:${attemptId}`;
+  return `log-group-setup-${attemptId}`;
 }
 
 // --- locks / heartbeat / capabilities -------------------------------------------------------------

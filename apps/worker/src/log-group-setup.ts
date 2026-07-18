@@ -31,7 +31,11 @@ import { createTelegramForumTopic, sendTelegramMessage } from "./telegram.js";
 // Telegram callback.
 //
 // Resume-safe: the attempt row's topicBindings is written after EACH created
-// topic, so a retried/crashed job re-reads it and never recreates a topic.
+// topic, so a retried/crashed job re-reads it and never recreates a PERSISTED
+// topic. (A crash in the narrow window between a createForumTopic response and
+// its persist can orphan ONE empty, never-bound topic - see
+// provisionStagedTopics; Telegram's Bot API exposes no list/dedupe to
+// reconcile it, so this is accepted, bounded and harmless.)
 // The active group is switched ONLY inside the activation transaction, which
 // is conditional on the attempt still being in a running state - a cancel or
 // concurrent activation can never produce a partial switch, and a failed
@@ -115,8 +119,13 @@ async function provisionStagedTopics(
       return { ok: false, safeErrorCode: result.safeErrorCode, retryable: result.retryable };
     }
     bindings[key] = result.messageThreadId;
-    // Durable per-topic persist: write the binding + count before the next
-    // create, so a crash here never loses a created topic.
+    // Durable per-topic persist: write the binding + count IMMEDIATELY after
+    // the create and before the next create, so a resume never recreates an
+    // already-PERSISTED topic. A crash in the narrow window between the
+    // createForumTopic response above and this write can orphan one empty
+    // topic (Telegram's Bot API has no list/dedupe to reconcile it); that
+    // topic is never bound - activation only consumes persisted bindings - so
+    // the residue is a harmless empty forum topic, never a delivery target.
     await prisma.logGroupSetupAttempt.update({
       where: { id: attempt.id },
       data: { topicBindings: bindings, createdTopicCount: Object.keys(bindings).length },
@@ -224,32 +233,44 @@ async function handleProvisionJob(
     return { skipped: "already-terminal", status: existing.status };
   }
 
-  // CAS claim: QUEUED/PROVISIONING/TESTING -> PROVISIONING (re-claim resumes a
-  // crashed run). A FAILED row is not re-claimable here (a new attempt is
-  // created for a fresh retry from the bot).
-  const claimed = await prisma.logGroupSetupAttempt.updateMany({
-    where: { id: attemptId, status: { in: RUNNING_STATUSES } },
-    data: { status: LogGroupSetupStatus.PROVISIONING, startedAt: existing.startedAt ?? new Date() },
-  });
-  if (claimed.count === 0) {
-    return { skipped: "not-claimable", status: existing.status };
-  }
-
   const token = botToken();
-  if (token === null) {
-    await failAttempt(attemptId, "bot-token-missing");
-    return { failed: "bot-token-missing" };
-  }
 
   let lock: HeldLock | null = null;
   try {
+    // CAS claim: QUEUED/PROVISIONING/TESTING -> PROVISIONING (re-claim resumes
+    // a crashed run). A FAILED row is not re-claimable here (a new attempt is
+    // created for a fresh retry from the bot). Inside the try so any post-claim
+    // throw frees the slot on the final attempt (see the catch below).
+    const claimed = await prisma.logGroupSetupAttempt.updateMany({
+      where: { id: attemptId, status: { in: RUNNING_STATUSES } },
+      data: {
+        status: LogGroupSetupStatus.PROVISIONING,
+        startedAt: existing.startedAt ?? new Date(),
+      },
+    });
+    if (claimed.count === 0) {
+      // Already moved to a terminal/other state; nothing we claimed to free.
+      return { skipped: "not-claimable", status: existing.status };
+    }
+
+    if (token === null) {
+      await failAttempt(attemptId, "bot-token-missing");
+      return { failed: "bot-token-missing" };
+    }
+
     lock = await acquireLock(deps.redis, LOG_GROUP_SETUP_LOCK_KEY, SETUP_LOCK_TTL_MS);
     if (lock === null) {
-      // Another provisioning holds the lock; retry via BullMQ backoff.
+      // Another provisioning holds the lock; retry via BullMQ backoff. On the
+      // FINAL attempt the catch below frees the slot so a future setup can run
+      // (mirroring the provision/test branches, which free it via failAttempt).
       throw new Error("setup-lock-contended");
     }
 
-    const attempt = (await prisma.logGroupSetupAttempt.findUnique({ where: { id: attemptId } }))!;
+    const attempt = await prisma.logGroupSetupAttempt.findUnique({ where: { id: attemptId } });
+    if (attempt === null) {
+      // Row deleted concurrently (the unique slot went with it) - nothing to do.
+      return { skipped: "attempt-missing" };
+    }
     if (attempt.status === LogGroupSetupStatus.CANCELLED) {
       return { skipped: "cancelled" };
     }
@@ -265,16 +286,27 @@ async function handleProvisionJob(
     }
 
     // Re-read for a cancel that landed during provisioning.
-    const afterProvision = (await prisma.logGroupSetupAttempt.findUnique({ where: { id: attemptId } }))!;
+    const afterProvision = await prisma.logGroupSetupAttempt.findUnique({
+      where: { id: attemptId },
+    });
+    if (afterProvision === null) {
+      return { skipped: "attempt-missing" };
+    }
     if (afterProvision.status === LogGroupSetupStatus.CANCELLED) {
       return { skipped: "cancelled" };
     }
 
-    // 2. Direct SYSTEM test send to the staged topic (mark TESTING).
-    await prisma.logGroupSetupAttempt.updateMany({
+    // 2. Direct SYSTEM test send to the staged topic (mark TESTING). The
+    // guarded updateMany's count IS the race check: a cancel that committed
+    // CANCELLED after the re-read above matches 0 rows, and we must NOT send
+    // the test message into a group we are no longer activating.
+    const toTesting = await prisma.logGroupSetupAttempt.updateMany({
       where: { id: attemptId, status: LogGroupSetupStatus.PROVISIONING },
       data: { status: LogGroupSetupStatus.TESTING },
     });
+    if (toTesting.count === 0) {
+      return { skipped: "cancelled-or-not-provisioning" };
+    }
     const systemThreadId = provisioned.bindings.SYSTEM;
     const testSend = await sendTelegramMessage({
       token,
@@ -291,7 +323,12 @@ async function handleProvisionJob(
     }
 
     // 3. Atomic activation (guarded on non-cancelled state).
-    const activatedAttempt = (await prisma.logGroupSetupAttempt.findUnique({ where: { id: attemptId } }))!;
+    const activatedAttempt = await prisma.logGroupSetupAttempt.findUnique({
+      where: { id: attemptId },
+    });
+    if (activatedAttempt === null) {
+      return { skipped: "attempt-missing" };
+    }
     const activated = await activateStagedGroup(activatedAttempt, provisioned.bindings);
     if (!activated) {
       return { skipped: "activation-aborted" };
@@ -310,6 +347,18 @@ async function handleProvisionJob(
     }).catch(() => undefined);
 
     return { ok: true, activated: true, topicCount: Object.keys(provisioned.bindings).length };
+  } catch (err) {
+    // On the FINAL BullMQ attempt, ANY terminal failure after the CAS claim
+    // MUST free the unique active-setup slot (activeSlot) so a future setup can
+    // start: the lock-contended throw, a transient activation DB error, or any
+    // other unexpected throw. Earlier attempts keep the slot held so the SAME
+    // durable row resumes on retry - the slot is never freed mid-retry, only
+    // when the attempt is truly terminal. failAttempt is a no-op unless the row
+    // is still running, so a branch that already freed it never double-frees.
+    if (isFinalAttempt(job)) {
+      await failAttempt(attemptId, "setup-error");
+    }
+    throw err;
   } finally {
     if (lock !== null) {
       await releaseLock(deps.redis, lock);

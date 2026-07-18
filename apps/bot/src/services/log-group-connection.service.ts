@@ -247,7 +247,32 @@ export async function prepareLogGroupConnection(
 
 export type CreateAttemptResult =
   | { ok: true; attempt: LogGroupSetupAttempt }
-  | { ok: false; reason: "active-exists"; activeAttempt: LogGroupSetupAttempt };
+  | { ok: false; reason: "active-exists"; activeAttempt: LogGroupSetupAttempt }
+  | { ok: false; reason: "invalid-input" };
+
+// Postgres int8 (the BigInt column) range. A chat id outside it - a manually
+// corrupted stored Setting, or an over-long value that slipped the shape regex
+// - must fail safely here, never throw a raw SyntaxError from BigInt() nor a
+// numeric-out-of-range at insert time.
+const INT8_MIN = -9223372036854775808n;
+const INT8_MAX = 9223372036854775807n;
+
+/**
+ * Parses a chat-id string into a BigInt ONLY when it is a plain integer within
+ * the int8 column range; returns null otherwise (no throw). The digit-length
+ * cap bounds BigInt() cost before the range check runs.
+ */
+export function safeChatIdBigInt(value: string): bigint | null {
+  if (!/^-?[0-9]{1,19}$/.test(value)) {
+    return null;
+  }
+  try {
+    const big = BigInt(value);
+    return big >= INT8_MIN && big <= INT8_MAX ? big : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Creates a VALIDATED setup attempt for a validated target. Refuses when a
@@ -268,13 +293,23 @@ export async function createLogGroupSetupAttempt(input: {
   if (running !== null) {
     return { ok: false, reason: "active-exists", activeAttempt: running };
   }
+  const chatIdBig = safeChatIdBigInt(input.chatId);
+  if (chatIdBig === null) {
+    // Defensive: the validated numeric-ID flow never produces an out-of-range
+    // id (probe-gated), but never insert one that would overflow the column.
+    return { ok: false, reason: "invalid-input" };
+  }
+  // A corrupted stored PREVIOUS chat id (informational only - the replacement
+  // warning) degrades to "no previous recorded" rather than throwing.
+  const previousChatIdBig =
+    input.previous === null ? null : safeChatIdBigInt(input.previous.chatId);
   const attempt = await prisma.logGroupSetupAttempt.create({
     data: {
-      chatId: BigInt(input.chatId),
+      chatId: chatIdBig,
       safeTitle: input.title.slice(0, 120),
       status: LogGroupSetupStatus.VALIDATED,
       requestedByAdminId: input.adminId,
-      previousChatId: input.previous === null ? null : BigInt(input.previous.chatId),
+      previousChatId: previousChatIdBig,
       previousTitle: input.previous?.title ?? null,
       idempotencyKey: randomUUID(),
     },
@@ -374,14 +409,40 @@ export async function confirmLogGroupConnection(
   const enqueued = await enqueueLogGroupSetup(attemptId);
   if (!enqueued) {
     // Roll the claim back so the OWNER can retry once Redis is back; free the
-    // active slot so the next attempt is not blocked forever.
-    await prisma.logGroupSetupAttempt.updateMany({
-      where: { id: attemptId, status: LogGroupSetupStatus.QUEUED },
-      data: { status: LogGroupSetupStatus.FAILED, activeSlot: null, safeErrorCode: "redis-unavailable", failedAt: new Date() },
-    });
+    // active slot so the next attempt is not blocked forever. The rollback is
+    // best-effort: if THIS write also throws (the same outage), swallow it so
+    // the OWNER still gets the safe queue-unavailable message - the stranded
+    // QUEUED row is then reclaimed by the startup resume sweep, never leaked.
+    await freeSlotBestEffort(attemptId, "redis-unavailable");
     return { ok: false, safeMessage: SETUP_QUEUE_UNAVAILABLE_TEXT };
   }
   return { ok: true, attempt: claimed };
+}
+
+/**
+ * Frees the single active-setup slot for a still-QUEUED attempt after an
+ * enqueue failure, WITHOUT letting the free-write's own failure propagate. A
+ * throw here (same Redis/DB outage that failed the enqueue) would otherwise
+ * strand the row at QUEUED/activeSlot=1 with no job. Swallowing it keeps the
+ * caller's safe message intact; the startup resume sweep reclaims the row.
+ */
+export async function freeSlotBestEffort(attemptId: string, safeErrorCode: string): Promise<void> {
+  try {
+    await prisma.logGroupSetupAttempt.updateMany({
+      where: { id: attemptId, status: LogGroupSetupStatus.QUEUED },
+      data: {
+        status: LogGroupSetupStatus.FAILED,
+        activeSlot: null,
+        safeErrorCode,
+        failedAt: new Date(),
+      },
+    });
+  } catch (err) {
+    logger.warn("log group slot free (enqueue rollback) failed", {
+      attemptId,
+      error: err instanceof Error ? err.message.slice(0, 120) : "unknown",
+    });
+  }
 }
 
 /**
@@ -436,7 +497,12 @@ export async function activateLogGroupBindings(
     input.title.slice(0, 120),
     "STRING",
   );
-  const telegramChatId = BigInt(input.chatId);
+  const telegramChatId = safeChatIdBigInt(input.chatId);
+  if (telegramChatId === null) {
+    // A malformed chat id must roll the whole activation back cleanly (the
+    // previous group stays active) rather than throw a raw SyntaxError.
+    throw new Error("invalid chat id for activation");
+  }
   for (const key of OPS_LOG_TOPIC_KEYS) {
     const topicId = input.bindings[key];
     if (typeof topicId !== "number") {
