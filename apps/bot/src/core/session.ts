@@ -306,6 +306,9 @@ export interface SessionData {
     // Customer win-back config edit (Phase 3, flow "admin_ntf_wb:cfg"). Holds
     // which win-back config field the next admin text message edits.
     adminWinbackNtfDraft?: { field: string };
+    // Analytics report date-range input (Phase 4, flow "admin_analytics:range").
+    // Holds only which report view the parsed range applies to (never PII).
+    adminAnalyticsDraft?: { view: "cohort" | "conversion" };
     // Production-backup rework: scheduled-backup text input target (the
     // "rb:sched_hour" flow currently only edits the run hour).
     adminBackupScheduleDraft?: { field: "hour" };

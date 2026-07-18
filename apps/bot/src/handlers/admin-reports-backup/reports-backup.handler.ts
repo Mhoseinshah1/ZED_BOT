@@ -148,6 +148,8 @@ function verifyLabel(state: BackupListEntry["verifyState"]): string {
 export async function renderLanding(ctx: BotContext): Promise<void> {
   await safeAnswerCallback(ctx);
   const kb = new InlineKeyboard()
+    .text("تحلیل اعلان‌ها 📈", CB.ADMIN_ANALYTICS)
+    .row()
     .text("وضعیت سیستم 🩺", RB_CB.health)
     .row()
     .text("ساخت بکاپ دیتابیس 💾", RB_CB.backup)

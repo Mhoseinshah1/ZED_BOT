@@ -305,6 +305,38 @@ export async function enqueueAttributionReconcile(orderId: string): Promise<bool
   }
 }
 
+/**
+ * Analytics phase (Phase 4): OWNER-triggered manual attribution reconcile. Kicks
+ * the batch sweep + reversal reconciler once (jobId-deduped so a double-tap can't
+ * stack runs). Fail-soft: returns false when Redis is unavailable.
+ */
+export async function enqueueAttributionBatchNow(): Promise<boolean> {
+  const pair = getQueues();
+  if (pair === null) {
+    return false;
+  }
+  try {
+    await withTimeout(
+      Promise.all([
+        pair.notifMaintenance.add(
+          NOTIFICATION_JOB_NAMES.RECONCILE_NOTIFICATION_ATTRIBUTION_BATCH,
+          {},
+          { jobId: "attribution-batch-manual", removeOnComplete: true, removeOnFail: true },
+        ),
+        pair.notifMaintenance.add(
+          NOTIFICATION_JOB_NAMES.RECONCILE_NOTIFICATION_ATTRIBUTION_REVERSALS,
+          {},
+          { jobId: "attribution-reversals-manual", removeOnComplete: true, removeOnFail: true },
+        ),
+      ]),
+    );
+    return true;
+  } catch (err) {
+    logger.warn("attribution manual reconcile enqueue failed", { error: errorText(err) });
+    return false;
+  }
+}
+
 /** Waiting+active+failed counts for the log-group-setup queue (status page). */
 export async function getLogGroupSetupQueueCounts(): Promise<BackupQueueCounts | null> {
   const pair = getQueues();

@@ -39,6 +39,7 @@ export const CB = {
   ADMIN_SUPPORT: "admin:support",
   ADMIN_BROADCAST: "admin:broadcast",
   ADMIN_REPORTS_BACKUP: "admin:reports_backup",
+  ADMIN_ANALYTICS: "admin:analytics",
 
   // Common / gates
   COMMON_BACK: "common:back",
