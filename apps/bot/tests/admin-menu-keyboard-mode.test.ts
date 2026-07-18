@@ -79,17 +79,29 @@ const HISTORICAL_ADMIN_ROWS: Array<Array<{ label: string; callback: string }>> =
   ],
 ];
 
-const ADMIN_BUTTON_SEEDS: Record<string, string> = Object.fromEntries(
-  HISTORICAL_ADMIN_ROWS.flat().map(({ label, callback }) => {
-    const entry = Object.values(ADMIN_MAIN_MENU_ACTION_WIRING).find(
-      (w) => w.callback === callback,
-    );
-    if (entry === undefined) {
-      throw new Error(`no wiring for callback ${callback}`);
-    }
-    return [entry.buttonKey, label];
-  }),
-);
+const ADMIN_BUTTON_SEEDS: Record<string, string> = {
+  ...Object.fromEntries(
+    HISTORICAL_ADMIN_ROWS.flat().map(({ label, callback }) => {
+      const entry = Object.values(ADMIN_MAIN_MENU_ACTION_WIRING).find(
+        (w) => w.callback === callback,
+      );
+      if (entry === undefined) {
+        throw new Error(`no wiring for callback ${callback}`);
+      }
+      return [entry.buttonKey, label];
+    }),
+  ),
+  // Two-way navigation: the final full-width return-to-user row (callback is the
+  // existing CB.USER_MENU, so it is not part of HISTORICAL_ADMIN_ROWS above).
+  admin_return_user_menu: "بازگشت به منوی کاربر 👤",
+};
+
+/** The final full-width return-to-user row appended after the historical rows. */
+const RETURN_ROW: Array<{ label: string; callback: string }> = [
+  { label: "بازگشت به منوی کاربر 👤", callback: CB.USER_MENU },
+];
+/** The complete admin main menu = historical rows + the return row (always last). */
+const FULL_ADMIN_ROWS = [...HISTORICAL_ADMIN_ROWS, RETURN_ROW];
 
 interface SentMessage {
   text: string;
@@ -287,16 +299,18 @@ describe.runIf(hasDb)("admin main-menu keyboard mode", () => {
 
   // --- shared definition + renderer parity (8-16) ---------------------------------------------
 
-  it("8-13. inline layout is the historical contract; reply keyboard mirrors it exactly", async () => {
-    // 8-9. Exact approved rows: labels AND stable callbacks, in order.
+  it("8-13. inline layout is the historical contract + return row; reply keyboard mirrors it", async () => {
+    // 8-9. Exact approved rows: labels AND stable callbacks, in order - the five
+    // historical rows UNCHANGED, then the final full-width return-to-user row.
     const inline = inlineRows(await buildAdminMainKeyboard(owner));
-    expect(inline).toEqual(HISTORICAL_ADMIN_ROWS);
+    expect(inline).toEqual(FULL_ADMIN_ROWS);
+    // The historical rows are byte-identical and the return row is always last.
+    expect(inline.slice(0, HISTORICAL_ADMIN_ROWS.length)).toEqual(HISTORICAL_ADMIN_ROWS);
+    expect(inline.at(-1)).toEqual([{ label: "بازگشت به منوی کاربر 👤", callback: CB.USER_MENU }]);
 
     // 10-11. The reply rendering: same rows/labels, no callback data at all.
     const reply = await buildAdminMainReplyKeyboard(owner);
-    expect(replyRows(reply)).toEqual(
-      HISTORICAL_ADMIN_ROWS.map((row) => row.map((b) => b.label)),
-    );
+    expect(replyRows(reply)).toEqual(FULL_ADMIN_ROWS.map((row) => row.map((b) => b.label)));
     expect(JSON.stringify(reply)).not.toContain("callback_data");
 
     // 12. Persistent, resized, not one-time.
@@ -347,9 +361,10 @@ describe.runIf(hasDb)("admin main-menu keyboard mode", () => {
   // --- resolution + authorization (17-24) -----------------------------------------------------
 
   it("17-19. labels resolve to stable actions; edited labels keep routing", async () => {
-    // 17. Every visible label resolves to its wired action for an active admin.
+    // 17. Every visible label resolves to its wired action for an active admin
+    // (nine sections + the return-to-user action = ten).
     const definition = await buildAdminMainMenuDefinition(owner);
-    expect(definition.flat()).toHaveLength(9);
+    expect(definition.flat()).toHaveLength(10);
     for (const button of definition.flat()) {
       expect(await resolveAdminMainMenuAction(button.label, owner)).toEqual({
         matched: true,
@@ -492,10 +507,15 @@ describe.runIf(hasDb)("admin main-menu keyboard mode", () => {
   it("29-30. every approved action dispatches to its section; arbitrary text falls through", async () => {
     await setAdminMenuMode("REPLY");
     clearSettingsCache();
-    // 29. All 9 labels render their section landing (same entries the inline
-    // callbacks use).
+    // 29. All 9 SECTION labels render their section landing (same entries the
+    // inline callbacks use). RETURN_TO_USER_MENU is not a section - it exits to
+    // the user surface and is covered by the dedicated return-navigation suite.
     const definition = await buildAdminMainMenuDefinition(owner);
-    for (const button of definition.flat()) {
+    const sectionButtons = definition
+      .flat()
+      .filter((b) => b.action !== "RETURN_TO_USER_MENU");
+    expect(sectionButtons).toHaveLength(9);
+    for (const button of sectionButtons) {
       const { ctx, sent } = fakeTextCtx(owner.telegramId, button.label, { admin: owner });
       await adminMenuTextRouter.middleware()(ctx, async () => {});
       expect(sent.length, `action ${button.action} must render`).toBeGreaterThan(0);

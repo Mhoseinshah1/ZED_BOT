@@ -160,7 +160,7 @@ over the current trial-ready panel set. See
 
 ---
 
-## Admin main menu (`/admin`, Fix A — 5 rows)
+## Admin main menu (`/admin`, Fix A — 5 rows + return row)
 
 | row | button → callback |
 | --- | --- |
@@ -169,6 +169,19 @@ over the current trial-ready panel set. See
 | 3 | محصولات دیگر / سفارش‌های محصولات دیگر → `admin:other_products` |
 | 4 | تیکت‌های پشتیبانی 🎫 → `admin:support` · پیام همگانی 📣 → `admin:broadcast` |
 | 5 | تنظیمات عمومی ⚙️ → `admin:general_settings` · گزارشات / بکاپ → `admin:reports_backup` |
+| 6 | بازگشت به منوی کاربر 👤 → `user:menu` (the existing `CB.USER_MENU`) |
+
+Row 6 completes the two-way User/Admin navigation (PR #96 added «پنل مدیریت 🛠»
+to the user menu; this is the return leg). It is always the final full-width
+row and reuses `CB.USER_MENU`: an inline tap goes through the normal user area
+(`userAccessMiddleware → menuHandler → showUserMenu`), identical to `/menu`; in
+REPLY admin mode the label resolves to the `RETURN_TO_USER_MENU` action, which
+runs `ensureUserAccess` then the shared `showUserMenu`. The destination honors
+the independently configured user menu mode (all four Admin×User INLINE/REPLY
+transitions), and the user-access gates (maintenance / blocked / terms /
+force-join) apply first — an active admin never bypasses them. Admin submenus
+keep only their «بازگشت به پنل ادمین» back button; the admin main menu is the
+single exit to the user surface.
 
 Not rendered but still answered (old keyboards): `admin:receipts` (real
 receipts list — reachable via مالی), plus the placeholders

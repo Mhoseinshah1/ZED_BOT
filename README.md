@@ -350,6 +350,16 @@ glass buttons inside the message (default) or as a persistent reply
 keyboard below the input field — one shared menu definition drives both
 modes; see `docs/user-menu-keyboard-modes.md`.
 
+**Two-way User/Admin navigation**: active admins get a «پنل مدیریت 🛠» entry
+in the user menu, and the admin main menu's final full-width row
+«بازگشت به منوی کاربر 👤» returns to the user surface. The return button reuses
+the existing user-menu entry (`CB.USER_MENU` inline; the shared `showUserMenu`
+after the user-access gates in reply mode), works in both admin keyboard modes,
+honors the independently configured user menu mode across all four transitions,
+never bypasses the user-access gates, and keeps `/menu` unchanged; sensitive
+admin submenus still return to the admin main menu first. See
+`docs/admin-menu-keyboard-mode.md`.
+
 **Specialized digital-product workflows**: OTHER_PRODUCT items carry an
 admin-selected kind (Apple ID, AI account, Telegram Premium, gift card, or
 generic) that drives the creation wizard, the encrypted stock-inventory

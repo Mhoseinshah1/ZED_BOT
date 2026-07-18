@@ -232,6 +232,8 @@ describe("main menus and landing pages (exact approved labels)", () => {
       "پیام همگانی 📣",
       "تنظیمات عمومی ⚙️",
       "گزارشات / بکاپ 📊",
+      // Two-way navigation: the final full-width return-to-user row.
+      "بازگشت به منوی کاربر 👤",
     ]);
   });
 

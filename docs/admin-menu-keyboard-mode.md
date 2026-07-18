@@ -65,7 +65,7 @@ non-admins (see routing).
 
 `buildAdminMainMenuDefinition()` in
 `apps/bot/src/keyboards/admin-menu-definition.ts` is the single source of
-the admin main menu: the approved row layout, nine **language-neutral
+the admin main menu: the approved row layout, ten **language-neutral
 action identities** (`AdminMainMenuAction`), operator-editable labels and
 the shared visibility policy. Action identity never derives from the
 visible Persian label — the stable wiring is
@@ -83,10 +83,30 @@ callback):
 | `BROADCAST` | `admin_broadcast` | `admin:broadcast` |
 | `GENERAL_SETTINGS` | `admin_general_settings` | `admin:general_settings` |
 | `REPORTS_BACKUP` | `admin_reports_backup` | `admin:reports_backup` |
+| `RETURN_TO_USER_MENU` | `admin_return_user_menu` | `user:menu` (the **existing** `CB.USER_MENU`) |
 
-The approved layout is the historical inline layout: five rows —
-finance+users · products+panels · other-products · support+broadcast ·
-general-settings+reports-backup.
+The approved layout is the historical inline layout plus one appended row:
+five historical rows — finance+users · products+panels · other-products ·
+support+broadcast · general-settings+reports-backup — then a final
+**full-width** two-way-navigation row `RETURN_TO_USER_MENU`
+(«بازگشت به منوی کاربر 👤»). The historical rows are unchanged; the return
+row is always last and never sits beside a sensitive section.
+
+**Two-way navigation.** `RETURN_TO_USER_MENU` is the only action that is not
+an admin *section* — it exits to the user surface. Its inline callback is the
+existing `CB.USER_MENU` (no new callback is minted), so an inline tap flows
+through the normal user area
+(`userAccessMiddleware → menuHandler → showUserMenu`) exactly like `/menu`. In
+REPLY mode the label resolves to the `RETURN_TO_USER_MENU` action and
+`admin-menu-actions.ts` handles it directly: `ensureUserAccess(ctx)` then the
+shared `showUserMenu(ctx)`. Either way the user-access gates
+(maintenance / blocked / terms / force-join) apply first — an active admin
+**never** bypasses the user gates via the return button, because admin access
+and user access are independent. `showUserMenu` owns every keyboard transition
+and session flag, so no rendering or state handling is duplicated. Sensitive
+admin submenus keep their own «بازگشت به پنل ادمین» back button and do **not**
+each gain a direct user-menu exit; the admin main menu is the single place to
+return to the user surface.
 
 **Visibility policy** (`visibleActions`, shared by both renderers *and*
 the text resolver): the approved admin main menu is currently identical

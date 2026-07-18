@@ -82,6 +82,15 @@ status rules.
 | 3 | محصولات دیگر / سفارش‌های محصولات دیگر |
 | 4 | تیکت‌های پشتیبانی 🎫 · پیام همگانی 📣 |
 | 5 | تنظیمات عمومی ⚙️ · گزارشات / بکاپ |
+| 6 | بازگشت به منوی کاربر 👤 → `user:menu` (the existing `CB.USER_MENU`) |
+
+Row 6 is the two-way-navigation exit and is always the final full-width row.
+It reuses `CB.USER_MENU`, so an inline tap flows through the normal user area
+(`userAccessMiddleware → showUserMenu`) exactly like `/menu`; in REPLY mode the
+label routes to the `RETURN_TO_USER_MENU` action, which runs
+`ensureUserAccess` then `showUserMenu`. Admin access never bypasses the
+user-access gates. Sensitive admin submenus keep only their «بازگشت به پنل
+ادمین» back button — they do not each get a user-menu exit.
 
 `CB.ADMIN_RECEIPTS` and the placeholder callbacks (panel features, bot
 update, tutorials, mini-app settings, custom service price) stay registered

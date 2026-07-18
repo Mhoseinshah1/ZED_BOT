@@ -8,6 +8,8 @@ import {
 import { resolveMainMenuAction } from "../keyboards/user-menu-definition.js";
 import { getAdminMenuMode, getUserMenuMode } from "../services/menu-mode.service.js";
 import { safeReply } from "../utils/safe-reply.js";
+import { ensureUserAccess } from "../middlewares/user-access.middleware.js";
+import { showUserMenu } from "./menu.handler.js";
 import { renderLanding as renderBroadcastLanding } from "./admin-broadcast/broadcast.handler.js";
 import { renderFinanceLanding } from "./admin-finance/admin-finance.handler.js";
 import { renderLanding as renderManualOrdersLanding } from "./admin-manual-orders/manual-orders.handler.js";
@@ -33,7 +35,14 @@ import { showProductMenu } from "./products/product.handler.js";
 export const ADMIN_MENU_ACCESS_DENIED_TEXT =
   "شما دسترسی لازم برای ورود به این بخش را ندارید.";
 
-const ACTION_HANDLERS: Record<AdminMainMenuAction, (ctx: BotContext) => Promise<void>> = {
+/**
+ * The admin main-menu SECTION actions - everything except the two-way exit
+ * (RETURN_TO_USER_MENU), which is not a business section and is dispatched
+ * separately (ensureUserAccess -> showUserMenu) in the router below.
+ */
+type AdminMainMenuSectionAction = Exclude<AdminMainMenuAction, "RETURN_TO_USER_MENU">;
+
+const ACTION_HANDLERS: Record<AdminMainMenuSectionAction, (ctx: BotContext) => Promise<void>> = {
   FINANCE: renderFinanceLanding,
   USERS: renderAdminUsersLanding,
   PRODUCTS: showProductMenu,
@@ -48,7 +57,7 @@ const ACTION_HANDLERS: Record<AdminMainMenuAction, (ctx: BotContext) => Promise<
 /** Opens one admin main-menu section - the same entry the callback uses. */
 export async function openAdminMainMenuSection(
   ctx: BotContext,
-  action: AdminMainMenuAction,
+  action: AdminMainMenuSectionAction,
 ): Promise<void> {
   await ACTION_HANDLERS[action](ctx);
 }
@@ -93,6 +102,20 @@ adminMenuTextRouter.on("message:text", async (ctx, next) => {
       return next();
     }
     await safeReply(ctx, ADMIN_MENU_ACCESS_DENIED_TEXT);
+    return;
+  }
+  if (resolution.action === "RETURN_TO_USER_MENU") {
+    // The return button lives in the admin menu, so the sender is already a
+    // resolved active admin here - but the destination is the USER surface.
+    // Admin access NEVER bypasses the user-area gates (blocked/maintenance/
+    // terms/force-join), so apply them explicitly before showing the user
+    // menu; the inline twin (CB.USER_MENU) is gated by userAccessMiddleware.
+    // Reuse showUserMenu so every keyboard-transition + session flag stays in
+    // one place (no duplicated rendering/state handling).
+    if (!(await ensureUserAccess(ctx))) {
+      return;
+    }
+    await showUserMenu(ctx);
     return;
   }
   await openAdminMainMenuSection(ctx, resolution.action);
