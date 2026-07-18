@@ -256,7 +256,12 @@ d("checkout-payment reminder delivery", () => {
     const secret = "AUTH-SECRET-zarinpal-abcdef123456";
     const user = await makeUser();
     const checkout = await makeCheckout(user, 5);
-    const payment = await makeFailedPayment(user, checkout, { authority: secret, externalReference: secret });
+    // authority is globally unique - keep it distinct per run while still
+    // containing the secret substring the message must never expose.
+    const payment = await makeFailedPayment(user, checkout, {
+      authority: `${secret}-${runTag}-${seq}`,
+      externalReference: secret,
+    });
     const id = await paymentNotification(user, checkout, payment);
     await processor(deliverJob(id));
     expect(JSON.stringify(sentBodies[0])).not.toContain(secret);
