@@ -142,3 +142,15 @@ The worker status snapshot (`zedbot:notif:worker-status`) gains
 The admin «اعلان‌ها و یادآوری‌ها 🔔» page shows «آخرین بررسی سفارش‌های ناقص» /
 «آخرین بررسی پرداخت‌های ناموفق» + candidate counts. Enabling either checkout rule
 requires the same fresh-status activation gate as the Phase-1 rules.
+
+## Customer win-back status (Phase 3)
+
+The worker status snapshot gains `lastRetentionScanAt`, `winbackCandidates`,
+`winbackScheduled`, `winbackExcludedUncertainService` and `retentionScanFailures`
+(all optional, for rolling upgrades). The admin «بازگرداندن مشتریان غیرفعال 👋»
+page shows «آخرین بررسی بازگشت مشتری» + the dry-run audience estimate (تخمینی).
+Enabling the win-back rule requires the same fresh-status activation gate as the
+other rules, PLUS a healthy retention scheduler and ≥1 allowed user group. A large
+`winbackExcludedUncertainService` means paid-service state is stale (priority
+syncs are being enqueued); win-back is never sent on a guess. All fields are
+counts/timestamps only — never a user id or financial value.

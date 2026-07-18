@@ -86,8 +86,11 @@ d("winback reminder delivery", () => {
   afterAll(async () => {
     await prisma.$disconnect();
   });
-  beforeEach(() => {
+  beforeEach(async () => {
     installFetchStub();
+    // Use the code-default win-back config (stages [30,60,90], groups ["F"]) so
+    // these delivery fixtures are not affected by a config another suite persisted.
+    await prisma.setting.deleteMany({ where: { key: "notification_winback_config" } });
   });
   afterEach(() => {
     vi.restoreAllMocks();

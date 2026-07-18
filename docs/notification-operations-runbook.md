@@ -91,3 +91,24 @@ stays authoritative.
 - **Known limitations**: the payment scan bounds itself to failures in the last
   7 days; a pure usage reset without renewal does not re-open a cycle (Phase 1);
   quiet-hours/daily-cap deferrals re-arm on the reconcile cadence (≤5 min).
+
+## Customer win-back (Phase 3)
+
+Enable: admin → تنظیمات عمومی → «اعلان‌ها و یادآوری‌ها 🔔» → «بازگرداندن مشتریان
+غیرفعال 👋». Tune the config (stages/groups/thresholds/snooze/max), preview the
+audience (تخمینی), send a test, then toggle on behind the fail-safe activation
+gate (master · Redis · heartbeat · fresh status · retention scheduler · template ·
+config · ≥1 group). OWNER-only; disabled by default. Full detail (health signals,
+safe log events, user controls, rollback, limitations, Phase 4) lives in
+[customer-winback-operations.md](customer-winback-operations.md).
+
+- **Rollback**: disable the rule (or the master switch) — the retention scheduler
+  is removed within ≤5 min; scheduled reminders cancel at delivery re-validation.
+  No data migration.
+- **Troubleshooting**: a reminder that never fires — check the rule enabled + fresh
+  worker status + the customer is a completed paying customer with no usable/
+  uncertain paid service, not snoozed/opted-out, past the first stage, under the
+  per-cycle cap. A reminder to someone who bought again is impossible (delivery
+  cancels `winback-cycle-changed` / `winback-active-service`). A large
+  `winbackExcludedUncertainService` means panels are stale/unreachable (priority
+  syncs are being enqueued; nothing is guessed).

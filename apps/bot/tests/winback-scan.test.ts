@@ -57,6 +57,9 @@ d("winback notification scan", () => {
 
   beforeEach(async () => {
     await Promise.all([setBool(KEYS.master, true), setBool(KEYS.winback, true)]);
+    // Reset the win-back config to the code default so these scan tests are not
+    // affected by a config another suite persisted (e.g. an extra allowed group).
+    await prisma.setting.deleteMany({ where: { key: "notification_winback_config" } });
   });
 
   async function makeUser(overrides: Partial<User> = {}): Promise<User> {
