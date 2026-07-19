@@ -13,11 +13,18 @@ import {
   NOTIFICATION_JOB_NAMES,
   NOTIFICATION_MAINTENANCE_QUEUE_NAME,
   NOTIFICATION_WORKER_STATUS_KEY,
+  REFERRAL_EXECUTE_QUEUE_NAME,
+  REFERRAL_JOB_NAMES,
+  REFERRAL_QUEUE_NAME,
+  REFERRAL_WORKER_STATUS_KEY,
   STARS_SUBSCRIPTION_JOB_NAMES,
   STARS_SUBSCRIPTION_QUEUE_NAME,
   WORKER_CAPABILITIES_KEY,
   WORKER_HEARTBEAT_KEY,
+  referralCreditJobId,
+  referralReverseJobId,
   type NotificationWorkerStatus,
+  type ReferralWorkerStatus,
   type WorkerCapabilities,
 } from "@zedbot/shared";
 import { Queue } from "bullmq";
@@ -73,6 +80,8 @@ interface QueuePair {
   notifMaintenance: Queue;
   autoRenewalControl: Queue;
   starsSubscriptionControl: Queue;
+  referralControl: Queue;
+  referralExecute: Queue;
 }
 
 let queues: QueuePair | null = null;
@@ -111,12 +120,14 @@ function getQueues(): QueuePair | null {
   const notifMaintenance = new Queue(NOTIFICATION_MAINTENANCE_QUEUE_NAME, { connection });
   const autoRenewalControl = new Queue(AUTO_RENEWAL_QUEUE_NAME, { connection });
   const starsSubscriptionControl = new Queue(STARS_SUBSCRIPTION_QUEUE_NAME, { connection });
-  for (const queue of [backup, logDelivery, logGroupSetup, notifMaintenance, autoRenewalControl, starsSubscriptionControl]) {
+  const referralControl = new Queue(REFERRAL_QUEUE_NAME, { connection });
+  const referralExecute = new Queue(REFERRAL_EXECUTE_QUEUE_NAME, { connection });
+  for (const queue of [backup, logDelivery, logGroupSetup, notifMaintenance, autoRenewalControl, starsSubscriptionControl, referralControl, referralExecute]) {
     queue.on("error", (err) => {
       logger.warn("ops queue redis error", { queue: queue.name, error: errorText(err) });
     });
   }
-  queues = { backup, logDelivery, logGroupSetup, notifMaintenance, autoRenewalControl, starsSubscriptionControl };
+  queues = { backup, logDelivery, logGroupSetup, notifMaintenance, autoRenewalControl, starsSubscriptionControl, referralControl, referralExecute };
   queuesFingerprint = fingerprint;
   return queues;
 }
@@ -130,6 +141,8 @@ export async function resetOpsQueueForTests(): Promise<void> {
     await queues.notifMaintenance.close().catch(() => undefined);
     await queues.autoRenewalControl.close().catch(() => undefined);
     await queues.starsSubscriptionControl.close().catch(() => undefined);
+    await queues.referralControl.close().catch(() => undefined);
+    await queues.referralExecute.close().catch(() => undefined);
     queues = null;
     queuesFingerprint = "";
   }
@@ -411,6 +424,136 @@ export async function enqueueStarsSubscriptionReconcileNow(): Promise<boolean> {
   } catch (err) {
     logger.warn("stars subscription manual reconcile enqueue failed", { error: errorText(err) });
     return false;
+  }
+}
+
+/**
+ * Referral financial-safety phase: the AFTER-COMMIT durable credit hook. Enqueues
+ * the idempotent commission credit of ONE completed Order onto the bot-consumed
+ * referral execute queue, carrying ONLY the orderId. jobId = per-order, so a
+ * re-fired dispatch collapses onto one job; the unique orderId commission row is
+ * the durable convergence anchor regardless. Bounded retries with backoff make a
+ * transient DB error recover automatically; the periodic worker credit scan is the
+ * catch-all for a Redis flush / missed enqueue. Fail-soft: Redis unavailable
+ * returns false and the scan picks the order up later. NEVER call inside the
+ * payment transaction (runs after commit).
+ */
+export async function enqueueReferralCredit(orderId: string): Promise<boolean> {
+  const pair = getQueues();
+  if (pair === null) {
+    return false;
+  }
+  try {
+    await withTimeout(
+      pair.referralExecute.add(
+        REFERRAL_JOB_NAMES.CREDIT_REFERRAL_COMMISSION,
+        { orderId },
+        {
+          jobId: referralCreditJobId(orderId),
+          attempts: 5,
+          backoff: { type: "exponential", delay: 10_000 },
+          removeOnComplete: true,
+          removeOnFail: { age: 24 * 3600 },
+        },
+      ),
+    );
+    return true;
+  } catch (err) {
+    logger.warn("referral credit enqueue failed", { orderId, error: errorText(err) });
+    return false;
+  }
+}
+
+/**
+ * Durable referral reversal hook: enqueues the clawback of ONE refunded order's
+ * commission onto the bot-consumed execute queue (orderId only). jobId = per-order.
+ * Fail-soft; the worker reversal scan is the authoritative catch-all, so a lost
+ * enqueue is recovered.
+ */
+export async function enqueueReferralReverse(orderId: string): Promise<boolean> {
+  const pair = getQueues();
+  if (pair === null) {
+    return false;
+  }
+  try {
+    await withTimeout(
+      pair.referralExecute.add(
+        REFERRAL_JOB_NAMES.REVERSE_REFERRAL_COMMISSION,
+        { orderId },
+        {
+          jobId: referralReverseJobId(orderId),
+          attempts: 5,
+          backoff: { type: "exponential", delay: 10_000 },
+          removeOnComplete: true,
+          removeOnFail: { age: 24 * 3600 },
+        },
+      ),
+    );
+    return true;
+  } catch (err) {
+    logger.warn("referral reverse enqueue failed", { orderId, error: errorText(err) });
+    return false;
+  }
+}
+
+/**
+ * OWNER-triggered manual referral reconcile: kicks the credit, reversal and debt-
+ * recovery scans once (jobId-deduped so a double-tap can't stack runs). The worker
+ * no-ops every scan while the master switch is off, so this can never pay behind a
+ * disabled system. Fail-soft: returns false when Redis is unavailable.
+ */
+export async function enqueueReferralReconcileNow(): Promise<boolean> {
+  const pair = getQueues();
+  if (pair === null) {
+    return false;
+  }
+  try {
+    await withTimeout(
+      Promise.all([
+        pair.referralControl.add(REFERRAL_JOB_NAMES.SCAN_REFERRAL_CREDITS, {}, { jobId: "ref-credits-manual", removeOnComplete: true, removeOnFail: true }),
+        pair.referralControl.add(REFERRAL_JOB_NAMES.SCAN_REFERRAL_REVERSALS, {}, { jobId: "ref-reversals-manual", removeOnComplete: true, removeOnFail: true }),
+        pair.referralControl.add(REFERRAL_JOB_NAMES.RECOVER_REFERRAL_DEBTS, {}, { jobId: "ref-recovery-manual", removeOnComplete: true, removeOnFail: true }),
+      ]),
+    );
+    return true;
+  } catch (err) {
+    logger.warn("referral manual reconcile enqueue failed", { error: errorText(err) });
+    return false;
+  }
+}
+
+/** Reads the worker-published referral reconciliation status snapshot; null on any error. */
+export async function readReferralWorkerStatus(): Promise<ReferralWorkerStatus | null> {
+  const redis = getReader();
+  if (redis === null) {
+    return null;
+  }
+  try {
+    const raw = await withTimeout(redis.get(REFERRAL_WORKER_STATUS_KEY));
+    if (raw === null) {
+      return null;
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    const v = parsed as Record<string, unknown>;
+    const num = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+    return {
+      enabled: v.enabled === true,
+      lastScanAt: typeof v.lastScanAt === "string" ? v.lastScanAt : null,
+      creditScanEnqueued: num(v.creditScanEnqueued),
+      reversalScanEnqueued: num(v.reversalScanEnqueued),
+      recoveryScanEnqueued: num(v.recoveryScanEnqueued),
+      paidCount: num(v.paidCount),
+      reversedCount: num(v.reversedCount),
+      reversalPendingCount: num(v.reversalPendingCount),
+      reversalPendingOutstandingToman: num(v.reversalPendingOutstandingToman),
+      executeFailures: num(v.executeFailures),
+      checkedAt: typeof v.checkedAt === "string" ? v.checkedAt : "",
+    };
+  } catch {
+    return null;
   }
 }
 

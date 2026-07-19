@@ -352,11 +352,20 @@ order (`floor(amount × percent / 100)`) as a real wallet commission
 (`WalletTransaction` type `COMMISSION` / source `REFERRAL`). The payout is
 idempotent (one commission per order, enforced by a `@@unique(orderId)` claimed
 before any money moves), atomic (increment-with-row-lock ledger write), and
-reversible (a refunded order claws the credit back). The OWNER enables it and
-sets the percent / first-purchase-only / minimum-order policy from «تنظیمات
-عمومی ⚙️ → زیرمجموعه‌گیری و پاداش 👥»; the user menu button stays hidden while the
-program is off. Referral *attribution* (the `/start` linker) is unchanged and
-always on. See `docs/referral-affiliate-system.md`.
+reversible (a refunded order claws the credit back). Financial-safety hardening
+makes it **durable** (a worker reconciliation engine recovers any credit/reversal
+the live hook missed — a crash or Redis flush never loses money), gated by an
+**activation horizon** (only orders completed after payouts were first enabled are
+eligible — no historical back-fill), **no-overdraft** on reversal (a shortfall
+becomes an auditable `REVERSAL_PENDING` debt collected as funds arrive, never a
+negative wallet), and first-purchase-safe under concurrency (a `SELECT … FOR
+UPDATE` on the referral). The OWNER enables it and sets the percent /
+first-purchase-only / minimum-order policy from «تنظیمات عمومی ⚙️ →
+زیرمجموعه‌گیری و پاداش 👥» (with a manual reconcile action and paid/reversed/
+pending/net reporting); the user menu button stays hidden and the payout page
+fails closed while the program is off. Referral *attribution* (the `/start`
+linker, now one atomic claim) is unchanged and always on. See
+`docs/referral-affiliate-system.md`.
 
 **Configurable user main-menu keyboard**: admins choose («تنظیمات عمومی ⚙️
 → نوع نمایش منوی کاربر») whether the user main menu renders as inline

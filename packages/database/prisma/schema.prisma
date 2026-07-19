@@ -339,8 +339,13 @@ enum ReferralCommissionStatus {
   PAID
   CANCELLED
   // Affiliate-commission phase: a PAID commission whose source order was later
-  // refunded/cancelled is REVERSED (the wallet credit is clawed back).
+  // refunded/cancelled is REVERSED once its wallet credit is FULLY clawed back.
   REVERSED
+  // Financial-safety phase: the source order was refunded but the referrer's
+  // wallet lacked enough balance to claw the credit back without going negative
+  // (allowNegativeBalance=false). What could be recovered was; the remainder
+  // (recoveryOutstandingToman) is an auditable debt collected as funds arrive.
+  REVERSAL_PENDING
 }
 
 enum SupportMode {
@@ -1531,8 +1536,20 @@ model ReferralCommission {
   status              ReferralCommissionStatus @default(PENDING)
   walletTransactionId String?
   walletTransaction   WalletTransaction?       @relation(fields: [walletTransactionId], references: [id])
-  // Set when a REVERSED commission's wallet credit was clawed back.
+  // Set to the FIRST clawback debit when a reversal begins. The full recovery
+  // audit trail is the WalletTransaction rows (type SYSTEM_ADJUSTMENT, source
+  // REFERRAL, relatedOrderId) — a single FK cannot hold multiple partial debits.
   reversalWalletTransactionId String?
+  // Financial-safety phase — no-overdraft clawback accounting:
+  //   recoveredToman           = amount actually clawed back so far (sum of debits)
+  //   recoveryOutstandingToman = amount still owed (amountToman − recoveredToman)
+  // While REVERSAL_PENDING the outstanding is collected as the referrer's wallet
+  // gains funds; when it reaches 0 the commission becomes REVERSED. A CHECK keeps
+  // 0 <= recovered <= amount so a debt can never be over-collected.
+  recoveredToman           Int       @default(0)
+  recoveryOutstandingToman Int       @default(0)
+  // When the reversal was first detected/initiated (a refunded source order).
+  reversalRequestedAt DateTime?
   createdAt           DateTime                 @default(now())
   paidAt              DateTime?
   reversedAt          DateTime?

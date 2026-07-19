@@ -5,6 +5,7 @@ import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
 import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
+import { startReferralExecuteConsumer } from "./services/referral-execute-consumer.js";
 import { startStarsSubscriptionConsumer } from "./services/stars-subscription-consumer.js";
 import { runningGitSha } from "./services/backup-health.service.js";
 import { startCheckoutInputRetentionLoop } from "./services/checkout-customer-input.service.js";
@@ -50,6 +51,12 @@ async function run(botToken: string): Promise<void> {
   // is unconfigured; the feature is disabled-by-default regardless.
   const starsSubscriptionConsumer = startStarsSubscriptionConsumer(bot.api);
 
+  // Referral commission EXECUTE consumer (financial-safety phase): runs the
+  // idempotent wallet credit / no-overdraft reversal / debt recovery for jobs the
+  // worker (and the live after-commit hook) enqueue. Null when Redis is
+  // unconfigured; the whole feature is disabled-by-default regardless.
+  const referralExecuteConsumer = startReferralExecuteConsumer();
+
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`received ${signal}, stopping bot`);
     try {
@@ -67,6 +74,9 @@ async function run(botToken: string): Promise<void> {
       }
       if (starsSubscriptionConsumer !== null) {
         await starsSubscriptionConsumer.stop();
+      }
+      if (referralExecuteConsumer !== null) {
+        await referralExecuteConsumer.stop();
       }
       await disconnectDatabase();
     } catch (err) {

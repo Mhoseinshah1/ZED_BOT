@@ -20,6 +20,13 @@ export const REFERRAL_COMMISSION_PERCENT_KEY = "referral_commission_percent";
 export const REFERRAL_FIRST_PURCHASE_ONLY_KEY = "referral_first_purchase_only";
 /** Orders paid below this (Toman) never earn a commission. */
 export const REFERRAL_MIN_PURCHASE_TOMAN_KEY = "referral_min_purchase_toman";
+/**
+ * Activation horizon (financial-safety phase). Stamped EXACTLY ONCE the first
+ * time the OWNER enables payouts; ONLY orders completed at or after this instant
+ * are ever eligible for a commission. Disabling and re-enabling preserves the
+ * original stamp, so historical orders can never suddenly be back-filled.
+ */
+export const REFERRAL_COMMISSIONS_STARTED_AT_KEY = "referral_commissions_started_at";
 
 // --- config ------------------------------------------------------------------
 
@@ -99,4 +106,154 @@ export function resolveReferralCommission(input: {
 /** The user-facing t.me deep link that attributes a new user to this referrer. */
 export function referralDeepLink(botUsername: string, referralCode: string): string {
   return `https://t.me/${botUsername}?start=${referralCode}`;
+}
+
+// --- activation horizon (pure) -----------------------------------------------
+
+/**
+ * True when an order completed at/after the activation horizon and may earn a
+ * commission. A null horizon means payouts were never properly activated → NO
+ * order is eligible (fail-closed; never back-fill history). Deterministic in its
+ * inputs — no clock, no I/O.
+ */
+export function isOrderWithinReferralHorizon(input: {
+  orderCompletedAtEpoch: number | null;
+  horizonEpoch: number | null;
+}): boolean {
+  if (input.horizonEpoch === null) {
+    return false;
+  }
+  if (input.orderCompletedAtEpoch === null || !Number.isFinite(input.orderCompletedAtEpoch)) {
+    return false;
+  }
+  return input.orderCompletedAtEpoch >= input.horizonEpoch;
+}
+
+// --- no-overdraft clawback (pure) --------------------------------------------
+
+export interface ReferralClawbackPlan {
+  /** How much can be debited NOW without overdrawing (== outstanding when allowed negative). */
+  recoverNow: number;
+  /** Amount still owed AFTER this step. */
+  remainingOutstanding: number;
+  /** True when this step clears the whole debt (→ REVERSED). */
+  fullyRecovered: boolean;
+}
+
+/**
+ * Decides how much of an outstanding referral debt to claw back in one step
+ * WITHOUT driving the wallet below zero (unless the user is explicitly allowed a
+ * negative balance). Never returns a negative amount and never exceeds the
+ * outstanding debt, so the same debt can never be over-collected. Pure and
+ * deterministic — the row-locked recovery transaction supplies the live balance.
+ */
+export function planReferralClawback(input: {
+  outstandingToman: number;
+  currentBalanceToman: number;
+  allowNegativeBalance: boolean;
+}): ReferralClawbackPlan {
+  const outstanding = Math.max(0, Math.trunc(input.outstandingToman));
+  let recoverNow: number;
+  if (input.allowNegativeBalance) {
+    recoverNow = outstanding;
+  } else {
+    const affordable = Math.max(0, Math.trunc(input.currentBalanceToman));
+    recoverNow = Math.min(outstanding, affordable);
+  }
+  const remainingOutstanding = outstanding - recoverNow;
+  return { recoverNow, remainingOutstanding, fullyRecovered: remainingOutstanding === 0 };
+}
+
+// --- durable reconciliation: queue / job / scheduler identifiers -------------
+
+/** Worker-owned control queue: scan credits / scan reversals / recover / cleanup. */
+export const REFERRAL_QUEUE_NAME = "referral-commissions";
+/** EXECUTE queue consumed by the BOT process (co-located with the wallet ledger). */
+export const REFERRAL_EXECUTE_QUEUE_NAME = "referral-commissions-execute";
+
+export const REFERRAL_JOB_NAMES = {
+  /** Control (worker): find COMPLETED post-horizon orders missing a commission. */
+  SCAN_REFERRAL_CREDITS: "SCAN_REFERRAL_CREDITS",
+  /** Control (worker): find PAID commissions whose source order was refunded. */
+  SCAN_REFERRAL_REVERSALS: "SCAN_REFERRAL_REVERSALS",
+  /** Control (worker): retry REVERSAL_PENDING debts as funds become available. */
+  RECOVER_REFERRAL_DEBTS: "RECOVER_REFERRAL_DEBTS",
+  /** Control (worker): terminal-row retention cleanup. */
+  CLEANUP_REFERRAL_COMMISSIONS: "CLEANUP_REFERRAL_COMMISSIONS",
+  /** Execute (bot): credit ONE order's commission (idempotent, orderId only). */
+  CREDIT_REFERRAL_COMMISSION: "CREDIT_REFERRAL_COMMISSION",
+  /** Execute (bot): reverse ONE refunded order's commission (orderId only). */
+  REVERSE_REFERRAL_COMMISSION: "REVERSE_REFERRAL_COMMISSION",
+  /** Execute (bot): recover more of ONE REVERSAL_PENDING debt (commissionId only). */
+  RECOVER_REFERRAL_COMMISSION: "RECOVER_REFERRAL_COMMISSION",
+} as const;
+export type ReferralJobName = (typeof REFERRAL_JOB_NAMES)[keyof typeof REFERRAL_JOB_NAMES];
+
+export const REFERRAL_SCHEDULER_IDS = {
+  credits: "ref-sched-credits",
+  reversals: "ref-sched-reversals",
+  recovery: "ref-sched-recovery",
+  cleanup: "ref-sched-cleanup",
+} as const;
+
+/** Redis lock: only one referral reconciliation scan runs at a time. */
+export const REFERRAL_SCAN_LOCK_KEY = "zedbot:referral-scan-lock";
+/** Worker-published referral reconciliation status snapshot (heartbeat/dry-run). */
+export const REFERRAL_WORKER_STATUS_KEY = "zedbot:referral-worker-status";
+
+/** Idempotent per-order credit execute job id (retry/duplicate collapse onto one). */
+export function referralCreditJobId(orderId: string): string {
+  return `ref-credit-${orderId}`;
+}
+/** Idempotent per-order reversal execute job id. */
+export function referralReverseJobId(orderId: string): string {
+  return `ref-reverse-${orderId}`;
+}
+/** Idempotent per-commission recovery execute job id. */
+export function referralRecoverJobId(commissionId: string): string {
+  return `ref-recover-${commissionId}`;
+}
+
+/** How often the worker reconciliation scans run (safe on any cadence). */
+export const REFERRAL_RECONCILE_INTERVAL_MS = 5 * 60_000;
+/** Terminal-row retention cleanup cadence. */
+export const REFERRAL_CLEANUP_INTERVAL_MS = 24 * 60 * 60_000;
+/** Bounded batch: max orders/commissions examined per scan run. */
+export const REFERRAL_SCAN_BATCH = 500;
+/**
+ * Reversal/credit look-back: a worker down for up to a week still catches every
+ * missed credit and every refund on restart. Comfortably exceeds the scan cadence.
+ */
+export const REFERRAL_SCAN_LOOKBACK_MS = 7 * 24 * 3_600_000;
+/** How long terminal (REVERSED/CANCELLED) rows are retained before cleanup (days). */
+export const REFERRAL_COMMISSION_RETENTION_DAYS = 730;
+
+// --- worker status snapshot --------------------------------------------------
+
+/**
+ * The referral reconciliation heartbeat/status snapshot the worker publishes to
+ * Redis each scan. Counts + timestamps only — NEVER a user id, telegram id,
+ * referral code, order id or wallet balance.
+ */
+export interface ReferralWorkerStatus {
+  enabled: boolean;
+  /** ISO instant of the last credit/reversal/recovery scan (null before the first). */
+  lastScanAt: string | null;
+  /** Orders the last credit scan enqueued for crediting. */
+  creditScanEnqueued: number;
+  /** Commissions the last reversal scan enqueued for clawback. */
+  reversalScanEnqueued: number;
+  /** REVERSAL_PENDING debts the last recovery scan retried. */
+  recoveryScanEnqueued: number;
+  /** Live count of PAID commissions (retained payouts). */
+  paidCount: number;
+  /** Live count of fully-reversed commissions. */
+  reversedCount: number;
+  /** Live count of REVERSAL_PENDING commissions (debt still owed). */
+  reversalPendingCount: number;
+  /** Live sum of outstanding (uncollected) debt across REVERSAL_PENDING rows. */
+  reversalPendingOutstandingToman: number;
+  /** Execute jobs that exhausted their retries since the last reset (observability). */
+  executeFailures: number;
+  checkedAt: string;
 }

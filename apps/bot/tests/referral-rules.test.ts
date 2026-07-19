@@ -1,6 +1,8 @@
 import {
   DEFAULT_REFERRAL_CONFIG,
   clampReferralInt,
+  isOrderWithinReferralHorizon,
+  planReferralClawback,
   referralDeepLink,
   resolveReferralCommission,
   type ReferralConfig,
@@ -74,5 +76,48 @@ describe("clampReferralInt", () => {
 describe("referralDeepLink", () => {
   it("R10: builds a t.me start deep link from the bot username + referral code", () => {
     expect(referralDeepLink("MyBot", "12345")).toBe("https://t.me/MyBot?start=12345");
+  });
+});
+
+describe("isOrderWithinReferralHorizon", () => {
+  it("R11: a null horizon is fail-closed — no order is eligible (never back-fills)", () => {
+    expect(isOrderWithinReferralHorizon({ orderCompletedAtEpoch: 1_000, horizonEpoch: null })).toBe(false);
+  });
+  it("R12: an order completed before the horizon is ineligible", () => {
+    expect(isOrderWithinReferralHorizon({ orderCompletedAtEpoch: 999, horizonEpoch: 1_000 })).toBe(false);
+  });
+  it("R13: an order completed at/after the horizon is eligible", () => {
+    expect(isOrderWithinReferralHorizon({ orderCompletedAtEpoch: 1_000, horizonEpoch: 1_000 })).toBe(true);
+    expect(isOrderWithinReferralHorizon({ orderCompletedAtEpoch: 1_001, horizonEpoch: 1_000 })).toBe(true);
+  });
+  it("R14: a null/invalid completion time is ineligible", () => {
+    expect(isOrderWithinReferralHorizon({ orderCompletedAtEpoch: null, horizonEpoch: 1_000 })).toBe(false);
+  });
+});
+
+describe("planReferralClawback (no-overdraft)", () => {
+  it("R15: full reversal when the balance covers the debt", () => {
+    expect(planReferralClawback({ outstandingToman: 10_000, currentBalanceToman: 15_000, allowNegativeBalance: false }))
+      .toEqual({ recoverNow: 10_000, remainingOutstanding: 0, fullyRecovered: true });
+  });
+  it("R16: partial reversal — never exceeds the affordable balance, no negative", () => {
+    expect(planReferralClawback({ outstandingToman: 10_000, currentBalanceToman: 3_000, allowNegativeBalance: false }))
+      .toEqual({ recoverNow: 3_000, remainingOutstanding: 7_000, fullyRecovered: false });
+  });
+  it("R17: zero balance recovers nothing and leaves the whole debt", () => {
+    expect(planReferralClawback({ outstandingToman: 10_000, currentBalanceToman: 0, allowNegativeBalance: false }))
+      .toEqual({ recoverNow: 0, remainingOutstanding: 10_000, fullyRecovered: false });
+  });
+  it("R18: a negative balance never recovers (and never over-collects)", () => {
+    expect(planReferralClawback({ outstandingToman: 10_000, currentBalanceToman: -500, allowNegativeBalance: false }))
+      .toEqual({ recoverNow: 0, remainingOutstanding: 10_000, fullyRecovered: false });
+  });
+  it("R19: allowNegativeBalance users are fully clawed back regardless of balance", () => {
+    expect(planReferralClawback({ outstandingToman: 10_000, currentBalanceToman: 0, allowNegativeBalance: true }))
+      .toEqual({ recoverNow: 10_000, remainingOutstanding: 0, fullyRecovered: true });
+  });
+  it("R20: recovery never exceeds the outstanding debt", () => {
+    expect(planReferralClawback({ outstandingToman: 2_000, currentBalanceToman: 999_999, allowNegativeBalance: false }))
+      .toEqual({ recoverNow: 2_000, remainingOutstanding: 0, fullyRecovered: true });
   });
 });
