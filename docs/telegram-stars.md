@@ -79,3 +79,13 @@ Availability is re-read on the manager's ~30 s cache cycle, so admin rate
 edits take effect quickly. Since Telegram offers no payment-status poll,
 `verifyPayment` reports `uncertain` — bot updates are authoritative and the
 sweep settles any recorded SUCCESS the handler missed.
+
+## Recurring subscriptions (Automatic Renewal Phase 2)
+
+The **one-time** Stars flow documented above is unchanged. Recurring monthly
+Service renewals funded by Telegram Stars subscriptions are a separate,
+disabled-by-default system using `createInvoiceLink` (`subscription_period =
+2592000`) and the `zedbot:sub:<publicPayloadId>` payload scheme (strictly
+separate from the one-time `zedbot:pay:` scheme). See
+`telegram-stars-service-subscriptions.md` and its `-payments` / `-refunds` /
+`-operations` / `-concurrency` siblings.

@@ -288,6 +288,10 @@ export function serviceDetailKeyboard(
   // (same import-cycle reason as the notification buttons above).
   if (actions.canRenew && service.expiresAt !== null) {
     kb.text("تمدید خودکار 🔁", `user:arn:svc:${sid}`).row();
+    // Stars monthly subscription (Phase 2). Same finite-expiry renewal gate; the
+    // route re-validates operational state + subscription-enabled 30-day plans on
+    // click and shows the intro/status. Literal callback (import-cycle reason).
+    kb.text("اشتراک ماهانه Stars ⭐", `user:sub:svc:${sid}`).row();
   }
   // Row 6: enable/disable, labeled by the direction that currently applies
   // (transfer slot hidden - not implemented).

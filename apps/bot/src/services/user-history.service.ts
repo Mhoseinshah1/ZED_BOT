@@ -117,6 +117,8 @@ const PAYMENT_PURPOSE_TITLE: Record<PaymentPurpose, string> = {
   WALLET_CHARGE: "شارژ کیف پول",
   ORDER_PAYMENT: "پرداخت سفارش",
   PAY_WITH_WALLET: "پرداخت با کیف پول",
+  SERVICE_SUBSCRIPTION_INITIAL: "اشتراک ماهانه (پرداخت اول)",
+  SERVICE_SUBSCRIPTION_RECURRING: "اشتراک ماهانه (تمدید دوره‌ای)",
 };
 
 export function paymentPurposeTitle(purpose: PaymentPurpose): string {

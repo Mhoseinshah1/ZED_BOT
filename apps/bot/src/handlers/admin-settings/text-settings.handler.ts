@@ -122,6 +122,10 @@ export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     // literal callback avoids importing the admin handler into this module.
     .text("تمدید خودکار 🔁", "admin:war:root")
     .row()
+    // Telegram Stars monthly subscriptions (Phase 2). OWNER-only (handler
+    // re-checks); literal callback avoids importing the admin handler here.
+    .text("اشتراک‌های ماهانه Stars ⭐", "admin:starsub:root")
+    .row()
     .text("تنظیمات گروه لاگ 📝", LG_CB.root)
     .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
