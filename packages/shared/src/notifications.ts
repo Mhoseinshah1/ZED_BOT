@@ -135,6 +135,16 @@ export interface NotificationWorkerStatus {
   autoRenewalInsufficientBalanceCount?: number;
   autoRenewalRequiresActionCount?: number;
   autoRenewalFailureCount?: number;
+  // Telegram Stars subscriptions phase (Phase 2). Optional for rolling upgrades;
+  // counts + timestamps only, never a user/charge id.
+  starsSubscriptionsEnabled?: boolean;
+  lastStarsSubscriptionReconcileAt?: string | null;
+  starsSubscriptionsActive?: number;
+  starsSubscriptionChargesProcessed?: number;
+  starsSubscriptionChargesRefunded?: number;
+  starsSubscriptionPastDue?: number;
+  starsSubscriptionRequiresAction?: number;
+  starsSubscriptionFailures?: number;
 }
 
 // --- Setting keys ------------------------------------------------------------

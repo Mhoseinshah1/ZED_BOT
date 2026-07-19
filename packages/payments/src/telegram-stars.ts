@@ -14,6 +14,72 @@ export const STARS_PAYLOAD_PREFIX = "zedbot:pay:";
 /** Telegram invoice titles are capped at 32 characters. */
 const STARS_TITLE_MAX_LENGTH = 32;
 
+/** The ONLY period Telegram supports for bot Star subscriptions (30 days). */
+export const STARS_SUBSCRIPTION_PERIOD_SECONDS = 2592000;
+/** Telegram Star subscription amount bounds (inclusive). */
+export const STARS_SUBSCRIPTION_MIN_AMOUNT = 1;
+export const STARS_SUBSCRIPTION_MAX_AMOUNT = 10000;
+
+/** The exact `createInvoiceLink` parameters for a recurring Stars subscription. */
+export interface StarsSubscriptionInvoiceParams {
+  title: string;
+  description: string;
+  /** `zedbot:sub:<publicPayloadId>` — built by the caller (from @zedbot/shared). */
+  payload: string;
+  currency: "XTR";
+  /** Exactly 2592000 — the only period Telegram supports. */
+  subscriptionPeriod: number;
+  /** Exactly ONE labeled price of `starsAmount` Stars. */
+  prices: { label: string; amount: number }[];
+}
+
+export interface BuildStarsSubscriptionInvoiceInput {
+  title: string;
+  description: string;
+  payload: string;
+  starsAmount: number;
+  /** Optional label for the single price line (defaults to the title). */
+  priceLabel?: string;
+}
+
+export type BuildStarsSubscriptionInvoiceResult =
+  | { ok: true; params: StarsSubscriptionInvoiceParams }
+  | { ok: false; errorMessage: string };
+
+/**
+ * Builds the `createInvoiceLink` parameters for a recurring Stars subscription.
+ * Pure and dependency-free: `currency = XTR`, `subscription_period = 2592000`,
+ * exactly ONE labeled price, amount in [1, 10000]. This is the ONLY subscription
+ * invoice path — the one-time `createPayment`/`sendInvoice` flow below is
+ * untouched. NO tips, NO name/email/phone/shipping requests.
+ */
+export function buildStarsSubscriptionInvoice(
+  input: BuildStarsSubscriptionInvoiceInput,
+): BuildStarsSubscriptionInvoiceResult {
+  if (
+    !Number.isInteger(input.starsAmount) ||
+    input.starsAmount < STARS_SUBSCRIPTION_MIN_AMOUNT ||
+    input.starsAmount > STARS_SUBSCRIPTION_MAX_AMOUNT
+  ) {
+    return { ok: false, errorMessage: "Stars subscription amount is out of range (1..10000)." };
+  }
+  if (!input.payload.startsWith("zedbot:sub:")) {
+    return { ok: false, errorMessage: "Subscription invoice payload must use the zedbot:sub: scheme." };
+  }
+  const title = input.title.trim().slice(0, STARS_TITLE_MAX_LENGTH);
+  return {
+    ok: true,
+    params: {
+      title,
+      description: input.description,
+      payload: input.payload,
+      currency: "XTR",
+      subscriptionPeriod: STARS_SUBSCRIPTION_PERIOD_SECONDS,
+      prices: [{ label: (input.priceLabel ?? title).slice(0, STARS_TITLE_MAX_LENGTH), amount: input.starsAmount }],
+    },
+  };
+}
+
 export interface TelegramStarsConfig {
   /** Operator switch (TELEGRAM_STARS_ENABLED === "true"). */
   enabled: boolean;
