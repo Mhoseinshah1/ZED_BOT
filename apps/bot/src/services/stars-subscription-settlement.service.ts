@@ -108,14 +108,25 @@ export async function settleTelegramStarsSubscriptionCharge(
       if (existing === null) {
         return { kind: "in-progress" };
       }
+      // Already-resolved charges return their outcome WITHOUT re-driving the
+      // financial chain (one charge id → at most one Payment/Order/renewal).
       if (existing.status === "COMPLETED") {
         return { kind: "already-completed" };
       }
+      if (existing.status === "REFUND_PENDING") {
+        return { kind: "refund-required", chargeId: existing.id };
+      }
+      if (existing.status === "REFUNDED" || existing.status === "FAILED" || existing.status === "IGNORED") {
+        return { kind: "ignored", reason: `already-${existing.status.toLowerCase()}` };
+      }
+      if (existing.status === "RECONCILIATION_REQUIRED") {
+        return { kind: "reconciliation-required" };
+      }
       if (existing.orderId !== null) {
-        // A financial chain exists; re-drive fulfillment (idempotent) if not done.
+        // FULFILLING crash recovery: the chain exists; re-drive fulfillment only.
         return finishAfterOrder(api, subscription, existing.id, existing.orderId);
       }
-      // Another delivery is mid-settlement, or a prior attempt left it RECEIVED.
+      // Another delivery is mid-settlement (RECEIVED/SETTLING).
       chargeId = existing.id;
     } else {
       throw err;
