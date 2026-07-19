@@ -87,6 +87,7 @@ import {
   adminNotificationsHandler,
   adminNotificationsTextHandler,
 } from "./handlers/admin-settings/notifications.handler.js";
+import { autoRenewalAdminHandler } from "./handlers/admin-settings/auto-renewal-admin.handler.js";
 import { userNotificationsHandler } from "./handlers/user-notifications/notification.handler.js";
 import {
   reportsBackupHandler,
@@ -190,6 +191,10 @@ export function createBot(token: string): Bot<BotContext> {
   // Notification-engine phase: «اعلان‌ها و یادآوری‌ها 🔔» admin settings +
   // health page (admin:ntf*). Reads for any admin; mutations OWNER-only.
   adminArea.use(adminNotificationsHandler);
+  // Wallet auto-renewal (Phase 1): OWNER-only «تمدید خودکار 🔁» admin page
+  // (admin:war:*) — master switch, dry-run preview, paused-mandate review,
+  // admin pause/cancel, manual scan. Never enables a user's mandate.
+  adminArea.use(autoRenewalAdminHandler);
   // Direct-log-group-setup phase: the numeric-ID connection UI (admin:lg:id*,
   // admin:lg:op:*). The status-page keyboards (log-group.handler.ts) mount
   // via adminTextSettingsHandler above; this composer owns the new flow.

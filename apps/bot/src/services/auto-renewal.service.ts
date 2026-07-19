@@ -427,6 +427,132 @@ export async function adminStopMandate(
   return res.count > 0;
 }
 
+// --- admin views -------------------------------------------------------------
+
+export interface AutoRenewalAdminStats {
+  enabled: boolean;
+  activeMandates: number;
+  pausedMandates: number;
+  cancelledMandates: number;
+  openAttempts: number;
+  completedToday: number;
+  insufficientBalance: number;
+  requiresAction: number;
+  failed: number;
+}
+
+/** Authoritative counts for the admin overview (read straight from the DB). */
+export async function getAutoRenewalAdminStats(): Promise<AutoRenewalAdminStats> {
+  const dayAgo = new Date(Date.now() - 24 * 3_600_000);
+  const [
+    enabled,
+    activeMandates,
+    pausedMandates,
+    cancelledMandates,
+    openAttempts,
+    completedToday,
+    insufficientBalance,
+    requiresAction,
+    failed,
+  ] = await Promise.all([
+    isWalletAutoRenewalEnabled(),
+    prisma.serviceAutoRenewalMandate.count({ where: { status: AutoRenewalMandateStatus.ACTIVE } }),
+    prisma.serviceAutoRenewalMandate.count({ where: { status: AutoRenewalMandateStatus.PAUSED } }),
+    prisma.serviceAutoRenewalMandate.count({ where: { status: AutoRenewalMandateStatus.CANCELLED } }),
+    prisma.serviceAutoRenewalAttempt.count({
+      where: { status: { in: ["SCHEDULED", "CLAIMED", "PAYMENT_CREATED", "FULFILLING"] } },
+    }),
+    prisma.serviceAutoRenewalAttempt.count({
+      where: { status: "COMPLETED", completedAt: { gte: dayAgo } },
+    }),
+    prisma.serviceAutoRenewalAttempt.count({ where: { status: "INSUFFICIENT_BALANCE" } }),
+    prisma.serviceAutoRenewalAttempt.count({ where: { status: "REQUIRES_ACTION" } }),
+    prisma.serviceAutoRenewalAttempt.count({ where: { status: { in: ["FAILED", "DEAD_LETTER"] } } }),
+  ]);
+  return {
+    enabled,
+    activeMandates,
+    pausedMandates,
+    cancelledMandates,
+    openAttempts,
+    completedToday,
+    insufficientBalance,
+    requiresAction,
+    failed,
+  };
+}
+
+export interface AutoRenewalPreviewRow {
+  mandate: ServiceAutoRenewalMandate;
+  username: string;
+  expiresAt: Date | null;
+}
+
+/**
+ * Dry-run preview: ACTIVE mandates whose Service is already inside the
+ * charge-lead window (would be picked up by the next scan). READ-ONLY — this
+ * never creates an attempt and never moves money.
+ */
+export async function previewDueMandates(limit = 20): Promise<AutoRenewalPreviewRow[]> {
+  const now = Date.now();
+  const mandates = await prisma.serviceAutoRenewalMandate.findMany({
+    where: { status: AutoRenewalMandateStatus.ACTIVE },
+    orderBy: { createdAt: "asc" },
+    take: 500,
+  });
+  const rows: AutoRenewalPreviewRow[] = [];
+  for (const mandate of mandates) {
+    const service = await prisma.service.findUnique({
+      where: { id: mandate.serviceId },
+      select: { username: true, expiresAt: true },
+    });
+    if (service === null || service.expiresAt === null) {
+      continue;
+    }
+    if (service.expiresAt.getTime() - now <= mandate.chargeLeadMinutes * 60_000) {
+      rows.push({ mandate, username: service.username, expiresAt: service.expiresAt });
+      if (rows.length >= limit) {
+        break;
+      }
+    }
+  }
+  return rows;
+}
+
+/** Paused mandates the admin may want to review (with the target username). */
+export async function listPausedMandatesForAdmin(
+  limit = 20,
+): Promise<{ mandate: ServiceAutoRenewalMandate; username: string }[]> {
+  const mandates = await prisma.serviceAutoRenewalMandate.findMany({
+    where: { status: AutoRenewalMandateStatus.PAUSED },
+    orderBy: { pausedAt: "desc" },
+    take: limit,
+  });
+  const services = await prisma.service.findMany({
+    where: { id: { in: mandates.map((m) => m.serviceId) } },
+    select: { id: true, username: true },
+  });
+  const nameById = new Map(services.map((s) => [s.id, s.username]));
+  return mandates.map((mandate) => ({
+    mandate,
+    username: nameById.get(mandate.serviceId) ?? "-",
+  }));
+}
+
+/** Admin mandate lookup by short id (any owner). */
+export async function getMandateByShortIdForAdmin(
+  shortId: string,
+): Promise<ServiceAutoRenewalMandate | null> {
+  if (!/^[0-9a-f-]{4,32}$/i.test(shortId)) {
+    return null;
+  }
+  const matches = await prisma.serviceAutoRenewalMandate.findMany({
+    where: { id: { startsWith: shortId } },
+    take: 2,
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
 // --- execute engine ----------------------------------------------------------
 
 async function pauseMandateForAttempt(

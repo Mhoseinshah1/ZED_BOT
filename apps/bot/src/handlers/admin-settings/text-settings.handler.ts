@@ -118,6 +118,10 @@ export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     .row()
     .text("اعلان‌ها و یادآوری‌ها 🔔", NTF_ADMIN_CB.root)
     .row()
+    // Wallet auto-renewal (Phase 1). OWNER-only page (the handler re-checks);
+    // literal callback avoids importing the admin handler into this module.
+    .text("تمدید خودکار 🔁", "admin:war:root")
+    .row()
     .text("تنظیمات گروه لاگ 📝", LG_CB.root)
     .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
