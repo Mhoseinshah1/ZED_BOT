@@ -3,7 +3,6 @@ import {
   REFERRAL_COMMISSION_RETENTION_DAYS,
   REFERRAL_JOB_NAMES,
   REFERRAL_SCAN_BATCH,
-  REFERRAL_SCAN_LOOKBACK_MS,
   REFERRAL_WORKER_STATUS_KEY,
   createLogger,
   errorMessage,
@@ -16,7 +15,7 @@ import type { Queue } from "bullmq";
 
 import type { RawRedis } from "../redis.js";
 import {
-  getReferralCommissionsStartedAt,
+  getReferralPayoutWindows,
   isReferralSystemEnabled,
 } from "./settings.js";
 
@@ -25,12 +24,19 @@ import {
 // commission impossible to permanently lose and a refund impossible to permanently
 // leave un-reversed. Each scan DISCOVERS work from authoritative DB state and
 // PRODUCES idempotent execute jobs the bot consumes (the bot owns the wallet
-// mutation). Bounded per run; safe on any cadence and while the switch is off
-// (every scan no-ops when disabled). NEVER logs a user/order id or a balance.
-//   credit   — COMPLETED post-horizon orders (referred, no commission) → CREDIT
-//   reversal — PAID commissions whose source order is definitively refunded → REVERSE
-//   recovery — REVERSAL_PENDING debts (retry the no-overdraft clawback) → RECOVER
-//   cleanup  — prune terminal rows past retention (the wallet ledger persists)
+// mutation). Bounded per run; safe on any cadence. NEVER logs a user/order id or a
+// balance.
+//   credit   — orders completed inside an active payout window, referred, still
+//              uncommissioned → CREDIT. No time floor (oldest-first pages), so a
+//              multi-day outage never permanently drops an eligible order; the
+//              engine writes a terminal marker for orders that yield no payout, so
+//              the scan converges instead of re-selecting them forever.
+//   reversal — PAID commissions whose source order is definitively refunded →
+//              REVERSE. Commission-driven (no time floor) and runs REGARDLESS of the
+//              enabled switch, so a refund whose live enqueue was lost while payouts
+//              were paused is still reversed.
+//   recovery — REVERSAL_PENDING debts (retry the no-overdraft clawback) → RECOVER.
+//   cleanup  — prune terminal rows past retention (the wallet ledger persists).
 // =============================================================================
 
 const log = createLogger("worker:referral-scan");
@@ -56,33 +62,42 @@ export function createReferralScanState(): ReferralScanState {
 const jobOpts = { removeOnComplete: true, removeOnFail: { age: 24 * 3600 } } as const;
 
 /**
- * Credit scan: COMPLETED orders (>= horizon, within look-back) belonging to a
- * referred user and still missing a commission → enqueue an idempotent CREDIT job.
- * Recovers every credit the live hook lost to a crash / Redis flush. No-op while
- * disabled or before the horizon is stamped (fail-closed — never back-fills).
+ * Credit scan: orders completed INSIDE an active payout window (so a paused-period
+ * order is never back-filled), belonging to a referred user and still missing a
+ * commission → enqueue an idempotent CREDIT job. Recovers every credit the live
+ * hook lost to a crash / Redis flush. NO time floor — the window ranges bound the
+ * candidate set and orders are processed OLDEST-FIRST in bounded pages, so a
+ * multi-day outage never permanently excludes an eligible order (the durable
+ * recovery guarantee). The engine writes a terminal marker for any candidate that
+ * yields no payout, so this scan converges instead of re-selecting it forever.
+ * No-op while disabled or before the first enable (fail-closed).
  */
 export async function runReferralCreditScan(
   executeQueue: Queue,
   state: ReferralScanState,
-  now: Date = new Date(),
 ): Promise<{ scanned: number; enqueued: number }> {
   if (!(await isReferralSystemEnabled())) {
     return { scanned: 0, enqueued: 0 };
   }
-  const horizon = await getReferralCommissionsStartedAt();
-  if (horizon === null) {
+  const windows = await getReferralPayoutWindows();
+  if (windows.length === 0) {
     return { scanned: 0, enqueued: 0 };
   }
-  const lookbackStart = new Date(Math.max(horizon.getTime(), now.getTime() - REFERRAL_SCAN_LOOKBACK_MS));
+  // One completedAt range per active window → an order is a candidate ONLY if it
+  // completed while payouts were switched on (never during a pause). No lower time
+  // floor beyond window[0].from, so an old-but-eligible order is never dropped.
+  const windowRanges = windows.map((w) => ({
+    completedAt: { gte: new Date(w.from), ...(w.to === null ? {} : { lte: new Date(w.to) }) },
+  }));
   const orders = await prisma.order.findMany({
     where: {
       status: OrderStatus.COMPLETED,
-      completedAt: { gte: lookbackStart, lte: now },
+      OR: windowRanges,
       user: { referralAsReferred: { isNot: null } },
       referralCommissions: { none: {} },
     },
     select: { id: true },
-    orderBy: { completedAt: "desc" },
+    orderBy: { completedAt: "asc" },
     take: REFERRAL_SCAN_BATCH,
   });
   let enqueued = 0;
@@ -109,50 +124,32 @@ export async function runReferralCreditScan(
 /**
  * Reversal scan: PAID commissions whose source order carries AUTHORITATIVE refund
  * evidence — a REFUND WalletTransaction or a terminal Order status — → enqueue an
- * idempotent REVERSE job. Signal-driven + bounded look-back, so a worker down for
- * up to a week still catches every refund on restart. Never reverses on an
- * uncertain remote/panel state (only real refund records count).
+ * idempotent REVERSE job. COMMISSION-DRIVEN with NO time floor (the query joins each
+ * PAID commission to its order's refund records), so a refund from before any
+ * fixed look-back is still caught. Runs REGARDLESS of the enabled switch — a
+ * commission already paid before payouts were paused must still be clawed back if
+ * its order is later refunded, even while the payout switch is off. Never reverses
+ * on an uncertain remote/panel state (only real refund records count).
  */
 export async function runReferralReversalScan(
   executeQueue: Queue,
   state: ReferralScanState,
-  now: Date = new Date(),
 ): Promise<{ scanned: number; enqueued: number }> {
-  if (!(await isReferralSystemEnabled())) {
-    return { scanned: 0, enqueued: 0 };
-  }
-  const lookback = new Date(now.getTime() - REFERRAL_SCAN_LOOKBACK_MS);
-  const [refundTx, terminalOrders] = await Promise.all([
-    prisma.walletTransaction.findMany({
-      where: { type: WalletTransactionType.REFUND, relatedOrderId: { not: null }, createdAt: { gte: lookback } },
-      select: { relatedOrderId: true },
-      distinct: ["relatedOrderId"],
-      take: REFERRAL_SCAN_BATCH,
-    }),
-    prisma.order.findMany({
-      where: {
-        status: { in: [OrderStatus.REFUNDED, OrderStatus.CANCELLED, OrderStatus.FAILED] },
-        updatedAt: { gte: lookback },
-      },
-      select: { id: true },
-      take: REFERRAL_SCAN_BATCH,
-    }),
-  ]);
-  const orderIds = [
-    ...new Set([
-      ...refundTx.map((t) => t.relatedOrderId).filter((id): id is string => id !== null),
-      ...terminalOrders.map((o) => o.id),
-    ]),
-  ];
-  if (orderIds.length === 0) {
-    state.reversalScanEnqueued = 0;
-    return { scanned: 0, enqueued: 0 };
-  }
   // Only PAID commissions are first-time reversal candidates (REVERSAL_PENDING is
-  // handled by the recovery scan; REVERSED is done).
+  // handled by the recovery scan; REVERSED is done). Age-independent: the join to
+  // the order's terminal status / REFUND wallet transactions carries no time floor.
   const commissions = await prisma.referralCommission.findMany({
-    where: { orderId: { in: orderIds }, status: ReferralCommissionStatus.PAID },
+    where: {
+      status: ReferralCommissionStatus.PAID,
+      order: {
+        OR: [
+          { status: { in: [OrderStatus.REFUNDED, OrderStatus.CANCELLED, OrderStatus.FAILED] } },
+          { walletTransactions: { some: { type: WalletTransactionType.REFUND } } },
+        ],
+      },
+    },
     select: { orderId: true },
+    orderBy: { createdAt: "asc" },
     take: REFERRAL_SCAN_BATCH,
   });
   let enqueued = 0;

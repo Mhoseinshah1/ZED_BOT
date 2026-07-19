@@ -2,7 +2,10 @@ import { prisma } from "@zedbot/database";
 import {
   REFERRAL_COMMISSIONS_STARTED_AT_KEY,
   REFERRAL_FIRST_PURCHASE_ONLY_KEY,
+  REFERRAL_PAYOUT_WINDOWS_KEY,
   REFERRAL_SYSTEM_ENABLED_KEY,
+  parseReferralPayoutWindows,
+  type ReferralPayoutWindow,
 } from "@zedbot/shared";
 
 // =============================================================================
@@ -47,4 +50,19 @@ export async function getReferralCommissionsStartedAt(): Promise<Date | null> {
   }
   const ms = Date.parse(raw);
   return Number.isFinite(ms) ? new Date(ms) : null;
+}
+
+/**
+ * The payout ACTIVE-WINDOWS. An order is credit-eligible only if it completed
+ * inside one. Backward-compatible: an install with a horizon but no windows row
+ * (enabled under the pre-window code) synthesises a single open window from the
+ * horizon, preserving the old "all post-horizon eligible" behaviour.
+ */
+export async function getReferralPayoutWindows(): Promise<ReferralPayoutWindow[]> {
+  const parsed = parseReferralPayoutWindows(await settingValue(REFERRAL_PAYOUT_WINDOWS_KEY));
+  if (parsed.length > 0) {
+    return parsed;
+  }
+  const horizon = await getReferralCommissionsStartedAt();
+  return horizon === null ? [] : [{ from: horizon.toISOString(), to: null }];
 }

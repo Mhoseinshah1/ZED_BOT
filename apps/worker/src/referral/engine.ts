@@ -62,7 +62,9 @@ export function startReferralEngine(connection: WorkerRedisConnection, redis: Ra
   }
 
   const withScanLock = async <T>(run: () => Promise<T>): Promise<T | { skipped: string }> => {
-    const token = `${Date.now()}`;
+    // Random suffix so two scans firing in the same millisecond can never mint the
+    // same token (which would let one release the other's lock in the finally).
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const acquired = await redis.set(REFERRAL_SCAN_LOCK_KEY, token, "PX", SCAN_LOCK_TTL_MS, "NX");
     if (acquired !== "OK") {
       return { skipped: "scan-locked" };

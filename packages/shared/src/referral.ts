@@ -22,11 +22,19 @@ export const REFERRAL_FIRST_PURCHASE_ONLY_KEY = "referral_first_purchase_only";
 export const REFERRAL_MIN_PURCHASE_TOMAN_KEY = "referral_min_purchase_toman";
 /**
  * Activation horizon (financial-safety phase). Stamped EXACTLY ONCE the first
- * time the OWNER enables payouts; ONLY orders completed at or after this instant
- * are ever eligible for a commission. Disabling and re-enabling preserves the
- * original stamp, so historical orders can never suddenly be back-filled.
+ * time the OWNER enables payouts; kept as the earliest instant payouts were ever
+ * active (window[0].from). Disabling and re-enabling preserves the original stamp.
  */
 export const REFERRAL_COMMISSIONS_STARTED_AT_KEY = "referral_commissions_started_at";
+/**
+ * Payout ACTIVE-WINDOWS (review-blocker phase). A JSON array of intervals during
+ * which payouts were switched ON: [{from, to|null}]. Enabling opens a window,
+ * disabling closes it. An order earns a commission ONLY if it completed inside one
+ * of these windows — so orders completed while payouts were PAUSED are never
+ * back-filled after a later re-enable, and the horizon alone (a single instant) no
+ * longer decides eligibility. Committed atomically with the enabled switch.
+ */
+export const REFERRAL_PAYOUT_WINDOWS_KEY = "referral_payout_windows";
 
 // --- config ------------------------------------------------------------------
 
@@ -127,6 +135,98 @@ export function isOrderWithinReferralHorizon(input: {
     return false;
   }
   return input.orderCompletedAtEpoch >= input.horizonEpoch;
+}
+
+// --- payout active-windows (pure) --------------------------------------------
+
+/** One interval during which payouts were switched ON. `to` null = still open. */
+export interface ReferralPayoutWindow {
+  from: string;
+  to: string | null;
+}
+
+/** Defensively parses the stored windows JSON; a malformed value yields []. */
+export function parseReferralPayoutWindows(raw: string | null | undefined): ReferralPayoutWindow[] {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  const out: ReferralPayoutWindow[] = [];
+  for (const w of parsed) {
+    if (typeof w !== "object" || w === null) {
+      continue;
+    }
+    const o = w as Record<string, unknown>;
+    const from = typeof o.from === "string" ? o.from : null;
+    if (from === null || !Number.isFinite(Date.parse(from))) {
+      continue;
+    }
+    const to = typeof o.to === "string" && Number.isFinite(Date.parse(o.to)) ? o.to : null;
+    out.push({ from, to });
+  }
+  return out;
+}
+
+/**
+ * True when an order completed inside an ACTIVE payout window (i.e. payouts were
+ * switched on at the moment the order completed). Deterministic — no clock/I/O.
+ * An empty windows list (payouts never enabled) is fail-closed: nothing eligible.
+ */
+export function isWithinReferralPayoutWindows(
+  completedAtEpoch: number | null,
+  windows: ReferralPayoutWindow[],
+): boolean {
+  if (completedAtEpoch === null || !Number.isFinite(completedAtEpoch)) {
+    return false;
+  }
+  for (const w of windows) {
+    const fromMs = Date.parse(w.from);
+    if (!Number.isFinite(fromMs) || completedAtEpoch < fromMs) {
+      continue;
+    }
+    if (w.to === null) {
+      return true; // open window — anything from `from` onward is inside it
+    }
+    const toMs = Date.parse(w.to);
+    if (!Number.isFinite(toMs) || completedAtEpoch <= toMs) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Opens a new payout window at `nowIso` unless one is already open (idempotent). */
+export function openReferralPayoutWindow(
+  windows: ReferralPayoutWindow[],
+  nowIso: string,
+): ReferralPayoutWindow[] {
+  if (windows.some((w) => w.to === null)) {
+    return windows;
+  }
+  return [...windows, { from: nowIso, to: null }];
+}
+
+/** Closes the currently-open payout window at `nowIso` (no-op if none open). */
+export function closeReferralPayoutWindow(
+  windows: ReferralPayoutWindow[],
+  nowIso: string,
+): ReferralPayoutWindow[] {
+  let closed = false;
+  return windows.map((w) => {
+    if (!closed && w.to === null) {
+      closed = true;
+      return { from: w.from, to: nowIso };
+    }
+    return w;
+  });
 }
 
 // --- no-overdraft clawback (pure) --------------------------------------------

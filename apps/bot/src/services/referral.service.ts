@@ -9,20 +9,35 @@ import {
   REFERRAL_MIN_COMMISSION_PERCENT,
   REFERRAL_MIN_PURCHASE_TOMAN_BOUND,
   REFERRAL_MIN_PURCHASE_TOMAN_KEY,
+  REFERRAL_PAYOUT_WINDOWS_KEY,
   REFERRAL_SYSTEM_ENABLED_KEY,
   clampReferralInt,
+  closeReferralPayoutWindow,
   errorMessage,
+  openReferralPayoutWindow,
+  parseReferralPayoutWindows,
   type ReferralConfig,
+  type ReferralPayoutWindow,
 } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import {
   clearSettingsCache,
-  compareAndSetBooleanSetting,
   getBooleanSetting,
   getSetting,
   setSetting,
 } from "./settings.service.js";
+
+/** A Referral row already exists for a user whose User.referrerId was still null,
+ *  pointing at a DIFFERENT referrer — throwing rolls the /start claim back so the
+ *  User relation and the Referral row can never disagree (never a new mismatch). */
+class ReferralAttributionMismatchError extends Error {}
+
+/** getBooleanSetting's truthy set, for transaction-local reads (no cache). */
+function isTruthySettingValue(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  return v === "true" || v === "1" || v === "yes";
+}
 
 /**
  * Applies a /start referral payload when eligible:
@@ -59,26 +74,45 @@ export async function applyReferralIfEligible(user: User, payload: string): Prom
     // evaluated against the live DB row (never the stale object), so two concurrent
     // /start requests with different codes converge on exactly one referrer.
     const now = new Date();
-    const linked = await prisma.$transaction(async (tx) => {
-      const claim = await tx.user.updateMany({
-        where: { id: user.id, referrerId: null },
-        data: { referrerId: referrer.id, referralJoinedAt: now },
-      });
-      if (claim.count === 0) {
-        // Already referred (or a concurrent /start won the claim) — never overwrite.
-        return false;
-      }
-      try {
-        await tx.referral.create({ data: { referrerUserId: referrer.id, referredUserId: user.id } });
-      } catch (err) {
-        // A pre-existing Referral row (from legacy data) means attribution already
-        // converged — the User claim above still points at the same referrer.
-        if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) {
-          throw err;
+    let linked = false;
+    try {
+      linked = await prisma.$transaction(async (tx) => {
+        const claim = await tx.user.updateMany({
+          where: { id: user.id, referrerId: null },
+          data: { referrerId: referrer.id, referralJoinedAt: now },
+        });
+        if (claim.count === 0) {
+          // Already referred (or a concurrent /start won the claim) — never overwrite.
+          return false;
         }
+        // The conditional claim above serialises concurrent /start for THIS user
+        // (the row lock lets only one win), so at most one writer reaches here — a
+        // check-then-create is race-free. A pre-existing Referral row can only come
+        // from legacy inconsistent data (User.referrerId null but a Referral row
+        // present); it MUST point at the same referrer, else we roll the whole claim
+        // back rather than leave User.referrerId and Referral.referrerUserId
+        // disagreeing. (We check-then-create instead of catching P2002 because a
+        // constraint error inside a transaction aborts it, forbidding a follow-up read.)
+        const existing = await tx.referral.findUnique({
+          where: { referredUserId: user.id },
+          select: { referrerUserId: true },
+        });
+        if (existing !== null) {
+          if (existing.referrerUserId !== referrer.id) {
+            throw new ReferralAttributionMismatchError();
+          }
+          return true; // already consistently linked to the same referrer
+        }
+        await tx.referral.create({ data: { referrerUserId: referrer.id, referredUserId: user.id } });
+        return true;
+      });
+    } catch (err) {
+      if (err instanceof ReferralAttributionMismatchError) {
+        logger.warn("referral attribution mismatch — kept existing attribution", { referredUserId: user.id });
+        return;
       }
-      return true;
-    });
+      throw err;
+    }
     if (linked) {
       logger.info("referral applied", { referredUserId: user.id, referrerUserId: referrer.id });
     }
@@ -95,10 +129,9 @@ export async function isReferralSystemEnabled(): Promise<boolean> {
 }
 
 /**
- * The activation-horizon instant (financial-safety phase), or null when payouts
- * were never enabled. Only orders completed at/after this instant may ever earn a
- * commission — a null horizon is fail-closed (no order is eligible), and no
- * historical order is ever back-filled.
+ * The activation-horizon instant (the earliest payouts were ever active), or null
+ * when payouts were never enabled. Kept for display + the coarse "never before the
+ * first enable" guarantee; the FINE eligibility gate is the payout windows below.
  */
 export async function getReferralCommissionsStartedAt(): Promise<Date | null> {
   const raw = (await getSetting(REFERRAL_COMMISSIONS_STARTED_AT_KEY, "")).trim();
@@ -110,45 +143,111 @@ export async function getReferralCommissionsStartedAt(): Promise<Date | null> {
 }
 
 /**
- * Stamps the activation horizon EXACTLY ONCE. A racing or repeated enable
- * converges on the first-written value (unique key → P2002 → no overwrite), so the
- * horizon can never move and no historical back-fill is opened. Disabling never
- * clears it, so re-enabling keeps the original horizon.
+ * The payout ACTIVE-WINDOWS. An order earns a commission only if it completed
+ * inside one of these. Backward-compatible: an install that enabled under the
+ * pre-window code has a horizon but no windows row → a single OPEN window from the
+ * horizon is synthesised (preserving the old "all post-horizon eligible" behaviour)
+ * until the first explicit toggle materialises real windows.
  */
-async function stampReferralHorizonOnce(now: Date): Promise<void> {
-  try {
-    await prisma.setting.create({
-      data: { key: REFERRAL_COMMISSIONS_STARTED_AT_KEY, value: now.toISOString(), type: "STRING" },
-    });
-  } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      return; // already stamped → keep the original horizon.
-    }
-    throw err;
+export async function getReferralPayoutWindows(): Promise<ReferralPayoutWindow[]> {
+  const parsed = parseReferralPayoutWindows(await getSetting(REFERRAL_PAYOUT_WINDOWS_KEY, ""));
+  if (parsed.length > 0) {
+    return parsed;
   }
+  const horizon = await getReferralCommissionsStartedAt();
+  return horizon === null ? [] : [{ from: horizon.toISOString(), to: null }];
+}
+
+/** Reads the current window list inside a transaction (no cache), with the same
+ *  horizon-synthesis fallback as getReferralPayoutWindows. */
+async function readWindowsTx(
+  tx: Prisma.TransactionClient,
+): Promise<ReferralPayoutWindow[]> {
+  const [winRow, horizonRow] = await Promise.all([
+    tx.setting.findUnique({ where: { key: REFERRAL_PAYOUT_WINDOWS_KEY }, select: { value: true } }),
+    tx.setting.findUnique({ where: { key: REFERRAL_COMMISSIONS_STARTED_AT_KEY }, select: { value: true } }),
+  ]);
+  const parsed = parseReferralPayoutWindows(winRow?.value ?? null);
+  if (parsed.length > 0) {
+    return parsed;
+  }
+  return horizonRow === null ? [] : [{ from: horizonRow.value, to: null }];
 }
 
 /**
- * OWNER enables referral payouts: stamps the activation horizon (once) BEFORE
- * flipping the master switch, so a commission that fires the instant payouts turn
- * on always sees a valid horizon. Idempotent. Returns whether the switch actually
- * flipped and the effective (first-stamped) horizon.
+ * OWNER enables referral payouts. Stamps the activation horizon (once), OPENS a
+ * payout window, and flips the master switch — ALL IN ONE TRANSACTION, so a crash
+ * can never leave an orphan horizon (or window) recorded while payouts stay
+ * disabled. Idempotent. Returns whether the switch actually flipped + the horizon.
  */
 export async function enableReferralPayouts(
   now: Date = new Date(),
 ): Promise<{ flipped: boolean; startedAt: Date }> {
-  await stampReferralHorizonOnce(now);
-  const flipped = await compareAndSetBooleanSetting(REFERRAL_SYSTEM_ENABLED_KEY, false, true);
-  if (flipped) {
-    clearSettingsCache();
-  }
-  const startedAt = await getReferralCommissionsStartedAt();
-  return { flipped, startedAt: startedAt ?? now };
+  const nowIso = now.toISOString();
+  const result = await prisma.$transaction(async (tx) => {
+    // Horizon: create-if-absent (never overwritten) — the earliest active instant.
+    await tx.setting.upsert({
+      where: { key: REFERRAL_COMMISSIONS_STARTED_AT_KEY },
+      create: { key: REFERRAL_COMMISSIONS_STARTED_AT_KEY, value: nowIso, type: "STRING" },
+      update: {},
+    });
+    const horizonRow = await tx.setting.findUnique({
+      where: { key: REFERRAL_COMMISSIONS_STARTED_AT_KEY },
+      select: { value: true },
+    });
+    const enabledRow = await tx.setting.findUnique({
+      where: { key: REFERRAL_SYSTEM_ENABLED_KEY },
+      select: { value: true },
+    });
+    const wasEnabled = enabledRow !== null && isTruthySettingValue(enabledRow.value);
+    // Open a payout window (idempotent if one is already open).
+    const windows = openReferralPayoutWindow(await readWindowsTx(tx), nowIso);
+    await tx.setting.upsert({
+      where: { key: REFERRAL_PAYOUT_WINDOWS_KEY },
+      create: { key: REFERRAL_PAYOUT_WINDOWS_KEY, value: JSON.stringify(windows), type: "STRING" },
+      update: { value: JSON.stringify(windows), type: "STRING" },
+    });
+    await tx.setting.upsert({
+      where: { key: REFERRAL_SYSTEM_ENABLED_KEY },
+      create: { key: REFERRAL_SYSTEM_ENABLED_KEY, value: "true", type: "BOOLEAN" },
+      update: { value: "true", type: "BOOLEAN" },
+    });
+    return { flipped: !wasEnabled, startedAt: horizonRow?.value ?? nowIso };
+  });
+  clearSettingsCache();
+  return { flipped: result.flipped, startedAt: new Date(result.startedAt) };
 }
 
-/** OWNER disables referral payouts. The horizon is preserved (re-enable keeps it). */
-export async function disableReferralPayouts(): Promise<boolean> {
-  const flipped = await compareAndSetBooleanSetting(REFERRAL_SYSTEM_ENABLED_KEY, true, false);
+/**
+ * OWNER disables referral payouts. CLOSES the open payout window and flips the
+ * switch in ONE transaction, so orders completed after this instant fall in a
+ * window gap and are never paid, even after a later re-enable. The horizon is
+ * preserved (re-enable opens a NEW window and keeps the original horizon).
+ */
+export async function disableReferralPayouts(now: Date = new Date()): Promise<boolean> {
+  const nowIso = now.toISOString();
+  const flipped = await prisma.$transaction(async (tx) => {
+    const enabledRow = await tx.setting.findUnique({
+      where: { key: REFERRAL_SYSTEM_ENABLED_KEY },
+      select: { value: true },
+    });
+    const wasEnabled = enabledRow !== null && isTruthySettingValue(enabledRow.value);
+    if (!wasEnabled) {
+      return false;
+    }
+    const windows = closeReferralPayoutWindow(await readWindowsTx(tx), nowIso);
+    await tx.setting.upsert({
+      where: { key: REFERRAL_PAYOUT_WINDOWS_KEY },
+      create: { key: REFERRAL_PAYOUT_WINDOWS_KEY, value: JSON.stringify(windows), type: "STRING" },
+      update: { value: JSON.stringify(windows), type: "STRING" },
+    });
+    await tx.setting.upsert({
+      where: { key: REFERRAL_SYSTEM_ENABLED_KEY },
+      create: { key: REFERRAL_SYSTEM_ENABLED_KEY, value: "false", type: "BOOLEAN" },
+      update: { value: "false", type: "BOOLEAN" },
+    });
+    return true;
+  });
   if (flipped) {
     clearSettingsCache();
   }
