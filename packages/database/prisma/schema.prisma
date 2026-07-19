@@ -286,6 +286,11 @@ enum PaymentPurpose {
   WALLET_CHARGE
   ORDER_PAYMENT
   PAY_WITH_WALLET
+  // Telegram Stars recurring service subscriptions (Phase 2). The initial charge
+  // enrolls the subscription; recurring charges renew the existing Service. These
+  // are NEVER wallet payments and NEVER a wallet top-up.
+  SERVICE_SUBSCRIPTION_INITIAL
+  SERVICE_SUBSCRIPTION_RECURRING
 }
 
 enum StarsPricingMode {
@@ -814,6 +819,15 @@ model Product {
   customerInputSchema             Json?
   // Optional Persian message sent when a personalized service is completed.
   completionMessageTemplate       String?
+
+  // Telegram Stars recurring subscription config (Phase 2). Opt-in per Product;
+  // NOT derived from the Toman/Star rate. Only a SERVICE_PRODUCT with
+  // durationDays = 30 and a Stars price in 1..10000 may enable it. The version
+  // freezes onto each active subscription; a material change bumps it so active
+  // subscriptions keep their old terms until the user re-consents.
+  telegramStarsSubscriptionEnabled Boolean @default(false)
+  telegramStarsSubscriptionPrice   Int?
+  telegramStarsSubscriptionVersion Int     @default(1)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2521,6 +2535,53 @@ model CustomerRetentionPreference {
 /**
  * Mandate lifecycle. A CANCELLED mandate reactivates only via fresh consent.
  */
+/**
+ * How an automatic-renewal mandate is funded (Phase 2). WALLET is the Phase-1
+ * default (existing rows backfill to WALLET); TELEGRAM_STARS is funded by a
+ * Telegram Stars subscription. Invariant: one Service has AT MOST ONE mandate
+ * (`ServiceAutoRenewalMandate.serviceId @unique`), so a Service can never have
+ * both wallet auto-renewal and a Stars subscription at once. The worker wallet
+ * scan only ever processes `fundingMethod = WALLET` mandates.
+ */
+enum AutoRenewalFundingMethod {
+  WALLET
+  TELEGRAM_STARS
+}
+
+/**
+ * Telegram Stars service-subscription lifecycle (Phase 2). Distinct from the
+ * generic mandate status so wallet and Stars automation never share a state
+ * machine. PENDING_PAYMENT until the first recurring charge fulfils;
+ * CANCEL_AT_PERIOD_END keeps the paid period active but stops future extension.
+ */
+enum TelegramStarsSubscriptionStatus {
+  PENDING_PAYMENT
+  ACTIVE
+  CANCEL_AT_PERIOD_END
+  REACTIVATION_ALLOWED
+  PAST_DUE
+  EXPIRED
+  REQUIRES_ACTION
+  CANCELLED
+}
+
+/**
+ * One Telegram Stars subscription CHARGE's processing lifecycle (Phase 2). Each
+ * unique `telegram_payment_charge_id` maps to exactly one charge row; the status
+ * drives the all-or-nothing settlement, refund and reconciliation transitions.
+ */
+enum TelegramStarsSubscriptionChargeStatus {
+  RECEIVED
+  SETTLING
+  FULFILLING
+  COMPLETED
+  RECONCILIATION_REQUIRED
+  REFUND_PENDING
+  REFUNDED
+  FAILED
+  IGNORED
+}
+
 enum AutoRenewalMandateStatus {
   ACTIVE
   PAUSED
@@ -2577,10 +2638,18 @@ model ServiceAutoRenewalMandate {
   serviceId String @unique
   productId String
 
+  // Phase 2: how this mandate is funded. Existing rows backfill to WALLET. The
+  // worker wallet scan filters on WALLET; a TELEGRAM_STARS mandate is driven by
+  // its TelegramStarsServiceSubscription instead and is never wallet-charged.
+  fundingMethod AutoRenewalFundingMethod @default(WALLET)
+
   status      AutoRenewalMandateStatus @default(ACTIVE)
   pauseReason AutoRenewalPauseReason?
 
-  // The user-approved ceiling, and the plan price shown at consent time.
+  // The user-approved wallet ceiling + the plan price shown at consent time.
+  // Wallet-only semantics; a TELEGRAM_STARS mandate stores 0 here (its fixed
+  // Stars amount lives on the subscription) and is never reached by the wallet
+  // scan.
   maximumChargeToman  Int
   consentedPriceToman Int
 
@@ -2606,11 +2675,13 @@ model ServiceAutoRenewalMandate {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  attempts ServiceAutoRenewalAttempt[]
+  attempts     ServiceAutoRenewalAttempt[]
+  starsSubscription TelegramStarsServiceSubscription?
 
   @@index([status, nextEvaluationAt])
   @@index([userId, status])
   @@index([productId])
+  @@index([fundingMethod, status])
 }
 
 /**
@@ -2666,4 +2737,116 @@ model ServiceAutoRenewalAttempt {
   @@index([status, nextAttemptAt])
   @@index([serviceId, createdAt])
   @@index([userId, createdAt])
+}
+
+/**
+ * Telegram Stars recurring service subscription (Phase 2). Backed by a
+ * TELEGRAM_STARS mandate (`mandateId @unique`), so the Phase-1 `serviceId @unique`
+ * on the mandate is the single exclusivity authority: one Service → one
+ * automation funding method. Holds the FIXED recurring Stars amount, the FROZEN
+ * Product version + entitlement snapshot (later cycles apply this contract, not a
+ * mutated live Product), the authoritative first charge id (required by
+ * `editUserStarSubscription`), and the current-period expiry. `publicPayloadId` is
+ * a non-enumerable identifier carried in the `zedbot:sub:<publicPayloadId>` invoice
+ * payload — no user/service/product id, no price, no secret. userId/serviceId/
+ * productId are soft references (no FK) so history survives unrelated cleanup.
+ */
+model TelegramStarsServiceSubscription {
+  id String @id @default(uuid())
+
+  mandateId String                    @unique
+  mandate   ServiceAutoRenewalMandate @relation(fields: [mandateId], references: [id], onDelete: Cascade)
+
+  userId    String
+  serviceId String @unique
+  productId String
+
+  status TelegramStarsSubscriptionStatus @default(PENDING_PAYMENT)
+
+  // Non-enumerable public identity carried in the invoice payload.
+  publicPayloadId String @unique
+
+  // The FIXED recurring contract. Telegram charges this exact amount every period.
+  starsAmount               Int
+  subscriptionPeriodSeconds Int @default(2592000)
+
+  // Frozen at enrollment; later cycles apply this contract, never a mutated Product.
+  productVersion      Int
+  entitlementSnapshot Json
+
+  consentVersion  Int
+  consentedAt     DateTime
+  termsAcceptedAt DateTime
+
+  // The authoritative FIRST subscription charge id (Telegram requires it for
+  // edit/cancel/reactivate) and its local Payment.
+  initialPaymentId               String?
+  initialTelegramPaymentChargeId String? @unique
+
+  currentPeriodStartedAt DateTime?
+  currentPeriodEndsAt    DateTime?
+  nextExpectedChargeAt   DateTime?
+
+  telegramExtensionCanceled Boolean @default(false)
+
+  cancellationRequestedAt DateTime?
+  cancellationConfirmedAt DateTime?
+  reactivationRequestedAt DateTime?
+
+  lastChargeAt          DateTime?
+  lastSuccessfulOrderId String?
+  safeLastErrorCode     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  charges TelegramStarsSubscriptionCharge[]
+
+  @@index([status, nextExpectedChargeAt])
+  @@index([userId, status])
+  @@index([productId])
+}
+
+/**
+ * One Telegram Stars subscription CHARGE (Phase 2). The idempotency spine: one
+ * `telegramPaymentChargeId @unique` → one charge → at most one Payment / Checkout /
+ * Order / applied renewal (all `@unique`). A duplicate Telegram update for the same
+ * charge id returns the existing charge's result. Only Telegram's safe fields are
+ * stored — never the raw update, never `order_info`.
+ */
+model TelegramStarsSubscriptionCharge {
+  id String @id @default(uuid())
+
+  subscriptionId String
+  subscription   TelegramStarsServiceSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  telegramPaymentChargeId String  @unique
+  providerPaymentChargeId String?
+
+  starsAmount                Int
+  isFirstRecurring           Boolean
+  subscriptionExpirationDate DateTime
+
+  status TelegramStarsSubscriptionChargeStatus @default(RECEIVED)
+
+  paymentId         String? @unique
+  checkoutSessionId String? @unique
+  orderId           String? @unique
+
+  receivedAt          DateTime  @default(now())
+  settlementStartedAt DateTime?
+  fulfillmentStartedAt DateTime?
+  completedAt         DateTime?
+
+  refundRequestedAt DateTime?
+  refundedAt        DateTime?
+  refundAttempts    Int       @default(0)
+
+  safeErrorCode String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([subscriptionId, receivedAt])
+  @@index([status, createdAt])
 }

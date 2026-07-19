@@ -90,6 +90,18 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   // max attempts, retention, consent version) is code-defaulted in @zedbot/shared,
   // so tuning a default never needs a data migration and migration/seed enable nothing.
   { key: "wallet_auto_renewal_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Telegram Stars recurring service subscriptions (Automatic Renewal Phase 2).
+  // MASTER switch, disabled by default. Requires the one-time Stars gateway switch
+  // (TELEGRAM_STARS_ENABLED) too. Config (grace, reconcile cadence, transaction
+  // lookback, refund attempts, pending-enrollment TTL, retention, consent version)
+  // is code-defaulted in @zedbot/shared — seed/migration enable nothing and create
+  // no subscription, invoice, payment or consent.
+  {
+    key: "telegram_stars_subscriptions_enabled",
+    value: "false",
+    type: SettingType.BOOLEAN,
+    isPublic: false,
+  },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are
