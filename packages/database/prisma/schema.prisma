@@ -2510,3 +2510,160 @@ model CustomerRetentionPreference {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// =============================================================================
+// Wallet auto-renewal (Phase 1) — consent-based, wallet-funded automatic renewal
+// of an EXISTING VPN Service in place. Disabled globally by default; no mandate
+// is ever created without an explicit, versioned user confirmation. See
+// docs/wallet-auto-renewal.md and docs/wallet-auto-renewal-consent.md.
+// =============================================================================
+
+/**
+ * Mandate lifecycle. A CANCELLED mandate reactivates only via fresh consent.
+ */
+enum AutoRenewalMandateStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED
+}
+
+/**
+ * Why an ACTIVE mandate was paused (safe, non-PII marker; user-visible reason).
+ */
+enum AutoRenewalPauseReason {
+  USER_PAUSED
+  ADMIN_PAUSED
+  INSUFFICIENT_BALANCE
+  PRICE_ABOVE_LIMIT
+  PRODUCT_UNAVAILABLE
+  PANEL_UNAVAILABLE
+  SERVICE_INELIGIBLE
+  SERVICE_STATE_UNCERTAIN
+  FINANCIAL_REVIEW
+  FULFILLMENT_REVIEW
+  SYSTEM_DISABLED
+}
+
+/**
+ * One durable auto-renewal attempt's lifecycle (one per Service expiry cycle).
+ */
+enum AutoRenewalAttemptStatus {
+  SCHEDULED
+  CLAIMED
+  PAYMENT_CREATED
+  FULFILLING
+  COMPLETED
+  INSUFFICIENT_BALANCE
+  REQUIRES_ACTION
+  FAILED
+  DEAD_LETTER
+  CANCELLED
+  SKIPPED
+}
+
+/**
+ * A user's explicit, versioned CONSENT to auto-renew ONE Service from their
+ * wallet, bounded by a maximum authorized charge. Invariant: one Service → at
+ * most one mandate (`serviceId @unique`). userId/serviceId/productId are soft
+ * references (indexed String, no FK) so the mandate/attempt history survives
+ * cleanup of unrelated rows and never cascades into financial tables. A cancelled
+ * mandate is only reactivated through a fresh confirmation; a changed Product or
+ * a higher maximumChargeToman requires new consent (never silently mutated).
+ */
+model ServiceAutoRenewalMandate {
+  id String @id @default(uuid())
+
+  userId    String
+  serviceId String @unique
+  productId String
+
+  status      AutoRenewalMandateStatus @default(ACTIVE)
+  pauseReason AutoRenewalPauseReason?
+
+  // The user-approved ceiling, and the plan price shown at consent time.
+  maximumChargeToman  Int
+  consentedPriceToman Int
+
+  // How long before expiry the renewal is attempted, and whether an
+  // insufficient-balance result schedules bounded retries.
+  chargeLeadMinutes               Int
+  insufficientBalanceRetryEnabled Boolean @default(true)
+
+  consentVersion Int
+  consentedAt    DateTime
+  cancelledAt    DateTime?
+  pausedAt       DateTime?
+
+  nextEvaluationAt      DateTime?
+  lastEvaluatedAt       DateTime?
+  lastAttemptAt         DateTime?
+  lastSuccessfulAt      DateTime?
+  lastSuccessfulOrderId String?
+
+  consecutiveFailureCount Int     @default(0)
+  safeLastErrorCode       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attempts ServiceAutoRenewalAttempt[]
+
+  @@index([status, nextEvaluationAt])
+  @@index([userId, status])
+  @@index([productId])
+}
+
+/**
+ * One durable auto-renewal ATTEMPT per Service expiry cycle. The database
+ * guarantees at-most-once wallet renewal per cycle:
+ * - `@@unique([mandateId, expiryCycleFingerprint])` — repeated scans reuse the
+ * same attempt; a new cycle (after a successful renewal extends the Service)
+ * yields a new fingerprint and a fresh attempt.
+ * - `idempotencyKey @unique` — the wallet settlement's stable key (derived from
+ * mandate + cycle), so the same attempt can never deduct twice and a worker
+ * restart resumes rather than re-charges.
+ * checkoutSessionId/paymentId/orderId are soft references linking the created
+ * financial rows for audit/reporting.
+ */
+model ServiceAutoRenewalAttempt {
+  id String @id @default(uuid())
+
+  mandateId String
+  mandate   ServiceAutoRenewalMandate @relation(fields: [mandateId], references: [id], onDelete: Cascade)
+
+  serviceId String
+  userId    String
+  productId String
+
+  status AutoRenewalAttemptStatus @default(SCHEDULED)
+
+  expiryCycleFingerprint String
+  idempotencyKey         String @unique
+
+  expectedServiceExpiresAt     DateTime?
+  expectedProductPriceToman    Int
+  authorizedMaximumChargeToman Int
+
+  checkoutSessionId String?
+  paymentId         String?
+  orderId           String?
+
+  attemptNumber Int       @default(1)
+  nextAttemptAt DateTime?
+
+  safeErrorCode String?
+
+  claimedAt        DateTime?
+  paymentCreatedAt DateTime?
+  completedAt      DateTime?
+  failedAt         DateTime?
+  cancelledAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([mandateId, expiryCycleFingerprint])
+  @@index([status, nextAttemptAt])
+  @@index([serviceId, createdAt])
+  @@index([userId, createdAt])
+}

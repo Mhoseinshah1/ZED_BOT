@@ -126,6 +126,15 @@ export interface NotificationWorkerStatus {
   attributionsActive?: number;
   attributionsReversed?: number;
   attributionReconcileFailures?: number;
+  // Wallet auto-renewal phase (Phase 1 auto-renewal). Optional for rolling
+  // upgrades; counts + timestamps only, never a user/service/order id or balance.
+  walletAutoRenewalEnabled?: boolean;
+  lastWalletAutoRenewalScanAt?: string | null;
+  autoRenewalDueCount?: number;
+  autoRenewalCompletedCount?: number;
+  autoRenewalInsufficientBalanceCount?: number;
+  autoRenewalRequiresActionCount?: number;
+  autoRenewalFailureCount?: number;
 }
 
 // --- Setting keys ------------------------------------------------------------

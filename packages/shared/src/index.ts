@@ -9,4 +9,5 @@ export * from "./notifications.js";
 export * from "./checkout-notifications.js";
 export * from "./winback.js";
 export * from "./attribution.js";
+export * from "./auto-renewal.js";
 export * from "./template.js";

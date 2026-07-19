@@ -83,6 +83,13 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   // code-defaulted in @zedbot/shared, so tuning a default never needs a migration.
   { key: "notification_analytics_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
   { key: "notification_analytics_csv_export_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Wallet auto-renewal (Phase 1). The MASTER switch seeds FALSE - no mandate is
+  // ever evaluated or charged until the OWNER explicitly enables the system behind
+  // the activation gate, and even then only Services the user explicitly consented.
+  // Config (scan cadence, charge lead, notice lead, retry intervals, grace,
+  // max attempts, retention, consent version) is code-defaulted in @zedbot/shared,
+  // so tuning a default never needs a data migration and migration/seed enable nothing.
+  { key: "wallet_auto_renewal_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are
