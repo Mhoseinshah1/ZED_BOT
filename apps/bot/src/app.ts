@@ -88,6 +88,7 @@ import {
   adminNotificationsTextHandler,
 } from "./handlers/admin-settings/notifications.handler.js";
 import { autoRenewalAdminHandler } from "./handlers/admin-settings/auto-renewal-admin.handler.js";
+import { starsSubscriptionAdminHandler } from "./handlers/admin-finance/stars-subscription-admin.handler.js";
 import { userNotificationsHandler } from "./handlers/user-notifications/notification.handler.js";
 import {
   reportsBackupHandler,
@@ -203,6 +204,9 @@ export function createBot(token: string): Bot<BotContext> {
   // (admin:war:*) — master switch, dry-run preview, paused-mandate review,
   // admin pause/cancel, manual scan. Never enables a user's mandate.
   adminArea.use(autoRenewalAdminHandler);
+  // Telegram Stars subscriptions (Phase 2): OWNER-only «اشتراک‌های ماهانه Stars ⭐»
+  // admin page (admin:starsub:*) — master switch + activation gate + counts.
+  adminArea.use(starsSubscriptionAdminHandler);
   // Direct-log-group-setup phase: the numeric-ID connection UI (admin:lg:id*,
   // admin:lg:op:*). The status-page keyboards (log-group.handler.ts) mount
   // via adminTextSettingsHandler above; this composer owns the new flow.
