@@ -239,3 +239,37 @@ Scheduler ids: `attributionBatch` / `attributionReversals` / `attributionCleanup
 The bot enqueues the per-order hook + a manual reconcile through
 `ops-queue.service.ts` (fail-soft producer). See
 [conversion-attribution.md](conversion-attribution.md).
+
+## Telegram Stars subscription recovery (Phase 2.1)
+
+Two queues, gated by the `telegram_stars_subscriptions_enabled` master switch. This
+is the same **worker-owns-discovery / bot-owns-money** producer/consumer split as
+wallet auto-renewal ([wallet-auto-renewal-operations.md](wallet-auto-renewal-operations.md)):
+the worker cannot import the bot, and the idempotent settlement/refund services
+already live in the bot.
+
+- **`stars-subscription`** (worker-owned) — `apps/worker/src/stars-subscription/engine.ts`
+  registers 4 processors with the existing scheduler ids + a reconcile lock:
+  `RECONCILE_STARS_SUBSCRIPTION_TRANSACTIONS` (drives the transaction cursor +
+  `getStarTransactions` recovery + refund reconciliation), `..._EXPIRATIONS`
+  (PAST_DUE detection + stuck-charge selection), `..._REFUNDS` (refund-retry
+  selection), `CLEANUP_STARS_SUBSCRIPTION_CHARGES` (deletes only terminal
+  FAILED/IGNORED charges past retention with no Payment/Order). The
+  settings-driven scheduler removes **every** recurring job while the switch is
+  off.
+- **`stars-subscription-execute`** (bot-consumed) — the money-touching jobs the
+  worker produces: `SETTLE_RECOVERED_CHARGE` / `RETRY_REFUND` / `RECONCILE_CHARGE`.
+  Consumer: `apps/bot/src/services/stars-subscription-consumer.ts` (registered in
+  `apps/bot/src/index.ts`), which runs them with grammy's `Api` + the **existing**
+  `settleTelegramStarsSubscriptionCharge` / `refundStarsSubscriptionCharge`
+  services. One implementation, idempotent on `telegramPaymentChargeId` — a
+  duplicate delivery, retry or restart converges, never a double charge or refund.
+
+The worker's `apps/worker/src/telegram.ts` gained `getStarTransactions(offset?,
+limit?)` (HTTPS, 20 s AbortController timeout, one transient retry honoring a 429
+retry-after, `limit` clamped 1..100, token only in the URL, raw response never
+persisted). The engine's `getStatusFields` merges into the notification worker
+status snapshot (`starsSubscriptionsEnabled`, `lastStarsSubscriptionReconcileAt`,
+charge counts, PAST_DUE / requires-action / failures, optional
+`lastStarsTransactionOffset` / `cursorStale`). Full design:
+[telegram-stars-subscription-recovery.md](telegram-stars-subscription-recovery.md).

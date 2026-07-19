@@ -9,7 +9,7 @@ import {
   prisma,
   type TelegramStarsServiceSubscription,
 } from "@zedbot/database";
-import { errorMessage } from "@zedbot/shared";
+import { deriveRecoveredPeriodEnd, errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import type { FrozenEntitlement } from "./stars-subscription.service.js";
@@ -18,6 +18,7 @@ import {
   type DispatchResult,
 } from "./order-fulfillment.service.js";
 import type { DeliverySendApi } from "./other-product-delivery.service.js";
+import { createStarsSubscriptionNotification } from "./stars-subscription-notify.service.js";
 
 // =============================================================================
 // Telegram Stars subscription — CENTRAL charge settlement (Phase 2). ONE service
@@ -37,6 +38,13 @@ export interface StarsChargeInput {
   starsAmount: number;
   isFirstRecurring: boolean;
   subscriptionExpirationDate: Date;
+  // Phase 2.1 recovery evidence. Omitted → a live successful_payment charge
+  // (LIVE_SUCCESSFUL_PAYMENT + LIVE_EXACT). A getStarTransactions-recovered charge
+  // passes STAR_TRANSACTION_RECOVERY + RECOVERED_DERIVED + the transaction date;
+  // its subscriptionExpirationDate is derived (txDate + period), never exact.
+  evidenceSource?: "LIVE_SUCCESSFUL_PAYMENT" | "STAR_TRANSACTION_RECOVERY";
+  periodEndSource?: "LIVE_EXACT" | "RECOVERED_DERIVED";
+  telegramTransactionAt?: Date | null;
 }
 
 export type SettleChargeResult =
@@ -84,6 +92,9 @@ export async function settleTelegramStarsSubscriptionCharge(
     return { kind: "ignored", reason: "amount-mismatch" };
   }
 
+  const evidenceSource = input.evidenceSource ?? "LIVE_SUCCESSFUL_PAYMENT";
+  const periodEndSource = input.periodEndSource ?? "LIVE_EXACT";
+
   // 1) Create-or-load the charge row keyed on the unique Telegram charge id.
   let chargeId: string;
   try {
@@ -96,6 +107,10 @@ export async function settleTelegramStarsSubscriptionCharge(
         isFirstRecurring: input.isFirstRecurring,
         subscriptionExpirationDate: input.subscriptionExpirationDate,
         status: "RECEIVED",
+        evidenceSource,
+        periodEndSource,
+        telegramTransactionAt: input.telegramTransactionAt ?? null,
+        recoveredAt: evidenceSource === "STAR_TRANSACTION_RECOVERY" ? new Date() : null,
       },
       select: { id: true },
     });
@@ -107,6 +122,29 @@ export async function settleTelegramStarsSubscriptionCharge(
       });
       if (existing === null) {
         return { kind: "in-progress" };
+      }
+      // Convergence upgrade (Part F/G): a live update arriving after a recovered
+      // charge supplies Telegram's exact expiration. Upgrade the derived period end
+      // to LIVE_EXACT WITHOUT creating a second charge/Payment/Order/renewal.
+      if (
+        existing.periodEndSource === "RECOVERED_DERIVED" &&
+        periodEndSource === "LIVE_EXACT"
+      ) {
+        await prisma.telegramStarsSubscriptionCharge.updateMany({
+          where: { id: existing.id, periodEndSource: "RECOVERED_DERIVED" },
+          data: {
+            periodEndSource: "LIVE_EXACT",
+            evidenceSource: "LIVE_SUCCESSFUL_PAYMENT",
+            subscriptionExpirationDate: input.subscriptionExpirationDate,
+          },
+        });
+        await prisma.telegramStarsServiceSubscription.updateMany({
+          where: { id: subscription.id, currentPeriodEndsAt: existing.subscriptionExpirationDate },
+          data: {
+            currentPeriodEndsAt: input.subscriptionExpirationDate,
+            nextExpectedChargeAt: input.subscriptionExpirationDate,
+          },
+        });
       }
       // Already-resolved charges return their outcome WITHOUT re-driving the
       // financial chain (one charge id → at most one Payment/Order/renewal).
@@ -295,14 +333,32 @@ async function finishAfterOrder(
       where: { id: chargeId },
       data: { status: "COMPLETED", completedAt: now, safeErrorCode: null },
     });
+    // PENDING_PAYMENT/REACTIVATION_ALLOWED/PAST_DUE all recover to ACTIVE on a
+    // fulfilled charge (a delayed charge moves PAST_DUE → ACTIVE, Part K).
     await prisma.telegramStarsServiceSubscription.updateMany({
-      where: { id: subscription.id, status: { in: ["PENDING_PAYMENT", "ACTIVE", "PAST_DUE"] } },
-      data: { status: "ACTIVE", lastSuccessfulOrderId: orderId, safeLastErrorCode: null },
+      where: {
+        id: subscription.id,
+        status: { in: ["PENDING_PAYMENT", "ACTIVE", "PAST_DUE", "REACTIVATION_ALLOWED"] },
+      },
+      data: { status: "ACTIVE", lastSuccessfulOrderId: orderId, pastDueMarkedAt: null, safeLastErrorCode: null },
     });
     const service = await prisma.service.findUnique({ where: { id: subscription.serviceId } });
-    if (user !== null) {
-      await sendSafe(api, user.telegramId.toString(), buildRenewedNotice(subscription, service?.expiresAt ?? null));
-    }
+    const charge = await prisma.telegramStarsSubscriptionCharge.findUnique({
+      where: { id: chargeId },
+      select: { isFirstRecurring: true },
+    });
+    const frozen = parseFrozen(subscription);
+    await createStarsSubscriptionNotification({
+      subscriptionId: subscription.id,
+      userId: subscription.userId,
+      type: charge?.isFirstRecurring === true ? "STARS_SUBSCRIPTION_ACTIVATED" : "STARS_SUBSCRIPTION_RENEWED",
+      cycleKey: chargeId.slice(0, 12),
+      serviceName: frozen?.productName ?? "-",
+      starsAmount: subscription.starsAmount,
+      currentPeriodEnd: service?.expiresAt === undefined || service.expiresAt === null
+        ? "-"
+        : service.expiresAt.toISOString().slice(0, 10),
+    }).catch(() => undefined);
     logger.info("stars subscription renewal completed", { subscriptionId: subscription.id.slice(0, 8), orderId });
     return { kind: "renewed", orderId };
   }
@@ -333,23 +389,89 @@ async function failCharge(chargeId: string, code: string): Promise<void> {
   });
 }
 
-/** Best-effort Telegram send; a delivery failure never rolls back a settlement. */
-async function sendSafe(api: DeliverySendApi, chatId: string, text: string): Promise<void> {
-  try {
-    await api.sendMessage(chatId, text);
-  } catch (err) {
-    logger.warn("stars subscription notice failed", { error: errorMessage(err) });
-  }
+// =============================================================================
+// Recovery entrypoints (Phase 2.1). Consumed by the bot's stars-subscription
+// execute consumer from worker-produced jobs. Both reuse the exact idempotent
+// settlement engine above — one Telegram charge id → one financial chain.
+// =============================================================================
+
+export interface RecoveredChargeInput {
+  subscriptionId: string;
+  telegramPaymentChargeId: string;
+  starsAmount: number;
+  /** Unix seconds — the recovered transaction date. */
+  telegramTransactionAtSec: number;
+  isFirstRecurring: boolean;
 }
 
-function buildRenewedNotice(
-  subscription: TelegramStarsServiceSubscription,
-  newExpiry: Date | null,
-): string {
-  return [
-    "اشتراک ماهانه با موفقیت تمدید شد ⭐",
-    "",
-    `مبلغ: ${subscription.starsAmount} استار`,
-    `پایان دوره جدید: ${newExpiry === null ? "-" : newExpiry.toISOString().slice(0, 10)}`,
-  ].join("\n");
+/**
+ * Settles a getStarTransactions-recovered charge: STAR_TRANSACTION_RECOVERY
+ * evidence + a RECOVERED_DERIVED period end (txDate + fixed period). Idempotent —
+ * if a live update already created the charge this converges to that one result.
+ */
+export async function settleRecoveredStarsCharge(
+  api: DeliverySendApi,
+  input: RecoveredChargeInput,
+): Promise<SettleChargeResult> {
+  const subscription = await prisma.telegramStarsServiceSubscription.findUnique({
+    where: { id: input.subscriptionId },
+  });
+  if (subscription === null) {
+    return { kind: "ignored", reason: "subscription-missing" };
+  }
+  const txMs = input.telegramTransactionAtSec * 1000;
+  return settleTelegramStarsSubscriptionCharge(api, subscription, {
+    telegramPaymentChargeId: input.telegramPaymentChargeId,
+    starsAmount: input.starsAmount,
+    isFirstRecurring: input.isFirstRecurring,
+    subscriptionExpirationDate: deriveRecoveredPeriodEnd(txMs, subscription.subscriptionPeriodSeconds),
+    evidenceSource: "STAR_TRANSACTION_RECOVERY",
+    periodEndSource: "RECOVERED_DERIVED",
+    telegramTransactionAt: new Date(txMs),
+  });
+}
+
+/**
+ * Re-drives a stuck charge (SETTLING/FULFILLING/RECONCILIATION_REQUIRED). When the
+ * Order already exists it re-runs fulfillment (the existing panel read-after-write
+ * reconciliation completes locally or refunds on proof — never both). When the
+ * settlement transaction never produced an Order (a crash between claim and commit),
+ * it resets the charge to RECEIVED and re-settles from the stored fields.
+ */
+export async function reconcileStarsChargeById(
+  api: DeliverySendApi,
+  chargeId: string,
+): Promise<SettleChargeResult> {
+  const charge = await prisma.telegramStarsSubscriptionCharge.findUnique({
+    where: { id: chargeId },
+    include: { subscription: true },
+  });
+  if (charge === null) {
+    return { kind: "ignored", reason: "charge-missing" };
+  }
+  if (charge.status === "COMPLETED") return { kind: "already-completed" };
+  if (charge.status === "REFUND_PENDING") return { kind: "refund-required", chargeId };
+  if (charge.status === "REFUNDED" || charge.status === "FAILED" || charge.status === "IGNORED") {
+    return { kind: "ignored", reason: `already-${charge.status.toLowerCase()}` };
+  }
+  if (charge.orderId !== null) {
+    // The chain exists; re-check fulfillment against the live panel state.
+    return finishAfterOrder(api, charge.subscription, charge.id, charge.orderId);
+  }
+  // No Order yet (crash between CAS-claim and the settlement tx). Reset to RECEIVED
+  // so the idempotent settle re-drives the whole chain from the stored fields.
+  await prisma.telegramStarsSubscriptionCharge.updateMany({
+    where: { id: charge.id, status: { in: ["SETTLING", "RECONCILIATION_REQUIRED"] }, orderId: null },
+    data: { status: "RECEIVED", safeErrorCode: null },
+  });
+  return settleTelegramStarsSubscriptionCharge(api, charge.subscription, {
+    telegramPaymentChargeId: charge.telegramPaymentChargeId,
+    providerPaymentChargeId: charge.providerPaymentChargeId,
+    starsAmount: charge.starsAmount,
+    isFirstRecurring: charge.isFirstRecurring,
+    subscriptionExpirationDate: charge.subscriptionExpirationDate,
+    evidenceSource: charge.evidenceSource,
+    periodEndSource: charge.periodEndSource,
+    telegramTransactionAt: charge.telegramTransactionAt,
+  });
 }

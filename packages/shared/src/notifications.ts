@@ -145,6 +145,11 @@ export interface NotificationWorkerStatus {
   starsSubscriptionPastDue?: number;
   starsSubscriptionRequiresAction?: number;
   starsSubscriptionFailures?: number;
+  // Phase 2.1 optional recovery diagnostics (rolling-deploy tolerant).
+  lastStarsTransactionOffset?: number;
+  starsSubscriptionRefundPending?: number;
+  starsSubscriptionReconciliationRequired?: number;
+  starsSubscriptionCursorStale?: boolean;
 }
 
 // --- Setting keys ------------------------------------------------------------
@@ -209,9 +214,27 @@ export type NotificationType =
   | "TRIAL_EXPIRED"
   | "ABANDONED_CHECKOUT"
   | "PAYMENT_RETRY"
-  | "CUSTOMER_WINBACK";
+  | "CUSTOMER_WINBACK"
+  | "STARS_SUBSCRIPTION_ACTIVATED"
+  | "STARS_SUBSCRIPTION_RENEWED"
+  | "STARS_SUBSCRIPTION_CANCELLED"
+  | "STARS_SUBSCRIPTION_PAST_DUE"
+  | "STARS_SUBSCRIPTION_REQUIRES_ACTION"
+  | "STARS_SUBSCRIPTION_REFUNDED"
+  | "STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED";
 
 export type NotificationCategory = "SERVICE" | "PAYMENT" | "MARKETING";
+
+/** The 7 Phase-2.1 Stars subscription notification types (all PAYMENT category). */
+export const STARS_SUBSCRIPTION_NOTIFICATION_TYPES: readonly NotificationType[] = [
+  "STARS_SUBSCRIPTION_ACTIVATED",
+  "STARS_SUBSCRIPTION_RENEWED",
+  "STARS_SUBSCRIPTION_CANCELLED",
+  "STARS_SUBSCRIPTION_PAST_DUE",
+  "STARS_SUBSCRIPTION_REQUIRES_ACTION",
+  "STARS_SUBSCRIPTION_REFUNDED",
+  "STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED",
+];
 
 /** Category (=> which user preference gates the type). Trials are SERVICE. */
 export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCategory> = {
@@ -224,6 +247,13 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   ABANDONED_CHECKOUT: "PAYMENT",
   PAYMENT_RETRY: "PAYMENT",
   CUSTOMER_WINBACK: "MARKETING",
+  STARS_SUBSCRIPTION_ACTIVATED: "PAYMENT",
+  STARS_SUBSCRIPTION_RENEWED: "PAYMENT",
+  STARS_SUBSCRIPTION_CANCELLED: "PAYMENT",
+  STARS_SUBSCRIPTION_PAST_DUE: "PAYMENT",
+  STARS_SUBSCRIPTION_REQUIRES_ACTION: "PAYMENT",
+  STARS_SUBSCRIPTION_REFUNDED: "PAYMENT",
+  STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED: "PAYMENT",
 };
 
 /** The notification types Phase 1 actually schedules + delivers. */
@@ -251,6 +281,14 @@ export const NOTIFICATION_TYPE_PRIORITY: Record<NotificationType, number> = {
   PAYMENT_RETRY: 3,
   ABANDONED_CHECKOUT: 4,
   CUSTOMER_WINBACK: 5,
+  // Stars subscription lifecycle — money-critical states rank above marketing.
+  STARS_SUBSCRIPTION_REFUNDED: 1,
+  STARS_SUBSCRIPTION_REQUIRES_ACTION: 1,
+  STARS_SUBSCRIPTION_PAST_DUE: 2,
+  STARS_SUBSCRIPTION_ACTIVATED: 3,
+  STARS_SUBSCRIPTION_RENEWED: 3,
+  STARS_SUBSCRIPTION_CANCELLED: 3,
+  STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED: 4,
 };
 
 // --- expiry thresholds -------------------------------------------------------
@@ -770,6 +808,12 @@ export const NTF_ACTION_CODES = {
   VIEW_WALLET: "w",
   SNOOZE_WINBACK: "z",
   MARKETING_OPT_OUT: "o",
+  // Stars subscription phase (Phase 2.1). u = open subscription detail;
+  // a = reactivation confirm (creates NO payment); y = payment support. None
+  // charges money. (OPEN_SERVICE "s" is reused for "view service".)
+  VIEW_SUBSCRIPTION: "u",
+  REACTIVATE_SUBSCRIPTION: "a",
+  PAYMENT_SUPPORT: "y",
 } as const;
 export type NtfActionCode = (typeof NTF_ACTION_CODES)[keyof typeof NTF_ACTION_CODES];
 
@@ -840,6 +884,11 @@ export const NOTIF_BUTTON_KEYS = {
   WINBACK_WALLET: "notif_btn_winback_wallet",
   WINBACK_SNOOZE: "notif_btn_winback_snooze",
   WINBACK_OPT_OUT: "notif_btn_winback_opt_out",
+  // Stars subscription phase (Phase 2.1).
+  STARS_VIEW_SUBSCRIPTION: "notif_btn_stars_view_subscription",
+  STARS_VIEW_SERVICE: "notif_btn_stars_view_service",
+  STARS_REACTIVATE: "notif_btn_stars_reactivate",
+  STARS_PAYMENT_SUPPORT: "notif_btn_stars_payment_support",
 } as const;
 
 /** Action code -> the DEFAULT ButtonText key (fallback when a button spec omits
@@ -858,6 +907,9 @@ export const NTF_ACTION_BUTTON_KEY: Record<NtfActionCode, string> = {
   [NTF_ACTION_CODES.VIEW_WALLET]: NOTIF_BUTTON_KEYS.WINBACK_WALLET,
   [NTF_ACTION_CODES.SNOOZE_WINBACK]: NOTIF_BUTTON_KEYS.WINBACK_SNOOZE,
   [NTF_ACTION_CODES.MARKETING_OPT_OUT]: NOTIF_BUTTON_KEYS.WINBACK_OPT_OUT,
+  [NTF_ACTION_CODES.VIEW_SUBSCRIPTION]: NOTIF_BUTTON_KEYS.STARS_VIEW_SUBSCRIPTION,
+  [NTF_ACTION_CODES.REACTIVATE_SUBSCRIPTION]: NOTIF_BUTTON_KEYS.STARS_REACTIVATE,
+  [NTF_ACTION_CODES.PAYMENT_SUPPORT]: NOTIF_BUTTON_KEYS.STARS_PAYMENT_SUPPORT,
 };
 
 /** Template keys for the Phase-2 checkout/payment reminder messages. */
@@ -868,6 +920,65 @@ export const NOTIF_CHECKOUT_TEMPLATE_KEYS = {
 
 /** Template key for the Phase-3 customer win-back message (MARKETING). */
 export const NOTIF_WINBACK_TEMPLATE_KEY = "notification_customer_winback";
+
+/** Template keys for the 7 Phase-2.1 Stars subscription messages. */
+export const NOTIF_STARS_SUBSCRIPTION_TEMPLATE_KEYS: Record<string, string> = {
+  STARS_SUBSCRIPTION_ACTIVATED: "notification_stars_subscription_activated",
+  STARS_SUBSCRIPTION_RENEWED: "notification_stars_subscription_renewed",
+  STARS_SUBSCRIPTION_CANCELLED: "notification_stars_subscription_cancelled",
+  STARS_SUBSCRIPTION_PAST_DUE: "notification_stars_subscription_past_due",
+  STARS_SUBSCRIPTION_REQUIRES_ACTION: "notification_stars_subscription_requires_action",
+  STARS_SUBSCRIPTION_REFUNDED: "notification_stars_subscription_refunded",
+  STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED: "notification_stars_subscription_price_version_changed",
+};
+
+/** The safe action buttons for each Stars subscription notification type. */
+export function starsSubscriptionNotificationButtons(type: NotificationType): NotificationButtonSpec[] {
+  const view: NotificationButtonSpec = {
+    action: NTF_ACTION_CODES.VIEW_SUBSCRIPTION,
+    buttonTextKey: NOTIF_BUTTON_KEYS.STARS_VIEW_SUBSCRIPTION,
+  };
+  const service: NotificationButtonSpec = {
+    action: NTF_ACTION_CODES.OPEN_SERVICE,
+    buttonTextKey: NOTIF_BUTTON_KEYS.STARS_VIEW_SERVICE,
+  };
+  const reactivate: NotificationButtonSpec = {
+    action: NTF_ACTION_CODES.REACTIVATE_SUBSCRIPTION,
+    buttonTextKey: NOTIF_BUTTON_KEYS.STARS_REACTIVATE,
+  };
+  const support: NotificationButtonSpec = {
+    action: NTF_ACTION_CODES.PAYMENT_SUPPORT,
+    buttonTextKey: NOTIF_BUTTON_KEYS.STARS_PAYMENT_SUPPORT,
+  };
+  switch (type) {
+    case "STARS_SUBSCRIPTION_ACTIVATED":
+    case "STARS_SUBSCRIPTION_RENEWED":
+      return [view, service];
+    case "STARS_SUBSCRIPTION_CANCELLED":
+      return [view, reactivate];
+    case "STARS_SUBSCRIPTION_PAST_DUE":
+      return [view, reactivate, support];
+    case "STARS_SUBSCRIPTION_REQUIRES_ACTION":
+    case "STARS_SUBSCRIPTION_REFUNDED":
+      return [view, support];
+    default:
+      return [view];
+  }
+}
+
+/**
+ * Dedupe key for a Stars subscription notification. `cycleKey` anchors the event
+ * (period-end ISO for PAST_DUE, order/charge short id for RENEWED, state marker for
+ * CANCELLED, version for PRICE_VERSION_CHANGED) so exactly one row is created per
+ * real event. NEVER contains a full charge id, payload or Telegram id.
+ */
+export function starsSubscriptionDedupeKey(
+  subscriptionId: string,
+  type: NotificationType,
+  cycleKey: string,
+): string {
+  return `starssub:${subscriptionId}:${type}:${cycleKey}`;
+}
 
 // --- misc safety -------------------------------------------------------------
 

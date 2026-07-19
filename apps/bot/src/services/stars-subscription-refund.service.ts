@@ -3,6 +3,16 @@ import { clampStarsSubInt, DEFAULT_STARS_SUBSCRIPTION_CONFIG, errorMessage, TELE
 
 import { logger } from "../core/logger.js";
 import { getSetting } from "./settings.service.js";
+import { createStarsSubscriptionNotification } from "./stars-subscription-notify.service.js";
+
+/** Frozen plan name from a subscription's entitlement snapshot (safe). */
+function frozenProductName(entitlementSnapshot: unknown): string {
+  if (typeof entitlementSnapshot === "object" && entitlementSnapshot !== null && !Array.isArray(entitlementSnapshot)) {
+    const name = (entitlementSnapshot as Record<string, unknown>).productName;
+    if (typeof name === "string" && name.trim() !== "") return name;
+  }
+  return "-";
+}
 
 // =============================================================================
 // Telegram Stars subscription — refund + Telegram subscription-edit (Phase 2).
@@ -107,7 +117,16 @@ export async function refundStarsSubscriptionCharge(
     where: { id: charge.subscription.id, status: { notIn: ["CANCELLED", "EXPIRED"] } },
     data: { status: "REQUIRES_ACTION", telegramExtensionCanceled: true, safeLastErrorCode: "charge-refunded" },
   });
-  await sendSafe(api, user.telegramId.toString(), REFUND_FAILED_USER_TEXT);
+  // Durable REFUNDED notification (idempotent per charge). NEVER a WalletTransaction.
+  await createStarsSubscriptionNotification({
+    subscriptionId: charge.subscription.id,
+    userId: charge.subscription.userId,
+    type: "STARS_SUBSCRIPTION_REFUNDED",
+    cycleKey: chargeId.slice(0, 12),
+    serviceName: frozenProductName(charge.subscription.entitlementSnapshot),
+    starsAmount: charge.starsAmount,
+    currentPeriodEnd: "-",
+  }).catch(() => undefined);
   logger.info("stars subscription charge refunded", { chargeId: chargeId.slice(0, 8) });
   return { status: "refunded" };
 }
@@ -163,13 +182,5 @@ export async function reactivateTelegramExtension(
   } catch (err) {
     logger.warn("editUserStarSubscription(reactivate) failed", { error: errorMessage(err) });
     return false;
-  }
-}
-
-async function sendSafe(api: StarsBotApi, chatId: string, text: string): Promise<void> {
-  try {
-    await api.sendMessage(chatId, text);
-  } catch (err) {
-    logger.warn("stars refund notice failed", { error: errorMessage(err) });
   }
 }

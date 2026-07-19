@@ -10,6 +10,11 @@ import { userAccessMiddleware } from "./middlewares/user-access.middleware.js";
 import { adminHandler } from "./handlers/admin.handler.js";
 import { financialReconciliationHandler } from "./handlers/admin-finance/financial-reconciliation.handler.js";
 import { financialReportsHandler } from "./handlers/admin-finance/financial-reports.handler.js";
+import { starsReportHandler } from "./handlers/admin-finance/stars-report.handler.js";
+import {
+  starsProductConfigHandler,
+  starsProductPriceTextHandler,
+} from "./handlers/admin-finance/stars-product-config.handler.js";
 import { paymentsListHandler } from "./handlers/admin-finance/payments-list.handler.js";
 import {
   adminFinanceHandler,
@@ -113,6 +118,11 @@ import {
   starsSubscriptionHandler,
   starsSubscriptionPaymentHandler,
 } from "./handlers/user-stars-subscription/stars-subscription.handler.js";
+import {
+  starsRefundedPaymentHandler,
+  starsSubscriptionUpdateHandler,
+} from "./handlers/user-stars-subscription/stars-subscription-updates.handler.js";
+import { paysupportHandler } from "./handlers/user-stars-subscription/paysupport.handler.js";
 import { startHandler } from "./handlers/start.handler.js";
 import { termsHandler } from "./handlers/terms.handler.js";
 import { freeTrialHandler } from "./handlers/user-free-trial/free-trial.handler.js";
@@ -148,6 +158,15 @@ export function createBot(token: string): Bot<BotContext> {
   // after the one-time handler (which defers sub payloads) and before the gates,
   // so a recurring charge always reaches settlement.
   bot.use(starsSubscriptionPaymentHandler);
+  // Bot API 10.2 subscription-state Updates + external RefundedPayment Updates
+  // (zedbot:sub: only), also pre-gate: a canceled/active/failed state or a refund
+  // must be recorded before access/maintenance gates and before the message flow
+  // router can swallow a refunded_payment message. Both are ownership-validated and
+  // create NO Payment/Order. (Telegram's default getUpdates delivers the new
+  // `subscription` update — only chat_member/message_reaction(_count) are excluded
+  // by default — so no allowed_updates change is needed.)
+  bot.use(starsSubscriptionUpdateHandler);
+  bot.use(starsRefundedPaymentHandler);
 
   // Gate-free basics.
   bot.use(pingHandler);
@@ -164,6 +183,10 @@ export function createBot(token: string): Bot<BotContext> {
   // active OWNER admin themselves.
   bot.use(logGroupSetupHandler);
   bot.use(startHandler);
+  // /paysupport + user:psup:* — payment-support flow (masked Stars charges +
+  // support tickets). Gate-free like /start so the command always reaches the
+  // user; every handler self-guards on ctx.dbUser and resolves charges owner-scoped.
+  bot.use(paysupportHandler);
 
   // Gate actions run their own access re-check after mutating state.
   bot.use(termsHandler);
@@ -207,6 +230,12 @@ export function createBot(token: string): Bot<BotContext> {
   // Telegram Stars subscriptions (Phase 2): OWNER-only «اشتراک‌های ماهانه Stars ⭐»
   // admin page (admin:starsub:*) — master switch + activation gate + counts.
   adminArea.use(starsSubscriptionAdminHandler);
+  // Phase 2.1: Stars subscription financial report + CSV («گزارش مالی ⭐»,
+  // admin:starsrep:*) — Stars totals kept strictly separate from Toman revenue.
+  adminArea.use(starsReportHandler);
+  // Phase 2.1: per-Product Stars subscription config (admin:starsprod:*) —
+  // enable/disable, set Stars price, bump terms version, version-drift report.
+  adminArea.use(starsProductConfigHandler);
   // Direct-log-group-setup phase: the numeric-ID connection UI (admin:lg:id*,
   // admin:lg:op:*). The status-page keyboards (log-group.handler.ts) mount
   // via adminTextSettingsHandler above; this composer owns the new flow.
@@ -245,6 +274,9 @@ export function createBot(token: string): Bot<BotContext> {
   // Phase 4: analytics custom date-range input ("admin_analytics:range"). Self-
   // gates on currentFlow.
   adminFlowText.use(analyticsTextHandler);
+  // Phase 2.1: Stars product subscription price input ("admin_starsprod:price").
+  // Self-gates on currentFlow, so it passes through for every other admin flow.
+  adminFlowText.use(starsProductPriceTextHandler);
   // Direct-log-group-setup phase: numeric chat-id input ("lg:chat_id"). Self-
   // gates on currentFlow, so it passes through for every other admin flow.
   adminFlowText.use(logGroupIdTextHandler);

@@ -462,3 +462,32 @@ revenue), view toggle (cohort ⇄ conversion), 7/30-day presets, custom date-ran
 text flow (`admin_analytics:range`), analytics settings/activation, OWNER-only CSV
 export and manual reconcile. Viewing is admin-readable; every mutation + export is
 OWNER-only. No user-facing navigation changes.
+
+## Telegram Stars subscription recovery & operations (Phase 2.1)
+
+All disabled while `telegram_stars_subscriptions_enabled` is off. Every callback is
+owner-scoped (user side) or OWNER-only (admin side).
+
+**User**
+
+| Entry | Routes |
+| --- | --- |
+| Subscription detail «فعال‌سازی مجدد» button (shown only when `telegramExtensionCanceled` + reactivation-compatible state + a first charge id) | `user:sub:react:<short>` (confirm) → `user:sub:react:<short>:yes` (execute) — calls `reactivateTelegramExtension` then sets `REACTIVATION_ALLOWED`; shows «اجازه فعال‌سازی مجدد ثبت شد» (never «تمدید شد»); creates no Payment/Checkout/Order |
+| **`/paysupport`** command + `user:psup:*` (registered **gate-free**) | payment-support landing → recent **masked** Stars charges (date/amount/first-recurring/state/masked ref only) → problem categories → support ticket via the existing `createSupportTicket` (safe metadata only). Never shows a full charge id/payload/UUID/token/panel username |
+
+**Stars lifecycle notification action buttons** (worker-delivered, routed by type
+first in `notification.handler.ts`): view subscription `u` · view service `s` ·
+reactivate `a` · payment support `y` — safe short callbacks carrying only the
+subscription short id.
+
+**Admin** — پنل ادمین → تنظیمات عمومی → «اشتراک‌های ماهانه Stars ⭐» (OWNER-only):
+
+| Entry | Routes |
+| --- | --- |
+| Dashboard (`admin:starsub:*`) | global status · gateway/worker/cursor health · subscription+charge counts · last reconcile · «اجرای تطبیق اکنون» (enqueues the 3 reconcile jobs with fixed job ids, returns immediately — never scans Telegram in the callback) · «محصولات اشتراکی» · «گزارش مالی» · «وضعیت صف و Worker» |
+| Product config (`admin:starsprod:*`) | per-Product page (status/price/duration/version/active-count/version-drift-count) · enable (behind the sellability gate) · disable (does **not** refund/cancel active subs) · version bump (→ one durable `PRICE_VERSION_CHANGED` per active sub) · drift report · price via a self-gating admin text flow |
+| Financial report (`admin:starsrep:*`) | Stars totals separate from Toman (gross = COMPLETED+REFUND_PENDING+REFUNDED, refunded = REFUNDED only, net = gross−refunded) · initial/recurring/completed-renewals/requires-action/refund-pending · ranges today/7d/30d/all · OWNER-only PII-free aggregate CSV |
+
+See [telegram-stars-subscription-operations.md](telegram-stars-subscription-operations.md),
+[telegram-stars-subscription-support.md](telegram-stars-subscription-support.md),
+[telegram-stars-subscription-reporting.md](telegram-stars-subscription-reporting.md).

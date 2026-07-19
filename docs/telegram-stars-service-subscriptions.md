@@ -103,4 +103,38 @@ The authoritative first charge id (`initialTelegramPaymentChargeId`) is what
 
 The remainder of this document is expanded as the implementation lands (see the
 sibling docs: `telegram-stars-subscription-payments.md`, `-refunds.md`,
-`-operations.md`, `-concurrency.md`).
+`-operations.md`, `-concurrency.md`, and the Phase 2.1 additions
+`-recovery.md`, `-support.md`, `-reporting.md`).
+
+---
+
+## Phase 2.1 — subscription recovery & operations (PR beyond #105)
+
+Phase 2.1 (`feat/stars-subscription-recovery-operations` off `origin/main`
+@ `782904b`) completes the operational scope deferred by Phase 2. It adds, all
+behind the same master switch and disabled by default:
+
+- **Bot API 10.2 subscription-state Updates** (`active` / `canceled` / `failed`)
+  via a pre-gate handler and a minimal compat shim (`Update.subscription` is not
+  yet in `@grammyjs/types@3.28.0`); **refunded-payment Updates**.
+- A durable **transaction cursor** (`TelegramStarsReconciliationCursor`
+  singleton) + `getStarTransactions`-based **charge recovery** — settles charges
+  Telegram genuinely made but whose live update was lost, never fabricating a
+  subscription.
+- **Recovery evidence** (`LIVE_SUCCESSFUL_PAYMENT` vs `STAR_TRANSACTION_RECOVERY`)
+  and **exact-vs-derived expiration** (`LIVE_EXACT` vs `RECOVERED_DERIVED`), with
+  live/recovery **convergence** onto one settled charge (no double renewal).
+- **PAST_DUE** detection (recoverable), bounded **refund retries**, and
+  **fulfillment reconciliation** of stuck charges.
+- A **producer/consumer split**: the worker owns discovery/scheduling and produces
+  money-touching jobs onto the bot-consumed `stars-subscription-execute` queue;
+  the bot consumer runs them with the existing idempotent settlement/refund
+  services (mirrors wallet auto-renewal).
+- **Reactivation** UI, admin **product configuration** + version-drift reporting,
+  an admin **dashboard** with manual reconcile, **`/paysupport`**, a Stars
+  **financial report**, cleanup/retention, and operational logging.
+
+Full detail: `telegram-stars-subscription-recovery.md` (cursor, recovery, evidence,
+PAST_DUE, refunds, engine, producer/consumer, rollback), `-support.md`
+(`/paysupport`), `-reporting.md` (financial report). The `-payments` / `-refunds` /
+`-operations` / `-concurrency` docs carry their own Phase 2.1 sections.

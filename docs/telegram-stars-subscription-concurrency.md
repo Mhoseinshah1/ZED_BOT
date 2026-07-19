@@ -28,3 +28,19 @@ no charged cycle silently disappears
 
 Database constraints and compare-and-set transitions are authoritative; Redis
 locks are coordination only.
+
+## Phase 2.1 — recovery & Update races
+
+The same `telegramPaymentChargeId @unique` spine keeps the new recovery and
+Bot API 10.2 Update paths idempotent. See
+`telegram-stars-subscription-recovery.md` for the full engine.
+
+| Race | Resolution |
+| --- | --- |
+| Recovered charge vs. live `successful_payment` for the same charge id | charge id `@unique` — one settles; the live path only **upgrades** `periodEndSource RECOVERED_DERIVED → LIVE_EXACT`, with **no** second charge/Payment/Order/renewal (convergence) |
+| Two recovery scans finding the same transaction | `SETTLE_RECOVERED_CHARGE` is idempotent on the charge id; the second is an "already" no-op |
+| Live `failed` update vs. worker EXPIRATIONS both marking PAST_DUE | idempotent state write + dedup key on the notification — one PAST_DUE, one notice |
+| PAST_DUE vs. a delayed charge settling | the settled charge wins: `PAST_DUE → ACTIVE`, and the stale PAST_DUE/REQUIRES_ACTION notification is cancelled by delivery revalidation |
+| `refunded_payment` Update vs. `RETRY_REFUND` job | CAS on the charge status `REFUND_PENDING → REFUNDED`; whichever confirms first wins, the other is an idempotent no-op (never a second `refundStarPayment`) |
+| Cursor advance vs. API error mid-run | progress persists **per page**; an error never resets the offset — the next run resumes from the persisted position |
+| Reactivation vs. an open refund/reconciliation or a wallet mandate | reactivation is **blocked** (never creates a Payment/Order); the mandate `serviceId @unique` remains the exclusivity authority |
