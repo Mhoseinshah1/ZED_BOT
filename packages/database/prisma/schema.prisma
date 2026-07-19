@@ -2208,6 +2208,9 @@ enum AutomatedNotificationType {
   STARS_SUBSCRIPTION_REQUIRES_ACTION
   STARS_SUBSCRIPTION_REFUNDED
   STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED
+  // Corrective Phase — durable advance notice before a wallet auto-renewal
+  // deduction (PAYMENT category; normally delivered ~24h before the charge).
+  AUTO_RENEWAL_UPCOMING
 }
 
 /**
@@ -2256,6 +2259,10 @@ enum NotificationInteractionType {
   VIEW_SUBSCRIPTION
   REACTIVATE_SUBSCRIPTION
   PAYMENT_SUPPORT
+  // Corrective Phase — wallet auto-renewal upcoming notice actions. VIEW_WALLET is
+  // reused for the "open wallet" button; these two are auto-renewal-specific.
+  VIEW_AUTO_RENEWAL
+  CANCEL_AUTO_RENEWAL
 }
 
 /**

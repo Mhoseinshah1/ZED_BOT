@@ -137,13 +137,27 @@ export function startAutoRenewalEngine(
   logger.info(`auto-renewal engine started (queues: ${AUTO_RENEWAL_QUEUE_NAME}, ${AUTO_RENEWAL_EXECUTE_QUEUE_NAME})`);
 
   const getStatusFields = async (): Promise<WalletAutoRenewalStatusFields> => {
-    const [enabled, dueOpen, completedToday, insufficient, requiresAction, failed] = await Promise.all([
+    const dayAgo = new Date(Date.now() - 24 * 3_600_000);
+    const [
+      enabled,
+      dueOpen,
+      completedToday,
+      insufficient,
+      requiresAction,
+      failed,
+      prechargeSent,
+      prechargeFailed,
+      prechargeExpired,
+    ] = await Promise.all([
       isWalletAutoRenewalEnabled(),
       prisma.serviceAutoRenewalAttempt.count({ where: { status: { in: ["SCHEDULED", "CLAIMED", "PAYMENT_CREATED", "FULFILLING"] } } }),
-      prisma.serviceAutoRenewalAttempt.count({ where: { status: "COMPLETED", completedAt: { gte: new Date(Date.now() - 24 * 3_600_000) } } }),
+      prisma.serviceAutoRenewalAttempt.count({ where: { status: "COMPLETED", completedAt: { gte: dayAgo } } }),
       prisma.serviceAutoRenewalAttempt.count({ where: { status: "INSUFFICIENT_BALANCE" } }),
       prisma.serviceAutoRenewalAttempt.count({ where: { status: "REQUIRES_ACTION" } }),
       prisma.serviceAutoRenewalAttempt.count({ where: { status: { in: ["FAILED", "DEAD_LETTER"] } } }),
+      prisma.automatedNotification.count({ where: { type: "AUTO_RENEWAL_UPCOMING", status: "SENT", sentAt: { gte: dayAgo } } }),
+      prisma.automatedNotification.count({ where: { type: "AUTO_RENEWAL_UPCOMING", status: { in: ["FAILED", "DEAD_LETTER"] } } }),
+      prisma.automatedNotification.count({ where: { type: "AUTO_RENEWAL_UPCOMING", status: "EXPIRED" } }),
     ]);
     return {
       walletAutoRenewalEnabled: enabled,
@@ -153,6 +167,14 @@ export function startAutoRenewalEngine(
       autoRenewalInsufficientBalanceCount: insufficient,
       autoRenewalRequiresActionCount: requiresAction,
       autoRenewalFailureCount: failed,
+      // Pre-charge notice heartbeat (Corrective Phase, Part R) — counts + last
+      // schedule time only; never a user/service/mandate id, price or balance.
+      lastWalletPrechargeScheduleAt: state.lastPrechargeScheduleAt,
+      walletPrechargeScheduledCount: state.prechargeScheduledCount,
+      walletPrechargeCatchUpCount: state.prechargeCatchUpCount,
+      walletPrechargeSentCount: prechargeSent,
+      walletPrechargeFailedCount: prechargeFailed,
+      walletPrechargeExpiredCount: prechargeExpired,
     };
   };
 

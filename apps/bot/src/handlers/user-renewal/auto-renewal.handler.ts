@@ -308,7 +308,7 @@ autoRenewalHandler.callbackQuery(arnCb.list, async (ctx) => {
   await safeEditOrReply(ctx, "🔁 تمدیدهای خودکار شما", autoRenewalListKeyboard(rows));
 });
 
-async function renderMandateDetail(ctx: BotContext, mandateShort: string): Promise<void> {
+export async function renderMandateDetail(ctx: BotContext, mandateShort: string): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
     return;

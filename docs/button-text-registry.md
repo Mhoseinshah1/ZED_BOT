@@ -130,3 +130,13 @@ Callback data is `ntf:<shortId>:<action>` (c=continue/reselect, d=view, n=suppre
 | `notif_btn_winback_wallet` | اعلان: کیف پول من | کیف پول من 🏦 | yes |
 | `notif_btn_winback_snooze` | اعلان: توقف موقت یادآوری بازگشت | فعلاً یادآوری نکن | yes |
 | `notif_btn_winback_opt_out` | اعلان: عدم دریافت پیشنهادها | عدم دریافت پیشنهادها | yes |
+
+## Wallet auto-renewal pre-charge notice (Corrective Phase)
+
+| key | default text | action code |
+| --- | --- | --- |
+| `notif_btn_auto_renewal_view_settings` | مشاهده تنظیمات تمدید خودکار ⚙️ | `e` (VIEW_AUTO_RENEWAL) |
+| `notif_btn_auto_renewal_cancel` | غیرفعال کردن تمدید خودکار 🚫 | `k` (CANCEL_AUTO_RENEWAL) |
+| `notif_btn_auto_renewal_wallet` | کیف پول من 🏦 | `w` (VIEW_WALLET, reused) |
+
+Callback data is `ntf:<shortId>:<code>`; the label is never authorization. The cancel button opens the existing confirmation and cancels via the existing `cancelMandate` service (no money moves from notification code).

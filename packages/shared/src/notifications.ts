@@ -221,7 +221,10 @@ export type NotificationType =
   | "STARS_SUBSCRIPTION_PAST_DUE"
   | "STARS_SUBSCRIPTION_REQUIRES_ACTION"
   | "STARS_SUBSCRIPTION_REFUNDED"
-  | "STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED";
+  | "STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED"
+  // Corrective Phase — durable advance notice before a wallet auto-renewal charge
+  // (PAYMENT category; gated by cron + payment prefs, never marketing).
+  | "AUTO_RENEWAL_UPCOMING";
 
 export type NotificationCategory = "SERVICE" | "PAYMENT" | "MARKETING";
 
@@ -254,6 +257,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   STARS_SUBSCRIPTION_REQUIRES_ACTION: "PAYMENT",
   STARS_SUBSCRIPTION_REFUNDED: "PAYMENT",
   STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED: "PAYMENT",
+  AUTO_RENEWAL_UPCOMING: "PAYMENT",
 };
 
 /** The notification types Phase 1 actually schedules + delivers. */
@@ -289,6 +293,9 @@ export const NOTIFICATION_TYPE_PRIORITY: Record<NotificationType, number> = {
   STARS_SUBSCRIPTION_RENEWED: 3,
   STARS_SUBSCRIPTION_CANCELLED: 3,
   STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED: 4,
+  // Advance pre-charge notice: money is about to move → ranks with the important
+  // service/expiry warnings (kept ahead of marketing under a daily cap).
+  AUTO_RENEWAL_UPCOMING: 2,
 };
 
 // --- expiry thresholds -------------------------------------------------------
@@ -814,6 +821,13 @@ export const NTF_ACTION_CODES = {
   VIEW_SUBSCRIPTION: "u",
   REACTIVATE_SUBSCRIPTION: "a",
   PAYMENT_SUPPORT: "y",
+  // Corrective Phase — wallet auto-renewal upcoming notice. e = open the existing
+  // auto-renewal settings page for the service (current state, not the snapshot);
+  // k = open the existing cancel-auto-renewal confirmation. The wallet button
+  // reuses "w" (VIEW_WALLET) with its own label. None of these moves money — the
+  // cancel button routes to the existing consent/cancel service.
+  VIEW_AUTO_RENEWAL: "e",
+  CANCEL_AUTO_RENEWAL: "k",
 } as const;
 export type NtfActionCode = (typeof NTF_ACTION_CODES)[keyof typeof NTF_ACTION_CODES];
 
@@ -889,6 +903,10 @@ export const NOTIF_BUTTON_KEYS = {
   STARS_VIEW_SERVICE: "notif_btn_stars_view_service",
   STARS_REACTIVATE: "notif_btn_stars_reactivate",
   STARS_PAYMENT_SUPPORT: "notif_btn_stars_payment_support",
+  // Corrective Phase — wallet auto-renewal upcoming notice buttons.
+  AUTO_RENEWAL_VIEW_SETTINGS: "notif_btn_auto_renewal_view_settings",
+  AUTO_RENEWAL_CANCEL: "notif_btn_auto_renewal_cancel",
+  AUTO_RENEWAL_WALLET: "notif_btn_auto_renewal_wallet",
 } as const;
 
 /** Action code -> the DEFAULT ButtonText key (fallback when a button spec omits
@@ -910,6 +928,8 @@ export const NTF_ACTION_BUTTON_KEY: Record<NtfActionCode, string> = {
   [NTF_ACTION_CODES.VIEW_SUBSCRIPTION]: NOTIF_BUTTON_KEYS.STARS_VIEW_SUBSCRIPTION,
   [NTF_ACTION_CODES.REACTIVATE_SUBSCRIPTION]: NOTIF_BUTTON_KEYS.STARS_REACTIVATE,
   [NTF_ACTION_CODES.PAYMENT_SUPPORT]: NOTIF_BUTTON_KEYS.STARS_PAYMENT_SUPPORT,
+  [NTF_ACTION_CODES.VIEW_AUTO_RENEWAL]: NOTIF_BUTTON_KEYS.AUTO_RENEWAL_VIEW_SETTINGS,
+  [NTF_ACTION_CODES.CANCEL_AUTO_RENEWAL]: NOTIF_BUTTON_KEYS.AUTO_RENEWAL_CANCEL,
 };
 
 /** Template keys for the Phase-2 checkout/payment reminder messages. */
@@ -964,6 +984,32 @@ export function starsSubscriptionNotificationButtons(type: NotificationType): No
     default:
       return [view];
   }
+}
+
+/** Template key for the Corrective-Phase wallet auto-renewal advance notice. */
+export const NOTIF_AUTO_RENEWAL_UPCOMING_TEMPLATE_KEY = "notification_wallet_auto_renewal_upcoming";
+
+/**
+ * The safe buttons for the wallet auto-renewal upcoming notice: open the auto-renewal
+ * settings, cancel auto-renewal (a REAL cancellation opportunity), and open the wallet
+ * (so the user can top up before the charge). The wallet button reuses the VIEW_WALLET
+ * action code with its own auto-renewal label. None of these moves money at click time.
+ */
+export function autoRenewalUpcomingNotificationButtons(): NotificationButtonSpec[] {
+  return [
+    {
+      action: NTF_ACTION_CODES.VIEW_AUTO_RENEWAL,
+      buttonTextKey: NOTIF_BUTTON_KEYS.AUTO_RENEWAL_VIEW_SETTINGS,
+    },
+    {
+      action: NTF_ACTION_CODES.CANCEL_AUTO_RENEWAL,
+      buttonTextKey: NOTIF_BUTTON_KEYS.AUTO_RENEWAL_CANCEL,
+    },
+    {
+      action: NTF_ACTION_CODES.VIEW_WALLET,
+      buttonTextKey: NOTIF_BUTTON_KEYS.AUTO_RENEWAL_WALLET,
+    },
+  ];
 }
 
 /**

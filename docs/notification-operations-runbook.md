@@ -121,3 +121,13 @@ views), export the aggregate CSV (OWNER) and trigger a manual reconcile from
 [notification-analytics-operations.md](notification-analytics-operations.md);
 metric formulas: [analytics-metric-definitions.md](analytics-metric-definitions.md);
 attribution contract: [conversion-attribution.md](conversion-attribution.md).
+
+## Wallet auto-renewal advance notices (Corrective Phase)
+
+`AUTO_RENEWAL_UPCOMING` notices are created by the wallet auto-renewal worker scan,
+not the notification scan. To pause them without touching renewals set
+`wallet_auto_renewal_precharge_notice_minutes = 0` (WAR admin → «اعلان پیش از کسر»).
+A notice that CANCELLED/EXPIRED/SUPPRESSED at delivery never revokes the mandate —
+the charge is guarded independently. Investigate `noticesFailed` / `noticesExpired`
+counts on the WAR admin page. Details:
+[wallet-auto-renewal-precharge-notices.md](./wallet-auto-renewal-precharge-notices.md).

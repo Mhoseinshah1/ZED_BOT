@@ -185,3 +185,12 @@ advances within the reconcile cadence while the master switch is on and `failure
 stays flat. See
 [telegram-stars-subscription-recovery.md](telegram-stars-subscription-recovery.md)
 and [telegram-stars-subscription-operations.md](telegram-stars-subscription-operations.md).
+
+## Wallet auto-renewal pre-charge notice fields (Corrective Phase)
+
+The worker status snapshot adds (all optional, count/timestamp only — no ids, prices
+or balances): `lastWalletPrechargeScheduleAt`, `walletPrechargeScheduledCount`,
+`walletPrechargeCatchUpCount`, `walletPrechargeSentCount`,
+`walletPrechargeFailedCount`, `walletPrechargeExpiredCount`. A high
+`walletPrechargeFailedCount`/`ExpiredCount` with healthy renewals means notices are
+failing to deliver but charges are still (correctly) proceeding under the gate.

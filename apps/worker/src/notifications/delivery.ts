@@ -1,4 +1,6 @@
 import {
+  AutoRenewalFundingMethod,
+  AutoRenewalMandateStatus,
   AutomatedNotificationStatus,
   ServiceSource,
   prisma,
@@ -6,12 +8,15 @@ import {
 } from "@zedbot/database";
 import {
   NOTIFICATION_JOB_NAMES,
+  buildAutoRenewalCycleFingerprint,
   computeTrafficUsage,
   createLogger,
   evaluateQuietHours,
   expiryCycleFingerprint,
   localMinutesInZone,
   quotaCycleFingerprint,
+  resolveAutoRenewalCharge,
+  resolveAutoRenewalExpectedChargeAt,
   type NotificationPayloadSnapshot,
   type ServiceNotificationKind,
 } from "@zedbot/shared";
@@ -32,6 +37,8 @@ import {
   userGateOpen,
 } from "./preferences.js";
 import { renderNotification } from "./render.js";
+import { formatNoticeInstant } from "../auto-renewal/precharge-notice.js";
+import { isWalletAutoRenewalEnabled } from "../auto-renewal/settings.js";
 import {
   getAbandonedCheckoutConfig,
   getFailedPaymentConfig,
@@ -222,6 +229,104 @@ async function revalidateWinbackSource(
   return { kind: "cancel", reason: `winback-${reason}` };
 }
 
+/**
+ * Re-validates a wallet AUTO_RENEWAL_UPCOMING advance notice against LIVE state at
+ * send time (Corrective Phase, Part H). CANCELS a notice whose charge will NOT
+ * happen as described (mandate no longer ACTIVE/WALLET, service gone/unlimited,
+ * cycle changed, product unavailable, live price above the ceiling); EXPIRES it
+ * once the expected charge instant has passed (never notify AFTER the money moved);
+ * otherwise returns FRESH variables so the delivered message shows the CURRENT
+ * price / ceiling / timestamps, never a stale snapshot amount. Read-only — it never
+ * touches money, the mandate or the Attempt. A cancelled/suppressed/expired notice
+ * NEVER revokes the mandate: the charge path is independently guarded, not driven,
+ * by this notice.
+ */
+export async function revalidateAutoRenewalUpcomingForDelivery(
+  notification: { userId: string; serviceId: string | null },
+  meta: RevalMeta,
+  now: Date,
+): Promise<Terminal | { freshVariables: Record<string, string | number> }> {
+  const metaCycle = typeof meta.cycle === "string" ? meta.cycle : "";
+  if (notification.serviceId === null) {
+    return { kind: "cancel", reason: "auto-renewal-service-missing" };
+  }
+  const mandate = await prisma.serviceAutoRenewalMandate.findUnique({
+    where: { serviceId: notification.serviceId },
+  });
+  if (mandate === null || mandate.userId !== notification.userId) {
+    return { kind: "cancel", reason: "auto-renewal-mandate-gone" };
+  }
+  if (mandate.status !== AutoRenewalMandateStatus.ACTIVE) {
+    // Cancelled/paused mandate -> no upcoming charge -> the notice is stale.
+    return { kind: "cancel", reason: "auto-renewal-mandate-inactive" };
+  }
+  if (mandate.fundingMethod !== AutoRenewalFundingMethod.WALLET) {
+    return { kind: "cancel", reason: "auto-renewal-not-wallet" };
+  }
+  const service = await prisma.service.findUnique({
+    where: { id: notification.serviceId },
+    select: { expiresAt: true, deletedAt: true, status: true, productNameSnapshot: true },
+  });
+  if (service === null || service.deletedAt !== null || service.status === "DELETED") {
+    return { kind: "cancel", reason: "auto-renewal-service-gone" };
+  }
+  if (service.expiresAt === null) {
+    return { kind: "cancel", reason: "auto-renewal-service-unlimited" };
+  }
+  const expiresAtEpoch = service.expiresAt.getTime();
+  const liveCycle = buildAutoRenewalCycleFingerprint({
+    serviceId: notification.serviceId,
+    expiresAtEpoch,
+    productId: mandate.productId,
+  });
+  if (liveCycle === null || liveCycle !== metaCycle) {
+    // A manual renewal / product change moved the cycle -> never deliver a stale one.
+    return { kind: "cancel", reason: "auto-renewal-cycle-changed" };
+  }
+  const expectedChargeAtEpoch = resolveAutoRenewalExpectedChargeAt({
+    expiresAtEpoch,
+    chargeLeadMinutes: mandate.chargeLeadMinutes,
+  });
+  if (expectedChargeAtEpoch !== null && now.getTime() >= expectedChargeAtEpoch) {
+    // The charge window has arrived -> an "upcoming" letter is no longer truthful.
+    return { kind: "expire", reason: "auto-renewal-charge-window-passed" };
+  }
+  const product = await prisma.product.findUnique({
+    where: { id: mandate.productId },
+    include: { category: true, panel: true },
+  });
+  if (
+    product === null ||
+    !product.isActive ||
+    product.type !== "SERVICE_PRODUCT" ||
+    product.category === null ||
+    !product.category.isActive ||
+    product.panel === null
+  ) {
+    return { kind: "cancel", reason: "auto-renewal-product-unavailable" };
+  }
+  const charge = resolveAutoRenewalCharge(product.priceToman, mandate.maximumChargeToman);
+  if (!charge.eligible) {
+    // The live price now exceeds the ceiling (or is invalid): the charge would pause,
+    // so notifying about it would be misleading -> cancel, never weaken the ceiling.
+    return { kind: "cancel", reason: `auto-renewal-${charge.reason}` };
+  }
+  const displayName =
+    typeof service.productNameSnapshot === "string" && service.productNameSnapshot.trim() !== ""
+      ? service.productNameSnapshot.trim()
+      : "سرویس شما";
+  return {
+    freshVariables: {
+      service_name: displayName,
+      product_name: product.name,
+      current_price: product.priceToman,
+      maximum_charge: mandate.maximumChargeToman,
+      expected_charge_time: formatNoticeInstant(new Date(expectedChargeAtEpoch ?? now.getTime())),
+      service_expiry: formatNoticeInstant(service.expiresAt),
+    },
+  };
+}
+
 async function markTerminal(id: string, decision: Terminal): Promise<void> {
   const now = new Date();
   const status =
@@ -317,7 +422,11 @@ export function createNotificationDeliveryProcessor(
     const meta = (snapshot.meta ?? {}) as RevalMeta;
 
     // --- per-service gate + source re-validation -----------------------------
-    if (notification.serviceId !== null) {
+    // AUTO_RENEWAL_UPCOMING carries a serviceId (for stale-cycle cleanup + button
+    // resolution) but is a PAYMENT-category notice, NOT a service alert — it must
+    // NOT be gated by the per-service SERVICE toggles nor by the service-alert
+    // source revalidator. Its own branch below revalidates the mandate/price/cycle.
+    if (notification.serviceId !== null && notification.type !== "AUTO_RENEWAL_UPCOMING") {
       const service = (await prisma.service.findUnique({
         where: { id: notification.serviceId },
         select: {
@@ -398,6 +507,27 @@ export function createNotificationDeliveryProcessor(
           return { cancelled: "stars-subscription-recovered" };
         }
       }
+    }
+
+    // --- wallet auto-renewal upcoming re-validation (Corrective Phase) --------
+    if (notification.type === "AUTO_RENEWAL_UPCOMING") {
+      if (!(await isWalletAutoRenewalEnabled())) {
+        // The whole system was disabled after the notice was scheduled -> the charge
+        // will not happen, so the "upcoming" letter must not be sent.
+        await markTerminal(notificationId, { kind: "cancel", reason: "auto-renewal-disabled" });
+        return { cancelled: "auto-renewal-disabled" };
+      }
+      const decision = await revalidateAutoRenewalUpcomingForDelivery(notification, meta, now);
+      if ("kind" in decision) {
+        await markTerminal(notificationId, decision);
+        return decision.kind === "suppress"
+          ? { suppressed: decision.reason }
+          : decision.kind === "expire"
+            ? { expired: decision.reason }
+            : { cancelled: decision.reason };
+      }
+      // Re-render with the LIVE price / ceiling / timestamps — never a stale amount.
+      snapshot.variables = { ...snapshot.variables, ...decision.freshVariables };
     }
 
     // --- quiet hours + daily cap (delivery-time concerns) --------------------

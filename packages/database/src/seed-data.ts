@@ -581,6 +581,39 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
       "برای استفاده از شرایط جدید می‌توانید اشتراک جدیدی بسازید.",
     allowedVariables: ["service_name", "stars_amount", "current_period_end"],
   },
+  // Corrective Phase — durable advance notice before a wallet auto-renewal
+  // deduction (category PAYMENT, normally ~24h ahead). Only safe display
+  // variables: service/plan display name, the current price, the user's ceiling,
+  // the expected charge time and the service expiry. NEVER the wallet balance,
+  // full ids, a service username, a panel/order/payment reference or credentials.
+  {
+    key: "notification_wallet_auto_renewal_upcoming",
+    title: "اعلان تمدید خودکار پیش‌رو (کیف پول)",
+    category: "notification",
+    defaultContent:
+      "تمدید خودکار سرویس شما به‌زودی از کیف پول انجام می‌شود ♻️\n" +
+      "\n" +
+      "سرویس:\n{service_name}\n" +
+      "\n" +
+      "پلن تمدید:\n{product_name}\n" +
+      "\n" +
+      "مبلغ قابل کسر از کیف پول:\n{current_price} تومان\n" +
+      "(سقف مجاز شما: {maximum_charge} تومان)\n" +
+      "\n" +
+      "زمان تقریبی کسر:\n{expected_charge_time}\n" +
+      "\n" +
+      "پایان دوره فعلی سرویس:\n{service_expiry}\n" +
+      "\n" +
+      "اگر نمی‌خواهید این تمدید انجام شود، می‌توانید تا پیش از زمان کسر، تمدید خودکار را لغو کنید.",
+    allowedVariables: [
+      "service_name",
+      "product_name",
+      "current_price",
+      "maximum_charge",
+      "expected_charge_time",
+      "service_expiry",
+    ],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -684,4 +717,13 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "notif_btn_stars_view_service", title: "اعلان: مشاهده سرویس اشتراک", text: "مشاهده سرویس 👁" },
   { key: "notif_btn_stars_reactivate", title: "اعلان: فعال‌سازی مجدد اشتراک", text: "اجازه فعال‌سازی مجدد ⭐" },
   { key: "notif_btn_stars_payment_support", title: "اعلان: پشتیبانی پرداخت", text: "پشتیبانی پرداخت 💳" },
+  // Corrective Phase — wallet auto-renewal upcoming notice. Callback data is
+  // ntf:<shortId>:<action> (e/k/w); the visible label is never authorization.
+  {
+    key: "notif_btn_auto_renewal_view_settings",
+    title: "اعلان: تنظیمات تمدید خودکار",
+    text: "مشاهده تنظیمات تمدید خودکار ⚙️",
+  },
+  { key: "notif_btn_auto_renewal_cancel", title: "اعلان: لغو تمدید خودکار", text: "غیرفعال کردن تمدید خودکار 🚫" },
+  { key: "notif_btn_auto_renewal_wallet", title: "اعلان: کیف پول من", text: "کیف پول من 🏦" },
 ];
