@@ -19,6 +19,7 @@ import { errorMessage } from "@zedbot/shared";
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
+import { reverseReferralCommissionForOrder } from "./referral-commission.service.js";
 import {
   assessPanelConfig,
   parsePanelInboundIds,
@@ -200,6 +201,15 @@ export async function failOrderWithRefund(
     refunded,
     error: internalError,
   });
+  // Referral affiliate commissions: if this order had already earned a commission
+  // (a completed order that reached the fail-refund path), claw it back. Idempotent
+  // and fail-soft — a reversal failure never affects the refund itself; a no-op for
+  // the common pre-completion failure (which never earned a commission).
+  if (refunded) {
+    void reverseReferralCommissionForOrder(order.id).catch((err) => {
+      logger.warn("referral commission reversal skipped", { orderId: order.id, error: errorMessage(err) });
+    });
+  }
   return refunded;
 }
 

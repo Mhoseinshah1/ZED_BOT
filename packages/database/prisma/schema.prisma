@@ -338,6 +338,9 @@ enum ReferralCommissionStatus {
   PENDING
   PAID
   CANCELLED
+  // Affiliate-commission phase: a PAID commission whose source order was later
+  // refunded/cancelled is REVERSED (the wallet credit is clawed back).
+  REVERSED
 }
 
 enum SupportMode {
@@ -1528,13 +1531,18 @@ model ReferralCommission {
   status              ReferralCommissionStatus @default(PENDING)
   walletTransactionId String?
   walletTransaction   WalletTransaction?       @relation(fields: [walletTransactionId], references: [id])
+  // Set when a REVERSED commission's wallet credit was clawed back.
+  reversalWalletTransactionId String?
   createdAt           DateTime                 @default(now())
   paidAt              DateTime?
+  reversedAt          DateTime?
 
+  // Idempotency: at most ONE commission row per source order, so a re-fired
+  // order-completion hook / concurrent settlement can never pay twice.
+  @@unique([orderId])
   @@index([referralId])
   @@index([referrerUserId])
   @@index([referredUserId])
-  @@index([orderId])
   @@index([status])
 }
 

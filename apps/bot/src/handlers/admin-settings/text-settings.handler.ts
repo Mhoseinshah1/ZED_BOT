@@ -126,6 +126,10 @@ export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     // re-checks); literal callback avoids importing the admin handler here.
     .text("اشتراک‌های ماهانه Stars ⭐", "admin:starsub:root")
     .row()
+    // Referral affiliate commissions (Phase 1). OWNER-only (handler re-checks);
+    // literal callback avoids importing the admin handler here.
+    .text("زیرمجموعه‌گیری و پاداش 👥", "admin:referral:root")
+    .row()
     .text("تنظیمات گروه لاگ 📝", LG_CB.root)
     .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);

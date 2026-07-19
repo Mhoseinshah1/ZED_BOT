@@ -23,7 +23,8 @@ export const PLACEHOLDER_TEXT = "این بخش هنوز فعال نشده است
 // user:free_test left this list in the free-trial phase - the real trial
 // flow (handlers/user-free-trial) owns CB.USER_FREE_TEST now.
 const USER_SECTIONS: Array<{ callback: string; buttonKey: string }> = [
-  { callback: CB.USER_REFERRAL, buttonKey: "referral" },
+  // CB.USER_REFERRAL left this list in the referral affiliate phase — the real
+  // referral page (handlers/user-referral) owns it now.
   { callback: CB.USER_WHEEL, buttonKey: "lucky_wheel" },
   { callback: CB.USER_TUTORIALS, buttonKey: "tutorials" },
   { callback: CB.USER_PRICING, buttonKey: "pricing" },

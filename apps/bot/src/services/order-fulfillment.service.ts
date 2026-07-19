@@ -3,6 +3,7 @@ import { errorMessage, NOTIF_ANALYTICS_ENABLED_KEY } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { enqueueAttributionReconcile } from "./ops-queue.service.js";
+import { creditReferralCommissionForOrder } from "./referral-commission.service.js";
 import { getBooleanSetting } from "./settings.service.js";
 import { TRIAL_CONVERTED_USER_TEXT } from "./trial-conversion.service.js";
 import {
@@ -282,7 +283,25 @@ export async function dispatchPaidOrderFulfillment(
   // enabled (the periodic batch reconciler is the authoritative catch-all for
   // every completion path, so a missed hook is never a lost attribution).
   void maybeEnqueueAttribution(orderId, result);
+  // Referral affiliate commissions (Phase 1): fire the after-commit commission
+  // hook. Same discipline as attribution — after the completion committed, orderId
+  // only, fail-soft, non-blocking, gated (by the referral master switch inside the
+  // service). Idempotent per order, so a re-fired hook never double-credits.
+  void maybeCreditReferralCommission(orderId, result);
   return result;
+}
+
+/** Credits the referrer's wallet for a dispatch that (re)completed a real Order.
+ * Never throws — a commission failure never affects the buyer's fulfillment. */
+async function maybeCreditReferralCommission(orderId: string, result: DispatchResult): Promise<void> {
+  if (result.kind === "NONE") {
+    return;
+  }
+  try {
+    await creditReferralCommissionForOrder(orderId);
+  } catch (err) {
+    logger.warn("referral commission hook skipped", { orderId, error: errorMessage(err) });
+  }
 }
 
 /** Enqueues attribution for a dispatch that (re)completed a real Order, gated on

@@ -2,6 +2,7 @@ import { Keyboard } from "grammy";
 
 import { CB } from "../core/callbacks.js";
 import { isFreeTrialVisible } from "../services/free-trial.service.js";
+import { isReferralSystemEnabled } from "../services/referral.service.js";
 import { getButtonText } from "../services/text.service.js";
 
 // =============================================================================
@@ -23,6 +24,7 @@ export type UserMainMenuAction =
   | "MY_ORDERS"
   | "SUPPORT"
   | "FREE_TRIAL"
+  | "REFERRAL"
   | "ADMIN_PANEL";
 
 export interface UserMainMenuButton {
@@ -48,6 +50,9 @@ export const MAIN_MENU_ACTION_WIRING: Record<
   MY_ORDERS: { buttonKey: "my_orders", callback: CB.USER_ORDERS },
   SUPPORT: { buttonKey: "support", callback: CB.USER_SUPPORT },
   FREE_TRIAL: { buttonKey: "free_test", callback: CB.USER_FREE_TEST },
+  // Referral affiliate phase: opens the real referral page. Visible only when the
+  // OWNER has enabled the referral program (like FREE_TRIAL) — hidden by default.
+  REFERRAL: { buttonKey: "referral", callback: CB.USER_REFERRAL },
   // Admin-entry phase: opens the EXISTING admin panel (same callback the
   // /admin menu uses). Visible only to active admins via the viewer-aware
   // definition below; the label is display-only and never authorization.
@@ -69,6 +74,7 @@ const APPROVED_ROWS: UserMainMenuAction[][] = [
   ["MY_SERVICES", "WALLET"],
   ["OTHER_PRODUCTS", "MY_ORDERS"],
   ["FREE_TRIAL"],
+  ["REFERRAL"],
   ["SUPPORT"],
   ["ADMIN_PANEL"],
 ];
@@ -92,13 +98,19 @@ const HIDDEN_VIEWER: UserMainMenuViewer = { isActiveAdmin: false };
 export async function buildUserMainMenuDefinition(
   viewer: UserMainMenuViewer = HIDDEN_VIEWER,
 ): Promise<UserMainMenuButton[][]> {
-  const trialVisible = await isFreeTrialVisible();
+  const [trialVisible, referralVisible] = await Promise.all([
+    isFreeTrialVisible(),
+    isReferralSystemEnabled(),
+  ]);
   const rows: UserMainMenuButton[][] = [];
   for (const rowActions of APPROVED_ROWS) {
     const row: UserMainMenuButton[] = [];
     for (const action of rowActions) {
       if (action === "FREE_TRIAL" && !trialVisible) {
         continue;
+      }
+      if (action === "REFERRAL" && !referralVisible) {
+        continue; // Hidden until the OWNER enables the referral program.
       }
       if (action === "ADMIN_PANEL" && !viewer.isActiveAdmin) {
         continue; // Fail closed: the default viewer never sees the admin row.

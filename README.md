@@ -344,6 +344,20 @@ per-action capability rules as paid services, with exactly-once
 trial-to-paid conversion. `docs/free-trial-entitlements.md`,
 `docs/free-trial-lifecycle.md`, `docs/free-trial-campaigns.md`.
 
+**Referral & affiliate commissions** (Phase 1, disabled by default): every
+user gets a personal invite deep link (`t.me/<bot>?start=<code>`) on a
+«زیرمجموعه‌گیری 👥» page with a share button and live earnings. When a referred
+user completes a paid order, the referrer earns a configured percent of that
+order (`floor(amount × percent / 100)`) as a real wallet commission
+(`WalletTransaction` type `COMMISSION` / source `REFERRAL`). The payout is
+idempotent (one commission per order, enforced by a `@@unique(orderId)` claimed
+before any money moves), atomic (increment-with-row-lock ledger write), and
+reversible (a refunded order claws the credit back). The OWNER enables it and
+sets the percent / first-purchase-only / minimum-order policy from «تنظیمات
+عمومی ⚙️ → زیرمجموعه‌گیری و پاداش 👥»; the user menu button stays hidden while the
+program is off. Referral *attribution* (the `/start` linker) is unchanged and
+always on. See `docs/referral-affiliate-system.md`.
+
 **Configurable user main-menu keyboard**: admins choose («تنظیمات عمومی ⚙️
 → نوع نمایش منوی کاربر») whether the user main menu renders as inline
 glass buttons inside the message (default) or as a persistent reply
