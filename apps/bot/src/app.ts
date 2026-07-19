@@ -96,6 +96,7 @@ import {
   autoRenewalAdminHandler,
   autoRenewalAdminTextHandler,
 } from "./handlers/admin-settings/auto-renewal-admin.handler.js";
+import { referralAdminHandler } from "./handlers/admin-settings/referral-admin.handler.js";
 import { starsSubscriptionAdminHandler } from "./handlers/admin-finance/stars-subscription-admin.handler.js";
 import { userNotificationsHandler } from "./handlers/user-notifications/notification.handler.js";
 import {
@@ -132,6 +133,7 @@ import { freeTrialHandler } from "./handlers/user-free-trial/free-trial.handler.
 import { adminMenuTextRouter } from "./handlers/admin-menu-actions.js";
 import { userMenuTextRouter } from "./handlers/user-menu-actions.js";
 import { userPlaceholdersHandler } from "./handlers/user-placeholders.handler.js";
+import { userReferralHandler } from "./handlers/user-referral/referral.handler.js";
 import { safeAnswerCallback } from "./utils/safe-reply.js";
 
 /**
@@ -230,6 +232,10 @@ export function createBot(token: string): Bot<BotContext> {
   // (admin:war:*) — master switch, dry-run preview, paused-mandate review,
   // admin pause/cancel, manual scan. Never enables a user's mandate.
   adminArea.use(autoRenewalAdminHandler);
+  // Referral affiliate commissions (Phase 1): OWNER-only «زیرمجموعه‌گیری و پاداش 👥»
+  // admin page (admin:referral:*) — master switch, commission percent, first-
+  // purchase-only, minimum order, totals. Never moves money or creates a commission.
+  adminArea.use(referralAdminHandler);
   // Telegram Stars subscriptions (Phase 2): OWNER-only «اشتراک‌های ماهانه Stars ⭐»
   // admin page (admin:starsub:*) — master switch + activation gate + counts.
   adminArea.use(starsSubscriptionAdminHandler);
@@ -399,6 +405,9 @@ export function createBot(token: string): Bot<BotContext> {
   // user notification settings pages (user:nset:* / user:nsvc:*). Registered
   // before the placeholder handler so its user:* routes always win.
   userArea.use(userNotificationsHandler);
+  // Referral affiliate phase: the real referral page - must run before the
+  // placeholder handler, which used to own CB.USER_REFERRAL.
+  userArea.use(userReferralHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());

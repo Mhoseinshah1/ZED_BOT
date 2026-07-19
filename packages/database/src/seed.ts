@@ -102,6 +102,13 @@ const INITIAL_SETTINGS: SettingSeed[] = [
     type: SettingType.BOOLEAN,
     isPublic: false,
   },
+  // Referral affiliate commissions (Phase 1). MASTER switch seeds FALSE — no
+  // commission is ever computed or credited until the OWNER enables it. Referral
+  // ATTRIBUTION (linking a referred user to a referrer on /start) already works
+  // regardless; only the wallet payout is gated. Config (commission percent,
+  // first-purchase-only, minimum qualifying order) is code-defaulted in
+  // @zedbot/shared, so tuning a default never needs a data migration.
+  { key: "referral_system_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are
