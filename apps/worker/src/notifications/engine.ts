@@ -51,6 +51,7 @@ export interface NotificationEngine {
 export function startNotificationEngine(
   connection: WorkerRedisConnection,
   redis: RawRedis,
+  extraStatus?: () => Promise<Partial<import("@zedbot/shared").NotificationWorkerStatus>>,
 ): NotificationEngine {
   const queues = createNotificationQueues(connection);
   const state = createEngineState();
@@ -188,7 +189,7 @@ export function startNotificationEngine(
   }
 
   const scheduler = startNotificationScheduler(queues);
-  const stopStatusLoop = startNotificationStatusLoop(redis, queues, state, scheduler.isActive);
+  const stopStatusLoop = startNotificationStatusLoop(redis, queues, state, scheduler.isActive, extraStatus);
 
   logger.info(
     `notification engine started (queues: ${SERVICE_STATE_SYNC_QUEUE_NAME}, ${NOTIFICATION_SCAN_QUEUE_NAME}, ${NOTIFICATION_DELIVERY_QUEUE_NAME}, ${NOTIFICATION_MAINTENANCE_QUEUE_NAME})`,

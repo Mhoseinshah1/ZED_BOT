@@ -15,6 +15,7 @@ import { startHeartbeat } from "./heartbeat.js";
 import { createLogDeliveryProcessor } from "./log-delivery.js";
 import { createLogGroupSetupProcessor } from "./log-group-setup.js";
 import { startNotificationEngine } from "./notifications/engine.js";
+import { startAutoRenewalEngine } from "./auto-renewal/engine.js";
 import { setLogDeliveryEnqueuer } from "./ops-log.js";
 import {
   createBackupQueue,
@@ -81,10 +82,15 @@ async function run(options: RedisConnectionOptions): Promise<void> {
   const stopHeartbeat = startHeartbeat(redis);
   const stopReconciler = startScheduleReconciler(backupQueue);
 
+  // Wallet auto-renewal engine (own scan/reconcile/cleanup queue + scheduler).
+  // Dormant until the operator enables the master switch. Started BEFORE the
+  // notification engine so its status fields feed the shared worker snapshot.
+  const autoRenewalEngine = startAutoRenewalEngine(connection, redis);
+
   // Automated-notification / retention engine (own queues + workers +
   // settings-driven scheduler). Dormant until the operator enables the master
   // switch - the scheduler removes every recurring job while it is off.
-  const notificationEngine = startNotificationEngine(connection, redis);
+  const notificationEngine = startNotificationEngine(connection, redis, autoRenewalEngine.getStatusFields);
 
   const backupWorker = new Worker(
     BACKUP_QUEUE_NAME,
@@ -141,6 +147,7 @@ async function run(options: RedisConnectionOptions): Promise<void> {
     stopReconciler();
     try {
       await notificationEngine.stop();
+      await autoRenewalEngine.stop();
       await Promise.allSettled([
         backupWorker.close(),
         logWorker.close(),
