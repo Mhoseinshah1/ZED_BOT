@@ -4,6 +4,7 @@ import { errorMessage } from "@zedbot/shared";
 import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
+import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
 import { runningGitSha } from "./services/backup-health.service.js";
 import { startCheckoutInputRetentionLoop } from "./services/checkout-customer-input.service.js";
 import { startFreeTrialLoop } from "./services/free-trial.service.js";
@@ -36,6 +37,12 @@ if (token === null) {
 async function run(botToken: string): Promise<void> {
   const bot = createBot(botToken);
 
+  // Wallet auto-renewal EXECUTE consumer (Phase 1): the bot's only BullMQ
+  // consumer. It runs the wallet charge + in-place renewal for attempts the
+  // worker enqueues (co-located with the fulfillment dispatcher). Null when
+  // Redis is unconfigured; the whole feature is disabled-by-default regardless.
+  const autoRenewalConsumer = startAutoRenewalConsumer(bot.api);
+
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`received ${signal}, stopping bot`);
     try {
@@ -48,6 +55,9 @@ async function run(botToken: string): Promise<void> {
         topicKey: "SYSTEM",
       });
       await bot.stop();
+      if (autoRenewalConsumer !== null) {
+        await autoRenewalConsumer.stop();
+      }
       await disconnectDatabase();
     } catch (err) {
       logger.warn("error during shutdown", { error: errorMessage(err) });

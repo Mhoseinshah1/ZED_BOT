@@ -1,6 +1,6 @@
 import { prisma } from "@zedbot/database";
 import {
-  AUTO_RENEWAL_MAX_ATTEMPTS,
+  AUTO_RENEWAL_MAX_MAX_ATTEMPTS,
   AUTO_RENEWAL_MAX_CHARGE_LEAD_MINUTES,
   AUTO_RENEWAL_MAX_GRACE_HOURS,
   AUTO_RENEWAL_MAX_PRECHARGE_NOTICE_MINUTES,
@@ -74,7 +74,7 @@ export async function getWalletAutoRenewalConfig(): Promise<WalletAutoRenewalCon
     prechargeNoticeMinutes: intSetting(notice, d.prechargeNoticeMinutes, AUTO_RENEWAL_MIN_PRECHARGE_NOTICE_MINUTES, AUTO_RENEWAL_MAX_PRECHARGE_NOTICE_MINUTES),
     insufficientRetryIntervalsMinutes: parseRetryIntervals(retries, d.insufficientRetryIntervalsMinutes),
     graceHours: intSetting(grace, d.graceHours, AUTO_RENEWAL_MIN_GRACE_HOURS, AUTO_RENEWAL_MAX_GRACE_HOURS),
-    maxAttemptsPerCycle: intSetting(maxAttempts, d.maxAttemptsPerCycle, AUTO_RENEWAL_MIN_MAX_ATTEMPTS, AUTO_RENEWAL_MAX_ATTEMPTS),
+    maxAttemptsPerCycle: intSetting(maxAttempts, d.maxAttemptsPerCycle, AUTO_RENEWAL_MIN_MAX_ATTEMPTS, AUTO_RENEWAL_MAX_MAX_ATTEMPTS),
     attemptRetentionDays: intSetting(retention, d.attemptRetentionDays, AUTO_RENEWAL_MIN_RETENTION_DAYS, AUTO_RENEWAL_MAX_RETENTION_DAYS),
     consentVersion: intSetting(consent, d.consentVersion, 1, 1_000_000),
   };
