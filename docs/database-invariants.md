@@ -197,3 +197,27 @@ Background: [backup-architecture.md](backup-architecture.md),
   (atomic conditional decrement) and reuses the existing SERVICE_RENEWAL Order +
   fulfillment path — the existing Service is renewed **in place**, never replaced.
 - The whole system is **disabled by default** (`wallet_auto_renewal_enabled`).
+
+## Telegram Stars Subscriptions (Phase 2)
+
+- **`ServiceAutoRenewalMandate.serviceId @unique`** remains the single automation
+  exclusivity authority: one Service → at most one funding method
+  (`fundingMethod ∈ {WALLET, TELEGRAM_STARS}`, existing rows backfilled to WALLET).
+  The worker wallet scan filters `fundingMethod = WALLET`, so a Stars mandate is
+  never wallet-charged; a Stars mandate stores `maximumChargeToman = 0`.
+- **`TelegramStarsServiceSubscription`**: `mandateId @unique`, `serviceId @unique`,
+  `publicPayloadId @unique` (the non-enumerable invoice-payload id),
+  `initialTelegramPaymentChargeId @unique` (the authoritative first charge id
+  required by `editUserStarSubscription`). The fixed `starsAmount` + frozen
+  `productVersion`/`entitlementSnapshot` are the recurring contract.
+- **`TelegramStarsSubscriptionCharge`**: `telegramPaymentChargeId @unique` and
+  `paymentId`/`checkoutSessionId`/`orderId` each `@unique` — one Telegram charge id
+  → at most one Payment/Checkout/Order/applied renewal. Only Telegram's safe fields
+  are stored (never the raw update, never `order_info`).
+- Stars renewal Orders carry **0 Toman** (revenue tracked in Stars on the charge),
+  so Stars never inflates Toman revenue and the reused wallet-refund path is a
+  no-op — a Stars refund creates **no** `WalletTransaction`.
+- All subscription/charge references (userId/serviceId/productId/orderId/paymentId/
+  checkoutSessionId) are soft (indexed String, no FK) except the mandate→
+  subscription→charge relations (onDelete: Cascade). Disabled by default
+  (`telegram_stars_subscriptions_enabled`).
