@@ -161,3 +161,17 @@ Background: [backup-architecture.md](backup-architecture.md),
   Order / Service / Payment / CheckoutSession / receipt / reconciliation state but
   never writes them, and never creates a payment, checkout, order or service.
   Lifecycle segments are derived on every evaluation, never persisted.
+
+## Phase 4 — NotificationConversionAttribution
+
+- **`orderId @unique`** — one completed Order has at most one attribution (the
+  convergence authority for both the hook and the batch reconciler).
+- **`interactionId @unique`** — one recorded click backs at most one Order.
+- All references (`orderId` / `notificationId` / `interactionId` / `userId`) are
+  **soft** (indexed String, no FK) — notification retention cleanup never cascades
+  into this financial-analytics table, and vice-versa.
+- `netRevenueToman = max(0, grossRevenueToman − reversedRevenueToman)` is
+  maintained on every write; a reversal sets `reversedRevenueToman = gross`,
+  `net = 0`, `status = REVERSED` and stamps `reversedAt` **exactly once**.
+- Attribution is **forward-only**: no row is written for an Order completed before
+  `notification_analytics_started_at`.

@@ -52,6 +52,18 @@ import {
   NOTIF_WINBACK_ENABLED_KEY,
   parseWinbackConfig,
   type WinbackConfig,
+  DEFAULT_ATTRIBUTION_CONFIG,
+  DEFAULT_ATTRIBUTION_RECONCILE_MINUTES,
+  DEFAULT_ATTRIBUTION_RETENTION_DAYS,
+  DEFAULT_ATTRIBUTION_REVERSALS_MINUTES,
+  NOTIF_ANALYTICS_ENABLED_KEY,
+  NOTIF_ANALYTICS_STARTED_AT_KEY,
+  NOTIF_ATTRIBUTION_CONFIG_KEY,
+  NOTIF_ATTRIBUTION_RECONCILE_MINUTES_KEY,
+  NOTIF_ATTRIBUTION_RETENTION_DAYS_KEY,
+  NOTIF_ATTRIBUTION_REVERSALS_MINUTES_KEY,
+  parseAttributionConfig,
+  type AttributionConfig,
 } from "@zedbot/shared";
 
 // =============================================================================
@@ -212,4 +224,51 @@ export async function getWinbackConfig(): Promise<WinbackConfig> {
 /** Retention (win-back) scan cadence, in minutes (daily by default). */
 export async function getRetentionScanMinutes(): Promise<number> {
   return intSetting(NOTIF_RETENTION_SCAN_MINUTES_KEY, DEFAULT_RETENTION_SCAN_MINUTES, 60, 7 * 24 * 60);
+}
+
+// --- analytics & conversion attribution (Phase 4) ----------------------------
+
+/** MASTER analytics switch (false until the OWNER enables it behind the gate). */
+export async function isNotificationAnalyticsEnabled(): Promise<boolean> {
+  return toBool(await settingValue(NOTIF_ANALYTICS_ENABLED_KEY));
+}
+
+/**
+ * The instant analytics was first enabled (epoch ms), stamped ONCE at enable.
+ * null => analytics never enabled OR the stored value is unparseable, in which
+ * case NO attribution is computed (never a historical back-fill).
+ */
+export async function getAnalyticsStartedAt(): Promise<number | null> {
+  const raw = await settingValue(NOTIF_ANALYTICS_STARTED_AT_KEY);
+  if (raw === null) {
+    return null;
+  }
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+export async function getAttributionConfig(): Promise<AttributionConfig> {
+  return parseAttributionConfig(await settingValue(NOTIF_ATTRIBUTION_CONFIG_KEY), DEFAULT_ATTRIBUTION_CONFIG);
+}
+
+export async function getAttributionReconcileMinutes(): Promise<number> {
+  return intSetting(
+    NOTIF_ATTRIBUTION_RECONCILE_MINUTES_KEY,
+    DEFAULT_ATTRIBUTION_RECONCILE_MINUTES,
+    1,
+    24 * 60,
+  );
+}
+
+export async function getAttributionReversalsMinutes(): Promise<number> {
+  return intSetting(
+    NOTIF_ATTRIBUTION_REVERSALS_MINUTES_KEY,
+    DEFAULT_ATTRIBUTION_REVERSALS_MINUTES,
+    5,
+    24 * 60,
+  );
+}
+
+export async function getAttributionRetentionDays(): Promise<number> {
+  return intSetting(NOTIF_ATTRIBUTION_RETENTION_DAYS_KEY, DEFAULT_ATTRIBUTION_RETENTION_DAYS, 30, 3650);
 }

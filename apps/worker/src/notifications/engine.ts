@@ -13,9 +13,20 @@ import type { WorkerRedisConnection } from "../queues.js";
 import type { RawRedis } from "../redis.js";
 import { runCheckoutNotificationScan } from "./checkout-scan.js";
 import { runWinbackScan } from "./winback-scan.js";
+import {
+  runAttributionBatch,
+  runAttributionCleanup,
+  runAttributionReversals,
+  reconcileOrderAttribution,
+} from "./attribution.js";
 import { createNotificationDeliveryProcessor } from "./delivery.js";
 import { runNotificationCleanup, runNotificationReconcile } from "./maintenance.js";
-import { createNotificationQueues, type NotificationQueues, type PanelSyncJobData } from "./queues.js";
+import {
+  createNotificationQueues,
+  type AttributionReconcileJobData,
+  type NotificationQueues,
+  type PanelSyncJobData,
+} from "./queues.js";
 import { runServiceNotificationScan } from "./scan.js";
 import { startNotificationScheduler } from "./scheduler.js";
 import { runServiceStateSync, syncPanelServices } from "./service-sync.js";
@@ -121,6 +132,32 @@ export function startNotificationEngine(
       }
       if (job.name === NOTIFICATION_JOB_NAMES.RECONCILE_FAILED_NOTIFICATIONS) {
         return (await runNotificationReconcile(queues.deliveryQueue)) as unknown as Record<string, unknown>;
+      }
+      // Analytics phase (Phase 4). Attribution jobs share the maintenance queue.
+      if (job.name === NOTIFICATION_JOB_NAMES.RECONCILE_NOTIFICATION_ATTRIBUTION) {
+        const { orderId } = (job.data ?? {}) as AttributionReconcileJobData;
+        if (orderId === undefined || orderId === "") {
+          return { skipped: "no-order-id" };
+        }
+        return (await reconcileOrderAttribution(orderId)) as unknown as Record<string, unknown>;
+      }
+      if (job.name === NOTIFICATION_JOB_NAMES.RECONCILE_NOTIFICATION_ATTRIBUTION_BATCH) {
+        try {
+          const result = await runAttributionBatch();
+          state.lastAttributionBatchAt = new Date().toISOString();
+          return result as unknown as Record<string, unknown>;
+        } catch (err) {
+          state.attributionReconcileFailures = (state.attributionReconcileFailures ?? 0) + 1;
+          throw err;
+        }
+      }
+      if (job.name === NOTIFICATION_JOB_NAMES.RECONCILE_NOTIFICATION_ATTRIBUTION_REVERSALS) {
+        const result = await runAttributionReversals();
+        state.lastAttributionReversalsAt = new Date().toISOString();
+        return result as unknown as Record<string, unknown>;
+      }
+      if (job.name === NOTIFICATION_JOB_NAMES.CLEANUP_NOTIFICATION_ATTRIBUTION) {
+        return (await runAttributionCleanup()) as unknown as Record<string, unknown>;
       }
       throw new Error(`unknown job: ${job.name}`);
     },

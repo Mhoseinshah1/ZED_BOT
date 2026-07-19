@@ -88,6 +88,10 @@ import {
   reportsBackupHandler,
   reportsBackupTextHandler,
 } from "./handlers/admin-reports-backup/reports-backup.handler.js";
+import {
+  analyticsHandler,
+  analyticsTextHandler,
+} from "./handlers/admin-reports-backup/analytics.handler.js";
 import { logGroupSetupHandler } from "./handlers/admin-settings/log-group-setup.handler.js";
 import {
   logGroupIdHandler,
@@ -188,6 +192,8 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(logGroupIdHandler);
   // Phase 35: backup / health («گزارشات / بکاپ 🛡»).
   adminArea.use(reportsBackupHandler);
+  // Phase 4: notification analytics («تحلیل اعلان‌ها 📈», admin:analytics / admin:an:*).
+  adminArea.use(analyticsHandler);
   adminArea.use(adminPlaceholdersHandler);
   bot.command("admin", adminArea.middleware());
   bot.callbackQuery(/^admin:/, adminArea.middleware());
@@ -215,6 +221,9 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(adminNotificationsTextHandler);
   // Production-backup rework: scheduled-backup hour input.
   adminFlowText.use(reportsBackupTextHandler);
+  // Phase 4: analytics custom date-range input ("admin_analytics:range"). Self-
+  // gates on currentFlow.
+  adminFlowText.use(analyticsTextHandler);
   // Direct-log-group-setup phase: numeric chat-id input ("lg:chat_id"). Self-
   // gates on currentFlow, so it passes through for every other admin flow.
   adminFlowText.use(logGroupIdTextHandler);

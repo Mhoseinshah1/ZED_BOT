@@ -30,6 +30,15 @@ export const NOTIFICATION_JOB_NAMES = {
   DELIVER_AUTOMATED_NOTIFICATION: "DELIVER_AUTOMATED_NOTIFICATION",
   CLEANUP_NOTIFICATION_HISTORY: "CLEANUP_NOTIFICATION_HISTORY",
   RECONCILE_FAILED_NOTIFICATIONS: "RECONCILE_FAILED_NOTIFICATIONS",
+  // Analytics phase (Phase 4). Attribution jobs run on the maintenance queue:
+  //   RECONCILE_..._ATTRIBUTION        - one completed Order (after-commit hook), data { orderId }
+  //   RECONCILE_..._ATTRIBUTION_BATCH  - periodic sweep of recently-completed Orders (catch-all)
+  //   RECONCILE_..._ATTRIBUTION_REVERSALS - flip attributions whose Order was refunded/voided
+  //   CLEANUP_..._ATTRIBUTION          - prune attributions past the retention window
+  RECONCILE_NOTIFICATION_ATTRIBUTION: "RECONCILE_NOTIFICATION_ATTRIBUTION",
+  RECONCILE_NOTIFICATION_ATTRIBUTION_BATCH: "RECONCILE_NOTIFICATION_ATTRIBUTION_BATCH",
+  RECONCILE_NOTIFICATION_ATTRIBUTION_REVERSALS: "RECONCILE_NOTIFICATION_ATTRIBUTION_REVERSALS",
+  CLEANUP_NOTIFICATION_ATTRIBUTION: "CLEANUP_NOTIFICATION_ATTRIBUTION",
 } as const;
 export type NotificationJobName =
   (typeof NOTIFICATION_JOB_NAMES)[keyof typeof NOTIFICATION_JOB_NAMES];
@@ -42,7 +51,21 @@ export const NOTIFICATION_SCHEDULER_IDS = {
   retentionScan: "notif-sched-retention-scan",
   reconcile: "notif-sched-reconcile",
   cleanup: "notif-sched-cleanup",
+  // Analytics phase (Phase 4): the recurring attribution sweeps (only registered
+  // while analytics is enabled). The per-order after-commit hook is on demand.
+  attributionBatch: "notif-sched-attribution-batch",
+  attributionReversals: "notif-sched-attribution-reversals",
+  attributionCleanup: "notif-sched-attribution-cleanup",
 } as const;
+
+/**
+ * BullMQ per-order attribution job id (idempotent enqueue): the after-commit hook
+ * and any retry collapse onto ONE job per Order, and the `orderId @unique`
+ * attribution constraint is the durable convergence anchor regardless.
+ */
+export function attributionReconcileJobId(orderId: string): string {
+  return `ntfattr-${orderId}`;
+}
 
 /** BullMQ delivery job id derived from the notification id (idempotent enqueue). */
 export function notificationDeliveryJobId(notificationId: string): string {
@@ -94,6 +117,15 @@ export interface NotificationWorkerStatus {
   winbackScheduled?: number;
   winbackExcludedUncertainService?: number;
   retentionScanFailures?: number;
+  // Analytics phase (Phase 4). Optional for rolling upgrades; the admin analytics
+  // health panel renders "نامشخص" when absent. Counts + timestamps only — never a
+  // user id, order id, revenue figure or message body.
+  analyticsEnabled?: boolean;
+  lastAttributionBatchAt?: string | null;
+  lastAttributionReversalsAt?: string | null;
+  attributionsActive?: number;
+  attributionsReversed?: number;
+  attributionReconcileFailures?: number;
 }
 
 // --- Setting keys ------------------------------------------------------------

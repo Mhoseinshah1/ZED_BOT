@@ -6,9 +6,12 @@ import {
 } from "@zedbot/shared";
 import {
   anyCheckoutRuleEnabled,
+  getAttributionReconcileMinutes,
+  getAttributionReversalsMinutes,
   getCheckoutScanMinutes,
   getRetentionScanMinutes,
   getScheduleMinutes,
+  isNotificationAnalyticsEnabled,
   isNotificationSystemEnabled,
   isWinbackRuleEnabled,
 } from "./settings.js";
@@ -88,6 +91,40 @@ export async function reconcileNotificationSchedulers(queues: NotificationQueues
   } else {
     await queues.scanQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.retentionScan);
   }
+
+  // Analytics attribution sweeps run ONLY while analytics is enabled (Phase 4):
+  // the batch catch-all + reversal reconciler + cleanup. Disabled installs run no
+  // attribution work at all (the per-order after-commit hook also no-ops when off).
+  if (await isNotificationAnalyticsEnabled()) {
+    const [reconcileMinutes, reversalsMinutes] = await Promise.all([
+      getAttributionReconcileMinutes(),
+      getAttributionReversalsMinutes(),
+    ]);
+    await Promise.all([
+      queues.maintenanceQueue.upsertJobScheduler(
+        NOTIFICATION_SCHEDULER_IDS.attributionBatch,
+        { every: reconcileMinutes * 60_000 },
+        { name: NOTIFICATION_JOB_NAMES.RECONCILE_NOTIFICATION_ATTRIBUTION_BATCH, data: {} },
+      ),
+      queues.maintenanceQueue.upsertJobScheduler(
+        NOTIFICATION_SCHEDULER_IDS.attributionReversals,
+        { every: reversalsMinutes * 60_000 },
+        { name: NOTIFICATION_JOB_NAMES.RECONCILE_NOTIFICATION_ATTRIBUTION_REVERSALS, data: {} },
+      ),
+      // Cleanup shares the notification cleanup cadence (daily by default).
+      queues.maintenanceQueue.upsertJobScheduler(
+        NOTIFICATION_SCHEDULER_IDS.attributionCleanup,
+        { every: minutes.cleanup * 60_000 },
+        { name: NOTIFICATION_JOB_NAMES.CLEANUP_NOTIFICATION_ATTRIBUTION, data: {} },
+      ),
+    ]);
+  } else {
+    await Promise.allSettled([
+      queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.attributionBatch),
+      queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.attributionReversals),
+      queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.attributionCleanup),
+    ]);
+  }
   return true;
 }
 
@@ -99,6 +136,9 @@ async function removeAllSchedulers(queues: NotificationQueues): Promise<void> {
     queues.scanQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.retentionScan),
     queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.reconcile),
     queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.cleanup),
+    queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.attributionBatch),
+    queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.attributionReversals),
+    queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.attributionCleanup),
   ]);
 }
 

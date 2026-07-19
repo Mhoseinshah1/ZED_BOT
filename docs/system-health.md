@@ -154,3 +154,13 @@ other rules, PLUS a healthy retention scheduler and ≥1 allowed user group. A l
 `winbackExcludedUncertainService` means paid-service state is stale (priority
 syncs are being enqueued); win-back is never sent on a guess. All fields are
 counts/timestamps only — never a user id or financial value.
+
+## Phase 4 — analytics health fields
+
+The worker status snapshot gains optional analytics fields (absent on older
+workers → the admin page renders "نامشخص"): `analyticsEnabled`,
+`lastAttributionBatchAt`, `lastAttributionReversalsAt`, `attributionsActive`,
+`attributionsReversed`, `attributionReconcileFailures`. Healthy = the batch
+timestamp advances within roughly the reconcile cadence (default 15 min) while
+analytics is on and `attributionReconcileFailures` stays flat. See
+[notification-analytics-operations.md](notification-analytics-operations.md).

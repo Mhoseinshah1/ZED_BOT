@@ -453,3 +453,12 @@ permanent opt-out) and, while snoozed, «لغو توقف موقت» » `user:nse
 | Entry | Routes |
 | --- | --- |
 | «بازگرداندن مشتریان غیرفعال 👋» (`admin:ntf:wb`) | فعال/غیرفعال » `admin:ntf:wb:tg` (OWNER-only; enable behind the activation gate) / تنظیم مراحل·حداقل خرید·حداقل مبلغ·مدت توقف موقت·سقف هر چرخه » `admin:ntf:wb:e:(stages\|minorders\|minspend\|snooze\|max)` *(flow `admin_ntf_wb:cfg`)* / گروه‌های مجاز » `admin:ntf:wb:groups` → toggle » `admin:ntf:wb:g:(F\|N\|N2)` (never empty) / ویرایش متن پیام » `admin:ntf:wb:tpl` / پیش‌نمایش مخاطبان » `admin:ntf:wb:prev` / ارسال آزمایشی » `admin:ntf:wb:test` (OWNER only) / بازگشت » `admin:ntf` |
+
+## Phase 4 — analytics page
+
+`گزارشات / بکاپ 🛡` (`admin:reports_backup`) gains a **تحلیل اعلان‌ها 📈** entry
+(`admin:analytics`, namespace `admin:an:*`): overview (funnel + conversions +
+revenue), view toggle (cohort ⇄ conversion), 7/30-day presets, custom date-range
+text flow (`admin_analytics:range`), analytics settings/activation, OWNER-only CSV
+export and manual reconcile. Viewing is admin-readable; every mutation + export is
+OWNER-only. No user-facing navigation changes.

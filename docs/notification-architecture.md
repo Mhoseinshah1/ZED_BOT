@@ -200,3 +200,33 @@ opt-out/snooze, and defers on uncertain state. Full detail:
 [customer-winback-rules.md](customer-winback-rules.md),
 [customer-lifecycle-segmentation.md](customer-lifecycle-segmentation.md),
 [customer-winback-operations.md](customer-winback-operations.md).
+
+## Phase 4 — analytics & evidence-based conversion attribution
+
+Phase 4 adds a **read-only** analytics layer over the same
+`AutomatedNotification` + `NotificationInteraction` history — WITHOUT a second
+engine, queue, scheduler or admin section. It sends no new user message. One
+additive `NotificationConversionAttribution` model links a completed paid `Order`
+to the notification whose recorded click preceded it, converging on
+`orderId @unique` / `interactionId @unique` so an order is attributed at most once
+and a conversion is never fabricated (a persisted click before the completed order
+is always required — never temporal proximity, opens or reads). The pure
+`@zedbot/shared/attribution.ts` evaluator (direct-checkout / direct-service /
+assisted-winback, deterministic precedence, funnel metrics, timezone-aware
+half-open date ranges) is called identically by the after-commit completion hook,
+the periodic reconciler and the reports. A low-latency **after-commit hook** on
+`dispatchPaidOrderFulfillment` enqueues `RECONCILE_NOTIFICATION_ATTRIBUTION
+{ orderId }`; the authoritative **batch reconciler** sweeps recently-completed
+orders as the catch-all (covering the startup-recovery + OTHER_PRODUCT completion
+paths the hook can't see); a **reversal reconciler** flips refunded orders'
+attributions to REVERSED (gross → reversed, net → 0, idempotent); and a **cleanup**
+job prunes past retention — all on the existing maintenance queue, gated on the
+analytics master switch (off by default; enabling stamps a start horizon once and
+never back-fills). The admin **تحلیل اعلان‌ها 📈** page (under گزارشات / بکاپ)
+renders the delivery funnel, CTR, direct/assisted conversions and attributed
+gross/net revenue for a bounded date range in two labelled views (cohort vs
+conversion timeline), with an OWNER-only PII-free formula-injection-safe CSV
+export. Full detail: [notification-analytics.md](notification-analytics.md),
+[conversion-attribution.md](conversion-attribution.md),
+[analytics-metric-definitions.md](analytics-metric-definitions.md),
+[notification-analytics-operations.md](notification-analytics-operations.md).
