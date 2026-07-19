@@ -151,3 +151,136 @@ export async function createTelegramForumTopic(input: {
   // result (identical fields).
   return classified as TelegramForumTopicResult;
 }
+
+// =============================================================================
+// getStarTransactions (Phase 2.1) — the WORKER's read side of the centralized Bot
+// API client, used ONLY for transaction recovery. Bounded timeout, one transient
+// retry, 429 retry-after honoured, response shape validated, token never logged,
+// raw Telegram response never returned or persisted (only the safe subset below).
+// The bot process performs refundStarPayment/editUserStarSubscription via its
+// native grammY Api — this client never mutates money.
+// =============================================================================
+
+/** The safe subset of a StarTransaction the worker keeps (never the raw object). */
+export interface WorkerStarTransaction {
+  id: string;
+  amount: number;
+  /** Unix seconds. */
+  date: number;
+  /** Present on incoming (payment) transactions. */
+  source?: WorkerStarTransactionPartner;
+  /** Present on outgoing (refund/withdrawal) transactions. */
+  receiver?: WorkerStarTransactionPartner;
+}
+
+export interface WorkerStarTransactionPartner {
+  type?: string;
+  transaction_type?: string;
+  user?: { id?: number };
+  invoice_payload?: string;
+  subscription_period?: number;
+}
+
+export type GetStarTransactionsResult =
+  | { ok: true; transactions: WorkerStarTransaction[] }
+  | { ok: false; safeErrorCode: string; retryable: boolean; retryAfterMs?: number };
+
+const STAR_TX_TIMEOUT_MS = 20_000;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Keeps ONLY the safe partner subset; drops anything unexpected. */
+function normalizePartner(raw: unknown): WorkerStarTransactionPartner | undefined {
+  if (!isPlainRecord(raw)) {
+    return undefined;
+  }
+  const partner: WorkerStarTransactionPartner = {};
+  if (typeof raw.type === "string") partner.type = raw.type;
+  if (typeof raw.transaction_type === "string") partner.transaction_type = raw.transaction_type;
+  if (isPlainRecord(raw.user) && typeof raw.user.id === "number") partner.user = { id: raw.user.id };
+  if (typeof raw.invoice_payload === "string") partner.invoice_payload = raw.invoice_payload;
+  if (typeof raw.subscription_period === "number") partner.subscription_period = raw.subscription_period;
+  return partner;
+}
+
+/** Validates one transaction; returns null when the shape is not usable. */
+function normalizeTransaction(raw: unknown): WorkerStarTransaction | null {
+  if (!isPlainRecord(raw)) return null;
+  if (typeof raw.id !== "string" || raw.id === "") return null;
+  if (typeof raw.amount !== "number" || typeof raw.date !== "number") return null;
+  return {
+    id: raw.id,
+    amount: raw.amount,
+    date: raw.date,
+    source: normalizePartner(raw.source),
+    receiver: normalizePartner(raw.receiver),
+  };
+}
+
+async function callGetStarTransactionsOnce(input: {
+  token: string;
+  offset: number;
+  limit: number;
+}): Promise<GetStarTransactionsResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), STAR_TX_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(`https://api.telegram.org/bot${input.token}/getStarTransactions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ offset: input.offset, limit: input.limit }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    // Token lives only in the request URL and is never present in the error we log.
+    logger.warn("getStarTransactions network error", { error: errorMessage(err).slice(0, 120) });
+    return { ok: false, safeErrorCode: "network-error", retryable: true };
+  } finally {
+    clearTimeout(timer);
+  }
+  let body: (TelegramApiResponse & { result?: { transactions?: unknown } }) = {};
+  try {
+    body = (await response.json()) as typeof body;
+  } catch {
+    // Non-JSON — fall through to status classification.
+  }
+  if (response.ok && body.ok === true) {
+    const rawList = body.result?.transactions;
+    if (!Array.isArray(rawList)) {
+      return { ok: false, safeErrorCode: "bad-response", retryable: false };
+    }
+    const transactions: WorkerStarTransaction[] = [];
+    for (const item of rawList) {
+      const tx = normalizeTransaction(item);
+      if (tx !== null) transactions.push(tx);
+    }
+    return { ok: true, transactions };
+  }
+  return classifyTelegramError(response.status, body) as GetStarTransactionsResult;
+}
+
+/**
+ * Fetches one bounded page of Star transactions (offset pagination). `limit` is
+ * clamped to Telegram's 1..100; `offset` is floored at 0. One transient-failure
+ * retry (honouring a 429 retry-after) then gives up — the caller does not advance
+ * its persistent cursor on failure.
+ */
+export async function getStarTransactions(input: {
+  token: string;
+  offset?: number;
+  limit?: number;
+}): Promise<GetStarTransactionsResult> {
+  const offset = Math.max(0, Math.floor(input.offset ?? 0));
+  const limit = Math.min(100, Math.max(1, Math.floor(input.limit ?? 100)));
+  const first = await callGetStarTransactionsOnce({ token: input.token, offset, limit });
+  if (first.ok || !first.retryable) {
+    return first;
+  }
+  // One bounded retry for a transient failure. Respect a 429 retry-after (capped).
+  const waitMs = Math.min(first.retryAfterMs ?? 1_000, 10_000);
+  await new Promise((resolve) => setTimeout(resolve, waitMs));
+  return callGetStarTransactionsOnce({ token: input.token, offset, limit });
+}

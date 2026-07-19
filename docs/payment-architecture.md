@@ -214,3 +214,25 @@ short-circuits, and a manual-review (`PENDING_REVIEW`) exclusion.
 4. The provider value must exist in the `PaymentGatewayType` Prisma enum so
    admin gateway rows can carry it; the bot side (creation, settlement,
    sweep, admin list) picks it up through the manager automatically.
+
+## Recurring Telegram Stars subscriptions (Phase 2 / 2.1)
+
+Recurring monthly Service renewals funded by Telegram Stars subscriptions are a
+**separate, disabled-by-default** system layered beside the one-time gateway — a
+different payload scheme (`zedbot:sub:` via `createInvoiceLink` +
+`subscription_period=2592000`, never the one-time `zedbot:pay:` / `sendInvoice`)
+and a per-Telegram-charge idempotency spine
+(`TelegramStarsSubscriptionCharge.telegramPaymentChargeId @unique`) instead of the
+one-time Payment-id payload. Stars renewal Orders carry **0 Toman**, so Stars
+revenue never inflates Toman reports and the reused wallet-refund path is a no-op.
+
+**Phase 2.1** adds the operational layer: Bot API 10.2 subscription-state Updates
+(via a compat shim) + refunded-payment Updates, a durable transaction cursor +
+`getStarTransactions` charge recovery (with `LIVE_EXACT` vs `RECOVERED_DERIVED`
+expiry evidence that converges onto one settled charge), PAST_DUE, bounded refund
+retries, a worker→bot producer/consumer split on the `stars-subscription-execute`
+queue, reactivation, admin product config + version drift, an OWNER dashboard,
+`/paysupport` (masked charges only), and a Stars-vs-Toman financial report. See
+[`telegram-stars-service-subscriptions.md`](telegram-stars-service-subscriptions.md)
+and its `-payments` / `-refunds` / `-operations` / `-concurrency` / `-recovery` /
+`-support` / `-reporting` siblings.

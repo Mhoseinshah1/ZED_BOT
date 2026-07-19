@@ -221,3 +221,35 @@ Background: [backup-architecture.md](backup-architecture.md),
   checkoutSessionId) are soft (indexed String, no FK) except the mandate→
   subscription→charge relations (onDelete: Cascade). Disabled by default
   (`telegram_stars_subscriptions_enabled`).
+
+## Telegram Stars Subscriptions — recovery & operations (Phase 2.1)
+
+Additive migration `20260719140000_stars_subscription_recovery_operations`. All
+existing rows backfill to safe defaults; **no billing / subscription / PAST_DUE
+state is fabricated by the migration**.
+
+- **Charge evidence columns**: `evidenceSource`
+  (`LIVE_SUCCESSFUL_PAYMENT` default / `STAR_TRANSACTION_RECOVERY`),
+  `telegramTransactionAt?`, `periodEndSource` (`LIVE_EXACT` default /
+  `RECOVERED_DERIVED`), `recoveredAt?`. A live update may upgrade a recovered
+  charge's `periodEndSource RECOVERED_DERIVED → LIVE_EXACT`, but **never** creates
+  a second charge / Payment / Order / renewal — the `telegramPaymentChargeId
+  @unique` spine keeps one settled charge per Telegram charge id (convergence).
+- **Subscription state columns**: `lastSubscriptionUpdateState?`,
+  `subscriptionUpdateAt?`, `pastDueMarkedAt?` — the **safe state string +
+  timestamp only** from a Bot API 10.2 subscription Update; never raw Update data.
+- **`TelegramStarsReconciliationCursor`**: `singletonKey` PK (one row), tracking
+  `nextOffset`, `bootstrapCompleted`, `bootstrapStartedAt?`, `lastTransactionAt?`,
+  `lastTransactionIdHash?`, `lastSuccessfulRunAt?`, `lastFailedRunAt?`,
+  `consecutiveFailureCount`, `safeLastErrorCode?`, timestamps. It contains **NO**
+  token / raw charge id / user id / payload / response. The offset is never reset
+  on an API error.
+- **7 new `AutomatedNotificationType`** values
+  `STARS_SUBSCRIPTION_{ACTIVATED,RENEWED,CANCELLED,PAST_DUE,REQUIRES_ACTION,REFUNDED,PRICE_VERSION_CHANGED}`
+  (all category `PAYMENT`); **3 new `NotificationInteractionType`** values
+  `VIEW_SUBSCRIPTION` / `REACTIVATE_SUBSCRIPTION` / `PAYMENT_SUPPORT`.
+- A Stars refund (live `refunded_payment` update, or the bounded refund-retry
+  path) still creates **no** `WalletTransaction`; refund-exhaustion marks the
+  subscription `REQUIRES_ACTION`. Cleanup deletes only terminal FAILED/IGNORED
+  charges past retention with no Payment/Order. Disabling the master switch
+  preserves all history.

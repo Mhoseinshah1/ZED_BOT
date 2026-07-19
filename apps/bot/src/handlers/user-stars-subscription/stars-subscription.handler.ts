@@ -27,11 +27,14 @@ import {
 import { settleTelegramStarsSubscriptionCharge } from "../../services/stars-subscription-settlement.service.js";
 import {
   cancelTelegramExtension,
+  reactivateTelegramExtension,
   refundStarsSubscriptionCharge,
   type StarsBotApi,
 } from "../../services/stars-subscription-refund.service.js";
+import { createStarsSubscriptionNotification } from "../../services/stars-subscription-notify.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import {
+  isReactivationCompatibleStatus,
   starsConsentText,
   starsIntroKeyboard,
   starsIntroText,
@@ -40,10 +43,21 @@ import {
   starsStatusText,
   starsSubscriptionsListKeyboard,
   STARS_LIST_EMPTY_TEXT,
+  STARS_REACTIVATE_CONFIRM_TEXT,
+  STARS_REACTIVATE_DONE_TEXT,
   subCb,
   walletConflictKeyboard,
   WALLET_CONFLICT_TEXT,
 } from "./stars-subscription-views.js";
+
+/** Frozen plan name from a subscription's entitlement snapshot (safe display). */
+function frozenProductName(entitlementSnapshot: unknown): string {
+  if (typeof entitlementSnapshot === "object" && entitlementSnapshot !== null && !Array.isArray(entitlementSnapshot)) {
+    const name = (entitlementSnapshot as Record<string, unknown>).productName;
+    if (typeof name === "string" && name.trim() !== "") return name;
+  }
+  return "-";
+}
 
 // =============================================================================
 // Telegram Stars subscriptions — user handler (Phase 2). Owns the recurring
@@ -397,9 +411,90 @@ starsSubscriptionHandler.callbackQuery(/^user:sub:cancel:([0-9a-f-]+):yes$/, asy
     where: { id: sub.id, userId: user.id, status: { in: ["ACTIVE", "PAST_DUE", "REQUIRES_ACTION"] } },
     data: { status: "CANCEL_AT_PERIOD_END", telegramExtensionCanceled: true, cancellationRequestedAt: new Date(), cancellationConfirmedAt: new Date() },
   });
+  await createStarsSubscriptionNotification({
+    subscriptionId: sub.id,
+    userId: user.id,
+    type: "STARS_SUBSCRIPTION_CANCELLED",
+    cycleKey: `user-cancel:${sub.currentPeriodEndsAt === null ? "-" : sub.currentPeriodEndsAt.toISOString().slice(0, 10)}`,
+    serviceName: frozenProductName(sub.entitlementSnapshot),
+    starsAmount: sub.starsAmount,
+    currentPeriodEnd: sub.currentPeriodEndsAt === null ? "-" : sub.currentPeriodEndsAt.toISOString().slice(0, 10),
+  }).catch(() => undefined);
   logger.info("stars subscription cancelled by user", { subscriptionId: sub.id.slice(0, 8) });
   await safeAnswerCallback(ctx, "تمدید دوره‌های بعدی لغو شد.");
   await renderSubscriptionDetail(ctx, ctx.match[1]);
+});
+
+// --- reactivation (Part N) — creates NO payment/checkout/order/renewal ---------
+
+starsSubscriptionHandler.callbackQuery(/^user:sub:react:([0-9a-f-]+)$/, async (ctx) => {
+  const user = ctx.dbUser;
+  if (user === null) return;
+  const sub = await getOwnedSubscriptionByShortId(ctx.match[1], user.id);
+  if (sub === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  if (!isReactivationCompatibleStatus(sub.status) || sub.initialTelegramPaymentChargeId === null) {
+    await safeAnswerCallback(ctx, "این اشتراک در وضعیت قابل فعال‌سازی مجدد نیست.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    STARS_REACTIVATE_CONFIRM_TEXT,
+    new InlineKeyboard()
+      .text("اجازه فعال‌سازی مجدد ⭐", subCb.reactivateYes(ctx.match[1]))
+      .row()
+      .text("انصراف", subCb.detail(ctx.match[1])),
+  );
+});
+
+starsSubscriptionHandler.callbackQuery(/^user:sub:react:([0-9a-f-]+):yes$/, async (ctx) => {
+  const user = ctx.dbUser;
+  if (user === null) return;
+  const sub = await getOwnedSubscriptionByShortId(ctx.match[1], user.id);
+  if (sub === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  // Compatibility gate: state reactivation-compatible, first charge id present,
+  // Service still exists, no active wallet-mandate conflict, no open refund case.
+  if (!isReactivationCompatibleStatus(sub.status) || sub.initialTelegramPaymentChargeId === null) {
+    await safeAnswerCallback(ctx, "این اشتراک در وضعیت قابل فعال‌سازی مجدد نیست.");
+    return;
+  }
+  const service = await prisma.service.findUnique({ where: { id: sub.serviceId } });
+  if (service === null || service.deletedAt !== null || service.status === "DELETED") {
+    await safeAnswerCallback(ctx, "سرویس این اشتراک دیگر موجود نیست.");
+    return;
+  }
+  const mandate = await prisma.serviceAutoRenewalMandate.findUnique({ where: { serviceId: sub.serviceId } });
+  if (mandate !== null && mandate.fundingMethod === "WALLET" && mandate.status === "ACTIVE") {
+    await safeAnswerCallback(ctx, "این سرویس تمدید خودکار از کیف پول دارد.");
+    return;
+  }
+  const openRefund = await prisma.telegramStarsSubscriptionCharge.count({
+    where: { subscriptionId: sub.id, status: { in: ["REFUND_PENDING", "RECONCILIATION_REQUIRED"] } },
+  });
+  if (openRefund > 0) {
+    await safeAnswerCallback(ctx, "به دلیل بررسی پرداخت، فعال‌سازی مجدد در حال حاضر ممکن نیست.");
+    return;
+  }
+  // Re-enable Telegram extension FIRST; only persist on API success. Creates NO
+  // Payment/Checkout/Order and renews nothing — waits for the next successful charge.
+  const ok = await reactivateTelegramExtension(ctx.api as unknown as StarsBotApi, sub);
+  if (!ok) {
+    await safeAnswerCallback(ctx, "فعال‌سازی مجدد در تلگرام انجام نشد. لطفاً دوباره تلاش کنید.");
+    return;
+  }
+  await prisma.telegramStarsServiceSubscription.updateMany({
+    where: { id: sub.id, userId: user.id, status: { in: ["CANCEL_AT_PERIOD_END", "PAST_DUE", "REACTIVATION_ALLOWED"] } },
+    data: { status: "REACTIVATION_ALLOWED", telegramExtensionCanceled: false, reactivationRequestedAt: new Date() },
+  });
+  logger.info("stars subscription reactivation requested", { subscriptionId: sub.id.slice(0, 8) });
+  await safeAnswerCallback(ctx, "اجازه فعال‌سازی مجدد ثبت شد ⭐");
+  await safeEditOrReply(ctx, STARS_REACTIVATE_DONE_TEXT, new InlineKeyboard().text("اشتراک‌های Stars من ⭐", subCb.list));
 });
 
 export { subscriptionShortId };

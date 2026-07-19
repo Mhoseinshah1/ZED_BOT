@@ -89,3 +89,15 @@ disabled-by-default system using `createInvoiceLink` (`subscription_period =
 separate from the one-time `zedbot:pay:` scheme). See
 `telegram-stars-service-subscriptions.md` and its `-payments` / `-refunds` /
 `-operations` / `-concurrency` siblings.
+
+### Recovery & operations (Phase 2.1)
+
+Phase 2.1 completes the subscription operations: Bot API 10.2 subscription-state
+Updates (via a compat shim — `Update.subscription`/`BotSubscriptionUpdated` are
+not yet in `@grammyjs/types@3.28.0`; `getStarTransactions` / `refundStarPayment` /
+`editUserStarSubscription` are native), a durable transaction cursor +
+`getStarTransactions` charge recovery, recovery evidence (`LIVE_EXACT` vs
+`RECOVERED_DERIVED`) with live/recovery convergence, PAST_DUE, bounded refund
+retries, a worker/bot producer/consumer split, reactivation, product config +
+version drift, an OWNER dashboard, `/paysupport`, and a Stars financial report.
+See `telegram-stars-subscription-recovery.md`, `-support.md`, `-reporting.md`.

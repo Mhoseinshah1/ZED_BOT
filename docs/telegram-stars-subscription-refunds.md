@@ -31,3 +31,25 @@ renewal AND a Stars refund.
 The durable charge/subscription rows make refunds and settlement resumable: a
 `REFUND_PENDING` charge is retried, a `FULFILLING` charge with an Order re-drives
 fulfilment only, and the worker recovery jobs re-scan.
+
+## Phase 2.1 — refunded-payment Updates, bounded retries, reconciliation
+
+- **Refunded-payment Update (Bot API).** A `message:refunded_payment` update
+  (pre-gate handler) is the refund **confirmation**: after validating `XTR` +
+  `zedbot:sub:` payload → subscription, charge id → charge, amount == charge
+  amount, same user and a refundable state, it marks the charge `REFUNDED`
+  (idempotent CAS), moves the subscription to `REQUIRES_ACTION` + extension
+  canceled, and creates a durable `STARS_SUBSCRIPTION_REFUNDED` notification. It
+  is **never** a `WalletTransaction` and **never** calls `refundStarPayment`
+  again. Duplicates are harmless; foreign/malformed updates are logged and
+  ignored.
+- **Bounded refund retries.** The worker `REFUNDS` processor selects
+  `REFUND_PENDING` charges with remaining capacity → a bot-consumed `RETRY_REFUND`
+  job, spaced by `telegram_stars_subscription_refund_retry_minutes` (default 30)
+  up to `..._refund_max_attempts`. When retries are **exhausted**, the
+  subscription is marked `REQUIRES_ACTION` — **never** a `WalletTransaction`.
+- **Refund reconciliation.** Confirms **only outgoing** star transactions that
+  match an existing `REFUND_PENDING` charge (same user/amount). Unknown outgoing
+  transactions are ignored — recovery never invents a refund.
+
+Full detail: `telegram-stars-subscription-recovery.md`.

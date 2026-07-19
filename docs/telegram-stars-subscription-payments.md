@@ -64,3 +64,25 @@ one telegram_payment_charge_id
 | definite failure (refunded) | `REFUND_PENDING` | Stars refund flow (see `-refunds.md`) |
 | uncertain panel outcome | `RECONCILIATION_REQUIRED` | existing reconciliation completes/refunds on proof |
 | amount != fixed / bad snapshot | `IGNORED` / `FAILED` | never settled |
+
+## Phase 2.1 — recovered charges & evidence
+
+Phase 2.1 adds a second way a charge can settle: **transaction recovery**. When a
+live `successful_payment` update was lost, the worker's `getStarTransactions`
+scan enqueues a `SETTLE_RECOVERED_CHARGE` job that runs the **same**
+`settleTelegramStarsSubscriptionCharge` — one implementation, idempotent on
+`telegramPaymentChargeId`. A recovered charge is stamped:
+
+- `evidenceSource = STAR_TRANSACTION_RECOVERY` (vs the live default
+  `LIVE_SUCCESSFUL_PAYMENT`),
+- `periodEndSource = RECOVERED_DERIVED` with period end = `txDate + period` (vs
+  the live default `LIVE_EXACT` = Telegram's `subscription_expiration_date`).
+
+**Convergence.** If the live update for that same charge later arrives, it
+**upgrades** `periodEndSource → LIVE_EXACT` (the exact expiry) **without** a
+second charge / Payment / Order / renewal. Live and recovery paths always resolve
+to one settled charge.
+
+A settled Stars renewal also creates a durable `STARS_SUBSCRIPTION_ACTIVATED`
+(first charge) or `STARS_SUBSCRIPTION_RENEWED` (recurring) notification. Full
+recovery/cursor/evidence detail: `telegram-stars-subscription-recovery.md`.

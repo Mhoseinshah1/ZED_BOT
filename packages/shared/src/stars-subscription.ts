@@ -85,6 +85,16 @@ export const TELEGRAM_STARS_SUBSCRIPTION_CHARGE_RETENTION_DAYS_KEY =
 export const TELEGRAM_STARS_SUBSCRIPTION_CONSENT_VERSION_KEY =
   "telegram_stars_subscription_consent_version";
 
+// Phase 2.1 — recovery/reconciliation settings (bounded, Part J).
+export const TELEGRAM_STARS_SUBSCRIPTION_MAX_PAGES_PER_RUN_KEY =
+  "telegram_stars_subscription_max_pages_per_run";
+export const TELEGRAM_STARS_SUBSCRIPTION_TRANSACTION_PAGE_SIZE_KEY =
+  "telegram_stars_subscription_transaction_page_size";
+export const TELEGRAM_STARS_SUBSCRIPTION_REFUND_RETRY_MINUTES_KEY =
+  "telegram_stars_subscription_refund_retry_minutes";
+export const TELEGRAM_STARS_SUBSCRIPTION_CURSOR_STALE_MINUTES_KEY =
+  "telegram_stars_subscription_cursor_stale_minutes";
+
 // --- config ------------------------------------------------------------------
 
 export interface StarsSubscriptionConfig {
@@ -102,6 +112,15 @@ export interface StarsSubscriptionConfig {
   chargeRetentionDays: number;
   /** Current consent version; a bump requires fresh consent to keep renewing. */
   consentVersion: number;
+  /** getStarTransactions pages processed per reconcile run (bounded). */
+  maxPagesPerRun: number;
+  /** getStarTransactions page size (Telegram limit 1..100). */
+  transactionPageSize: number;
+  /** Delay between automatic refund retry attempts (minutes). */
+  refundRetryMinutes: number;
+  /** After this many minutes without a successful transaction run the cursor is
+   * reported stale in worker diagnostics (does NOT block financial authority). */
+  cursorStaleMinutes: number;
 }
 
 export const DEFAULT_STARS_SUBSCRIPTION_CONFIG: StarsSubscriptionConfig = {
@@ -112,6 +131,10 @@ export const DEFAULT_STARS_SUBSCRIPTION_CONFIG: StarsSubscriptionConfig = {
   pendingEnrollmentMinutes: 60,
   chargeRetentionDays: 730,
   consentVersion: 1,
+  maxPagesPerRun: 10,
+  transactionPageSize: 100,
+  refundRetryMinutes: 30,
+  cursorStaleMinutes: 120,
 };
 
 // bounds (each value validated + clamped; an invalid stored value → the default)
@@ -127,6 +150,30 @@ export const STARS_SUB_MIN_PENDING_MINUTES = 5;
 export const STARS_SUB_MAX_PENDING_MINUTES = 24 * 60;
 export const STARS_SUB_MIN_RETENTION_DAYS = 90;
 export const STARS_SUB_MAX_RETENTION_DAYS = 3650;
+export const STARS_SUB_MIN_PAGES_PER_RUN = 1;
+export const STARS_SUB_MAX_PAGES_PER_RUN = 50;
+/** Telegram getStarTransactions caps `limit` at 100. */
+export const STARS_SUB_MIN_PAGE_SIZE = 1;
+export const STARS_SUB_MAX_PAGE_SIZE = 100;
+export const STARS_SUB_MIN_REFUND_RETRY_MINUTES = 1;
+export const STARS_SUB_MAX_REFUND_RETRY_MINUTES = 24 * 60;
+export const STARS_SUB_MIN_CURSOR_STALE_MINUTES = 5;
+export const STARS_SUB_MAX_CURSOR_STALE_MINUTES = 7 * 24 * 60;
+
+/** Clock-skew slack allowed between a recovered transaction date and enrollment. */
+export const STARS_SUB_ENROLLMENT_CLOCK_SKEW_MS = 10 * 60_000;
+
+/**
+ * Derives a recovered charge's period end from the transaction date + the fixed
+ * subscription period. NEVER an exact Telegram-provided expiration — the charge is
+ * stamped RECOVERED_DERIVED until a live update supplies the exact value.
+ */
+export function deriveRecoveredPeriodEnd(
+  transactionAtMs: number,
+  periodSeconds: number = STARS_SUBSCRIPTION_PERIOD_SECONDS,
+): Date {
+  return new Date(transactionAtMs + periodSeconds * 1000);
+}
 
 export function clampStarsSubInt(
   value: unknown,
@@ -164,6 +211,48 @@ export const STARS_SUBSCRIPTION_SCHEDULER_IDS = {
 /** Redis lock: only one subscription reconcile runs at a time across copies. */
 export const STARS_SUBSCRIPTION_RECONCILE_LOCK_KEY = "zedbot:stars-sub-reconcile-lock";
 
+// --- bot-consumed execute queue (Phase 2.1) ----------------------------------
+// The worker OWNS discovery/scheduling but any action that must renew a Service
+// (recovered-charge settlement, refund execution, stuck-charge reconcile) needs
+// the bot's panel-fulfillment + grammY Api. Mirroring wallet auto-renewal, the
+// worker PRODUCES these jobs and the bot process CONSUMES them, reusing the exact
+// settlement/refund services (one implementation, idempotent on the charge id).
+
+export const STARS_SUBSCRIPTION_EXECUTE_QUEUE_NAME = "stars-subscription-execute";
+
+export const STARS_SUBSCRIPTION_EXECUTE_JOB_NAMES = {
+  /** Settle a getStarTransactions-recovered charge (evidence STAR_TRANSACTION_RECOVERY). */
+  SETTLE_RECOVERED_CHARGE: "SETTLE_RECOVERED_CHARGE",
+  /** Execute one bounded Telegram refund for a REFUND_PENDING charge. */
+  RETRY_REFUND: "RETRY_REFUND",
+  /** Re-drive fulfillment/reconciliation for a stuck SETTLING/FULFILLING/RECONCILIATION_REQUIRED charge. */
+  RECONCILE_CHARGE: "RECONCILE_CHARGE",
+} as const;
+export type StarsSubscriptionExecuteJobName =
+  (typeof STARS_SUBSCRIPTION_EXECUTE_JOB_NAMES)[keyof typeof STARS_SUBSCRIPTION_EXECUTE_JOB_NAMES];
+
+/** Idempotent execute-job id: one job per (kind, charge) so duplicates collapse. */
+export function starsSubscriptionExecuteJobId(kind: string, chargeId: string): string {
+  return `starsexec-${kind}-${chargeId}`;
+}
+
+/** SystemLog event names (Part Z). Counts/state/safe codes only — never ids/payload. */
+export const STARS_SUBSCRIPTION_LOG_EVENTS = {
+  TRANSACTION_SCAN_COMPLETED: "stars_subscription.transaction_scan_completed",
+  TRANSACTION_RECOVERED: "stars_subscription.transaction_recovered",
+  SUBSCRIPTION_UPDATE_RECEIVED: "stars_subscription.subscription_update_received",
+  REFUND_UPDATE_RECEIVED: "stars_subscription.refund_update_received",
+  PAST_DUE: "stars_subscription.past_due",
+  REACTIVATION_REQUESTED: "stars_subscription.reactivation_requested",
+  REACTIVATED: "stars_subscription.reactivated",
+  REFUND_RETRY: "stars_subscription.refund_retry",
+  REFUND_EXHAUSTED: "stars_subscription.refund_exhausted",
+  PRODUCT_CONFIG_CHANGED: "stars_subscription.product_config_changed",
+  VERSION_DRIFT_DETECTED: "stars_subscription.version_drift_detected",
+  SUPPORT_TICKET_CREATED: "stars_subscription.support_ticket_created",
+  CLEANUP_COMPLETED: "stars_subscription.cleanup_completed",
+} as const;
+
 // --- worker status fields (rolling-upgrade-safe, counts + timestamps only) ----
 
 export interface StarsSubscriptionStatusFields {
@@ -175,4 +264,9 @@ export interface StarsSubscriptionStatusFields {
   starsSubscriptionPastDue?: number;
   starsSubscriptionRequiresAction?: number;
   starsSubscriptionFailures?: number;
+  // Optional (Part W) — added only when known; rolling deploys tolerate absence.
+  lastStarsTransactionOffset?: number;
+  starsSubscriptionRefundPending?: number;
+  starsSubscriptionReconciliationRequired?: number;
+  starsSubscriptionCursorStale?: boolean;
 }

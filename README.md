@@ -505,6 +505,24 @@ with the review queue and migration audit queries in
 the DB-enforced invariants in
 [`docs/database-invariants.md`](docs/database-invariants.md).
 
+Recurring monthly Service renewals funded by **Telegram Stars subscriptions**
+(`createInvoiceLink` + `subscription_period`, `zedbot:sub:` payloads, one local
+financial chain per Telegram charge id; **disabled by default**) are a separate
+system documented in
+[`docs/telegram-stars-service-subscriptions.md`](docs/telegram-stars-service-subscriptions.md)
+and its `-payments` / `-refunds` / `-operations` / `-concurrency` siblings. Phase
+2.1 adds subscription recovery and operations — Bot API 10.2 subscription-state
+Updates (behind a compat shim) + refunded-payment Updates, a durable transaction
+cursor with `getStarTransactions` charge recovery (exact-vs-derived expiry that
+converges onto one settled charge), PAST_DUE detection, bounded refund retries, a
+worker→bot producer/consumer split, reactivation, admin product config + version
+drift, an OWNER dashboard with manual reconcile, `/paysupport` (masked charges),
+and a Stars-vs-Toman financial report — see
+[`docs/telegram-stars-subscription-recovery.md`](docs/telegram-stars-subscription-recovery.md),
+[`docs/telegram-stars-subscription-support.md`](docs/telegram-stars-subscription-support.md)
+and
+[`docs/telegram-stars-subscription-reporting.md`](docs/telegram-stars-subscription-reporting.md).
+
 ### Database migrations
 
 Migrations live in `packages/database/prisma/migrations` and are applied

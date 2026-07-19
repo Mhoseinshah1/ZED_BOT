@@ -27,6 +27,7 @@ import {
   optOutMarketing,
   snoozeWinback,
 } from "../../services/winback.service.js";
+import { getOwnedSubscriptionByShortId } from "../../services/stars-subscription.service.js";
 import {
   getOrCreateNotificationPreference,
   getServiceNotificationPreference,
@@ -121,6 +122,90 @@ const ACTION_INTERACTION: Record<string, NotificationInteractionType | undefined
   r: NotificationInteractionType.RENEW_SERVICE,
   v: NotificationInteractionType.BUY_EXTRA_VOLUME,
   x: NotificationInteractionType.DISMISS,
+  u: NotificationInteractionType.VIEW_SUBSCRIPTION,
+  a: NotificationInteractionType.REACTIVATE_SUBSCRIPTION,
+  y: NotificationInteractionType.PAYMENT_SUPPORT,
+};
+
+/**
+ * Stars subscription notification actions (Phase 2.1): u = view subscription,
+ * s = view service, a = reactivation confirm, y = payment support. Routed by TYPE
+ * first (like win-back) so a payment-category Stars letter never falls through to
+ * the service/checkout branches (its serviceId is intentionally null; the
+ * subscription is resolved from the safe snapshot meta short id). Every path
+ * re-resolves the subscription owner-scoped + reloads LIVE state.
+ */
+async function handleStarsNotificationAction(
+  ctx: BotContext,
+  notification: AutomatedNotification,
+  userId: string,
+  action: string,
+): Promise<void> {
+  const snapshot = notification.payloadSnapshot as { meta?: { subShort?: unknown } } | null;
+  const subShort = typeof snapshot?.meta?.subShort === "string" ? snapshot.meta.subShort : "";
+  const sub = subShort === "" ? null : await getOwnedSubscriptionByShortId(subShort, userId);
+  if (sub === null) {
+    await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+    return;
+  }
+  const interaction = ACTION_INTERACTION[action];
+  if (interaction !== undefined) {
+    await recordNotificationInteraction(notification.id, userId, interaction);
+  }
+
+  if (action === "y") {
+    await safeAnswerCallback(ctx, "برای پیگیری پرداخت، دستور /paysupport را ارسال کنید.");
+    return;
+  }
+  if (action === "a") {
+    // Reactivation is compatible only in these states with a first charge id.
+    const canReactivate =
+      sub.initialTelegramPaymentChargeId !== null &&
+      (sub.status === "CANCEL_AT_PERIOD_END" || sub.status === "PAST_DUE" || sub.status === "REACTIVATION_ALLOWED");
+    if (!canReactivate) {
+      await safeAnswerCallback(ctx, "این اشتراک در وضعیت قابل فعال‌سازی مجدد نیست.");
+      return;
+    }
+    await safeAnswerCallback(ctx);
+    const kb = new InlineKeyboard()
+      .text("اجازه فعال‌سازی مجدد ⭐", `user:sub:react:${sub.id.slice(0, 8)}`)
+      .row()
+      .text("انصراف", "user:sub:list");
+    try {
+      await ctx.editMessageText(STARS_REACTIVATE_CONFIRM_TEXT, { reply_markup: kb });
+    } catch {
+      await ctx.reply(STARS_REACTIVATE_CONFIRM_TEXT, { reply_markup: kb });
+    }
+    return;
+  }
+  // u / s → point to the subscription (owner-scoped list is always a real landing).
+  await safeAnswerCallback(ctx);
+  const kb = new InlineKeyboard().text("اشتراک‌های من ⭐", "user:sub:list");
+  const text = `اشتراک ماهانه Stars\n\nوضعیت: ${STARS_STATUS_FA[sub.status] ?? sub.status}\nمبلغ هر دوره: ${sub.starsAmount} استار`;
+  try {
+    await ctx.editMessageText(text, { reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { reply_markup: kb });
+  }
+}
+
+const STARS_REACTIVATE_CONFIRM_TEXT = [
+  "⭐ اجازه فعال‌سازی مجدد اشتراک",
+  "",
+  "با تایید این گزینه، تلگرام اجازه خواهد داشت پرداخت دوره‌های بعدی اشتراک را دوباره انجام دهد.",
+  "",
+  "این عملیات به‌تنهایی پرداخت یا تمدید جدیدی ایجاد نمی‌کند؛ تمدید بعدی فقط پس از پرداخت موفق Telegram Stars انجام خواهد شد.",
+].join("\n");
+
+const STARS_STATUS_FA: Record<string, string> = {
+  PENDING_PAYMENT: "در انتظار پرداخت اول",
+  ACTIVE: "فعال",
+  CANCEL_AT_PERIOD_END: "لغو در پایان دوره",
+  REACTIVATION_ALLOWED: "اجازه فعال‌سازی مجدد",
+  PAST_DUE: "عقب‌افتاده",
+  EXPIRED: "منقضی",
+  REQUIRES_ACTION: "نیازمند بررسی",
+  CANCELLED: "لغو شده",
 };
 
 /**
@@ -225,7 +310,7 @@ async function handleWinbackNotificationAction(
   await safeEditOrReply(ctx, WINBACK_OPT_OUT_CONFIRM_TEXT, kb);
 }
 
-userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpxdngwzo])$/, async (ctx) => {
+userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpxdngwzouay])$/, async (ctx) => {
   const user = ctx.dbUser;
   if (user === null) {
     return;
@@ -254,6 +339,22 @@ userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpxdngwzo])$/
   }
   // A win-back-only letter on a non-win-back notification is invalid.
   if (action === "g" || action === "w" || action === "z" || action === "o") {
+    await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+    return;
+  }
+
+  // Stars subscription (PAYMENT) actions routed by TYPE first — its serviceId is
+  // null and the subscription is resolved from the safe snapshot meta short id.
+  if (notification.type.startsWith("STARS_SUBSCRIPTION_")) {
+    if (action === "u" || action === "s" || action === "a" || action === "y") {
+      await handleStarsNotificationAction(ctx, notification, user.id, action);
+    } else {
+      await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+    }
+    return;
+  }
+  // Stars-only actions on a non-Stars notification are invalid.
+  if (action === "u" || action === "a" || action === "y") {
     await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
     return;
   }

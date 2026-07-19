@@ -24,7 +24,25 @@ export const subCb = {
   detail: (subShort: string): string => `user:sub:m:${subShort}`,
   cancel: (subShort: string): string => `user:sub:cancel:${subShort}`,
   cancelYes: (subShort: string): string => `user:sub:cancel:${subShort}:yes`,
+  reactivate: (subShort: string): string => `user:sub:react:${subShort}`,
+  reactivateYes: (subShort: string): string => `user:sub:react:${subShort}:yes`,
 } as const;
+
+/** The subscription states in which reactivation is offered/allowed (Part N). */
+export function isReactivationCompatibleStatus(status: string): boolean {
+  return status === "CANCEL_AT_PERIOD_END" || status === "PAST_DUE" || status === "REACTIVATION_ALLOWED";
+}
+
+export const STARS_REACTIVATE_CONFIRM_TEXT = [
+  "⭐ اجازه فعال‌سازی مجدد اشتراک",
+  "",
+  "با تایید این گزینه، تلگرام اجازه خواهد داشت پرداخت دوره‌های بعدی اشتراک را دوباره انجام دهد.",
+  "",
+  "این عملیات به‌تنهایی پرداخت یا تمدید جدیدی ایجاد نمی‌کند؛ تمدید بعدی فقط پس از پرداخت موفق Telegram Stars انجام خواهد شد.",
+].join("\n");
+
+export const STARS_REACTIVATE_DONE_TEXT =
+  "اجازه فعال‌سازی مجدد ثبت شد ⭐\n\nتمدید بعدی فقط پس از پرداخت موفق Telegram Stars انجام خواهد شد.";
 
 export const STARS_SUBSCRIPTION_BUTTON_TEXT = "اشتراک ماهانه Stars ⭐";
 export const STARS_LIST_BUTTON_TEXT = "اشتراک‌های Stars من ⭐";
@@ -138,6 +156,16 @@ export function starsStatusKeyboard(sub: TelegramStarsServiceSubscription): Inli
   const kb = new InlineKeyboard();
   if ((sub.status === "ACTIVE" || sub.status === "PAST_DUE" || sub.status === "REQUIRES_ACTION") && !sub.telegramExtensionCanceled) {
     kb.text("لغو تمدید دوره‌های بعدی", subCb.cancel(short)).row();
+  }
+  // Reactivation is offered only when the extension is canceled (or the state is
+  // reactivation-compatible) AND the authoritative first charge id exists. It
+  // creates no payment; the next renewal happens only after a successful charge.
+  if (
+    isReactivationCompatibleStatus(sub.status) &&
+    sub.telegramExtensionCanceled &&
+    sub.initialTelegramPaymentChargeId !== null
+  ) {
+    kb.text("اجازه فعال‌سازی مجدد ⭐", subCb.reactivate(short)).row();
   }
   kb.text(STARS_LIST_BUTTON_TEXT, subCb.list).row();
   kb.text("مشاهده سرویس", `user:svc:view:${svc}`).row();

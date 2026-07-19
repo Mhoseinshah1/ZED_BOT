@@ -5,6 +5,7 @@ import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
 import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
+import { startStarsSubscriptionConsumer } from "./services/stars-subscription-consumer.js";
 import { runningGitSha } from "./services/backup-health.service.js";
 import { startCheckoutInputRetentionLoop } from "./services/checkout-customer-input.service.js";
 import { startFreeTrialLoop } from "./services/free-trial.service.js";
@@ -43,6 +44,12 @@ async function run(botToken: string): Promise<void> {
   // Redis is unconfigured; the whole feature is disabled-by-default regardless.
   const autoRenewalConsumer = startAutoRenewalConsumer(bot.api);
 
+  // Telegram Stars subscription EXECUTE consumer (Phase 2.1): settles worker-
+  // recovered charges, executes bounded refund retries and re-drives stuck-charge
+  // reconciliation with the bot's grammY Api + existing services. Null when Redis
+  // is unconfigured; the feature is disabled-by-default regardless.
+  const starsSubscriptionConsumer = startStarsSubscriptionConsumer(bot.api);
+
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`received ${signal}, stopping bot`);
     try {
@@ -57,6 +64,9 @@ async function run(botToken: string): Promise<void> {
       await bot.stop();
       if (autoRenewalConsumer !== null) {
         await autoRenewalConsumer.stop();
+      }
+      if (starsSubscriptionConsumer !== null) {
+        await starsSubscriptionConsumer.stop();
       }
       await disconnectDatabase();
     } catch (err) {

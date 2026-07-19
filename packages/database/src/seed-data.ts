@@ -495,6 +495,92 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
       "برای استفاده دوباره می‌توانید پلن‌های موجود را مشاهده کنید.",
     allowedVariables: ["inactive_days", "last_service_name", "last_product_name"],
   },
+  // Telegram Stars subscription lifecycle (Phase 2.1, category PAYMENT). Only safe
+  // display variables: service name, fixed Stars amount, current period end. No
+  // charge id, payload, order id or panel data. Every variable renders safely when
+  // missing.
+  {
+    key: "notification_stars_subscription_activated",
+    title: "اعلان فعال‌سازی اشتراک استاری",
+    category: "notification",
+    defaultContent:
+      "اشتراک ماهانه Telegram Stars فعال شد ⭐\n" +
+      "\n" +
+      "سرویس:\n{service_name}\n" +
+      "\n" +
+      "مبلغ هر دوره:\n{stars_amount} استار\n" +
+      "\n" +
+      "پایان دوره فعلی:\n{current_period_end}",
+    allowedVariables: ["service_name", "stars_amount", "current_period_end"],
+  },
+  {
+    key: "notification_stars_subscription_renewed",
+    title: "اعلان تمدید اشتراک استاری",
+    category: "notification",
+    defaultContent:
+      "اشتراک ماهانه با موفقیت تمدید شد ⭐\n" +
+      "\n" +
+      "سرویس:\n{service_name}\n" +
+      "\n" +
+      "مبلغ:\n{stars_amount} استار\n" +
+      "\n" +
+      "پایان دوره جدید:\n{current_period_end}",
+    allowedVariables: ["service_name", "stars_amount", "current_period_end"],
+  },
+  {
+    key: "notification_stars_subscription_cancelled",
+    title: "اعلان لغو اشتراک استاری",
+    category: "notification",
+    defaultContent:
+      "اشتراک ماهانه Telegram Stars لغو شد ⭐\n" +
+      "\n" +
+      "تمدید خودکار دوره‌های بعدی متوقف شد.\n" +
+      "دوره فعلی تا {current_period_end} فعال می‌ماند.",
+    allowedVariables: ["service_name", "stars_amount", "current_period_end"],
+  },
+  {
+    key: "notification_stars_subscription_past_due",
+    title: "اعلان عقب‌افتادگی اشتراک استاری",
+    category: "notification",
+    defaultContent:
+      "پرداخت دوره جدید اشتراک دریافت نشد ⚠️\n" +
+      "\n" +
+      "تمدید جدیدی روی سرویس اعمال نشده است.\n" +
+      "\n" +
+      "وضعیت Stars و اشتراک خود را بررسی کنید.",
+    allowedVariables: ["service_name", "stars_amount", "current_period_end"],
+  },
+  {
+    key: "notification_stars_subscription_requires_action",
+    title: "اعلان نیازمند بررسی اشتراک استاری",
+    category: "notification",
+    defaultContent:
+      "اشتراک ماهانه شما نیازمند بررسی است ⚠️\n" +
+      "\n" +
+      "برای جلوگیری از مشکل در تمدیدهای بعدی، وضعیت اشتراک را بررسی کنید.",
+    allowedVariables: ["service_name", "stars_amount", "current_period_end"],
+  },
+  {
+    key: "notification_stars_subscription_refunded",
+    title: "اعلان بازپرداخت اشتراک استاری",
+    category: "notification",
+    defaultContent:
+      "مبلغ استاری این دوره بازپرداخت شد ✅\n" +
+      "\n" +
+      "تمدید این دوره انجام نشد و پرداخت دوره‌های بعدی متوقف شده است.",
+    allowedVariables: ["service_name", "stars_amount", "current_period_end"],
+  },
+  {
+    key: "notification_stars_subscription_price_version_changed",
+    title: "اعلان تغییر شرایط اشتراک استاری",
+    category: "notification",
+    defaultContent:
+      "شرایط اشتراک ماهانه به‌روزرسانی شد ⭐\n" +
+      "\n" +
+      "اشتراک فعلی شما با همان مبلغ و شرایط قبلی ادامه می‌یابد.\n" +
+      "برای استفاده از شرایط جدید می‌توانید اشتراک جدیدی بسازید.",
+    allowedVariables: ["service_name", "stars_amount", "current_period_end"],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -593,4 +679,9 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "notif_btn_winback_wallet", title: "اعلان: کیف پول من", text: "کیف پول من 🏦" },
   { key: "notif_btn_winback_snooze", title: "اعلان: توقف موقت یادآوری بازگشت", text: "فعلاً یادآوری نکن" },
   { key: "notif_btn_winback_opt_out", title: "اعلان: عدم دریافت پیشنهادها", text: "عدم دریافت پیشنهادها" },
+  // Telegram Stars subscription (Phase 2.1). Callback data ntf:<shortId>:<action>.
+  { key: "notif_btn_stars_view_subscription", title: "اعلان: مشاهده اشتراک", text: "مشاهده اشتراک ⭐" },
+  { key: "notif_btn_stars_view_service", title: "اعلان: مشاهده سرویس اشتراک", text: "مشاهده سرویس 👁" },
+  { key: "notif_btn_stars_reactivate", title: "اعلان: فعال‌سازی مجدد اشتراک", text: "اجازه فعال‌سازی مجدد ⭐" },
+  { key: "notif_btn_stars_payment_support", title: "اعلان: پشتیبانی پرداخت", text: "پشتیبانی پرداخت 💳" },
 ];

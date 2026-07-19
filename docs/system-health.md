@@ -164,3 +164,24 @@ workers → the admin page renders "نامشخص"): `analyticsEnabled`,
 timestamp advances within roughly the reconcile cadence (default 15 min) while
 analytics is on and `attributionReconcileFailures` stays flat. See
 [notification-analytics-operations.md](notification-analytics-operations.md).
+
+## Telegram Stars subscription health (Phase 2.1)
+
+The Stars subscription engine's `getStatusFields` is merged into the same
+`zedbot:notif:worker-status` snapshot (absent on older workers → the admin page
+renders "نامشخص"). Fields: `starsSubscriptionsEnabled`,
+`lastStarsSubscriptionReconcileAt`, `active`, `chargesProcessed`,
+`chargesRefunded`, `pastDue`, `requiresAction`, `failures`, plus optional
+`lastStarsTransactionOffset`, `refundPending`, `reconciliationRequired`,
+`cursorStale`. All are counts / timestamps / a boolean — never a user id, charge
+id, payload or financial value.
+
+The OWNER dashboard `admin:starsub:*` surfaces gateway / worker / **cursor** health
+alongside the subscription and charge counts and the last reconcile time; a
+`cursorStale` flag (transaction cursor idle past
+`telegram_stars_subscription_cursor_stale_minutes`, default 120) signals the
+recovery scan has not advanced. Healthy = `lastStarsSubscriptionReconcileAt`
+advances within the reconcile cadence while the master switch is on and `failures`
+stays flat. See
+[telegram-stars-subscription-recovery.md](telegram-stars-subscription-recovery.md)
+and [telegram-stars-subscription-operations.md](telegram-stars-subscription-operations.md).

@@ -13,6 +13,8 @@ import {
   NOTIFICATION_JOB_NAMES,
   NOTIFICATION_MAINTENANCE_QUEUE_NAME,
   NOTIFICATION_WORKER_STATUS_KEY,
+  STARS_SUBSCRIPTION_JOB_NAMES,
+  STARS_SUBSCRIPTION_QUEUE_NAME,
   WORKER_CAPABILITIES_KEY,
   WORKER_HEARTBEAT_KEY,
   type NotificationWorkerStatus,
@@ -70,6 +72,7 @@ interface QueuePair {
   logGroupSetup: Queue;
   notifMaintenance: Queue;
   autoRenewalControl: Queue;
+  starsSubscriptionControl: Queue;
 }
 
 let queues: QueuePair | null = null;
@@ -90,6 +93,7 @@ function getQueues(): QueuePair | null {
     void queues.logGroupSetup.close().catch(() => undefined);
     void queues.notifMaintenance.close().catch(() => undefined);
     void queues.autoRenewalControl.close().catch(() => undefined);
+    void queues.starsSubscriptionControl.close().catch(() => undefined);
     queues = null;
   }
   // BullMQ requires maxRetriesPerRequest: null on its connections.
@@ -106,12 +110,13 @@ function getQueues(): QueuePair | null {
   const logGroupSetup = new Queue(LOG_GROUP_SETUP_QUEUE_NAME, { connection });
   const notifMaintenance = new Queue(NOTIFICATION_MAINTENANCE_QUEUE_NAME, { connection });
   const autoRenewalControl = new Queue(AUTO_RENEWAL_QUEUE_NAME, { connection });
-  for (const queue of [backup, logDelivery, logGroupSetup, notifMaintenance, autoRenewalControl]) {
+  const starsSubscriptionControl = new Queue(STARS_SUBSCRIPTION_QUEUE_NAME, { connection });
+  for (const queue of [backup, logDelivery, logGroupSetup, notifMaintenance, autoRenewalControl, starsSubscriptionControl]) {
     queue.on("error", (err) => {
       logger.warn("ops queue redis error", { queue: queue.name, error: errorText(err) });
     });
   }
-  queues = { backup, logDelivery, logGroupSetup, notifMaintenance, autoRenewalControl };
+  queues = { backup, logDelivery, logGroupSetup, notifMaintenance, autoRenewalControl, starsSubscriptionControl };
   queuesFingerprint = fingerprint;
   return queues;
 }
@@ -124,6 +129,7 @@ export async function resetOpsQueueForTests(): Promise<void> {
     await queues.logGroupSetup.close().catch(() => undefined);
     await queues.notifMaintenance.close().catch(() => undefined);
     await queues.autoRenewalControl.close().catch(() => undefined);
+    await queues.starsSubscriptionControl.close().catch(() => undefined);
     queues = null;
     queuesFingerprint = "";
   }
@@ -366,6 +372,44 @@ export async function enqueueAutoRenewalScanNow(): Promise<boolean> {
     return true;
   } catch (err) {
     logger.warn("auto-renewal manual scan enqueue failed", { error: errorText(err) });
+    return false;
+  }
+}
+
+/**
+ * OWNER manual reconcile (Part Q): enqueues the transaction / expiration / refund
+ * reconcile jobs onto the worker-owned stars-subscription queue and returns
+ * immediately (the worker scans Telegram — never the callback). Fixed job ids
+ * prevent a duplicate active manual run while one is queued.
+ */
+export async function enqueueStarsSubscriptionReconcileNow(): Promise<boolean> {
+  const pair = getQueues();
+  if (pair === null) {
+    return false;
+  }
+  try {
+    await withTimeout(
+      Promise.all([
+        pair.starsSubscriptionControl.add(
+          STARS_SUBSCRIPTION_JOB_NAMES.RECONCILE_STARS_SUBSCRIPTION_TRANSACTIONS,
+          {},
+          { jobId: "stars-sub-tx-manual", removeOnComplete: true, removeOnFail: true },
+        ),
+        pair.starsSubscriptionControl.add(
+          STARS_SUBSCRIPTION_JOB_NAMES.RECONCILE_STARS_SUBSCRIPTION_EXPIRATIONS,
+          {},
+          { jobId: "stars-sub-exp-manual", removeOnComplete: true, removeOnFail: true },
+        ),
+        pair.starsSubscriptionControl.add(
+          STARS_SUBSCRIPTION_JOB_NAMES.RECONCILE_STARS_SUBSCRIPTION_REFUNDS,
+          {},
+          { jobId: "stars-sub-refund-manual", removeOnComplete: true, removeOnFail: true },
+        ),
+      ]),
+    );
+    return true;
+  } catch (err) {
+    logger.warn("stars subscription manual reconcile enqueue failed", { error: errorText(err) });
     return false;
   }
 }

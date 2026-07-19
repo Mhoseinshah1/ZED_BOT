@@ -2200,6 +2200,14 @@ enum AutomatedNotificationType {
   ABANDONED_CHECKOUT
   PAYMENT_RETRY
   CUSTOMER_WINBACK
+  // Phase 2.1 — Telegram Stars subscription lifecycle (all PAYMENT category).
+  STARS_SUBSCRIPTION_ACTIVATED
+  STARS_SUBSCRIPTION_RENEWED
+  STARS_SUBSCRIPTION_CANCELLED
+  STARS_SUBSCRIPTION_PAST_DUE
+  STARS_SUBSCRIPTION_REQUIRES_ACTION
+  STARS_SUBSCRIPTION_REFUNDED
+  STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED
 }
 
 /**
@@ -2243,6 +2251,11 @@ enum NotificationInteractionType {
   VIEW_WALLET
   SNOOZE_WINBACK
   MARKETING_OPT_OUT
+  // Phase 2.1 — Stars subscription notification actions (OPEN_SERVICE + VIEW_PRODUCTS
+  // are reused for "view service" / "create new subscription").
+  VIEW_SUBSCRIPTION
+  REACTIVATE_SUBSCRIPTION
+  PAYMENT_SUPPORT
 }
 
 /**
@@ -2582,6 +2595,30 @@ enum TelegramStarsSubscriptionChargeStatus {
   IGNORED
 }
 
+/**
+ * Phase 2.1 — how a charge's payment evidence was obtained. A live
+ * successful_payment update carries the complete authoritative object; a charge
+ * recovered from getStarTransactions carries a smaller StarTransaction and is
+ * marked STAR_TRANSACTION_RECOVERY. Existing rows backfill to
+ * LIVE_SUCCESSFUL_PAYMENT (they predate recovery).
+ */
+enum TelegramStarsChargeEvidenceSource {
+  LIVE_SUCCESSFUL_PAYMENT
+  STAR_TRANSACTION_RECOVERY
+}
+
+/**
+ * Phase 2.1 — whether the charge's period-end is Telegram's exact
+ * subscription_expiration_date (LIVE_EXACT) or was derived from the recovered
+ * transaction date + subscription period (RECOVERED_DERIVED). A recovered charge
+ * is never presented as an exact Telegram expiration; a later live update
+ * upgrades it to LIVE_EXACT.
+ */
+enum TelegramStarsPeriodEndSource {
+  LIVE_EXACT
+  RECOVERED_DERIVED
+}
+
 enum AutoRenewalMandateStatus {
   ACTIVE
   PAUSED
@@ -2793,6 +2830,15 @@ model TelegramStarsServiceSubscription {
   cancellationConfirmedAt DateTime?
   reactivationRequestedAt DateTime?
 
+  // Phase 2.1 — the last authoritative Bot API subscription-state Update
+  // (BotSubscriptionUpdated.state: "canceled" | "active" | "failed") and when it
+  // arrived. Persist ONLY the safe state string + timestamp, never raw Update data.
+  lastSubscriptionUpdateState String?
+  subscriptionUpdateAt        DateTime?
+  // When the worker marked this subscription PAST_DUE (period+grace elapsed with no
+  // recurring charge). Cleared when a delayed charge recovers it to ACTIVE.
+  pastDueMarkedAt DateTime?
+
   lastChargeAt          DateTime?
   lastSuccessfulOrderId String?
   safeLastErrorCode     String?
@@ -2842,6 +2888,15 @@ model TelegramStarsSubscriptionCharge {
   refundedAt        DateTime?
   refundAttempts    Int       @default(0)
 
+  // Phase 2.1 recovery evidence. A live charge is LIVE_SUCCESSFUL_PAYMENT +
+  // LIVE_EXACT; a getStarTransactions-recovered charge is STAR_TRANSACTION_RECOVERY
+  // with a RECOVERED_DERIVED period end (telegramTransactionAt + period). A later
+  // live update upgrades periodEndSource to LIVE_EXACT WITHOUT creating a 2nd chain.
+  evidenceSource        TelegramStarsChargeEvidenceSource @default(LIVE_SUCCESSFUL_PAYMENT)
+  telegramTransactionAt DateTime?
+  periodEndSource       TelegramStarsPeriodEndSource      @default(LIVE_EXACT)
+  recoveredAt           DateTime?
+
   safeErrorCode String?
 
   createdAt DateTime @default(now())
@@ -2849,4 +2904,32 @@ model TelegramStarsSubscriptionCharge {
 
   @@index([subscriptionId, receivedAt])
   @@index([status, createdAt])
+  @@index([evidenceSource, status])
+}
+
+/**
+ * Phase 2.1 — the single-row cursor for worker-owned getStarTransactions
+ * reconciliation (offset pagination). Coordination only, NEVER financial authority
+ * (the unique telegramPaymentChargeId is the authority). Holds NO token, raw charge
+ * id, user id, payload or Telegram response — only a bounded offset, bootstrap
+ * state, a one-way hash of the last transaction id, and safe run health.
+ */
+model TelegramStarsReconciliationCursor {
+  singletonKey String @id @default("default")
+
+  nextOffset Int @default(0)
+
+  bootstrapCompleted Boolean   @default(false)
+  bootstrapStartedAt DateTime?
+
+  lastTransactionAt     DateTime?
+  lastTransactionIdHash String?
+
+  lastSuccessfulRunAt     DateTime?
+  lastFailedRunAt         DateTime?
+  consecutiveFailureCount Int       @default(0)
+  safeLastErrorCode       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

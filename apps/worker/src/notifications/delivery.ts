@@ -376,6 +376,30 @@ export function createNotificationDeliveryProcessor(
       }
     }
 
+    // --- Stars subscription re-validation (Phase 2.1) ------------------------
+    // Source-state revalidation: cancel a stale PAST_DUE / REQUIRES_ACTION letter
+    // when the subscription has since recovered to ACTIVE (a delayed charge
+    // settled). The subscription is resolved from the safe snapshot meta short id.
+    if (
+      notification.type === "STARS_SUBSCRIPTION_PAST_DUE" ||
+      notification.type === "STARS_SUBSCRIPTION_REQUIRES_ACTION"
+    ) {
+      const subShort =
+        typeof (meta as { subShort?: unknown }).subShort === "string"
+          ? ((meta as { subShort: string }).subShort)
+          : "";
+      if (subShort !== "") {
+        const sub = await prisma.telegramStarsServiceSubscription.findFirst({
+          where: { id: { startsWith: subShort }, userId: notification.userId },
+          select: { status: true },
+        });
+        if (sub !== null && sub.status === "ACTIVE") {
+          await markTerminal(notificationId, { kind: "cancel", reason: "stars-subscription-recovered" });
+          return { cancelled: "stars-subscription-recovered" };
+        }
+      }
+    }
+
     // --- quiet hours + daily cap (delivery-time concerns) --------------------
     const prefs = await resolveEffectiveDeliveryPreferences(notification.userId);
     const quiet = evaluateQuietHours(now, prefs.quietHours, prefs.timezone);
