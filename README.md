@@ -523,6 +523,16 @@ and a Stars-vs-Toman financial report — see
 and
 [`docs/telegram-stars-subscription-reporting.md`](docs/telegram-stars-subscription-reporting.md).
 
+Wallet-funded recurring renewals (consent-based `ServiceAutoRenewalMandate`;
+**disabled by default**) send a **durable advance pre-charge notice** — an
+`AUTO_RENEWAL_UPCOMING` notification normally delivered ~24h before the wallet
+deduction, deduped per expiry cycle, revalidated against the live price/cycle at
+delivery (never a stale amount), with a real cancellation window; the charge is
+gated on the notice but never frozen by a Telegram outage. Configured by
+`wallet_auto_renewal_precharge_notice_minutes` (`0` disables only the advance
+notice). See
+[`docs/wallet-auto-renewal-precharge-notices.md`](docs/wallet-auto-renewal-precharge-notices.md).
+
 ### Database migrations
 
 Migrations live in `packages/database/prisma/migrations` and are applied

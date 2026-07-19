@@ -61,3 +61,11 @@ Rendered by the worker delivery from a safe snapshot (keys mirror
 | `notification_abandoned_checkout` | اعلان سفارش ناقص | `{checkout_reference}` `{product_name}` `{payable_amount}` `{expires_in}` | yes |
 | `notification_payment_retry` | اعلان پرداخت ناموفق | `{checkout_reference}` `{product_name}` `{payable_amount}` `{payment_method}` | yes |
 | `notification_customer_winback` | اعلان بازگشت مشتری | `{inactive_days}` `{last_service_name}` `{last_product_name}` | yes |
+
+## Wallet auto-renewal pre-charge notice (Corrective Phase)
+
+| key | category | variables | notes |
+| --- | --- | --- | --- |
+| `notification_wallet_auto_renewal_upcoming` | notification | `service_name`, `product_name`, `current_price`, `maximum_charge`, `expected_charge_time`, `service_expiry` | Durable advance notice ~24h before a wallet auto-renewal charge. No wallet balance. Delivered variables are re-rendered from LIVE state at send time (never a stale price). See [wallet-auto-renewal-precharge-notices.md](./wallet-auto-renewal-precharge-notices.md). |
+
+Note: the former at-charge `AUTO_RENEWAL_CHARGING_TEXT` "renewing now" message was removed — the advance notice replaces it.

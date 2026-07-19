@@ -2,6 +2,8 @@ import {
   AutoRenewalAttemptStatus,
   AutoRenewalMandateStatus,
   AutoRenewalPauseReason,
+  AutomatedNotificationStatus,
+  AutomatedNotificationType,
   PanelStatus,
   Prisma,
   prisma,
@@ -15,6 +17,8 @@ import {
   AUTO_RENEWAL_MAX_CHARGE_LEAD_MINUTES,
   AUTO_RENEWAL_MIN_MAX_ATTEMPTS,
   AUTO_RENEWAL_MAX_MAX_ATTEMPTS,
+  AUTO_RENEWAL_MIN_PRECHARGE_NOTICE_MINUTES,
+  AUTO_RENEWAL_MAX_PRECHARGE_NOTICE_MINUTES,
   buildAutoRenewalCycleFingerprint,
   clampInt,
   DEFAULT_WALLET_AUTO_RENEWAL_CONFIG,
@@ -22,11 +26,14 @@ import {
   isValidCeiling,
   parseRetryIntervals,
   resolveAutoRenewalCharge,
+  resolveAutoRenewalNoticeSchedule,
+  type AutoRenewalNoticeScheduleKind,
   WALLET_AUTO_RENEWAL_CONSENT_VERSION_KEY,
   WALLET_AUTO_RENEWAL_DEFAULT_CHARGE_LEAD_MINUTES_KEY,
   WALLET_AUTO_RENEWAL_ENABLED_KEY,
   WALLET_AUTO_RENEWAL_INSUFFICIENT_RETRY_INTERVALS_KEY,
   WALLET_AUTO_RENEWAL_MAX_ATTEMPTS_PER_CYCLE_KEY,
+  WALLET_AUTO_RENEWAL_PRECHARGE_NOTICE_MINUTES_KEY,
 } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
@@ -37,7 +44,7 @@ import {
 } from "./order-fulfillment.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 import { isRenewalPlanValid } from "./renewal-checkout.service.js";
-import { getBooleanSetting, getSetting } from "./settings.service.js";
+import { clearSettingsCache, getBooleanSetting, getSetting, setSetting } from "./settings.service.js";
 import { payAutoRenewalWithWallet } from "./wallet-payment.service.js";
 
 // =============================================================================
@@ -74,8 +81,9 @@ const FULFILLMENT_FAILURE_PAUSE_THRESHOLD = 1;
 
 // --- notification texts ------------------------------------------------------
 
-export const AUTO_RENEWAL_CHARGING_TEXT =
-  "سرویس شما هم‌اکنون به‌صورت خودکار از کیف پول تمدید می‌شود… 🔁";
+// NOTE (Corrective Phase): the former AUTO_RENEWAL_CHARGING_TEXT "renewing now"
+// best-effort message was removed — the durable AUTO_RENEWAL_UPCOMING notification
+// (scheduled ~24h before the charge) is the single pre-charge warning now.
 
 export const AUTO_RENEWAL_INSUFFICIENT_RETRY_TEXT =
   "تمدید خودکار سرویس شما به دلیل کافی‌نبودن موجودی کیف پول انجام نشد.\n" +
@@ -313,10 +321,18 @@ export async function listUserMandates(userId: string): Promise<ServiceAutoRenew
 
 /**
  * User-initiated cancellation. Owner-scoped and terminal: a cancelled mandate
- * never charges again (the scan only evaluates ACTIVE mandates, and any
- * in-flight attempt is re-validated against the mandate before any charge).
+ * never charges again (the scan only evaluates ACTIVE mandates, and any in-flight
+ * attempt is re-validated against the mandate before any charge). On success it
+ * also cancels the mandate's UNCOMMITTED attempts (SCHEDULED/CLAIMED only — never a
+ * settling or COMPLETED one, so a completed renewal is never reversed) and any
+ * pending advance pre-charge notice for the service (no misleading "renewing soon"
+ * letter after the user opted out). It never touches another mandate or any money.
  */
 export async function cancelMandate(mandateId: string, userId: string): Promise<boolean> {
+  const mandate = await prisma.serviceAutoRenewalMandate.findFirst({
+    where: { id: mandateId, userId },
+    select: { serviceId: true },
+  });
   const res = await prisma.serviceAutoRenewalMandate.updateMany({
     where: { id: mandateId, userId, status: { not: AutoRenewalMandateStatus.CANCELLED } },
     data: {
@@ -325,7 +341,31 @@ export async function cancelMandate(mandateId: string, userId: string): Promise<
       nextEvaluationAt: null,
     },
   });
-  return res.count > 0;
+  if (res.count === 0) {
+    return false;
+  }
+  const now = new Date();
+  // Cancel only UNCOMMITTED attempts — a PAYMENT_CREATED/FULFILLING/COMPLETED
+  // attempt is money already in motion / settled and is left untouched.
+  await prisma.serviceAutoRenewalAttempt.updateMany({
+    where: {
+      mandateId,
+      status: { in: [AutoRenewalAttemptStatus.SCHEDULED, AutoRenewalAttemptStatus.CLAIMED] },
+    },
+    data: { status: AutoRenewalAttemptStatus.CANCELLED, cancelledAt: now, safeErrorCode: "mandate-cancelled" },
+  });
+  // Cancel any pending advance pre-charge notice for this service's cycle.
+  if (mandate !== null) {
+    await prisma.automatedNotification.updateMany({
+      where: {
+        serviceId: mandate.serviceId,
+        type: AutomatedNotificationType.AUTO_RENEWAL_UPCOMING,
+        status: { in: [AutomatedNotificationStatus.SCHEDULED, AutomatedNotificationStatus.READY] },
+      },
+      data: { status: AutomatedNotificationStatus.CANCELLED, cancelledAt: now, safeErrorCode: "mandate-cancelled" },
+    });
+  }
+  return true;
 }
 
 /**
@@ -438,6 +478,12 @@ export interface AutoRenewalAdminStats {
   insufficientBalance: number;
   requiresAction: number;
   failed: number;
+  // Pre-charge notice counts (Corrective Phase, Parts P/R).
+  prechargeNoticeMinutes: number;
+  noticesScheduled: number;
+  noticesSentToday: number;
+  noticesFailed: number;
+  noticesExpired: number;
 }
 
 /** Authoritative counts for the admin overview (read straight from the DB). */
@@ -453,6 +499,11 @@ export async function getAutoRenewalAdminStats(): Promise<AutoRenewalAdminStats>
     insufficientBalance,
     requiresAction,
     failed,
+    prechargeNoticeMinutes,
+    noticesScheduled,
+    noticesSentToday,
+    noticesFailed,
+    noticesExpired,
   ] = await Promise.all([
     isWalletAutoRenewalEnabled(),
     prisma.serviceAutoRenewalMandate.count({ where: { status: AutoRenewalMandateStatus.ACTIVE } }),
@@ -467,6 +518,11 @@ export async function getAutoRenewalAdminStats(): Promise<AutoRenewalAdminStats>
     prisma.serviceAutoRenewalAttempt.count({ where: { status: "INSUFFICIENT_BALANCE" } }),
     prisma.serviceAutoRenewalAttempt.count({ where: { status: "REQUIRES_ACTION" } }),
     prisma.serviceAutoRenewalAttempt.count({ where: { status: { in: ["FAILED", "DEAD_LETTER"] } } }),
+    getPrechargeNoticeMinutes(),
+    prisma.automatedNotification.count({ where: { type: "AUTO_RENEWAL_UPCOMING", status: "SCHEDULED" } }),
+    prisma.automatedNotification.count({ where: { type: "AUTO_RENEWAL_UPCOMING", status: "SENT", sentAt: { gte: dayAgo } } }),
+    prisma.automatedNotification.count({ where: { type: "AUTO_RENEWAL_UPCOMING", status: { in: ["FAILED", "DEAD_LETTER"] } } }),
+    prisma.automatedNotification.count({ where: { type: "AUTO_RENEWAL_UPCOMING", status: "EXPIRED" } }),
   ]);
   return {
     enabled,
@@ -478,7 +534,101 @@ export async function getAutoRenewalAdminStats(): Promise<AutoRenewalAdminStats>
     insufficientBalance,
     requiresAction,
     failed,
+    prechargeNoticeMinutes,
+    noticesScheduled,
+    noticesSentToday,
+    noticesFailed,
+    noticesExpired,
   };
+}
+
+// --- pre-charge notice admin settings (Corrective Phase, Parts B/P/Q) ---------
+
+/** The current advance-notice window in minutes (validated/clamped; 0 = disabled). */
+export async function getPrechargeNoticeMinutes(): Promise<number> {
+  const raw = await getSetting(WALLET_AUTO_RENEWAL_PRECHARGE_NOTICE_MINUTES_KEY, "");
+  const n = Number.parseInt(raw, 10);
+  if (
+    Number.isInteger(n) &&
+    n >= AUTO_RENEWAL_MIN_PRECHARGE_NOTICE_MINUTES &&
+    n <= AUTO_RENEWAL_MAX_PRECHARGE_NOTICE_MINUTES
+  ) {
+    return n;
+  }
+  return DEFAULT_WALLET_AUTO_RENEWAL_CONFIG.prechargeNoticeMinutes;
+}
+
+/**
+ * Sets the advance-notice window (minutes). 0 disables ONLY the advance notice —
+ * the renewal / insufficient / success / price-change / requires-action messages are
+ * unaffected. Out-of-range input is rejected (returns false); a valid value is
+ * clamped, persisted and the settings cache cleared so the next scan uses it.
+ */
+export async function setPrechargeNoticeMinutes(minutes: number): Promise<boolean> {
+  if (
+    !Number.isInteger(minutes) ||
+    minutes < AUTO_RENEWAL_MIN_PRECHARGE_NOTICE_MINUTES ||
+    minutes > AUTO_RENEWAL_MAX_PRECHARGE_NOTICE_MINUTES
+  ) {
+    return false;
+  }
+  await setSetting(WALLET_AUTO_RENEWAL_PRECHARGE_NOTICE_MINUTES_KEY, String(minutes), "NUMBER");
+  clearSettingsCache();
+  return true;
+}
+
+export interface PrechargeNoticePreviewRow {
+  username: string;
+  kind: AutoRenewalNoticeScheduleKind;
+  expectedChargeAt: Date | null;
+  prechargeNoticeAt: Date | null;
+}
+
+/**
+ * Dry-run preview of the advance notices the next scan WOULD schedule, using the
+ * SAME shared resolver (`resolveAutoRenewalNoticeSchedule`) as the real scan.
+ * READ-ONLY: it creates no notification and moves no money. Only mandates whose
+ * cycle would produce a `scheduled` or `catch-up` notice are returned.
+ */
+export async function previewPrechargeNotices(limit = 20): Promise<PrechargeNoticePreviewRow[]> {
+  const nowEpoch = Date.now();
+  const noticeMinutes = await getPrechargeNoticeMinutes();
+  // Newest consent first: a bounded dry-run preview surfaces the most recently
+  // enrolled mandates (the ones an operator is most likely to be checking on).
+  const mandates = await prisma.serviceAutoRenewalMandate.findMany({
+    where: { status: AutoRenewalMandateStatus.ACTIVE },
+    orderBy: { createdAt: "desc" },
+    take: 500,
+  });
+  const rows: PrechargeNoticePreviewRow[] = [];
+  for (const mandate of mandates) {
+    const service = await prisma.service.findUnique({
+      where: { id: mandate.serviceId },
+      select: { username: true, expiresAt: true },
+    });
+    if (service === null) {
+      continue;
+    }
+    const schedule = resolveAutoRenewalNoticeSchedule({
+      expiresAtEpoch: service.expiresAt?.getTime() ?? null,
+      chargeLeadMinutes: mandate.chargeLeadMinutes,
+      prechargeNoticeMinutes: noticeMinutes,
+      nowEpoch,
+    });
+    if (schedule.kind !== "scheduled" && schedule.kind !== "catch-up") {
+      continue;
+    }
+    rows.push({
+      username: service.username,
+      kind: schedule.kind,
+      expectedChargeAt: schedule.expectedChargeAtEpoch === null ? null : new Date(schedule.expectedChargeAtEpoch),
+      prechargeNoticeAt: schedule.scheduledForEpoch === null ? null : new Date(schedule.scheduledForEpoch),
+    });
+    if (rows.length >= limit) {
+      break;
+    }
+  }
+  return rows;
 }
 
 export interface AutoRenewalPreviewRow {
@@ -728,9 +878,12 @@ async function runClaimedAttempt(
     return { status: "price-above-limit" };
   }
 
-  // Pre-charge notice (best-effort): tell the user the renewal is happening now.
-  await sendSafe(api, user.telegramId.toString(), AUTO_RENEWAL_CHARGING_TEXT);
-
+  // Corrective Phase: the old best-effort "renewing now" message was REMOVED here.
+  // The pre-charge warning is now the durable AUTO_RENEWAL_UPCOMING notification the
+  // worker schedules ~24h ahead (persisted, deduped, revalidated, cancellable) — a
+  // second "renewing now" letter seconds before the success message was a confusing
+  // near-duplicate. The success / insufficient / price-change / plan-unavailable
+  // messages below are unchanged (the advance-notice setting never disables them).
   const outcome = await payAutoRenewalWithWallet(user, {
     product,
     service,

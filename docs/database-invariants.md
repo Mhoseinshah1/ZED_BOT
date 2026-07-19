@@ -253,3 +253,14 @@ state is fabricated by the migration**.
   subscription `REQUIRES_ACTION`. Cleanup deletes only terminal FAILED/IGNORED
   charges past retention with no Payment/Order. Disabling the master switch
   preserves all history.
+
+## Wallet auto-renewal pre-charge notice (Corrective Phase)
+
+- One expiry cycle → **exactly one** `AUTO_RENEWAL_UPCOMING` notification, enforced by
+  the unique `dedupeKey = wallet-auto-renewal:<mandateId>:<cycleFingerprint>:upcoming:v1`.
+- The notice's `availableUntil` is always the expected charge instant, so it EXPIRES
+  rather than delivering after the deduction.
+- Cancelling a mandate (`cancelMandate`) also CANCELs its pending
+  SCHEDULED/READY upcoming notice and its uncommitted (SCHEDULED/CLAIMED) attempts —
+  never a COMPLETED attempt (a settled renewal is never reversed).
+- A cancelled/suppressed/expired notice never mutates the mandate.

@@ -230,3 +230,16 @@ export. Full detail: [notification-analytics.md](notification-analytics.md),
 [conversion-attribution.md](conversion-attribution.md),
 [analytics-metric-definitions.md](analytics-metric-definitions.md),
 [notification-analytics-operations.md](notification-analytics-operations.md).
+
+## AUTO_RENEWAL_UPCOMING (Corrective Phase)
+
+A durable notification type (category PAYMENT) for the wallet auto-renewal advance
+pre-charge notice. Unlike other types it is **scheduled far in advance** (its
+`scheduledFor` = the pre-charge instant, `availableUntil` = the expected charge
+instant) and carries a `serviceId` for stale-cycle cleanup + button resolution while
+being **excluded** from the generic per-service SERVICE-preference gate (it is a
+PAYMENT notice, not a service alert). Its delivery revalidation
+(`revalidateAutoRenewalUpcomingForDelivery`) cancels a stale mandate/cycle, expires
+a passed charge window, cancels a price-above-ceiling cycle, and otherwise re-renders
+the LIVE price so a stale amount is never delivered. Gated by cron + payment prefs,
+never marketing. See [wallet-auto-renewal-precharge-notices.md](./wallet-auto-renewal-precharge-notices.md).

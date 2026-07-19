@@ -273,3 +273,12 @@ status snapshot (`starsSubscriptionsEnabled`, `lastStarsSubscriptionReconcileAt`
 charge counts, PAST_DUE / requires-action / failures, optional
 `lastStarsTransactionOffset` / `cursorStale`). Full design:
 [telegram-stars-subscription-recovery.md](telegram-stars-subscription-recovery.md).
+
+## Wallet auto-renewal pre-charge notice (Corrective Phase)
+
+No new queue. The `service-auto-renewal` scan eagerly creates the durable
+`AUTO_RENEWAL_UPCOMING` notification (scheduledFor = pre-charge instant), which the
+existing notification delivery/maintenance reconciler delivers. The charge itself
+(the `service-auto-renewal-execute` job) is gated on that notice's status — deferred
+in bounded 5-minute steps while the notice is in-flight, hard-capped at
+`expectedChargeAt + 30min`, then proceeds with `precharge-delivery-unconfirmed`.

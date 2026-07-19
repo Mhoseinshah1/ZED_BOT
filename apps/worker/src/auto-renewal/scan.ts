@@ -10,12 +10,14 @@ import {
   AUTO_RENEWAL_JOB_NAMES,
   autoRenewalExecuteJobId,
   autoRenewalIdempotencyKey,
+  autoRenewalUpcomingDedupeKey,
   buildAutoRenewalCycleFingerprint,
   createLogger,
   errorMessage,
   isAutoRenewalDue,
   isWithinAutoRenewalGrace,
   resolveAutoRenewalCharge,
+  resolveAutoRenewalExpectedChargeAt,
   type WalletAutoRenewalConfig,
 } from "@zedbot/shared";
 import type { Queue } from "bullmq";
@@ -23,6 +25,10 @@ import type { Queue } from "bullmq";
 import { isServiceStateFresh } from "../notifications/service-sync.js";
 import { getServiceStateMaxAgeMinutes } from "../notifications/settings.js";
 import { enqueuePanelSync } from "../notifications/queues.js";
+import {
+  ensureAutoRenewalPrechargeNotice,
+  evaluateAutoRenewalPrechargeGate,
+} from "./precharge-notice.js";
 import { getWalletAutoRenewalConfig, isWalletAutoRenewalEnabled } from "./settings.js";
 
 // =============================================================================
@@ -52,6 +58,10 @@ export interface AutoRenewalScanResult {
   enqueued: number;
   deferredUncertain: number;
   paused: number;
+  /** Advance pre-charge notices created with a future scheduledFor this scan. */
+  prechargeScheduled: number;
+  /** Advance pre-charge notices created for immediate (catch-up) delivery. */
+  prechargeCatchUp: number;
   skipped?: string;
 }
 
@@ -59,9 +69,19 @@ export interface AutoRenewalScanResult {
 export interface AutoRenewalScanState {
   lastScanAt: string | null;
   dueCount: number;
+  /** When the scan last created any advance pre-charge notice. */
+  lastPrechargeScheduleAt: string | null;
+  prechargeScheduledCount: number;
+  prechargeCatchUpCount: number;
 }
 export function createAutoRenewalScanState(): AutoRenewalScanState {
-  return { lastScanAt: null, dueCount: 0 };
+  return {
+    lastScanAt: null,
+    dueCount: 0,
+    lastPrechargeScheduleAt: null,
+    prechargeScheduledCount: 0,
+    prechargeCatchUpCount: 0,
+  };
 }
 
 async function pauseMandate(
@@ -100,8 +120,24 @@ async function evaluateMandate(
   now: Date,
   serviceSyncQueue: Queue,
   executeQueue: Queue,
-): Promise<{ due: boolean; created: boolean; enqueued: boolean; uncertain: boolean; paused: boolean }> {
-  const base = { due: false, created: false, enqueued: false, uncertain: false, paused: false };
+): Promise<{
+  due: boolean;
+  created: boolean;
+  enqueued: boolean;
+  uncertain: boolean;
+  paused: boolean;
+  scheduled: boolean;
+  catchUp: boolean;
+}> {
+  const base = {
+    due: false,
+    created: false,
+    enqueued: false,
+    uncertain: false,
+    paused: false,
+    scheduled: false,
+    catchUp: false,
+  };
 
   const service = await prisma.service.findUnique({ where: { id: mandate.serviceId } });
   if (
@@ -122,11 +158,27 @@ async function evaluateMandate(
   const expiresAtEpoch = service.expiresAt.getTime();
   const nowEpoch = now.getTime();
 
-  // Not yet in the charge-lead window -> re-evaluate near the lead boundary.
+  // Not yet in the charge-lead window -> create/refresh the durable advance
+  // pre-charge notice for this cycle (idempotent; the notification reconciler owns
+  // delivery), then re-evaluate near the charge boundary. Notice creation is a
+  // best-effort side channel: a failure here NEVER blocks or delays the charge.
   if (!isAutoRenewalDue({ expiresAtEpoch, nowEpoch, chargeLeadMinutes: mandate.chargeLeadMinutes })) {
+    let scheduled = false;
+    let catchUp = false;
+    try {
+      const outcome = await ensureAutoRenewalPrechargeNotice(mandate, service, config, null, now);
+      const created = "created" in outcome ? outcome.created : false;
+      scheduled = outcome.kind === "scheduled" && created;
+      catchUp = outcome.kind === "catch-up" && created;
+    } catch (err) {
+      log.warn("pre-charge notice scheduling failed", {
+        mandate: mandate.id.slice(0, 8),
+        error: errorMessage(err),
+      });
+    }
     const leadMs = mandate.chargeLeadMinutes * 60_000;
     await deferMandate(mandate.id, new Date(expiresAtEpoch - leadMs));
-    return base;
+    return { ...base, scheduled, catchUp };
   }
   // Past the grace window -> abandon this cycle (do not renew a long-dead expiry).
   if (!isWithinAutoRenewalGrace({ expiresAtEpoch, nowEpoch, graceHours: config.graceHours })) {
@@ -195,6 +247,26 @@ async function evaluateMandate(
   }
   const idempotencyKey = autoRenewalIdempotencyKey(mandate.id, fingerprint);
 
+  // Charge-race gate (Part J): never create the financial Attempt before this
+  // cycle's advance notice has been delivered (or has terminally failed). Bounded
+  // so a Telegram outage can never freeze a consented charge — past the hard cap
+  // (expectedChargeAt + 30min) the charge proceeds with `precharge-delivery-
+  // unconfirmed`. When the advance notice is disabled or its window was missed the
+  // gate proceeds immediately (recording `precharge-window-missed` for the record).
+  const expectedChargeAtEpoch =
+    resolveAutoRenewalExpectedChargeAt({ expiresAtEpoch, chargeLeadMinutes: mandate.chargeLeadMinutes }) ?? nowEpoch;
+  const gate = await evaluateAutoRenewalPrechargeGate(
+    autoRenewalUpcomingDedupeKey(mandate.id, fingerprint),
+    expectedChargeAtEpoch,
+    config.prechargeNoticeMinutes,
+    nowEpoch,
+  );
+  if (gate.action === "defer") {
+    await deferMandate(mandate.id, gate.until);
+    return { ...base, due: true };
+  }
+  const gateReason = gate.reason ?? null;
+
   let attemptId: string | null = null;
   let created = false;
   try {
@@ -209,6 +281,9 @@ async function evaluateMandate(
         expectedServiceExpiresAt: service.expiresAt,
         expectedProductPriceToman: product.priceToman,
         authorizedMaximumChargeToman: mandate.maximumChargeToman,
+        // A non-blocking diagnostic marker (overwritten by the execute consumer on
+        // completion) recording why the charge proceeded without a confirmed notice.
+        safeErrorCode: gateReason,
       },
       select: { id: true, status: true },
     });
@@ -239,7 +314,7 @@ async function evaluateMandate(
     { attemptId },
     { jobId: autoRenewalExecuteJobId(attemptId), removeOnComplete: true, removeOnFail: { age: 24 * 3600 } },
   );
-  return { due: true, created, enqueued: true, uncertain: false, paused: false };
+  return { ...base, due: true, created, enqueued: true };
 }
 
 /**
@@ -259,6 +334,8 @@ export async function runAutoRenewalScan(
     enqueued: 0,
     deferredUncertain: 0,
     paused: 0,
+    prechargeScheduled: 0,
+    prechargeCatchUp: 0,
   };
   if (!(await isWalletAutoRenewalEnabled())) {
     return { ...empty, skipped: "system-disabled" };
@@ -287,6 +364,8 @@ export async function runAutoRenewalScan(
       if (outcome.enqueued) result.enqueued += 1;
       if (outcome.uncertain) result.deferredUncertain += 1;
       if (outcome.paused) result.paused += 1;
+      if (outcome.scheduled) result.prechargeScheduled += 1;
+      if (outcome.catchUp) result.prechargeCatchUp += 1;
     } catch (err) {
       log.warn("auto-renewal mandate evaluation failed", {
         mandate: mandate.id.slice(0, 8),
@@ -297,6 +376,11 @@ export async function runAutoRenewalScan(
   if (state !== undefined) {
     state.lastScanAt = now.toISOString();
     state.dueCount = result.due;
+    state.prechargeScheduledCount = result.prechargeScheduled;
+    state.prechargeCatchUpCount = result.prechargeCatchUp;
+    if (result.prechargeScheduled > 0 || result.prechargeCatchUp > 0) {
+      state.lastPrechargeScheduleAt = now.toISOString();
+    }
   }
   if (result.attemptsCreated > 0 || result.paused > 0) {
     log.info("auto-renewal scan complete", {

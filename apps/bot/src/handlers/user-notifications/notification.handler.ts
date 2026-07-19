@@ -28,6 +28,9 @@ import {
   snoozeWinback,
 } from "../../services/winback.service.js";
 import { getOwnedSubscriptionByShortId } from "../../services/stars-subscription.service.js";
+import { getMandateForService, mandateShortId } from "../../services/auto-renewal.service.js";
+import { renderMandateDetail } from "../user-renewal/auto-renewal.handler.js";
+import { cancelConfirmKeyboard } from "../user-renewal/auto-renewal-views.js";
 import {
   getOrCreateNotificationPreference,
   getServiceNotificationPreference,
@@ -125,7 +128,11 @@ const ACTION_INTERACTION: Record<string, NotificationInteractionType | undefined
   u: NotificationInteractionType.VIEW_SUBSCRIPTION,
   a: NotificationInteractionType.REACTIVATE_SUBSCRIPTION,
   y: NotificationInteractionType.PAYMENT_SUPPORT,
+  e: NotificationInteractionType.VIEW_AUTO_RENEWAL,
+  k: NotificationInteractionType.CANCEL_AUTO_RENEWAL,
 };
+
+const AUTO_RENEWAL_CANCEL_CONFIRM_TEXT = "آیا از لغو تمدید خودکار این سرویس مطمئن هستید؟";
 
 /**
  * Stars subscription notification actions (Phase 2.1): u = view subscription,
@@ -310,7 +317,56 @@ async function handleWinbackNotificationAction(
   await safeEditOrReply(ctx, WINBACK_OPT_OUT_CONFIRM_TEXT, kb);
 }
 
-userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpxdngwzouay])$/, async (ctx) => {
+/**
+ * Wallet auto-renewal upcoming-notice actions (Corrective Phase): e = open the
+ * EXISTING auto-renewal settings page (current live state, never the snapshot);
+ * k = open the EXISTING cancel-confirmation (the actual cancellation runs through
+ * the existing user:arn:cancel:<mid>:yes callback + cancelMandate service, so this
+ * click never moves money); w = open the wallet (top-up before the charge). The
+ * mandate is resolved from the FULL serviceId — a re-consented mandate resolves to
+ * the current one, a cancelled/absent one gives the same safe invalid answer.
+ */
+async function handleAutoRenewalNotificationAction(
+  ctx: BotContext,
+  notification: AutomatedNotification,
+  userId: string,
+  action: "e" | "k" | "w",
+): Promise<void> {
+  if (action === "w") {
+    // Wallet: never touches the mandate — just opens the wallet page.
+    await recordNotificationInteraction(notification.id, userId, NotificationInteractionType.VIEW_WALLET);
+    await safeAnswerCallback(ctx);
+    await renderWallet(ctx);
+    return;
+  }
+  const mandate =
+    notification.serviceId === null ? null : await getMandateForService(userId, notification.serviceId);
+  if (mandate === null) {
+    await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+    return;
+  }
+  const interaction =
+    action === "e"
+      ? NotificationInteractionType.VIEW_AUTO_RENEWAL
+      : NotificationInteractionType.CANCEL_AUTO_RENEWAL;
+  await recordNotificationInteraction(notification.id, userId, interaction);
+
+  if (action === "e") {
+    // Open the existing mandate settings page (re-resolves + renders live state).
+    await renderMandateDetail(ctx, mandateShortId(mandate));
+    return;
+  }
+  // action === "k": open the existing cancel-confirmation. A mandate that is no
+  // longer ACTIVE has nothing to cancel -> just show its current settings page.
+  if (mandate.status !== "ACTIVE") {
+    await renderMandateDetail(ctx, mandateShortId(mandate));
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(ctx, AUTO_RENEWAL_CANCEL_CONFIRM_TEXT, cancelConfirmKeyboard(mandate));
+}
+
+userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpxdngwzouayek])$/, async (ctx) => {
   const user = ctx.dbUser;
   if (user === null) {
     return;
@@ -322,6 +378,24 @@ userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpxdngwzouay]
   // indistinguishable - the same safe answer, never revealing existence.
   const notification = await getOwnedNotificationByShortId(shortId, user.id);
   if (notification === null) {
+    await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+    return;
+  }
+
+  // Wallet auto-renewal upcoming notice (PAYMENT) routed by TYPE first: its e/k
+  // actions (and the shared "w" wallet action) must never fall through to the
+  // service/checkout/win-back branches. Every path re-resolves the mandate from the
+  // live serviceId and never moves money.
+  if (notification.type === "AUTO_RENEWAL_UPCOMING") {
+    if (action === "e" || action === "k" || action === "w") {
+      await handleAutoRenewalNotificationAction(ctx, notification, user.id, action);
+    } else {
+      await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+    }
+    return;
+  }
+  // Auto-renewal-only actions on a non-auto-renewal notification are invalid.
+  if (action === "e" || action === "k") {
     await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
     return;
   }

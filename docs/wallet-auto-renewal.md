@@ -145,3 +145,15 @@ paused‑mandate review with admin pause/cancel, and a **manual scan** trigger.
 - Cancellation prevents every future charge; the system is disabled by default.
 
 See also: `docs/wallet-auto-renewal-operations.md`.
+
+## Durable pre-charge notices (Corrective Phase)
+
+Wallet auto-renewal now sends a **durable advance notice** (`AUTO_RENEWAL_UPCOMING`,
+category PAYMENT) normally ~24h before the wallet deduction, instead of the old
+best-effort "renewing now" message sent at charge time (which was removed). The
+notice is scheduled by the worker scan, deduped per expiry cycle, revalidated
+against live price/cycle at delivery, and offers a real cancellation window. A
+charge is gated on the notice (never charged before it is delivered/terminal, never
+frozen by a Telegram outage). Configured by
+`wallet_auto_renewal_precharge_notice_minutes` (default 1440; `0` disables only the
+advance notice). Full detail: [wallet-auto-renewal-precharge-notices.md](./wallet-auto-renewal-precharge-notices.md).

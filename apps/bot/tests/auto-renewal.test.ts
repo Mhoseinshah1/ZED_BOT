@@ -347,7 +347,11 @@ describe.runIf(hasDb)("wallet auto-renewal", () => {
       const { user, mandate, attemptId } = await activeMandateWithAttempt(100_000);
       await cancelMandate(mandate.id, user.id);
       const result = await executeAutoRenewalAttempt(fakeApi, attemptId);
-      expect(result.status).toBe("mandate-inactive");
+      // Corrective Phase: cancelMandate now eagerly cancels the uncommitted attempt,
+      // so execute sees an already-terminal attempt (`already-cancelled`); if a race
+      // left it SCHEDULED, execute still cancels it (`mandate-inactive`). Either way
+      // there is NO charge and the attempt ends CANCELLED.
+      expect(["already-cancelled", "mandate-inactive"]).toContain(result.status);
       const attempt = await prisma.serviceAutoRenewalAttempt.findUniqueOrThrow({ where: { id: attemptId } });
       expect(attempt.status).toBe("CANCELLED");
       const after = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });

@@ -92,7 +92,10 @@ import {
   adminNotificationsHandler,
   adminNotificationsTextHandler,
 } from "./handlers/admin-settings/notifications.handler.js";
-import { autoRenewalAdminHandler } from "./handlers/admin-settings/auto-renewal-admin.handler.js";
+import {
+  autoRenewalAdminHandler,
+  autoRenewalAdminTextHandler,
+} from "./handlers/admin-settings/auto-renewal-admin.handler.js";
 import { starsSubscriptionAdminHandler } from "./handlers/admin-finance/stars-subscription-admin.handler.js";
 import { userNotificationsHandler } from "./handlers/user-notifications/notification.handler.js";
 import {
@@ -280,6 +283,9 @@ export function createBot(token: string): Bot<BotContext> {
   // Direct-log-group-setup phase: numeric chat-id input ("lg:chat_id"). Self-
   // gates on currentFlow, so it passes through for every other admin flow.
   adminFlowText.use(logGroupIdTextHandler);
+  // Corrective Phase: wallet auto-renewal pre-charge notice minutes input
+  // ("war:notice-minutes"). Self-gates on currentFlow.
+  adminFlowText.use(autoRenewalAdminTextHandler);
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {

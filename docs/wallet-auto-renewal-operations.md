@@ -74,3 +74,23 @@ Existing ACTIVE mandates keep working on their stored version until they pause.
 - The wallet deduction is an atomic conditional update — a negative balance is
   impossible, and a double click / retry / restart deducts at most once per
   cycle via the idempotency key.
+
+## Pre-charge notice operations (Corrective Phase)
+
+- **Setting:** `wallet_auto_renewal_precharge_notice_minutes` (default 1440). `0`
+  disables ONLY the advance notice — renewal/insufficient/success/price-change
+  messages still send. Edit it from the WAR admin page → «اعلان پیش از کسر»
+  (presets ۶/۱۲/۲۴/۴۸ ساعت + غیرفعال, or a custom minute value; OWNER-only).
+- **Dry-run / test send:** the admin page previews the notices the next scan would
+  schedule (creates nothing) and can send a rendered sample to the admin (no row,
+  no money).
+- **Heartbeat:** `walletPrechargeScheduledCount`, `walletPrechargeCatchUpCount`,
+  `walletPrechargeSentCount`, `walletPrechargeFailedCount`,
+  `walletPrechargeExpiredCount`, `lastWalletPrechargeScheduleAt`.
+- **SystemLog events:** `wallet_auto_renewal.precharge_scheduled` / `_catch_up` /
+  `_cancelled` / `_expired` / `_delivery_unconfirmed` / `_setting_changed` (PII-free).
+- **Reason codes:** `precharge-window-missed` (charge proceeded, no advance window),
+  `precharge-delivery-unconfirmed` (Telegram outage past the bounded wait → charge
+  proceeded), `auto-renewal-cycle-changed` / `auto-renewal-charge-window-passed`
+  (notice cancelled/expired at delivery). See
+  [wallet-auto-renewal-precharge-notices.md](./wallet-auto-renewal-precharge-notices.md).

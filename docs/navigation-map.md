@@ -491,3 +491,12 @@ subscription short id.
 See [telegram-stars-subscription-operations.md](telegram-stars-subscription-operations.md),
 [telegram-stars-subscription-support.md](telegram-stars-subscription-support.md),
 [telegram-stars-subscription-reporting.md](telegram-stars-subscription-reporting.md).
+
+## Wallet auto-renewal pre-charge notice callbacks (Corrective Phase)
+
+- Notice buttons: `ntf:<shortId>:e` (open auto-renewal settings), `ntf:<shortId>:k`
+  (cancel-confirmation), `ntf:<shortId>:w` (wallet). Route by TYPE first, resolve the
+  mandate from the live serviceId.
+- Admin (`admin:war:*`): `notice` (settings sub-page), `np:<minutes>` (preset),
+  `ncustom` (custom-minutes entry, flow `war:notice-minutes`), `npreview` (dry-run),
+  `ntest` (test send). OWNER-only.
