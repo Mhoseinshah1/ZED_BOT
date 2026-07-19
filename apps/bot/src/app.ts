@@ -108,6 +108,10 @@ import {
 } from "./handlers/user-wallet/wallet.handler.js";
 import { pingHandler } from "./handlers/ping.handler.js";
 import { starsPaymentHandler } from "./handlers/stars-payment.handler.js";
+import {
+  starsSubscriptionHandler,
+  starsSubscriptionPaymentHandler,
+} from "./handlers/user-stars-subscription/stars-subscription.handler.js";
 import { startHandler } from "./handlers/start.handler.js";
 import { termsHandler } from "./handlers/terms.handler.js";
 import { freeTrialHandler } from "./handlers/user-free-trial/free-trial.handler.js";
@@ -139,6 +143,10 @@ export function createBot(token: string): Bot<BotContext> {
   // run BEFORE every gate and flow router: a user who paid Stars must always
   // reach settlement, and the update must never be swallowed by a text flow.
   bot.use(starsPaymentHandler);
+  // Recurring Stars subscription payment updates (zedbot:sub:). Registered right
+  // after the one-time handler (which defers sub payloads) and before the gates,
+  // so a recurring charge always reaches settlement.
+  bot.use(starsSubscriptionPaymentHandler);
 
   // Gate-free basics.
   bot.use(pingHandler);
@@ -325,6 +333,9 @@ export function createBot(token: string): Bot<BotContext> {
   // Wallet auto-renewal (Phase 1): consent flow, per-service status, my-renewals
   // (user:arn:*). Registered before the placeholder handler so its routes win.
   userArea.use(autoRenewalHandler);
+  // Telegram Stars subscriptions (Phase 2): enrollment / status / cancel
+  // (user:sub:*). The payment updates are handled pre-gate above.
+  userArea.use(starsSubscriptionHandler);
   userArea.use(extraVolumeHandler);
   userArea.use(extraTimeHandler);
   userArea.use(walletHandler);

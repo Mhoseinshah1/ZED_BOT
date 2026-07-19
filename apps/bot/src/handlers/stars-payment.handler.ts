@@ -6,7 +6,7 @@ import {
   type User,
 } from "@zedbot/database";
 import { parseStarsPayload } from "@zedbot/payments";
-import { errorMessage } from "@zedbot/shared";
+import { errorMessage, STARS_SUBSCRIPTION_PAYLOAD_PREFIX } from "@zedbot/shared";
 import { Composer } from "grammy";
 
 import type { BotContext } from "../core/context.js";
@@ -80,8 +80,13 @@ export function validateStarsPreCheckout(
 
 export const starsPaymentHandler = new Composer<BotContext>();
 
-starsPaymentHandler.on("pre_checkout_query", async (ctx) => {
+starsPaymentHandler.on("pre_checkout_query", async (ctx, next) => {
   const query = ctx.preCheckoutQuery;
+  // Recurring subscription pre-checkouts (zedbot:sub:) are owned by the
+  // subscription handler; defer so this one-time handler never rejects them.
+  if (query.invoice_payload.startsWith(STARS_SUBSCRIPTION_PAYLOAD_PREFIX)) {
+    return next();
+  }
   try {
     const paymentId = parseStarsPayload(query.invoice_payload);
     const payment =
@@ -110,11 +115,16 @@ starsPaymentHandler.on("pre_checkout_query", async (ctx) => {
   }
 });
 
-starsPaymentHandler.on("message:successful_payment", async (ctx) => {
+starsPaymentHandler.on("message:successful_payment", async (ctx, next) => {
   const sp = ctx.message.successful_payment;
   try {
     if (sp.currency !== "XTR") {
       return;
+    }
+    // Recurring subscription payments (zedbot:sub:) are owned by the subscription
+    // handler; defer so this one-time handler never mis-settles them.
+    if (sp.invoice_payload.startsWith(STARS_SUBSCRIPTION_PAYLOAD_PREFIX)) {
+      return next();
     }
     const paymentId = parseStarsPayload(sp.invoice_payload);
     if (paymentId === null) {
