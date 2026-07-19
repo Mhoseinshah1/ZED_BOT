@@ -333,6 +333,10 @@ export interface SessionData {
        */
       parserRaw?: string;
     };
+    // Wallet auto-renewal consent draft (Phase 1, flow "arn:ceiling"). Holds
+    // the in-progress consent selection until the final confirm creates the
+    // mandate; carries only ids + the entered ceiling (never money moves here).
+    autoRenewalDraft?: { serviceId: string; productId: string; maximumChargeToman?: number };
     // Pre-settlement customer-input form draft (specialized-workflows phase,
     // flow "customer_input:form"). In-progress answers live ONLY here until
     // the final confirm persists them encrypted; values are NEVER logged.

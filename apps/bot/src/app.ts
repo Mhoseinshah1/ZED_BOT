@@ -61,6 +61,10 @@ import {
   renewalHandler,
   renewalTextHandler,
 } from "./handlers/user-renewal/renewal.handler.js";
+import {
+  autoRenewalHandler,
+  autoRenewalTextHandler,
+} from "./handlers/user-renewal/auto-renewal.handler.js";
 import { userOrdersHandler } from "./handlers/user-orders/orders.handler.js";
 import { servicesHandler } from "./handlers/user-services/services.handler.js";
 import {
@@ -83,6 +87,7 @@ import {
   adminNotificationsHandler,
   adminNotificationsTextHandler,
 } from "./handlers/admin-settings/notifications.handler.js";
+import { autoRenewalAdminHandler } from "./handlers/admin-settings/auto-renewal-admin.handler.js";
 import { userNotificationsHandler } from "./handlers/user-notifications/notification.handler.js";
 import {
   reportsBackupHandler,
@@ -186,6 +191,10 @@ export function createBot(token: string): Bot<BotContext> {
   // Notification-engine phase: «اعلان‌ها و یادآوری‌ها 🔔» admin settings +
   // health page (admin:ntf*). Reads for any admin; mutations OWNER-only.
   adminArea.use(adminNotificationsHandler);
+  // Wallet auto-renewal (Phase 1): OWNER-only «تمدید خودکار 🔁» admin page
+  // (admin:war:*) — master switch, dry-run preview, paused-mandate review,
+  // admin pause/cancel, manual scan. Never enables a user's mandate.
+  adminArea.use(autoRenewalAdminHandler);
   // Direct-log-group-setup phase: the numeric-ID connection UI (admin:lg:id*,
   // admin:lg:op:*). The status-page keyboards (log-group.handler.ts) mount
   // via adminTextSettingsHandler above; this composer owns the new flow.
@@ -253,6 +262,12 @@ export function createBot(token: string): Bot<BotContext> {
       await renewalTextHandler.middleware()(ctx, next);
       return;
     }
+    // Wallet auto-renewal (Phase 1): the ceiling-amount entry step. Self-gates
+    // on currentFlow so every other text passes through untouched.
+    if (flow === "arn:ceiling") {
+      await autoRenewalTextHandler.middleware()(ctx, next);
+      return;
+    }
     if (flow === "extra_volume:discount") {
       await extraVolumeTextHandler.middleware()(ctx, next);
       return;
@@ -307,6 +322,9 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(paymentHandler);
   userArea.use(servicesHandler);
   userArea.use(renewalHandler);
+  // Wallet auto-renewal (Phase 1): consent flow, per-service status, my-renewals
+  // (user:arn:*). Registered before the placeholder handler so its routes win.
+  userArea.use(autoRenewalHandler);
   userArea.use(extraVolumeHandler);
   userArea.use(extraTimeHandler);
   userArea.use(walletHandler);

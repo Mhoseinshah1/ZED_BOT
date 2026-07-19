@@ -330,7 +330,7 @@ describe("service detail page (approved fields, no dead/unfinished buttons)", ()
     const detail = callbacks(serviceDetailKeyboard(fakeService(), ALL_ACTIONS));
     expect(detail.length).toBeGreaterThanOrEqual(8);
     for (const cb of detail) {
-      expect(cb).toMatch(/^(user:(svc|nsvc|renew|ev|et):|user:support$|user:menu$)/);
+      expect(cb).toMatch(/^(user:(svc|nsvc|arn|renew|ev|et):|user:support$|user:menu$)/);
     }
   });
 

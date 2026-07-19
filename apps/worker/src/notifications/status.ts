@@ -65,6 +65,7 @@ export async function publishNotificationWorkerStatus(
   queues: NotificationQueues,
   state: NotificationEngineState,
   schedulerActive: boolean,
+  extraStatus?: () => Promise<Partial<NotificationWorkerStatus>>,
 ): Promise<void> {
   const [waiting, delayed, deliveryFailed, deadLetter, analyticsEnabled, attributionsActive, attributionsReversed] =
     await Promise.all([
@@ -98,6 +99,9 @@ export async function publishNotificationWorkerStatus(
     attributionsActive,
     attributionsReversed,
     attributionReconcileFailures: state.attributionReconcileFailures,
+    // Wallet auto-renewal fields (Phase 1) are merged from the auto-renewal
+    // engine's status provider; a failure there never blocks the snapshot.
+    ...(extraStatus === undefined ? {} : await extraStatus().catch(() => ({}))),
   };
   await redis.set(
     NOTIFICATION_WORKER_STATUS_KEY,
@@ -117,6 +121,7 @@ export function startNotificationStatusLoop(
   queues: NotificationQueues,
   state: NotificationEngineState,
   isSchedulerActive: () => boolean,
+  extraStatus?: () => Promise<Partial<NotificationWorkerStatus>>,
 ): () => void {
   let inFlight = false;
   const tick = (): void => {
@@ -124,7 +129,7 @@ export function startNotificationStatusLoop(
       return;
     }
     inFlight = true;
-    publishNotificationWorkerStatus(redis, queues, state, isSchedulerActive())
+    publishNotificationWorkerStatus(redis, queues, state, isSchedulerActive(), extraStatus)
       .catch((err: unknown) => {
         log.warn("notification status publish failed", { error: errorMessage(err) });
       })

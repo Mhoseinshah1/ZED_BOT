@@ -175,3 +175,25 @@ Background: [backup-architecture.md](backup-architecture.md),
   `net = 0`, `status = REVERSED` and stamps `reversedAt` **exactly once**.
 - Attribution is **forward-only**: no row is written for an Order completed before
   `notification_analytics_started_at`.
+
+## Wallet Auto-Renewal — ServiceAutoRenewalMandate / ServiceAutoRenewalAttempt
+
+- **`ServiceAutoRenewalMandate.serviceId @unique`** — at most one mandate per
+  Service. A mandate exists **only** via explicit user consent (`createMandate`
+  is the single writer); no admin/seed/migration path creates or enables one.
+- **`ServiceAutoRenewalAttempt.idempotencyKey @unique`** (=
+  `wallet-auto-renew:<mandateId>:<fingerprint>`) — the wallet-settlement key, so
+  a cycle is deducted **at most once**.
+- **`@@unique([mandateId, expiryCycleFingerprint])`** — at most one attempt per
+  expiry cycle. The fingerprint changes when the Service expiry or Product
+  changes, so a manual renewal invalidates any in-flight auto-renewal attempt for
+  that cycle (checked again in the execute engine before any charge).
+- All mandate/attempt references (`userId` / `serviceId` / `productId` /
+  `orderId` / `paymentId` / `checkoutSessionId`) are **soft** (indexed String, no
+  FK); the attempt→mandate relation is the only FK (onDelete: Cascade). Attempt
+  cleanup is a standalone `deleteMany` on terminal attempts and never touches
+  mandates, Orders, Payments, CheckoutSessions or WalletTransactions.
+- A charge never exceeds `maximumChargeToman`, never drives the wallet negative
+  (atomic conditional decrement) and reuses the existing SERVICE_RENEWAL Order +
+  fulfillment path — the existing Service is renewed **in place**, never replaced.
+- The whole system is **disabled by default** (`wallet_auto_renewal_enabled`).

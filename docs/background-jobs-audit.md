@@ -35,6 +35,8 @@ processes, event emitters, retry loops and cron references):
 | 20 | Startup delayed exits | bot/worker `index.ts` | `setTimeout(process.exit)` restart-loop damping |
 | 21 | `provisionNextPaidOrders` batch | `provisioning.service.ts` | exported, deliberately unscheduled (future worker) |
 | 22 | Startup crash recovery (NEW) | `startup-recovery.service.ts` | see fixes below |
+| 23 | Wallet auto-renewal scan/reconcile/cleanup | `apps/worker/src/auto-renewal/` (`service-auto-renewal` queue) | settings-driven scheduler; disabled by default; creates one durable attempt per expiry cycle (`@@unique([mandateId, expiryCycleFingerprint])`); never moves money |
+| 24 | Wallet auto-renewal EXECUTE consumer | `apps/bot/src/services/auto-renewal-consumer.ts` (`service-auto-renewal-execute` queue) | the bot's first BullMQ consumer; runs the atomic wallet charge + in-place renewal; idempotent on the mandate+cycle key; graceful shutdown |
 
 There is no cron anywhere (in-process or in `scripts/`); backups are
 manual admin actions. Docker services run with `restart: unless-stopped`

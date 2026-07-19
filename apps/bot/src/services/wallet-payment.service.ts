@@ -16,6 +16,8 @@ import {
   type WalletTransaction,
 } from "@zedbot/database";
 
+import { resolveAutoRenewalCharge } from "@zedbot/shared";
+
 import { logger } from "../core/logger.js";
 import type { CheckoutDraft, ExtraTimeDraft, ExtraVolumeDraft, RenewalDraft } from "../core/session.js";
 import { isProductVisible } from "./catalog.service.js";
@@ -626,4 +628,89 @@ export async function payExtraTimeDraftWithWallet(
     idempotencyKey: `wallet:${user.id}:extra-time:${draft.draftNonce}`,
   });
   return { result, service };
+}
+
+// --- wallet auto-renewal (Phase 1) -------------------------------------------
+
+export type AutoRenewalWalletOutcome =
+  | { status: "settled"; result: Extract<WalletPaymentResult, { ok: true }> }
+  | { status: "already-settled"; result: Extract<WalletPaymentResult, { ok: true }> }
+  | { status: "insufficient-balance" }
+  | { status: "price-above-limit"; livePriceToman: number }
+  | { status: "plan-invalid" }
+  | { status: "wallet-disabled" }
+  | { status: "error"; error: string };
+
+export interface AutoRenewalWalletInput {
+  /** The renewal product, reloaded with relations (category + panel). */
+  product: ProductWithRelations;
+  /** The target Service, reloaded and owner-verified by the caller. */
+  service: Service;
+  /** The user-approved wallet-charge ceiling (Toman) — enforced HERE. */
+  authorizedMaximumChargeToman: number;
+  /** Stable mandate+cycle idempotency key — the same attempt never deducts twice. */
+  idempotencyKey: string;
+}
+
+/**
+ * Wallet-funds an auto-renewal by REUSING the one atomic wallet-order settlement
+ * (executeWalletOrderPayment) — no second implementation, no copied transaction.
+ * Version-1 policy: the current NORMAL product price, NO discount code. The price
+ * ceiling is re-enforced INSIDE this financial path (defense in depth): a live
+ * price above the authorized maximum yields NO charge (price-above-limit), and a
+ * live price at/under the ceiling charges the live (possibly lower) price. The
+ * stable idempotency key (mandate+cycle) makes the same attempt idempotent across
+ * worker restarts. Returns a structured outcome the execute engine maps to
+ * attempt state + notifications. Never charges above the ceiling; never overdraws.
+ */
+export async function payAutoRenewalWithWallet(
+  user: User,
+  input: AutoRenewalWalletInput,
+): Promise<AutoRenewalWalletOutcome> {
+  const { product, service } = input;
+  // Re-validate the plan against the live Product/Service/group (the mandate's
+  // stored product is never trusted here).
+  if (!isRenewalPlanValid(product, service, user.group)) {
+    return { status: "plan-invalid" };
+  }
+  const charge = resolveAutoRenewalCharge(product.priceToman, input.authorizedMaximumChargeToman);
+  if (charge.reason === "price-above-limit") {
+    return { status: "price-above-limit", livePriceToman: product.priceToman };
+  }
+  if (!charge.eligible) {
+    return { status: "error", error: "invalid renewal price" };
+  }
+  if (!(await isWalletPaymentEnabled())) {
+    return { status: "wallet-disabled" };
+  }
+
+  const finalPriceToman = charge.chargeToman;
+  const snapshot = buildRenewalSnapshot(product, service, {
+    serviceId: service.id,
+    productId: product.id,
+    panelId: product.panelId ?? service.panelId,
+    categoryId: product.categoryId,
+    originalPriceToman: finalPriceToman,
+    discountAmountToman: 0,
+    finalPriceToman,
+  });
+
+  const result = await executeWalletOrderPayment(user, {
+    orderType: OrderType.SERVICE_RENEWAL,
+    product,
+    serviceId: service.id,
+    snapshot,
+    originalPriceToman: finalPriceToman,
+    discountAmountToman: 0,
+    finalPriceToman,
+    discountCodeId: null,
+    idempotencyKey: input.idempotencyKey,
+  });
+
+  if (result.ok) {
+    return { status: result.alreadyPaid ? "already-settled" : "settled", result };
+  }
+  // After the plan + price + wallet-enabled gates above, the only remaining
+  // failure of the (no-discount) settlement is insufficient balance.
+  return { status: "insufficient-balance" };
 }

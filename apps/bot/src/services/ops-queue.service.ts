@@ -1,5 +1,7 @@
 import {
   attributionReconcileJobId,
+  AUTO_RENEWAL_JOB_NAMES,
+  AUTO_RENEWAL_QUEUE_NAME,
   BACKUP_JOB_NAMES,
   BACKUP_QUEUE_NAME,
   getRedisOptions,
@@ -67,6 +69,7 @@ interface QueuePair {
   logDelivery: Queue;
   logGroupSetup: Queue;
   notifMaintenance: Queue;
+  autoRenewalControl: Queue;
 }
 
 let queues: QueuePair | null = null;
@@ -86,6 +89,7 @@ function getQueues(): QueuePair | null {
     void queues.logDelivery.close().catch(() => undefined);
     void queues.logGroupSetup.close().catch(() => undefined);
     void queues.notifMaintenance.close().catch(() => undefined);
+    void queues.autoRenewalControl.close().catch(() => undefined);
     queues = null;
   }
   // BullMQ requires maxRetriesPerRequest: null on its connections.
@@ -101,12 +105,13 @@ function getQueues(): QueuePair | null {
   const logDelivery = new Queue(LOG_DELIVERY_QUEUE_NAME, { connection });
   const logGroupSetup = new Queue(LOG_GROUP_SETUP_QUEUE_NAME, { connection });
   const notifMaintenance = new Queue(NOTIFICATION_MAINTENANCE_QUEUE_NAME, { connection });
-  for (const queue of [backup, logDelivery, logGroupSetup, notifMaintenance]) {
+  const autoRenewalControl = new Queue(AUTO_RENEWAL_QUEUE_NAME, { connection });
+  for (const queue of [backup, logDelivery, logGroupSetup, notifMaintenance, autoRenewalControl]) {
     queue.on("error", (err) => {
       logger.warn("ops queue redis error", { queue: queue.name, error: errorText(err) });
     });
   }
-  queues = { backup, logDelivery, logGroupSetup, notifMaintenance };
+  queues = { backup, logDelivery, logGroupSetup, notifMaintenance, autoRenewalControl };
   queuesFingerprint = fingerprint;
   return queues;
 }
@@ -118,6 +123,7 @@ export async function resetOpsQueueForTests(): Promise<void> {
     await queues.logDelivery.close().catch(() => undefined);
     await queues.logGroupSetup.close().catch(() => undefined);
     await queues.notifMaintenance.close().catch(() => undefined);
+    await queues.autoRenewalControl.close().catch(() => undefined);
     queues = null;
     queuesFingerprint = "";
   }
@@ -333,6 +339,33 @@ export async function enqueueAttributionBatchNow(): Promise<boolean> {
     return true;
   } catch (err) {
     logger.warn("attribution manual reconcile enqueue failed", { error: errorText(err) });
+    return false;
+  }
+}
+
+/**
+ * Wallet auto-renewal (Phase 1): OWNER-triggered manual SCAN. Enqueues one
+ * SCAN_WALLET_AUTO_RENEWALS job onto the worker's control queue (jobId-deduped
+ * so a double-tap can't stack scans). The worker still no-ops the scan while
+ * the master switch is off, so this can never charge behind a disabled system.
+ * Fail-soft: returns false when Redis is unavailable.
+ */
+export async function enqueueAutoRenewalScanNow(): Promise<boolean> {
+  const pair = getQueues();
+  if (pair === null) {
+    return false;
+  }
+  try {
+    await withTimeout(
+      pair.autoRenewalControl.add(
+        AUTO_RENEWAL_JOB_NAMES.SCAN_WALLET_AUTO_RENEWALS,
+        {},
+        { jobId: "war-scan-manual", removeOnComplete: true, removeOnFail: true },
+      ),
+    );
+    return true;
+  } catch (err) {
+    logger.warn("auto-renewal manual scan enqueue failed", { error: errorText(err) });
     return false;
   }
 }
