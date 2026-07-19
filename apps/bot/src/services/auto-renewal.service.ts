@@ -35,7 +35,6 @@ import {
   dispatchPaidOrderFulfillment,
   type DispatchResult,
 } from "./order-fulfillment.service.js";
-import { isWalletPaymentEnabled } from "./payment-settings.service.js";
 import type { ProductWithRelations } from "./product.service.js";
 import { isRenewalPlanValid } from "./renewal-checkout.service.js";
 import { getBooleanSetting, getSetting } from "./settings.service.js";
