@@ -1,7 +1,8 @@
-import { prisma, type User } from "@zedbot/database";
+import { Prisma, prisma, type User } from "@zedbot/database";
 import {
   DEFAULT_REFERRAL_CONFIG,
   REFERRAL_COMMISSION_PERCENT_KEY,
+  REFERRAL_COMMISSIONS_STARTED_AT_KEY,
   REFERRAL_FIRST_PURCHASE_ONLY_KEY,
   REFERRAL_MAX_COMMISSION_PERCENT,
   REFERRAL_MAX_PURCHASE_TOMAN_BOUND,
@@ -15,7 +16,13 @@ import {
 } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
-import { clearSettingsCache, getBooleanSetting, getSetting, setSetting } from "./settings.service.js";
+import {
+  clearSettingsCache,
+  compareAndSetBooleanSetting,
+  getBooleanSetting,
+  getSetting,
+  setSetting,
+} from "./settings.service.js";
 
 /**
  * Applies a /start referral payload when eligible:
@@ -34,25 +41,47 @@ export async function applyReferralIfEligible(user: User, payload: string): Prom
       logger.debug("ignoring non-numeric referral payload");
       return;
     }
+    // Fast path only: the AUTHORITATIVE not-already-referred check happens inside
+    // the transaction against the LIVE row, so a stale in-memory user is safe.
     if (user.referrerId !== null) {
       return;
     }
     const referrer = await prisma.user.findFirst({
       where: { OR: [{ referralCode: code }, { telegramId: BigInt(code) }] },
+      select: { id: true },
     });
     if (referrer === null || referrer.id === user.id) {
-      return;
+      return; // no such referrer, or self-referral — ignored.
     }
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { referrerId: referrer.id, referralJoinedAt: new Date() },
+    // ONE transaction: claim the User (only while referrerId is still null) AND
+    // write the Referral row together, so the relation and the row can never
+    // half-link and always reference the SAME referrer. The conditional claim is
+    // evaluated against the live DB row (never the stale object), so two concurrent
+    // /start requests with different codes converge on exactly one referrer.
+    const now = new Date();
+    const linked = await prisma.$transaction(async (tx) => {
+      const claim = await tx.user.updateMany({
+        where: { id: user.id, referrerId: null },
+        data: { referrerId: referrer.id, referralJoinedAt: now },
+      });
+      if (claim.count === 0) {
+        // Already referred (or a concurrent /start won the claim) — never overwrite.
+        return false;
+      }
+      try {
+        await tx.referral.create({ data: { referrerUserId: referrer.id, referredUserId: user.id } });
+      } catch (err) {
+        // A pre-existing Referral row (from legacy data) means attribution already
+        // converged — the User claim above still points at the same referrer.
+        if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) {
+          throw err;
+        }
+      }
+      return true;
     });
-    await prisma.referral.upsert({
-      where: { referredUserId: user.id },
-      update: {},
-      create: { referrerUserId: referrer.id, referredUserId: user.id },
-    });
-    logger.info("referral applied", { referredUserId: user.id, referrerUserId: referrer.id });
+    if (linked) {
+      logger.info("referral applied", { referredUserId: user.id, referrerUserId: referrer.id });
+    }
   } catch (err) {
     logger.warn("referral parsing failed, /start continues", { error: errorMessage(err) });
   }
@@ -63,6 +92,67 @@ export async function applyReferralIfEligible(user: User, payload: string): Prom
 /** MASTER switch: false for every install until the OWNER enables commissions. */
 export async function isReferralSystemEnabled(): Promise<boolean> {
   return getBooleanSetting(REFERRAL_SYSTEM_ENABLED_KEY, false);
+}
+
+/**
+ * The activation-horizon instant (financial-safety phase), or null when payouts
+ * were never enabled. Only orders completed at/after this instant may ever earn a
+ * commission — a null horizon is fail-closed (no order is eligible), and no
+ * historical order is ever back-filled.
+ */
+export async function getReferralCommissionsStartedAt(): Promise<Date | null> {
+  const raw = (await getSetting(REFERRAL_COMMISSIONS_STARTED_AT_KEY, "")).trim();
+  if (raw === "") {
+    return null;
+  }
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? new Date(ms) : null;
+}
+
+/**
+ * Stamps the activation horizon EXACTLY ONCE. A racing or repeated enable
+ * converges on the first-written value (unique key → P2002 → no overwrite), so the
+ * horizon can never move and no historical back-fill is opened. Disabling never
+ * clears it, so re-enabling keeps the original horizon.
+ */
+async function stampReferralHorizonOnce(now: Date): Promise<void> {
+  try {
+    await prisma.setting.create({
+      data: { key: REFERRAL_COMMISSIONS_STARTED_AT_KEY, value: now.toISOString(), type: "STRING" },
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return; // already stamped → keep the original horizon.
+    }
+    throw err;
+  }
+}
+
+/**
+ * OWNER enables referral payouts: stamps the activation horizon (once) BEFORE
+ * flipping the master switch, so a commission that fires the instant payouts turn
+ * on always sees a valid horizon. Idempotent. Returns whether the switch actually
+ * flipped and the effective (first-stamped) horizon.
+ */
+export async function enableReferralPayouts(
+  now: Date = new Date(),
+): Promise<{ flipped: boolean; startedAt: Date }> {
+  await stampReferralHorizonOnce(now);
+  const flipped = await compareAndSetBooleanSetting(REFERRAL_SYSTEM_ENABLED_KEY, false, true);
+  if (flipped) {
+    clearSettingsCache();
+  }
+  const startedAt = await getReferralCommissionsStartedAt();
+  return { flipped, startedAt: startedAt ?? now };
+}
+
+/** OWNER disables referral payouts. The horizon is preserved (re-enable keeps it). */
+export async function disableReferralPayouts(): Promise<boolean> {
+  const flipped = await compareAndSetBooleanSetting(REFERRAL_SYSTEM_ENABLED_KEY, true, false);
+  if (flipped) {
+    clearSettingsCache();
+  }
+  return flipped;
 }
 
 /** The validated referral config — every field bounded and code-defaulted. */
@@ -120,32 +210,61 @@ export async function setReferralFirstPurchaseOnly(value: boolean): Promise<void
 
 export interface ReferralAdminStats {
   enabled: boolean;
+  /** The activation horizon (null when payouts were never enabled). */
+  startedAt: Date | null;
   commissionPercent: number;
   firstPurchaseOnly: boolean;
   minPurchaseToman: number;
   totalReferrals: number;
+  // GROSS payout activity ---------------------------------------------------
+  /** PAID commissions (fully retained by the referrer). */
   paidCommissionCount: number;
   paidCommissionToman: number;
+  /** Fully-reversed commissions (credit entirely clawed back → net 0). */
   reversedCommissionCount: number;
+  reversedCommissionToman: number;
+  // Debt (no-overdraft reversals awaiting recovery) --------------------------
+  /** REVERSAL_PENDING commissions (a refunded order's credit not yet fully recovered). */
+  reversalPendingCount: number;
+  /** Outstanding (still-owed) debt across all REVERSAL_PENDING rows. */
+  reversalPendingOutstandingToman: number;
+  // NET (money actually retained = credited − recovered) ----------------------
+  netCommissionToman: number;
 }
 
 /** Authoritative referral counts for the admin overview (read straight from the DB). */
 export async function getReferralAdminStats(): Promise<ReferralAdminStats> {
-  const [enabled, config, totalReferrals, paid, reversedCount] = await Promise.all([
+  const [enabled, startedAt, config, totalReferrals, paid, reversed, pending] = await Promise.all([
     isReferralSystemEnabled(),
+    getReferralCommissionsStartedAt(),
     getReferralConfig(),
     prisma.referral.count(),
     prisma.referralCommission.aggregate({ where: { status: "PAID" }, _count: true, _sum: { amountToman: true } }),
-    prisma.referralCommission.count({ where: { status: "REVERSED" } }),
+    prisma.referralCommission.aggregate({ where: { status: "REVERSED" }, _count: true, _sum: { amountToman: true } }),
+    prisma.referralCommission.aggregate({
+      where: { status: "REVERSAL_PENDING" },
+      _count: true,
+      _sum: { recoveryOutstandingToman: true },
+    }),
   ]);
+  const paidToman = paid._sum.amountToman ?? 0;
+  const pendingOutstanding = pending._sum.recoveryOutstandingToman ?? 0;
   return {
     enabled,
+    startedAt,
     commissionPercent: config.commissionPercent,
     firstPurchaseOnly: config.firstPurchaseOnly,
     minPurchaseToman: config.minPurchaseToman,
     totalReferrals,
     paidCommissionCount: paid._count,
-    paidCommissionToman: paid._sum.amountToman ?? 0,
-    reversedCommissionCount: reversedCount,
+    paidCommissionToman: paidToman,
+    reversedCommissionCount: reversed._count,
+    reversedCommissionToman: reversed._sum.amountToman ?? 0,
+    reversalPendingCount: pending._count,
+    reversalPendingOutstandingToman: pendingOutstanding,
+    // NET retained = money still in referrer wallets from commissions:
+    //   PAID rows in full + the un-recovered remainder of REVERSAL_PENDING rows.
+    // (Fully REVERSED rows contribute 0.) Equals total credited − total recovered.
+    netCommissionToman: paidToman + pendingOutstanding,
   };
 }

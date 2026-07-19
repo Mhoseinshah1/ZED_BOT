@@ -16,6 +16,7 @@ import { createLogDeliveryProcessor } from "./log-delivery.js";
 import { createLogGroupSetupProcessor } from "./log-group-setup.js";
 import { startNotificationEngine } from "./notifications/engine.js";
 import { startAutoRenewalEngine } from "./auto-renewal/engine.js";
+import { startReferralEngine } from "./referral/engine.js";
 import { startStarsSubscriptionEngine } from "./stars-subscription/engine.js";
 import { setLogDeliveryEnqueuer } from "./ops-log.js";
 import {
@@ -94,6 +95,14 @@ async function run(options: RedisConnectionOptions): Promise<void> {
   // notification engine so its status fields feed the shared worker snapshot.
   const starsSubscriptionEngine = startStarsSubscriptionEngine(connection, redis);
 
+  // Referral commission reconciliation engine (own credit/reversal/recovery/cleanup
+  // control queue + scheduler; produces bot-consumed execute jobs). The durable
+  // authority that makes a commission impossible to permanently lose and a refund
+  // impossible to permanently leave un-reversed. Credit/reversal scans self-gate on
+  // the master switch; recovery/cleanup run regardless so an owed debt stays
+  // collectable after payouts are paused.
+  const referralEngine = startReferralEngine(connection, redis);
+
   // Automated-notification / retention engine (own queues + workers +
   // settings-driven scheduler). Dormant until the operator enables the master
   // switch - the scheduler removes every recurring job while it is off. The
@@ -161,6 +170,7 @@ async function run(options: RedisConnectionOptions): Promise<void> {
       await notificationEngine.stop();
       await starsSubscriptionEngine.stop();
       await autoRenewalEngine.stop();
+      await referralEngine.stop();
       await Promise.allSettled([
         backupWorker.close(),
         logWorker.close(),

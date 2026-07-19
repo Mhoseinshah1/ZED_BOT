@@ -4,7 +4,7 @@ import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
-import { getReferralConfig } from "../../services/referral.service.js";
+import { getReferralConfig, isReferralSystemEnabled } from "../../services/referral.service.js";
 import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
 
 // =============================================================================
@@ -23,9 +23,28 @@ function faDigits(value: string | number): string {
   return String(value).replace(/[0-9]/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)]);
 }
 
+/** Safe fail-closed page shown when the referral program is disabled. Reachable via
+ * a stale keyboard or a direct callback; never advertises a commission percentage. */
+async function renderReferralDisabled(ctx: BotContext): Promise<void> {
+  const kb = new InlineKeyboard().text("بازگشت به منو", CB.USER_MENU);
+  await safeEditOrReply(
+    ctx,
+    ["👥 <b>زیرمجموعه‌گیری</b>", "", "این بخش در حال حاضر غیرفعال است."].join("\n"),
+    kb,
+    { parseMode: "HTML" },
+  );
+}
+
 export async function renderReferralPage(ctx: BotContext): Promise<void> {
   const user = ctx.dbUser;
   if (user === null) {
+    return;
+  }
+  // Fail closed: re-check the master switch on EVERY render, so a hidden-menu
+  // bypass — a stale inline keyboard or a direct callback/text route — can never
+  // reach the live payout page while the program is disabled.
+  if (!(await isReferralSystemEnabled())) {
+    await renderReferralDisabled(ctx);
     return;
   }
   const code = user.referralCode ?? String(user.telegramId);

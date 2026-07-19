@@ -143,3 +143,97 @@ reused as-is.
   disabled switch, eligibility guards, reversal + idempotent reversal + concurrent
   reversal, and the `/start` attribution linker. Skips itself unless
   `DATABASE_URL` points at a migrated, disposable database.
+- `apps/bot/tests/referral-financial-safety.test.ts` — the hardening matrix (see
+  §8): first-purchase concurrency across two orders, activation horizon, durable
+  credit/reversal/recovery scans, no-overdraft reversal + debt recovery, atomic
+  attribution races, the disabled-route gate, and PII-safe status.
+- `apps/bot/tests/referral-migration-guard.test.ts` — the unique-orderId preflight
+  across clean / legacy / nullable / duplicate database states.
+
+## 8. Financial-safety hardening
+
+A later pass hardened every money path. All changes are additive and the program
+stays **disabled by default**.
+
+### 8.1 Concurrency authority (first-purchase-only)
+
+The credit locks the **Referral row** (`SELECT … FOR UPDATE`) and re-checks the
+first-purchase-only policy *inside* that lock, so two DIFFERENT qualifying orders
+for one referral can never both observe zero prior commissions — exactly one pays.
+Same-order concurrency is still resolved by the unique `orderId`. Outcomes are
+typed results (no `Error`-string control flow).
+
+### 8.2 Activation horizon (no historical back-fill)
+
+Enabling payouts stamps `referral_commissions_started_at` **exactly once**
+(preserved across disable/re-enable). Only orders completed **at/after** that
+instant are eligible; a **null** horizon is fail-closed (nothing is credited).
+Historical orders can never suddenly earn a commission.
+
+### 8.3 Durable reconciliation (worker + bot execute)
+
+The live after-commit hook now **enqueues** a retryable job instead of crediting
+inline, so a crash / transient DB error can't lose a commission. A worker engine
+(`apps/worker/src/referral/`) owns four bounded, safe-on-any-cadence scans on the
+`referral-commissions` control queue and produces execute jobs onto
+`referral-commissions-execute`, which the **bot** consumes (the wallet mutation is
+co-located with the ledger; the worker cannot import the bot):
+
+| Scan | Finds | Enqueues |
+|------|-------|----------|
+| credit | COMPLETED, post-horizon, referred, no commission | `CREDIT` |
+| reversal | PAID commissions whose order has **authoritative** refund evidence (a REFUND `WalletTransaction` or a terminal Order status) | `REVERSE` |
+| recovery | `REVERSAL_PENDING` debts (funds may have arrived) | `RECOVER` |
+| cleanup | terminal rows past retention (the ledger persists) | — |
+
+A Redis flush or a missed enqueue is recovered by the DB scan; a process restart
+re-runs the scans; every execute job is idempotent, so nothing double-credits.
+The credit/reversal scans self-gate on the master switch; recovery/cleanup run
+regardless so an owed debt stays collectable after payouts are paused. The OWNER
+admin page adds a manual **reconcile now** action and reads a PII-free worker
+status snapshot (counts + timestamps only). Reversals never act on an uncertain
+remote/panel state — only real refund records count.
+
+### 8.4 No-overdraft reversal + auditable debt
+
+A clawback never drives a normal wallet negative (`allowNegativeBalance=false`):
+it recovers only what the balance affords, writes a truthful `SYSTEM_ADJUSTMENT` /
+`REFERRAL` debit for the actual amount, and moves any shortfall into a
+`REVERSAL_PENDING` debt tracked on the commission (`recoveredToman`,
+`recoveryOutstandingToman`, a CHECK bounding `0 ≤ recovered ≤ amount`). The
+recovery scan collects the remainder as funds arrive; the row lock serialises
+concurrent reversals/recoveries so a debt is **collected exactly once, never
+over-collected**, and the ledger stays gapless. `allowNegativeBalance=true` users
+are fully clawed back as before. See `wallet-ledger-integrity.md` for the debit
+semantics and reconstruction rule.
+
+### 8.5 Atomic attribution
+
+`applyReferralIfEligible` now runs one transaction: a **conditional claim**
+(`updateMany … where referrerId IS NULL`, evaluated against the live row, not a
+stale object) plus the `Referral` row together. Concurrent `/start` with different
+codes converge on exactly one referrer; an existing attribution is never replaced;
+the relation and the row always reference the same referrer.
+
+### 8.6 Counter semantics (gross vs net)
+
+To remove ambiguity, the counters have **explicit, documented** meanings:
+
+| Counter | Semantics |
+|---------|-----------|
+| `User.totalReferralPurchaseCount` | **GROSS** — referred purchases that earned a commission; never decremented (a historical sale) |
+| `User.totalReferralPurchaseAmountToman` | **GROSS** — same, in Toman |
+| `Referral.totalPurchaseAmountToman` | **GROSS** — per-referral purchase volume |
+| `User.totalReferralCommissionToman` | **NET** — commission actually retained (credited − recovered); decremented by each clawback |
+| `Referral.totalCommissionAmountToman` | **NET** — same, per referral |
+
+The admin overview reports **paid** (count + Toman), **fully reversed** (count +
+Toman), **reversal-pending** (count + outstanding Toman) and **net retained** =
+paid + pending-outstanding, separately. Gross commission is never called "profit".
+
+### 8.7 Migration safety
+
+The `20260720121000_referral_commission_orderid_unique_guard` migration detects
+duplicate non-null `orderId` values and **fails with an actionable message**
+before (idempotently) re-asserting the unique index — safe on clean, legacy,
+nullable and duplicate databases (tested).

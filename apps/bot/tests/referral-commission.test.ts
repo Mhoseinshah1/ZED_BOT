@@ -8,6 +8,7 @@ import {
   type User,
 } from "@zedbot/database";
 import {
+  REFERRAL_COMMISSIONS_STARTED_AT_KEY,
   REFERRAL_COMMISSION_PERCENT_KEY,
   REFERRAL_FIRST_PURCHASE_ONLY_KEY,
   REFERRAL_MIN_PURCHASE_TOMAN_KEY,
@@ -48,7 +49,7 @@ async function configureReferral(opts: {
   firstPurchaseOnly?: boolean;
   minToman?: number;
 }): Promise<void> {
-  const rows: Array<{ key: string; value: string; type: "BOOLEAN" | "NUMBER" }> = [];
+  const rows: Array<{ key: string; value: string; type: "BOOLEAN" | "NUMBER" | "STRING" }> = [];
   if (opts.enabled !== undefined) {
     rows.push({ key: REFERRAL_SYSTEM_ENABLED_KEY, value: opts.enabled ? "true" : "false", type: "BOOLEAN" });
   }
@@ -61,6 +62,10 @@ async function configureReferral(opts: {
   if (opts.minToman !== undefined) {
     rows.push({ key: REFERRAL_MIN_PURCHASE_TOMAN_KEY, value: String(opts.minToman), type: "NUMBER" });
   }
+  // Stamp the activation horizon at the epoch so every "now"-completed test order
+  // is on/after it (the horizon gate is exercised on its own in the financial-
+  // safety suite). Without this the engine fail-closes and credits nothing.
+  rows.push({ key: REFERRAL_COMMISSIONS_STARTED_AT_KEY, value: new Date(0).toISOString(), type: "STRING" });
   for (const r of rows) {
     await prisma.setting.upsert({
       where: { key: r.key },

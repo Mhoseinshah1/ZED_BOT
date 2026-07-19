@@ -2,8 +2,7 @@ import { OrderType, prisma, type Order, type User } from "@zedbot/database";
 import { errorMessage, NOTIF_ANALYTICS_ENABLED_KEY } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
-import { enqueueAttributionReconcile } from "./ops-queue.service.js";
-import { creditReferralCommissionForOrder } from "./referral-commission.service.js";
+import { enqueueAttributionReconcile, enqueueReferralCredit } from "./ops-queue.service.js";
 import { getBooleanSetting } from "./settings.service.js";
 import { TRIAL_CONVERTED_USER_TEXT } from "./trial-conversion.service.js";
 import {
@@ -283,24 +282,28 @@ export async function dispatchPaidOrderFulfillment(
   // enabled (the periodic batch reconciler is the authoritative catch-all for
   // every completion path, so a missed hook is never a lost attribution).
   void maybeEnqueueAttribution(orderId, result);
-  // Referral affiliate commissions (Phase 1): fire the after-commit commission
-  // hook. Same discipline as attribution — after the completion committed, orderId
-  // only, fail-soft, non-blocking, gated (by the referral master switch inside the
-  // service). Idempotent per order, so a re-fired hook never double-credits.
-  void maybeCreditReferralCommission(orderId, result);
+  // Referral affiliate commissions (financial-safety phase): fire the after-commit
+  // commission hook. Same discipline as attribution — after the completion
+  // committed, orderId only, fail-soft, non-blocking. DURABLE: it ENQUEUES a
+  // retryable execute job rather than crediting inline, so a process crash or a
+  // transient DB error can never permanently lose the commission; the worker's
+  // periodic credit scan is the catch-all for a Redis flush / missed enqueue. The
+  // credit itself is gated (master switch + horizon) and idempotent per order.
+  void maybeEnqueueReferralCredit(orderId, result);
   return result;
 }
 
-/** Credits the referrer's wallet for a dispatch that (re)completed a real Order.
- * Never throws — a commission failure never affects the buyer's fulfillment. */
-async function maybeCreditReferralCommission(orderId: string, result: DispatchResult): Promise<void> {
+/** Enqueues the durable referral credit for a dispatch that (re)completed a real
+ * Order. Never throws — a hook failure never affects the buyer's fulfillment, and
+ * the worker credit scan recovers anything the enqueue missed. */
+async function maybeEnqueueReferralCredit(orderId: string, result: DispatchResult): Promise<void> {
   if (result.kind === "NONE") {
     return;
   }
   try {
-    await creditReferralCommissionForOrder(orderId);
+    await enqueueReferralCredit(orderId);
   } catch (err) {
-    logger.warn("referral commission hook skipped", { orderId, error: errorMessage(err) });
+    logger.warn("referral commission enqueue skipped", { orderId, error: errorMessage(err) });
   }
 }
 

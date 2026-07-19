@@ -20,7 +20,7 @@ No production code path updates or deletes a `WalletTransaction`
 ## Mutation inventory
 
 Every write to `User.balanceToman` in the codebase (verified by sweeping
-all Prisma writes and all raw SQL - there are exactly five, in four
+all Prisma writes and all raw SQL - there are exactly seven, in five
 services):
 
 | # | Operation | Type | Site |
@@ -30,11 +30,34 @@ services):
 | 3 | Provisioning-failure refund | `REFUND` | `apps/bot/src/services/provisioning.service.ts` (`failOrderWithRefund`) |
 | 4 | Admin manual add | `MANUAL_ADD` | `apps/bot/src/services/admin-user-wallet.service.ts` (`adjustUserWallet`) |
 | 5 | Admin manual deduct | `MANUAL_DEDUCT` | same as 4 |
+| 6 | Referral affiliate commission **credit** | `COMMISSION` | `apps/bot/src/services/referral-commission.service.ts` (`creditReferralCommissionForOrder`) |
+| 7 | Referral commission **clawback** (refunded order) | `SYSTEM_ADJUSTMENT` | same file (`runClawbackStep`) |
 
-All five run inside a single `prisma.$transaction` that also writes the
+All seven run inside a single `prisma.$transaction` that also writes the
 ledger row - the balance change and its journal entry commit or roll back
 together, so a successful mutation always has exactly one row and a failed
 mutation has none.
+
+### Referral commission clawback debit semantics (mutation #7)
+
+`type = SYSTEM_ADJUSTMENT` with `source = REFERRAL` is **always a referral
+commission clawback DEBIT** (never a credit): it reverses a `COMMISSION` /
+`REFERRAL` credit whose source order was refunded. It never drives a normal wallet
+negative — the clawback recovers only what the balance affords (`allowNegativeBalance`
+users excepted), so one refund may produce **several** partial debit rows over time
+as the referrer's wallet gains funds. The authoritative recovery total lives in the
+`ReferralCommission` row (`recoveredToman`, `recoveryOutstandingToman`, bounded by a
+CHECK `0 ≤ recovered ≤ amount`); the debit rows are the immutable ledger evidence.
+The commission row's `reversalWalletTransactionId` points at the FIRST such debit.
+Concurrent reversals/recoveries serialise on the commission row lock, so the sum of
+clawback debits for one order **never exceeds** the original credit.
+
+**Reconstruction rule:** a user's balance is still exactly the running sum of
+`± amountToman` over their `WalletTransaction` rows in `createdAt`/lock order, with
+`SYSTEM_ADJUSTMENT` + `REFERRAL` counted as a debit and `COMMISSION` as a credit.
+No referral row is ever edited or deleted in a way that touches the ledger; pruning
+an old terminal `ReferralCommission` row (retention cleanup) leaves the ledger
+untouched.
 
 ## Invariants and how each is enforced
 

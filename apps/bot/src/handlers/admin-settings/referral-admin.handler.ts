@@ -1,17 +1,18 @@
-import { REFERRAL_SYSTEM_ENABLED_KEY } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
+import { enqueueReferralReconcileNow, readReferralWorkerStatus } from "../../services/ops-queue.service.js";
 import {
+  disableReferralPayouts,
+  enableReferralPayouts,
   getReferralAdminStats,
   setReferralCommissionPercent,
   setReferralFirstPurchaseOnly,
   setReferralMinPurchaseToman,
   type ReferralAdminStats,
 } from "../../services/referral.service.js";
-import { clearSettingsCache, compareAndSetBooleanSetting } from "../../services/settings.service.js";
 import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
 
 // =============================================================================
@@ -29,6 +30,7 @@ export const REF_ADMIN_CB = {
   enable: "admin:referral:enable",
   disable: "admin:referral:disable",
   first: "admin:referral:first",
+  reconcile: "admin:referral:reconcile",
   pct: (n: number): string => `admin:referral:pct:${n}`,
   min: (n: number): string => `admin:referral:min:${n}`,
 } as const;
@@ -46,20 +48,36 @@ function faDigits(value: string | number): string {
   return String(value).replace(/[0-9]/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)]);
 }
 
-function overviewText(s: ReferralAdminStats): string {
+function toman(n: number): string {
+  return faDigits(n.toLocaleString("en-US"));
+}
+
+function overviewText(s: ReferralAdminStats, worker: ReferralWorkerLine): string {
   return [
     "👥 <b>زیرمجموعه‌گیری و پاداش</b>",
     "",
     `وضعیت پاداش: ${s.enabled ? "فعال ✅" : "غیرفعال ⛔"}`,
+    `شروع پاداش‌دهی: ${s.startedAt ? faDigits(s.startedAt.toISOString().slice(0, 10)) : "—"}`,
     `درصد پاداش: ${faDigits(s.commissionPercent)}٪`,
     `فقط اولین خرید: ${s.firstPurchaseOnly ? "بله" : "خیر"}`,
-    `حداقل مبلغ خرید: ${faDigits(s.minPurchaseToman.toLocaleString("en-US"))} تومان`,
+    `حداقل مبلغ خرید: ${toman(s.minPurchaseToman)} تومان`,
     "",
-    "<b>آمار:</b>",
+    "<b>آمار مالی:</b>",
     `تعداد زیرمجموعه‌ها: ${faDigits(s.totalReferrals)}`,
-    `پاداش‌های پرداخت‌شده: ${faDigits(s.paidCommissionCount)} مورد — ${faDigits(s.paidCommissionToman.toLocaleString("en-US"))} تومان`,
-    `بازگردانی‌شده: ${faDigits(s.reversedCommissionCount)}`,
+    `پاداش پرداخت‌شده: ${faDigits(s.paidCommissionCount)} مورد — ${toman(s.paidCommissionToman)} تومان`,
+    `بازگردانی‌شده (کامل): ${faDigits(s.reversedCommissionCount)} مورد — ${toman(s.reversedCommissionToman)} تومان`,
+    `در انتظار بازگردانی (بدهی): ${faDigits(s.reversalPendingCount)} مورد — ${toman(s.reversalPendingOutstandingToman)} تومان`,
+    `<b>پاداش خالص باقی‌مانده:</b> ${toman(s.netCommissionToman)} تومان`,
+    "",
+    "<b>وضعیت پردازش‌گر:</b>",
+    `آخرین بررسی: ${worker.lastScan}`,
+    `خطای اجرا: ${faDigits(worker.executeFailures)}`,
   ].join("\n");
+}
+
+interface ReferralWorkerLine {
+  lastScan: string;
+  executeFailures: number;
 }
 
 function overviewKeyboard(s: ReferralAdminStats): InlineKeyboard {
@@ -80,15 +98,20 @@ function overviewKeyboard(s: ReferralAdminStats): InlineKeyboard {
     kb.text(`${m === s.minPurchaseToman ? "✅ " : ""}${faDigits((m / 1000).toString())}k`, REF_ADMIN_CB.min(m));
   }
   kb.row();
-  kb.text("بروزرسانی ♻️", REF_ADMIN_CB.root).row();
+  kb.text("اجرای مغایرت‌گیری ♻️", REF_ADMIN_CB.reconcile).row();
+  kb.text("بروزرسانی 🔄", REF_ADMIN_CB.root).row();
   kb.text("بازگشت به تنظیمات عمومی", CB.ADMIN_GENERAL_SETTINGS);
   return kb;
 }
 
 async function renderOverview(ctx: BotContext, toast?: string): Promise<void> {
-  const stats = await getReferralAdminStats();
+  const [stats, status] = await Promise.all([getReferralAdminStats(), readReferralWorkerStatus()]);
+  const worker: ReferralWorkerLine = {
+    lastScan: status?.lastScanAt ? faDigits(status.lastScanAt.slice(0, 19).replace("T", " ")) : "نامشخص",
+    executeFailures: status?.executeFailures ?? 0,
+  };
   await safeAnswerCallback(ctx, toast);
-  await safeEditOrReply(ctx, overviewText(stats), overviewKeyboard(stats), { parseMode: "HTML" });
+  await safeEditOrReply(ctx, overviewText(stats, worker), overviewKeyboard(stats), { parseMode: "HTML" });
 }
 
 async function ownerGuard(ctx: BotContext): Promise<boolean> {
@@ -110,9 +133,10 @@ referralAdminHandler.callbackQuery(REF_ADMIN_CB.root, async (ctx) => {
 
 referralAdminHandler.callbackQuery(REF_ADMIN_CB.enable, async (ctx) => {
   if (!(await ownerGuard(ctx))) return;
-  const flipped = await compareAndSetBooleanSetting(REFERRAL_SYSTEM_ENABLED_KEY, false, true);
+  // Stamps the activation horizon exactly once (preserved across re-enables), so
+  // only orders completed at/after this instant ever earn a commission.
+  const { flipped } = await enableReferralPayouts();
   if (flipped) {
-    clearSettingsCache();
     logger.info("referral system enabled", { adminId: ctx.admin?.id });
   }
   await renderOverview(ctx, flipped ? "پاداش زیرمجموعه‌گیری فعال شد ✅" : "پاداش از قبل فعال است.");
@@ -120,12 +144,20 @@ referralAdminHandler.callbackQuery(REF_ADMIN_CB.enable, async (ctx) => {
 
 referralAdminHandler.callbackQuery(REF_ADMIN_CB.disable, async (ctx) => {
   if (!(await ownerGuard(ctx))) return;
-  const flipped = await compareAndSetBooleanSetting(REFERRAL_SYSTEM_ENABLED_KEY, true, false);
+  const flipped = await disableReferralPayouts();
   if (flipped) {
-    clearSettingsCache();
     logger.info("referral system disabled", { adminId: ctx.admin?.id });
   }
   await renderOverview(ctx, flipped ? "پاداش زیرمجموعه‌گیری غیرفعال شد." : "پاداش از قبل غیرفعال است.");
+});
+
+referralAdminHandler.callbackQuery(REF_ADMIN_CB.reconcile, async (ctx) => {
+  if (!(await ownerGuard(ctx))) return;
+  // Kicks the worker credit/reversal/recovery scans once. The worker no-ops the
+  // credit/reversal scans while payouts are disabled, so this never pays behind a
+  // disabled system; debt recovery always runs. Fail-soft when Redis is down.
+  const ok = await enqueueReferralReconcileNow();
+  await renderOverview(ctx, ok ? "مغایرت‌گیری در صف قرار گرفت ♻️" : "صف در دسترس نیست.");
 });
 
 referralAdminHandler.callbackQuery(REF_ADMIN_CB.first, async (ctx) => {
