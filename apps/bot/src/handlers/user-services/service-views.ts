@@ -282,6 +282,13 @@ export function serviceDetailKeyboard(
   if (actions.canBuyExtraTime) {
     kb.text("خرید زمان اضافه ⏳", etcb.service(sid)).row();
   }
+  // Row 5b: wallet auto-renewal (Phase 1). Offered for finite-expiry services
+  // that qualify for manual renewal; the route re-validates on click and shows
+  // the intro/consent or the existing mandate's status. Literal callback here
+  // (same import-cycle reason as the notification buttons above).
+  if (actions.canRenew && service.expiresAt !== null) {
+    kb.text("تمدید خودکار 🔁", `user:arn:svc:${sid}`).row();
+  }
   // Row 6: enable/disable, labeled by the direction that currently applies
   // (transfer slot hidden - not implemented).
   if (actions.toggleAction === "DISABLE") {

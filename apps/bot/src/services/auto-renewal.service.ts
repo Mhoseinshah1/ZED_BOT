@@ -284,6 +284,25 @@ export async function getOwnedMandate(
   return mandate !== null && mandate.userId === userId ? mandate : null;
 }
 
+/** Owner-scoped mandate by uuid-prefix short id (callbacks carry short ids). */
+export async function getOwnedMandateByShortId(
+  shortId: string,
+  userId: string,
+): Promise<ServiceAutoRenewalMandate | null> {
+  if (!/^[0-9a-f-]{4,32}$/i.test(shortId)) {
+    return null;
+  }
+  const matches = await prisma.serviceAutoRenewalMandate.findMany({
+    where: { id: { startsWith: shortId }, userId },
+    take: 2,
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+export function mandateShortId(mandate: { id: string }): string {
+  return mandate.id.slice(0, 8);
+}
+
 /** Non-cancelled mandates for a user, newest first (my-renewals list). */
 export async function listUserMandates(userId: string): Promise<ServiceAutoRenewalMandate[]> {
   return prisma.serviceAutoRenewalMandate.findMany({
