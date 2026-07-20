@@ -1,6 +1,5 @@
 import { OrderStatus, ReferralCommissionStatus, WalletTransactionType, prisma } from "@zedbot/database";
 import {
-  REFERRAL_COMMISSION_RETENTION_DAYS,
   REFERRAL_JOB_NAMES,
   REFERRAL_SCAN_BATCH,
   REFERRAL_WORKER_STATUS_KEY,
@@ -31,12 +30,15 @@ import {
 //              multi-day outage never permanently drops an eligible order; the
 //              engine writes a terminal marker for orders that yield no payout, so
 //              the scan converges instead of re-selecting them forever.
-//   reversal — PAID commissions whose source order is definitively refunded →
-//              REVERSE. Commission-driven (no time floor) and runs REGARDLESS of the
-//              enabled switch, so a refund whose live enqueue was lost while payouts
-//              were paused is still reversed.
+//   reversal — orders with authoritative refund evidence (a REFUND wallet tx or a
+//              terminal order status) that still hold a PAID commission → REVERSE.
+//              REFUND-DRIVEN (scales with refunds, not the whole PAID population),
+//              age-independent, naturally convergent (a reversed commission stops
+//              matching), and runs REGARDLESS of the enabled switch.
 //   recovery — REVERSAL_PENDING debts (retry the no-overdraft clawback) → RECOVER.
-//   cleanup  — prune terminal rows past retention (the wallet ledger persists).
+//   cleanup  — prune ONLY transient BullMQ job artifacts. ReferralCommission rows
+//              (incl. terminal REVERSED/CANCELLED markers) are PERMANENT financial +
+//              idempotency records and are NEVER hard-deleted.
 // =============================================================================
 
 const log = createLogger("worker:referral-scan");
@@ -122,43 +124,74 @@ export async function runReferralCreditScan(
 }
 
 /**
- * Reversal scan: PAID commissions whose source order carries AUTHORITATIVE refund
- * evidence — a REFUND WalletTransaction or a terminal Order status — → enqueue an
- * idempotent REVERSE job. COMMISSION-DRIVEN with NO time floor (the query joins each
- * PAID commission to its order's refund records), so a refund from before any
- * fixed look-back is still caught. Runs REGARDLESS of the enabled switch — a
- * commission already paid before payouts were paused must still be clawed back if
- * its order is later refunded, even while the payout switch is off. Never reverses
- * on an uncertain remote/panel state (only real refund records count).
+ * Reversal scan: enqueue an idempotent REVERSE job for every order that carries
+ * AUTHORITATIVE refund evidence AND still holds a PAID commission.
+ *
+ * REFUND-DRIVEN (inverted), so it SCALES WITH REFUNDS, not with the whole PAID
+ * population. Instead of scanning every PAID commission every cycle (which grows
+ * without bound — almost all referrals stay PAID forever), we start from the two
+ * highly selective evidence sets — REFUND wallet transactions and terminal
+ * (REFUNDED/CANCELLED/FAILED) orders — and require each candidate order to still
+ * have a PAID commission. Cost is O(refunds), not O(all commissions).
+ *
+ * NATURALLY CONVERGENT: the moment a commission leaves PAID (→ REVERSAL_PENDING
+ * after the first clawback, → REVERSED when fully recovered), the order stops
+ * matching `referralCommissions: { some: { status: PAID } }` and drops out of this
+ * scan — so no durable cursor is needed and a stuck row can never wedge the batch.
+ * REVERSAL_PENDING debts are retried by the recovery scan, not here.
+ *
+ * NO time floor (a refund from before any fixed look-back is still caught) and runs
+ * REGARDLESS of the enabled switch — a commission paid before payouts were paused
+ * must still be clawed back if its order is later refunded. Bounded + stably
+ * paginated (deterministic orderId order); never reverses on an uncertain
+ * remote/panel state (only real REFUND / terminal-order records count).
  */
 export async function runReferralReversalScan(
   executeQueue: Queue,
   state: ReferralScanState,
 ): Promise<{ scanned: number; enqueued: number }> {
-  // Only PAID commissions are first-time reversal candidates (REVERSAL_PENDING is
-  // handled by the recovery scan; REVERSED is done). Age-independent: the join to
-  // the order's terminal status / REFUND wallet transactions carries no time floor.
-  const commissions = await prisma.referralCommission.findMany({
-    where: {
-      status: ReferralCommissionStatus.PAID,
-      order: {
-        OR: [
-          { status: { in: [OrderStatus.REFUNDED, OrderStatus.CANCELLED, OrderStatus.FAILED] } },
-          { walletTransactions: { some: { type: WalletTransactionType.REFUND } } },
-        ],
+  const paidCommissionExists = {
+    referralCommissions: { some: { status: ReferralCommissionStatus.PAID } },
+  } as const;
+  const [refundTx, terminalOrders] = await Promise.all([
+    // REFUND ledger rows whose order still has a PAID commission. Selective on the
+    // (type, relatedOrderId) index; deterministic order → stable pagination.
+    prisma.walletTransaction.findMany({
+      where: {
+        type: WalletTransactionType.REFUND,
+        relatedOrderId: { not: null },
+        relatedOrder: paidCommissionExists,
       },
-    },
-    select: { orderId: true },
-    orderBy: { createdAt: "asc" },
-    take: REFERRAL_SCAN_BATCH,
-  });
+      select: { relatedOrderId: true },
+      distinct: ["relatedOrderId"],
+      orderBy: { relatedOrderId: "asc" },
+      take: REFERRAL_SCAN_BATCH,
+    }),
+    // Terminally-failed orders that still have a PAID commission. Selective on the
+    // Order.status index; deterministic order → stable pagination.
+    prisma.order.findMany({
+      where: {
+        status: { in: [OrderStatus.REFUNDED, OrderStatus.CANCELLED, OrderStatus.FAILED] },
+        ...paidCommissionExists,
+      },
+      select: { id: true },
+      orderBy: { id: "asc" },
+      take: REFERRAL_SCAN_BATCH,
+    }),
+  ]);
+  const orderIds = [
+    ...new Set([
+      ...refundTx.map((t) => t.relatedOrderId).filter((id): id is string => id !== null),
+      ...terminalOrders.map((o) => o.id),
+    ]),
+  ];
   let enqueued = 0;
-  for (const c of commissions) {
+  for (const orderId of orderIds) {
     try {
       await executeQueue.add(
         REFERRAL_JOB_NAMES.REVERSE_REFERRAL_COMMISSION,
-        { orderId: c.orderId },
-        { jobId: referralReverseJobId(c.orderId), attempts: 5, backoff: { type: "exponential", delay: 10_000 }, ...jobOpts },
+        { orderId },
+        { jobId: referralReverseJobId(orderId), attempts: 5, backoff: { type: "exponential", delay: 10_000 }, ...jobOpts },
       );
       enqueued += 1;
     } catch (err) {
@@ -168,9 +201,9 @@ export async function runReferralReversalScan(
   }
   state.reversalScanEnqueued = enqueued;
   if (enqueued > 0) {
-    log.info("referral reversal scan enqueued", { scanned: commissions.length, enqueued });
+    log.info("referral reversal scan enqueued", { scanned: orderIds.length, enqueued });
   }
-  return { scanned: commissions.length, enqueued };
+  return { scanned: orderIds.length, enqueued };
 }
 
 /**
@@ -210,24 +243,37 @@ export async function runReferralDebtRecoveryScan(
 }
 
 /**
- * Prunes fully-terminal commission rows (REVERSED / CANCELLED) past the retention
- * window. The immutable WalletTransaction ledger is the durable financial record
- * and is never touched here, so pruning a derived commission row loses no money
- * history. PENDING / PAID / REVERSAL_PENDING (money still owed or held) are never
- * pruned.
+ * Retention cleanup — TRANSIENT control data ONLY. A ReferralCommission row (in ANY
+ * status, INCLUDING the terminal REVERSED / CANCELLED zero-amount markers) is a
+ * PERMANENT financial + idempotency record and is NEVER hard-deleted here:
+ *   - the credit scan excludes an order that has ANY commission row
+ *     (`referralCommissions: { none: {} }`), so deleting a REVERSED/CANCELLED row
+ *     would make the order eligible AGAIN and re-credit an already-refunded or
+ *     already-declined order — the exact regression this cleanup used to cause;
+ *   - the WalletTransaction ledger and the ReferralCommission rows together keep
+ *     the full payout history reconstructable.
+ * So this pass only trims BullMQ's own completed/failed job artifacts on the two
+ * referral queues (non-financial, self-expiring anyway) to keep Redis tidy.
  */
-export async function runReferralCleanup(now: Date = new Date()): Promise<{ deleted: number }> {
-  const cutoff = new Date(now.getTime() - REFERRAL_COMMISSION_RETENTION_DAYS * 24 * 3_600_000);
-  const res = await prisma.referralCommission.deleteMany({
-    where: {
-      status: { in: [ReferralCommissionStatus.REVERSED, ReferralCommissionStatus.CANCELLED] },
-      createdAt: { lt: cutoff },
-    },
-  });
-  if (res.count > 0) {
-    log.info("referral commission cleanup complete", { deleted: res.count });
+export async function runReferralCleanup(
+  queues: { control: Queue; execute: Queue },
+): Promise<{ cleaned: number }> {
+  const COMPLETED_GRACE_MS = 24 * 3_600_000;
+  const FAILED_GRACE_MS = 7 * 24 * 3_600_000;
+  let cleaned = 0;
+  for (const q of [queues.control, queues.execute]) {
+    try {
+      const done = await q.clean(COMPLETED_GRACE_MS, 1000, "completed");
+      const failed = await q.clean(FAILED_GRACE_MS, 1000, "failed");
+      cleaned += done.length + failed.length;
+    } catch (err) {
+      log.debug("referral transient-job cleanup skipped", { error: errorMessage(err) });
+    }
   }
-  return { deleted: res.count };
+  if (cleaned > 0) {
+    log.info("referral transient job cleanup complete", { cleaned });
+  }
+  return { cleaned };
 }
 
 /**

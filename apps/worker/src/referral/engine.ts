@@ -90,7 +90,10 @@ export function startReferralEngine(connection: WorkerRedisConnection, redis: Ra
       } else if (job.name === REFERRAL_JOB_NAMES.RECOVER_REFERRAL_DEBTS) {
         result = (await withScanLock(() => runReferralDebtRecoveryScan(executeQueue, state))) as Record<string, unknown>;
       } else if (job.name === REFERRAL_JOB_NAMES.CLEANUP_REFERRAL_COMMISSIONS) {
-        result = (await runReferralCleanup()) as unknown as Record<string, unknown>;
+        result = (await runReferralCleanup({ control: controlQueue, execute: executeQueue })) as unknown as Record<
+          string,
+          unknown
+        >;
       } else {
         throw new Error(`unknown job: ${job.name}`);
       }

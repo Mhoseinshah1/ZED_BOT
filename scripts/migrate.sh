@@ -90,6 +90,18 @@ main() {
   app_cd
   detect_compose_command
 
+  # PREFLIGHT (runs BEFORE migrate deploy): on a legacy database that predates the
+  # one-commission-per-order unique index and accumulated duplicate orderId rows,
+  # fail loudly with an actionable message here rather than let the index-creating
+  # migration abort with PostgreSQL's opaque error. Moves no money, deletes no rows.
+  log_info "Referral migration preflight (duplicate orderId check) ..."
+  if ! run_compose run --rm api node packages/database/dist/referral-migration-preflight.js; then
+    log_error "Referral migration preflight FAILED — resolve duplicate ReferralCommission.orderId rows"
+    log_error "before deploying (see docs/referral-migration-preflight.md). No migrations were applied."
+    exit 1
+  fi
+  log_success "Referral migration preflight passed."
+
   log_info "Applying database migrations (prisma migrate deploy) ..."
   # `compose run` starts the postgres/redis dependencies and waits for their
   # healthchecks before executing.

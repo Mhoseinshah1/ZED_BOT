@@ -10,6 +10,19 @@
 // user's FIRST completed order.
 // =============================================================================
 
+import { createHash } from "node:crypto";
+
+/**
+ * A short, NON-REVERSIBLE correlation token for structured logs. Referral logs
+ * must never carry a raw user / order / referral / commission id (see §5 of the
+ * financial-safety audit); when a log genuinely needs to correlate lines for one
+ * entity, it emits this 10-hex-char SHA-256 prefix instead — enough to group
+ * related events, impossible to turn back into the original id.
+ */
+export function referralCorrelationHash(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 10);
+}
+
 // --- settings keys -----------------------------------------------------------
 
 /** MASTER switch (false for every install until the OWNER enables it). */
@@ -145,40 +158,156 @@ export interface ReferralPayoutWindow {
   to: string | null;
 }
 
-/** Defensively parses the stored windows JSON; a malformed value yields []. */
-export function parseReferralPayoutWindows(raw: string | null | undefined): ReferralPayoutWindow[] {
-  if (typeof raw !== "string" || raw.trim() === "") {
-    return [];
+/** The strict parse result: the usable windows plus an integrity verdict. */
+export interface ParsedReferralPayoutWindows {
+  /**
+   * Sanitized, sorted, non-overlapping windows that are SAFE for eligibility.
+   * Never contains a malformed interval and never more than one open window.
+   * Eligibility ALWAYS uses this list, so a corrupt store fails CLOSED (an
+   * order is only ever paid when it provably falls inside a trustworthy window).
+   */
+  windows: ReferralPayoutWindow[];
+  /**
+   * False when the stored value was corrupt (unparseable / not an array), an
+   * individual window was malformed (bad `from`, non-null malformed `to`, a
+   * reversed `to < from`), or a structural invariant was violated (more than one
+   * open window). The OWNER integrity warning fires on `!valid`; the activation
+   * gate refuses to enable payouts until windows are valid. A malformed window is
+   * NEVER reclassified as an open window (that would reopen payouts).
+   */
+  valid: boolean;
+  /** Safe, id-free reason codes for an OWNER-visible integrity warning. */
+  issues: string[];
+}
+
+/**
+ * STRICTLY parses the stored payout-windows JSON, FAIL-CLOSED. The contract:
+ *   - `to === null` is the ONLY representation of an open window;
+ *   - a non-null malformed `to` invalidates that window (never coerced to open);
+ *   - an invalid `from` invalidates that window;
+ *   - `to <= from` (a reversed / zero-length interval) invalidates that window;
+ *   - MORE THAN ONE open window is a structural violation → the whole set is
+ *     rejected (no eligible orders) so a corrupt "always open" state can't leak;
+ *   - overlapping valid windows are safely NORMALIZED (merged into their union);
+ *   - corrupt JSON (unparseable / not an array) → no windows + integrity warning.
+ * A malformed individual window is DROPPED (its interval never contributes
+ * eligibility) and marks the set `invalid` so the OWNER is warned, but the
+ * remaining trustworthy windows still work. Deterministic — no clock / I/O.
+ */
+export function parseReferralPayoutWindowsStrict(
+  raw: string | null | undefined,
+): ParsedReferralPayoutWindows {
+  // Unset / blank = payouts never configured. Valid + empty (fail-closed, no warning).
+  if (raw === null || raw === undefined || (typeof raw === "string" && raw.trim() === "")) {
+    return { windows: [], valid: true, issues: [] };
+  }
+  if (typeof raw !== "string") {
+    return { windows: [], valid: false, issues: ["corrupt-type"] };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return [];
+    return { windows: [], valid: false, issues: ["corrupt-json"] };
   }
   if (!Array.isArray(parsed)) {
-    return [];
+    return { windows: [], valid: false, issues: ["not-an-array"] };
   }
-  const out: ReferralPayoutWindow[] = [];
-  for (const w of parsed) {
-    if (typeof w !== "object" || w === null) {
+
+  const issues: string[] = [];
+  const addIssue = (code: string): void => {
+    if (!issues.includes(code)) issues.push(code);
+  };
+
+  // --- validate each entry (malformed ones are dropped, never reopened) --------
+  const clean: Array<{ fromMs: number; toMs: number | null }> = [];
+  let malformedEntry = false;
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      malformedEntry = true;
+      addIssue("non-object-window");
       continue;
     }
-    const o = w as Record<string, unknown>;
-    const from = typeof o.from === "string" ? o.from : null;
-    if (from === null || !Number.isFinite(Date.parse(from))) {
+    const o = entry as Record<string, unknown>;
+    const fromMs = typeof o.from === "string" ? Date.parse(o.from) : Number.NaN;
+    if (!Number.isFinite(fromMs)) {
+      malformedEntry = true;
+      addIssue("invalid-from");
       continue;
     }
-    const to = typeof o.to === "string" && Number.isFinite(Date.parse(o.to)) ? o.to : null;
-    out.push({ from, to });
+    let toMs: number | null;
+    if (o.to === null) {
+      toMs = null; // the ONLY open-window representation
+    } else if (typeof o.to === "string" && Number.isFinite(Date.parse(o.to))) {
+      toMs = Date.parse(o.to);
+      if (toMs <= fromMs) {
+        malformedEntry = true;
+        addIssue("reversed-interval");
+        continue;
+      }
+    } else {
+      // A non-null, non-parseable `to` is MALFORMED — dropped, never opened.
+      malformedEntry = true;
+      addIssue("malformed-to");
+      continue;
+    }
+    clean.push({ fromMs, toMs });
   }
-  return out;
+
+  // --- structural invariant: at most one open window ---------------------------
+  const openCount = clean.filter((w) => w.toMs === null).length;
+  if (openCount > 1) {
+    // Two "still open" windows both extend to +∞ → the stored state is untrustworthy.
+    // Reject the whole set (fail closed) rather than pay from an ambiguous overlap.
+    addIssue("multiple-open-windows");
+    return { windows: [], valid: false, issues };
+  }
+
+  // --- normalize overlaps by merging into the union (a tested, safe policy) ----
+  clean.sort((a, b) => a.fromMs - b.fromMs);
+  const merged: Array<{ fromMs: number; toMs: number | null }> = [];
+  for (const w of clean) {
+    const last = merged[merged.length - 1];
+    const lastEnd = last ? (last.toMs === null ? Number.POSITIVE_INFINITY : last.toMs) : null;
+    if (last && lastEnd !== null && w.fromMs <= lastEnd) {
+      addIssue("overlapping-windows");
+      if (last.toMs !== null) {
+        if (w.toMs === null) {
+          last.toMs = null; // an open window swallows the tail
+        } else if (w.toMs > last.toMs) {
+          last.toMs = w.toMs;
+        }
+      }
+      continue;
+    }
+    merged.push({ fromMs: w.fromMs, toMs: w.toMs });
+  }
+
+  const windows: ReferralPayoutWindow[] = merged.map((w) => ({
+    from: new Date(w.fromMs).toISOString(),
+    to: w.toMs === null ? null : new Date(w.toMs).toISOString(),
+  }));
+  // Overlap normalization alone is a SAFE, defined policy → still valid. Only a
+  // malformed entry (dropped interval) marks the set invalid for the OWNER warning.
+  return { windows, valid: !malformedEntry, issues };
+}
+
+/**
+ * Defensively parses the stored windows JSON to the SAFE, fail-closed window list
+ * (the strict parse's `.windows`). A malformed / corrupt store yields the
+ * trustworthy subset (often []), never an open window synthesised from garbage.
+ * Callers that must surface an OWNER integrity warning use the strict parser.
+ */
+export function parseReferralPayoutWindows(raw: string | null | undefined): ReferralPayoutWindow[] {
+  return parseReferralPayoutWindowsStrict(raw).windows;
 }
 
 /**
  * True when an order completed inside an ACTIVE payout window (i.e. payouts were
  * switched on at the moment the order completed). Deterministic — no clock/I/O.
  * An empty windows list (payouts never enabled) is fail-closed: nothing eligible.
+ * A malformed closing bound is FAIL-CLOSED too — it is skipped, never treated as
+ * an open window (defence-in-depth atop the strict parser).
  */
 export function isWithinReferralPayoutWindows(
   completedAtEpoch: number | null,
@@ -196,7 +325,10 @@ export function isWithinReferralPayoutWindows(
       return true; // open window — anything from `from` onward is inside it
     }
     const toMs = Date.parse(w.to);
-    if (!Number.isFinite(toMs) || completedAtEpoch <= toMs) {
+    if (!Number.isFinite(toMs)) {
+      continue; // malformed closed bound → NEVER match (fail closed, not "open")
+    }
+    if (completedAtEpoch <= toMs) {
       return true;
     }
   }
@@ -300,6 +432,18 @@ export const REFERRAL_SCHEDULER_IDS = {
 export const REFERRAL_SCAN_LOCK_KEY = "zedbot:referral-scan-lock";
 /** Worker-published referral reconciliation status snapshot (heartbeat/dry-run). */
 export const REFERRAL_WORKER_STATUS_KEY = "zedbot:referral-worker-status";
+
+/**
+ * Liveness key the BOT's referral EXECUTE consumer refreshes on an interval. Its
+ * presence (TTL-bounded) proves the consumer that performs the actual wallet
+ * mutations is alive — a precondition the activation integrity gate checks before
+ * the OWNER can enable payouts (no durable crediting without a live consumer).
+ */
+export const REFERRAL_EXECUTE_HEARTBEAT_KEY = "zedbot:referral-execute-heartbeat";
+/** How often the execute consumer refreshes its heartbeat. */
+export const REFERRAL_EXECUTE_HEARTBEAT_INTERVAL_MS = 15_000;
+/** Heartbeat TTL — a few missed refreshes and the key expires (consumer is down). */
+export const REFERRAL_EXECUTE_HEARTBEAT_TTL_SECONDS = 45;
 
 /** Idempotent per-order credit execute job id (retry/duplicate collapse onto one). */
 export function referralCreditJobId(orderId: string): string {

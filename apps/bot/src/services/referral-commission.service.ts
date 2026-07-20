@@ -6,7 +6,12 @@ import {
   WalletTransactionType,
   prisma,
 } from "@zedbot/database";
-import { isWithinReferralPayoutWindows, planReferralClawback, resolveReferralCommission } from "@zedbot/shared";
+import {
+  isWithinReferralPayoutWindows,
+  planReferralClawback,
+  referralCorrelationHash,
+  resolveReferralCommission,
+} from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import {
@@ -244,9 +249,10 @@ export async function creditReferralCommissionForOrder(
       return { status: "credited", commissionToman: decision.commissionToman };
     });
     if (outcome.status === "credited") {
-      // PII-safe: an order fingerprint + amount only — never a user/referrer id.
+      // PII-safe: a NON-REVERSIBLE correlation token + amount only — never a user /
+      // referrer / order id (not even a raw prefix).
       logger.info("referral commission credited", {
-        order: orderId.slice(0, 8),
+        corr: referralCorrelationHash(orderId),
         amountToman: decision.commissionToman,
       });
     }
@@ -421,11 +427,14 @@ export async function reverseReferralCommissionForOrder(
       : { status: "no-op" };
   }
   if (step.status === "reversed") {
-    logger.info("referral commission reversed", { orderId: orderId.slice(0, 8), recoveredToman: step.recoveredToman });
+    logger.info("referral commission reversed", {
+      corr: referralCorrelationHash(orderId),
+      recoveredToman: step.recoveredToman,
+    });
     return { status: "reversed", commissionToman: step.recoveredToman };
   }
   logger.warn("referral commission reversal pending (insufficient balance)", {
-    orderId: orderId.slice(0, 8),
+    corr: referralCorrelationHash(orderId),
     recoveredToman: step.recoveredToman,
     outstandingToman: step.outstandingToman,
   });

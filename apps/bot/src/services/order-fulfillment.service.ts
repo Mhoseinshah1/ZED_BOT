@@ -1,5 +1,5 @@
 import { OrderType, prisma, type Order, type User } from "@zedbot/database";
-import { errorMessage, NOTIF_ANALYTICS_ENABLED_KEY } from "@zedbot/shared";
+import { errorMessage, NOTIF_ANALYTICS_ENABLED_KEY, referralCorrelationHash } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { enqueueAttributionReconcile, enqueueReferralCredit } from "./ops-queue.service.js";
@@ -303,7 +303,7 @@ async function maybeEnqueueReferralCredit(orderId: string, result: DispatchResul
   try {
     await enqueueReferralCredit(orderId);
   } catch (err) {
-    logger.warn("referral commission enqueue skipped", { orderId, error: errorMessage(err) });
+    logger.warn("referral commission enqueue skipped", { corr: referralCorrelationHash(orderId), error: errorMessage(err) });
   }
 }
 

@@ -21,6 +21,8 @@ import {
   STARS_SUBSCRIPTION_QUEUE_NAME,
   WORKER_CAPABILITIES_KEY,
   WORKER_HEARTBEAT_KEY,
+  REFERRAL_EXECUTE_HEARTBEAT_KEY,
+  referralCorrelationHash,
   referralCreditJobId,
   referralReverseJobId,
   type NotificationWorkerStatus,
@@ -459,7 +461,7 @@ export async function enqueueReferralCredit(orderId: string): Promise<boolean> {
     );
     return true;
   } catch (err) {
-    logger.warn("referral credit enqueue failed", { orderId, error: errorText(err) });
+    logger.warn("referral credit enqueue failed", { corr: referralCorrelationHash(orderId), error: errorText(err) });
     return false;
   }
 }
@@ -491,7 +493,7 @@ export async function enqueueReferralReverse(orderId: string): Promise<boolean> 
     );
     return true;
   } catch (err) {
-    logger.warn("referral reverse enqueue failed", { orderId, error: errorText(err) });
+    logger.warn("referral reverse enqueue failed", { corr: referralCorrelationHash(orderId), error: errorText(err) });
     return false;
   }
 }
@@ -552,6 +554,31 @@ export async function readReferralWorkerStatus(): Promise<ReferralWorkerStatus |
       executeFailures: num(v.executeFailures),
       checkedAt: typeof v.checkedAt === "string" ? v.checkedAt : "",
     };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads the referral EXECUTE consumer liveness heartbeat (bot process). The key
+ * carries a TTL, so its presence already means "the consumer that moves the money
+ * is alive recently". Returns null when absent or Redis is unavailable.
+ */
+export async function readReferralExecuteHeartbeat(): Promise<WorkerHeartbeat | null> {
+  const redis = getReader();
+  if (redis === null) {
+    return null;
+  }
+  try {
+    const raw = await withTimeout(redis.get(REFERRAL_EXECUTE_HEARTBEAT_KEY));
+    if (raw === null) {
+      return null;
+    }
+    const millis = /^\d{10,}$/.test(raw) ? Number(raw) : Date.parse(raw);
+    if (!Number.isFinite(millis)) {
+      return { at: null, ageSeconds: null };
+    }
+    return { at: new Date(millis), ageSeconds: Math.max(0, Math.round((Date.now() - millis) / 1000)) };
   } catch {
     return null;
   }

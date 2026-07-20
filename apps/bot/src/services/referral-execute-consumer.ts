@@ -1,11 +1,16 @@
 import {
+  REFERRAL_EXECUTE_HEARTBEAT_INTERVAL_MS,
+  REFERRAL_EXECUTE_HEARTBEAT_KEY,
+  REFERRAL_EXECUTE_HEARTBEAT_TTL_SECONDS,
   REFERRAL_EXECUTE_QUEUE_NAME,
   REFERRAL_JOB_NAMES,
   createLogger,
   errorMessage,
   getRedisOptions,
+  referralCorrelationHash,
 } from "@zedbot/shared";
 import { Worker, type Job } from "bullmq";
+import { Redis } from "ioredis";
 
 import {
   creditReferralCommissionForOrder,
@@ -82,8 +87,10 @@ export function startReferralExecuteConsumer(): ReferralExecuteConsumer | null {
     log.info("referral commission execute consumer ready");
   });
   worker.on("failed", (job, err) => {
+    // The BullMQ job id embeds the order/commission id (e.g. `ref-credit-<orderId>`),
+    // so log a NON-REVERSIBLE correlation token instead of the raw id.
     log.error("referral execute job failed", {
-      jobId: job?.id,
+      corr: job?.id ? referralCorrelationHash(job.id) : undefined,
       jobName: job?.name,
       attemptsMade: job?.attemptsMade,
       error: errorMessage(err),
@@ -93,9 +100,38 @@ export function startReferralExecuteConsumer(): ReferralExecuteConsumer | null {
     log.warn("referral execute consumer redis error", { error: errorMessage(err) });
   });
 
+  // Liveness heartbeat: a dedicated client refreshes a TTL key so the activation
+  // integrity gate can prove THIS consumer (the process that moves the wallet money)
+  // is alive before the OWNER enables payouts. Counts/timestamps only — no ids.
+  const heartbeatRedis = new Redis({
+    host: options.host,
+    port: options.port,
+    password: options.password,
+    maxRetriesPerRequest: null,
+    lazyConnect: false,
+  });
+  heartbeatRedis.on("error", (err) => log.debug("referral execute heartbeat redis error", { error: errorMessage(err) }));
+  const writeHeartbeat = async (): Promise<void> => {
+    try {
+      await heartbeatRedis.set(
+        REFERRAL_EXECUTE_HEARTBEAT_KEY,
+        new Date().toISOString(),
+        "EX",
+        REFERRAL_EXECUTE_HEARTBEAT_TTL_SECONDS,
+      );
+    } catch (err) {
+      log.debug("referral execute heartbeat write failed", { error: errorMessage(err) });
+    }
+  };
+  void writeHeartbeat();
+  const heartbeatTimer = setInterval(() => void writeHeartbeat(), REFERRAL_EXECUTE_HEARTBEAT_INTERVAL_MS);
+  heartbeatTimer.unref();
+
   return {
     stop: async (): Promise<void> => {
+      clearInterval(heartbeatTimer);
       await worker.close().catch(() => undefined);
+      await heartbeatRedis.quit().catch(() => undefined);
     },
   };
 }

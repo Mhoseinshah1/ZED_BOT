@@ -269,3 +269,85 @@ synthesises a single open window from the horizon.
 
 Regression + concurrency coverage lives in
 `apps/bot/tests/referral-review-blockers.test.ts`.
+
+## 10. Terminal-safety hardening (PR #110 follow-up)
+
+This round closes the remaining financial-safety gaps found reviewing PR #110.
+
+### 10.1 ReferralCommission rows are PERMANENT
+
+A `ReferralCommission` row — in **any** status, including the terminal `REVERSED`
+and `CANCELLED` zero-amount markers — is a permanent **financial + idempotency**
+record and is **never hard-deleted**. The retention "cleanup" job now trims only
+transient BullMQ job artifacts; it touches no commission rows.
+
+Why it matters: the credit scan excludes an order that has **any** commission row
+(`referralCommissions: { none: {} }`). Deleting a `REVERSED`/`CANCELLED` row would
+make an already-refunded or already-declined order eligible **again**, re-crediting
+it. Keeping the row forever makes the durable scans converge and keeps the payout
+history reconstructable alongside the immutable `WalletTransaction` ledger.
+Configuration changes (percent / minimum / first-purchase) therefore never pay an
+old marked order retroactively.
+
+### 10.2 Payout-window parsing FAILS CLOSED
+
+`parseReferralPayoutWindowsStrict` is the authority. `to === null` is the only open
+representation. A non-null malformed `to`, an invalid `from`, or a reversed
+`to <= from` **invalidates that window** (dropped — never reclassified as open). More
+than one open window is a structural violation → the whole set is rejected (no
+eligible orders). Overlapping windows are safely normalized (merged). Corrupt JSON →
+no windows + an OWNER-visible integrity warning. The settings readers never
+synthesize an open window from a corrupt store (fail closed).
+
+### 10.3 Reversal discovery scales with REFUNDS, not all PAID
+
+The reversal scan is **inverted**: it starts from the two highly selective evidence
+sets — `REFUND` wallet transactions and terminal (`REFUNDED`/`CANCELLED`/`FAILED`)
+orders — and requires each candidate order to still hold a `PAID` commission. Cost is
+`O(refunds)`, not `O(all commissions)`. It is **naturally convergent**: the moment a
+commission leaves `PAID`, its order stops matching and drops out (no durable cursor
+needed). A composite `WalletTransaction(type, relatedOrderId)` index
+(`20260720130000_referral_reversal_scan_index`) makes the REFUND lookup index-only.
+
+`EXPLAIN (ANALYZE)` on a representative dataset (5000 `PAID` commissions, 5 refunds):
+
+| query | plan | rows touched | time |
+|-------|------|--------------|------|
+| OLD (scan all PAID) | `Seq Scan on "ReferralCommission" … rows=5005` | 5005 | ~6.1 ms |
+| NEW terminal-orders | `Index Scan … ReferralCommission_orderId_key` (loops=5) | ~5 | ~0.17 ms |
+| NEW refund-tx | `Seq Scan on "WalletTransaction"` (index-backed) + index probe | ~5 | ~0.14 ms |
+
+### 10.4 Immutable migration history + separate preflight
+
+The `20260719180000` migration is **restored to its original PR #108 contents** (no
+in-migration duplicate check). The duplicate-`orderId` preflight is now a **separate
+deployment step** (`packages/database/src/referral-migration-preflight.ts`, wrapper
+`scripts/referral-migration-preflight.sh`) that `scripts/migrate.sh` runs **before**
+`prisma migrate deploy`. It uses `DATABASE_URL`, moves no money, deletes no rows,
+exposes no full ids, and passes on a clean / fresh database. See
+`referral-migration-preflight.md` for the operator recovery procedure.
+
+### 10.5 No entity ids in logs
+
+Referral code never logs a raw user / order / referral / commission / telegram id or
+a full referral code. When a log genuinely needs to correlate lines it emits
+`referralCorrelationHash(id)` — a non-reversible 10-hex SHA-256 prefix. An automated
+log-source scan (`referral-log-redaction.test.ts`) enforces this.
+
+### 10.6 Activation integrity gate
+
+Before the OWNER can enable payouts, `assessReferralActivationReadiness()` requires
+**all** of: migrations healthy; migration history immutable (on-disk SHA-256 ==
+recorded checksum); referral worker heartbeat fresh; control queue reachable; execute
+consumer heartbeat fresh; wallet ledger healthy; payout windows valid; no
+Referral/User attribution mismatch; no duplicate commission order; no unresolved
+financial integrity issue. When the gate passes, the horizon + payout window + master
+switch flip **atomically** in one transaction. **Disabling is never gated** — the kill
+switch always works. The bot's execute consumer publishes a TTL heartbeat
+(`zedbot:referral-execute-heartbeat`) so the gate can prove the process that moves the
+money is alive.
+
+Coverage: `referral-terminal-safety.test.ts` (§10.1, §10.3),
+`referral-payout-windows.test.ts` (§10.2), `referral-migration-preflight.test.ts`
+(§10.4), `referral-log-redaction.test.ts` (§10.5), `referral-activation-gate.test.ts`
+(§10.6).

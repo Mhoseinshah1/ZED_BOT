@@ -622,6 +622,10 @@ model WalletTransaction {
   @@index([relatedOrderId])
   @@index([relatedPaymentId])
   @@index([createdAt])
+  // Selective composite for the referral reversal scan's REFUND-driven discovery:
+  // finds REFUND rows and their order ids from the index alone (scales with
+  // refunds, not the whole ledger).
+  @@index([type, relatedOrderId])
 }
 
 // =============================================================================
