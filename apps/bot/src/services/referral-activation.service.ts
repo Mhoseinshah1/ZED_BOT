@@ -1,12 +1,10 @@
-import { existsSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
-
 import {
   REFERRAL_AFFILIATE_MIGRATION_NAME,
-  countCurrentlyFailedOrStuckMigrations,
+  checkOrdinaryMigrationsImmutable,
+  evaluateMigrationDeploymentState,
   evaluateReferralMigrationLineage,
   prisma,
-  readPrismaMigrationChecksum,
+  readMigrationAttemptState,
   resolveMigrationsDir,
 } from "@zedbot/database";
 import {
@@ -75,22 +73,19 @@ function check(key: string, label: string, ok: boolean, detail: string | null = 
 }
 
 /**
- * Migrations are healthy when at least one has SUCCESSFULLY applied and NONE are
- * CURRENTLY failed/stuck (finished_at IS NULL AND rolled_back_at IS NULL). Prisma keeps
- * rolled-back rows forever, so a migration that was rolled back and then reapplied leaves
- * a historical rolled-back row that must NOT be treated as a live failure — otherwise
- * activation is blocked forever. Only the currently-failed/stuck count blocks here.
+ * Migrations are healthy when the on-disk migrations directory and the DB attempt history
+ * agree that EVERY shipped migration is currently APPLIED. The authoritative deployment
+ * helper blocks when any migration is pending (shipped, never applied), currently
+ * failed/stuck, rolled back and not reapplied later, or applied but missing its file. A
+ * historical rollback followed by a later successful reapplication is APPLIED and does NOT
+ * block. Never infers "all applied" from a single successful `_prisma_migrations` row.
  */
 async function checkMigrationsHealthy(): Promise<ReferralActivationCheck> {
   const label = "مهاجرت‌های پایگاه‌داده سالم";
   try {
-    const [appliedRow] = await prisma.$queryRaw<Array<{ n: bigint }>>`
-      SELECT count(*)::bigint AS n FROM _prisma_migrations
-      WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`;
-    const applied = Number(appliedRow?.n ?? 0n);
-    const currentlyFailed = await countCurrentlyFailedOrStuckMigrations();
-    if (applied === 0) return check("migrations-healthy", label, false, "no migrations applied");
-    if (currentlyFailed > 0) return check("migrations-healthy", label, false, `${currentlyFailed} currently failed/stuck`);
+    const dep = await evaluateMigrationDeploymentState();
+    if (dep.appliedCount === 0) return check("migrations-healthy", label, false, "no migrations applied");
+    if (!dep.ready) return check("migrations-healthy", label, false, dep.blocker ?? "migration deployment not ready");
     return check("migrations-healthy", label, true);
   } catch {
     return check("migrations-healthy", label, false, "migrations table unreadable");
@@ -122,45 +117,23 @@ async function evaluateMigrationHistory(): Promise<{ check: ReferralActivationCh
   const dir = resolveMigrationsDir();
   if (dir === null) return build("FILE_MISSING", "migrations dir not found");
   try {
-    // The LATEST SUCCESSFUL attempt per migration name. Rolled-back and currently-failed
-    // rows are excluded here (currently-failed is enforced by migrations-healthy), so a
-    // reapplied migration is judged by its successful checksum, not blocked by history.
-    const applied = await prisma.$queryRaw<Array<{ migration_name: string; checksum: string }>>`
-      SELECT DISTINCT ON (migration_name) migration_name, checksum
-      FROM _prisma_migrations
-      WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL
-      ORDER BY migration_name, started_at DESC`;
+    // Referral migration: judged by its CURRENT applied checksum — null when the migration
+    // is not currently applied (never applied, currently failed, or rolled back without a
+    // later reapply), which the lineage evaluator maps to a blocking CHECKSUM_DRIFT.
+    const refState = await readMigrationAttemptState(REFERRAL_AFFILIATE_MIGRATION_NAME);
+    const lineage = await evaluateReferralMigrationLineage(dir, refState.currentChecksum);
     let legacyWarning = false;
-    let referralSeen = false;
-    for (const row of applied) {
-      if (row.migration_name === REFERRAL_AFFILIATE_MIGRATION_NAME) {
-        referralSeen = true;
-        // Pass the already-fetched authoritative recorded checksum to avoid a second
-        // _prisma_migrations read (§7); the lineage re-runs the schema postconditions.
-        const lineage = await evaluateReferralMigrationLineage(dir, row.checksum);
-        if (lineage.status === "EXACT_MATCH") continue;
-        if (lineage.status === "KNOWN_COMPATIBLE_LEGACY_VARIANT") {
-          legacyWarning = true;
-          continue;
-        }
-        // FILE_MISSING / SCHEMA_POSTCONDITION_FAILED / CHECKSUM_DRIFT all block.
-        return build(lineage.status, lineage.detail);
-      }
+    if (lineage.status === "KNOWN_COMPATIBLE_LEGACY_VARIANT") legacyWarning = true;
+    else if (lineage.status !== "EXACT_MATCH") return build(lineage.status, lineage.detail);
 
-      // Ordinary migration: strict exact match against the latest successful checksum.
-      const file = resolvePath(dir, row.migration_name, "migration.sql");
-      if (!existsSync(file)) return build("FILE_MISSING", `missing file for ${row.migration_name}`);
-      if (readPrismaMigrationChecksum(file) !== row.checksum) {
-        return build("CHECKSUM_DRIFT", `checksum drift in ${row.migration_name}`);
-      }
+    // Every OTHER currently-applied migration must be immutable (file present, checksum
+    // unchanged). Non-applied migrations are blocked by migrations-healthy, not here.
+    const ordinary = await checkOrdinaryMigrationsImmutable(dir);
+    if (!ordinary.ok) {
+      const status: ReferralMigrationHistoryStatus = ordinary.missingMigration !== null ? "FILE_MISSING" : "CHECKSUM_DRIFT";
+      return build(status, ordinary.detail);
     }
-    // The referral migration has no successful attempt at all (never applied, currently
-    // failed, or rolled back without reapply). The lineage with recorded=null is always a
-    // blocking CHECKSUM_DRIFT ("not recorded as a successful attempt").
-    if (!referralSeen) {
-      const lineage = await evaluateReferralMigrationLineage(dir, null);
-      return build("CHECKSUM_DRIFT", lineage.detail);
-    }
+
     return legacyWarning
       ? build("KNOWN_COMPATIBLE_LEGACY_VARIANT", "known compatible legacy lineage")
       : build("HEALTHY", null);

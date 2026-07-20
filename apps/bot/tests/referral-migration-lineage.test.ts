@@ -449,6 +449,50 @@ dg("dual-lineage activation gate integration (§3/§4/§10)", () => {
     expect(await isReferralSystemEnabled()).toBe(false);
   });
 
+  it("§1/§4: a migration ROLLED BACK and NEVER reapplied BLOCKS activation", async () => {
+    // Its only attempt is a failure that was resolved --rolled-back: not currently applied.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO _prisma_migrations (id, checksum, migration_name, started_at, finished_at, rolled_back_at, applied_steps_count)
+       VALUES ('lineage-gate-test-rbnr', 'x', '29991231000000_rolledback_unreapplied', now(), NULL, now(), 0)`,
+    );
+    const readiness = await assessReferralActivationReadiness();
+    expect(readiness.checks.find((c) => c.key === "migrations-healthy")?.ok).toBe(false);
+    expect(readiness.checks.find((c) => c.key === "migrations-healthy")?.detail).toContain("rolled-back-not-reapplied");
+    expect((await enableReferralPayoutsGated()).status).toBe("blocked");
+    expect(await isReferralSystemEnabled()).toBe(false);
+  });
+
+  it("§1/§4: a migration that SUCCEEDED and was LATER rolled back BLOCKS activation", async () => {
+    // An older success does NOT prove the current state is applied once a newer rollback exists.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO _prisma_migrations (id, checksum, migration_name, started_at, finished_at, rolled_back_at, applied_steps_count)
+       VALUES ('lineage-gate-test-sr1', 'x', '29991231000000_success_then_rollback', now() - interval '2 hours', now() - interval '2 hours', NULL, 1)`,
+    );
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO _prisma_migrations (id, checksum, migration_name, started_at, finished_at, rolled_back_at, applied_steps_count)
+       VALUES ('lineage-gate-test-sr2', 'x', '29991231000000_success_then_rollback', now(), NULL, now(), 0)`,
+    );
+    const readiness = await assessReferralActivationReadiness();
+    expect(readiness.checks.find((c) => c.key === "migrations-healthy")?.ok).toBe(false);
+    expect((await enableReferralPayoutsGated()).status).toBe("blocked");
+    expect(await isReferralSystemEnabled()).toBe(false);
+  });
+
+  it("§2/§4: an APPLIED database migration whose FILE is missing on disk BLOCKS activation", async () => {
+    // A successful attempt for a migration that ships no directory: the deployment state must
+    // NOT infer 'all applied' — the missing file is a divergence that blocks.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO _prisma_migrations (id, checksum, migration_name, started_at, finished_at, rolled_back_at, applied_steps_count)
+       VALUES ('lineage-gate-test-ghost', 'x', '29991231000000_ghost_applied_no_file', now(), now(), NULL, 1)`,
+    );
+    const readiness = await assessReferralActivationReadiness();
+    expect(readiness.checks.find((c) => c.key === "migrations-healthy")?.ok).toBe(false);
+    // The ordinary-immutability check also flags the missing file as FILE_MISSING.
+    expect(readiness.migrationHistory.status).toBe("FILE_MISSING");
+    expect((await enableReferralPayoutsGated()).status).toBe("blocked");
+    expect(await isReferralSystemEnabled()).toBe(false);
+  });
+
   it("DISABLING is never gated even under an unknown migration history", async () => {
     await restoreRecorded();
     await writeFreshHeartbeats();

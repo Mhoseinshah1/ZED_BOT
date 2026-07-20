@@ -161,20 +161,39 @@ const hasDb = typeof process.env.DATABASE_URL === "string" && process.env.DATABA
     const out = lines.join("\n");
     expect(out).toContain("checksum classification:  ORIGINAL_LF");
     expect(out).toContain("lineage status:           EXACT_MATCH");
-    expect(out).toContain("FINAL ACTIVATION VERDICT: ALLOWED");
+    // §3 — the DB-only command prints a MIGRATION-readiness verdict, never the old
+    // "FINAL ACTIVATION VERDICT" (which implied the full Redis/heartbeat/wallet gate had run).
+    expect(out).toContain("FINAL MIGRATION READINESS VERDICT: PASSED");
+    expect(out).not.toContain("FINAL ACTIVATION VERDICT");
     expect(out).not.toMatch(/postgres(ql)?:\/\//i);
     expect(out).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  });
+
+  it("the command NEVER claims full referral activation is allowed — it defers to the OWNER readiness gate (§3)", async () => {
+    const lines: string[] = [];
+    await printReferralMigrationLineageStatus((l) => lines.push(l));
+    const out = lines.join("\n");
+    // Even when every migration check passes, the diagnostic must clearly state that full
+    // activation still requires the OWNER readiness gate (Redis, control queue, worker +
+    // execute heartbeats, wallet ledger, payout windows, attribution, integrity).
+    expect(out).toContain("Full referral activation still requires the OWNER readiness gate");
+    expect(out).toContain(
+      "(Redis, control queue, worker + execute heartbeats, wallet ledger, payout windows, attribution, integrity).",
+    );
+    // It must not overclaim by asserting activation is allowed/enabled.
+    expect(out).not.toMatch(/activation\s+(is\s+)?(allowed|enabled|ready)/i);
   });
 });
 
 // =============================================================================
-// §2 — the operator command's FINAL ACTIVATION VERDICT combines the referral lineage
-// AND the presence of any currently failed/stuck migration (which the real gate blocks
-// on via checkMigrationsHealthy). Historical rolled-back attempts alone do NOT block.
-// These tests insert synthetic _prisma_migrations rows / rewrite the recorded checksum
-// and restore everything.
+// §1/§2/§4 — the operator command's FINAL MIGRATION READINESS VERDICT combines the
+// referral lineage AND the authoritative deployment state (pending / currently-failed /
+// rolled-back-not-reapplied / missing-file all block) AND ordinary-migration immutability.
+// A migration that was rolled back and never reapplied now BLOCKS; only a historical
+// rollback FOLLOWED BY a later successful reapplication is non-blocking. These tests
+// insert synthetic _prisma_migrations rows / rewrite the recorded checksum and restore.
 // =============================================================================
-(hasDb ? describe : describe.skip)("lineage-status FINAL verdict combines lineage + live failures (§2)", () => {
+(hasDb ? describe : describe.skip)("lineage-status FINAL migration-readiness verdict (§1/§2/§4)", () => {
   async function setReferralRecorded(checksum: string): Promise<void> {
     await prisma.$executeRawUnsafe(
       `UPDATE _prisma_migrations SET checksum=$1 WHERE migration_name=$2 AND rolled_back_at IS NULL`,
@@ -186,14 +205,14 @@ const hasDb = typeof process.env.DATABASE_URL === "string" && process.env.DATABA
     await prisma.$executeRawUnsafe(`DELETE FROM _prisma_migrations WHERE id LIKE 'verdict-test-%'`);
     await setReferralRecorded(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF);
   }
-  async function finalVerdict(): Promise<"ALLOWED" | "BLOCKED"> {
+  async function finalVerdict(): Promise<"PASSED" | "BLOCKED"> {
     const lines: string[] = [];
     await printReferralMigrationLineageStatus((l) => lines.push(l));
-    const line = lines.find((l) => l.includes("FINAL ACTIVATION VERDICT:")) ?? "";
+    const line = lines.find((l) => l.includes("FINAL MIGRATION READINESS VERDICT:")) ?? "";
     // Parse the verdict token immediately after the label (the line ALSO reports the
     // separate "lineage ALLOWED/BLOCKED" dimension, so a naive substring check is wrong).
-    const m = line.match(/FINAL ACTIVATION VERDICT:\s+(ALLOWED|BLOCKED)/);
-    return m?.[1] === "BLOCKED" ? "BLOCKED" : "ALLOWED";
+    const m = line.match(/FINAL MIGRATION READINESS VERDICT:\s+(PASSED|BLOCKED)/);
+    return m?.[1] === "BLOCKED" ? "BLOCKED" : "PASSED";
   }
   async function insertRow(id: string, name: string, finished: boolean, rolledBack: boolean): Promise<void> {
     await prisma.$executeRawUnsafe(
@@ -212,18 +231,40 @@ const hasDb = typeof process.env.DATABASE_URL === "string" && process.env.DATABA
     await prisma.$disconnect();
   });
 
-  it("valid lineage + zero live failures → ALLOWED", async () => {
-    expect(await finalVerdict()).toBe("ALLOWED");
+  it("valid lineage + a fully-applied deployment → PASSED", async () => {
+    expect(await finalVerdict()).toBe("PASSED");
   });
 
-  it("valid lineage + one UNRELATED live migration failure → BLOCKED", async () => {
+  it("valid lineage + one UNRELATED currently-failed/stuck migration → BLOCKED", async () => {
     await insertRow("verdict-test-stuck", "29991230000000_unrelated_stuck", false, false);
     expect(await finalVerdict()).toBe("BLOCKED");
   });
 
-  it("valid lineage + a HISTORICAL rolled-back attempt only → ALLOWED", async () => {
+  it("valid lineage + an UNRELATED rolled-back-not-reapplied migration → BLOCKED (§1/§4)", async () => {
+    // A migration rolled back and never reapplied is NOT a healthy applied state — it must
+    // block, even though no attempt is currently stuck. (Was previously mis-treated as OK.)
     await insertRow("verdict-test-rb", "29991230000000_unrelated_rolledback", false, true);
-    expect(await finalVerdict()).toBe("ALLOWED");
+    expect(await finalVerdict()).toBe("BLOCKED");
+  });
+
+  it("valid lineage + a rollback FOLLOWED BY a later successful reapplication → PASSED (non-blocking)", async () => {
+    // For a REAL on-disk migration: an OLDER rolled-back attempt plus the existing current
+    // success means the migration is currently applied — the historical rollback must NOT block.
+    const rows = await prisma.$queryRaw<Array<{ migration_name: string }>>`
+      SELECT migration_name FROM _prisma_migrations
+      WHERE migration_name <> ${REFERRAL_AFFILIATE_MIGRATION_NAME}
+        AND finished_at IS NOT NULL AND rolled_back_at IS NULL
+      ORDER BY started_at ASC LIMIT 1`;
+    const target = rows[0];
+    expect(target).toBeDefined();
+    if (!target) return;
+    // started_at in the PAST so the existing successful attempt is strictly newer.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO _prisma_migrations (id, checksum, migration_name, started_at, finished_at, rolled_back_at, applied_steps_count)
+       VALUES ('verdict-test-histrb', 'x', $1, now() - interval '10 years', NULL, now() - interval '10 years', 0)`,
+      target.migration_name,
+    );
+    expect(await finalVerdict()).toBe("PASSED");
   });
 
   it("invalid lineage + zero live failures → BLOCKED", async () => {

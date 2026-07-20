@@ -171,6 +171,29 @@ d("referral activation integrity gate (§6)", () => {
     expect(checkOk(readiness, "migration-history-immutable")).toBe(true);
   });
 
+  it("§4: the OWNER readiness gate assesses the FULL end-to-end set, not just migrations", async () => {
+    // The migration-only diagnostic command (printReferralMigrationLineageStatus) deliberately
+    // checks migrations alone. The OWNER activation gate must additionally cover Redis / control
+    // queue / worker + execute heartbeats / wallet ledger / payout windows / attribution /
+    // integrity — so a green migration verdict can never be mistaken for full activation.
+    const readiness = await assessReferralActivationReadiness();
+    const keys = readiness.checks.map((c) => c.key);
+    for (const required of [
+      "migrations-healthy",
+      "migration-history-immutable",
+      "worker-heartbeat-fresh",
+      "control-queue-reachable",
+      "execute-consumer-heartbeat-fresh",
+      "wallet-ledger-healthy",
+      "payout-windows-valid",
+      "no-attribution-mismatch",
+      "no-duplicate-commission-order",
+      "no-unresolved-integrity-issue",
+    ]) {
+      expect(keys).toContain(required);
+    }
+  });
+
   it("DISABLING is never gated — it works even with every heartbeat gone", async () => {
     // First enable (healthy), then wipe the heartbeats and confirm disable still works.
     expect((await enableReferralPayoutsGated()).status).toBe("enabled");
