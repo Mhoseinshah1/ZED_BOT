@@ -137,7 +137,7 @@ d("referral financial safety", () => {
     ]);
     const credited = results.filter((r) => r.status === "credited");
     expect(credited).toHaveLength(1);
-    expect(await prisma.referralCommission.count({ where: { referredUserId: referred.id } })).toBe(1);
+    expect(await prisma.referralCommission.count({ where: { referredUserId: referred.id, status: "PAID" } })).toBe(1);
     expect((await prisma.user.findUniqueOrThrow({ where: { id: referrer.id } })).balanceToman).toBe(10_000);
   });
 

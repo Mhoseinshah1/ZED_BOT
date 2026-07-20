@@ -222,7 +222,10 @@ d("referral affiliate commissions — engine", () => {
     const order = await makeCompletedOrder(referred, 149_999);
 
     expect(await creditReferralCommissionForOrder(order.id)).toEqual({ status: "not-eligible" });
-    expect(await prisma.referralCommission.count({ where: { orderId: order.id } })).toBe(0);
+    // No payout, and a terminal CANCELLED marker (so the durable scan converges).
+    expect(await prisma.referralCommission.count({ where: { orderId: order.id, status: "PAID" } })).toBe(0);
+    expect(await prisma.referralCommission.count({ where: { orderId: order.id, status: "CANCELLED" } })).toBe(1);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: referrer.id } })).balanceToman).toBe(0);
   });
 
   it("credits an order exactly at the minimum", async () => {
@@ -241,7 +244,8 @@ d("referral affiliate commissions — engine", () => {
     const order = await makeCompletedOrder(referred, 100_000);
 
     expect(await creditReferralCommissionForOrder(order.id)).toEqual({ status: "not-eligible" });
-    expect(await prisma.referralCommission.count({ where: { orderId: order.id } })).toBe(0);
+    expect(await prisma.referralCommission.count({ where: { orderId: order.id, status: "PAID" } })).toBe(0);
+    expect(await prisma.referralCommission.count({ where: { orderId: order.id, status: "CANCELLED" } })).toBe(1);
   });
 
   // --- first-purchase-only ---------------------------------------------------
@@ -257,7 +261,8 @@ d("referral affiliate commissions — engine", () => {
     expect(await creditReferralCommissionForOrder(first.id)).toEqual({ status: "credited", commissionToman: 10_000 });
     expect(await creditReferralCommissionForOrder(second.id)).toEqual({ status: "not-eligible" });
 
-    expect(await prisma.referralCommission.count({ where: { referredUserId: referred.id } })).toBe(1);
+    // Exactly one PAID payout; the skipped second order carries a CANCELLED marker.
+    expect(await prisma.referralCommission.count({ where: { referredUserId: referred.id, status: "PAID" } })).toBe(1);
     expect((await prisma.user.findUniqueOrThrow({ where: { id: referrer.id } })).balanceToman).toBe(10_000);
   });
 

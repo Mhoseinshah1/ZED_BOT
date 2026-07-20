@@ -237,3 +237,35 @@ The `20260720121000_referral_commission_orderid_unique_guard` migration detects
 duplicate non-null `orderId` values and **fails with an actionable message**
 before (idempotently) re-asserting the unique index — safe on clean, legacy,
 nullable and duplicate databases (tested).
+
+## 9. Review-blocker hardening (PR #109 follow-up)
+
+A second review pass raised eight blockers; all are resolved here.
+
+### 9.1 Payout ACTIVE-WINDOWS replace the single-instant horizon
+
+Eligibility is no longer "completed at/after one horizon instant" (which paid
+orders completed while payouts were paused). Enabling **opens** a payout window and
+disabling **closes** it (`referral_payout_windows`, committed atomically with the
+switch). An order earns a commission **only if it completed inside an active
+window** — a paused-period order falls in a window gap and is never paid, even
+after re-enable. The `referral_commissions_started_at` horizon is kept as the
+earliest window start (display + the "never before the first enable" floor).
+Backward-compatible: an install enabled under the old code (horizon, no windows)
+synthesises a single open window from the horizon.
+
+### 9.2 The eight fixes
+
+| # | Severity | Fix |
+|---|----------|-----|
+| 1 | Critical | `runClawbackStep` now locks the **Referral row before the User row** — the same `Referral → User` order the credit path uses — so a concurrent credit and reversal can never deadlock. |
+| 2 | High | `applyReferralIfEligible` verifies a pre-existing `Referral` row's referrer matches (check-then-create under the serialising claim) and **rolls the whole claim back on a mismatch**, so `User.referrerId` and `Referral.referrerUserId` can never disagree. |
+| 3 | Medium | The worker scan-lock token gains a random suffix, so two scans in the same millisecond can't mint the same token and release each other's lock. |
+| 4 | P1 | Enabling stamps the horizon, opens the window, and flips the switch **in one transaction** — a crash can never leave an orphan horizon that would later back-fill. |
+| 5 | P1 | Orders completed while payouts were paused are excluded by the active-window gate (engine) and the window-range scan filter (worker) — never back-filled. |
+| 6 | P1 | The reversal scan runs **regardless of the enabled switch** and is commission-driven, so a refund whose live enqueue was lost while payouts were paused is still reversed. |
+| 7 | P1 | The credit scan has **no time floor**: it pages oldest-first over orders inside active windows, so a multi-day outage never permanently drops an eligible order. The engine writes a terminal `CANCELLED` marker for in-window orders that yield no payout (self-referral, below minimum, zero/first-purchase-consumed), so the scan converges instead of re-selecting them forever. |
+| 8 | P2 | The duplicate-`orderId` preflight now runs **before** the `CREATE UNIQUE INDEX` inside `20260719180000` (not only in the later standalone guard), so a legacy database with duplicates fails with the actionable message instead of PostgreSQL's opaque index error. |
+
+Regression + concurrency coverage lives in
+`apps/bot/tests/referral-review-blockers.test.ts`.

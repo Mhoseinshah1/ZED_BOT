@@ -6,12 +6,12 @@ import {
   WalletTransactionType,
   prisma,
 } from "@zedbot/database";
-import { isOrderWithinReferralHorizon, planReferralClawback, resolveReferralCommission } from "@zedbot/shared";
+import { isWithinReferralPayoutWindows, planReferralClawback, resolveReferralCommission } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import {
-  getReferralCommissionsStartedAt,
   getReferralConfig,
+  getReferralPayoutWindows,
   isReferralSystemEnabled,
 } from "./referral.service.js";
 
@@ -66,8 +66,43 @@ export type ReferralCreditResult =
     };
 
 /**
+ * Records a terminal CANCELLED commission (amount 0) claiming the order's unique
+ * id, so a referred, in-window order that yields NO payout (self-referral, below
+ * minimum, zero percent/commission) drops out of the durable credit scan instead of
+ * being re-selected on every run. Idempotent (P2002 = already recorded/credited).
+ * NEVER consumes a first-purchase slot (CANCELLED is excluded from that count).
+ */
+async function recordNoCommissionMarker(
+  referralId: string,
+  referrerUserId: string,
+  referredUserId: string,
+  orderId: string,
+  amountToman: number,
+  percent: number,
+): Promise<void> {
+  try {
+    await prisma.referralCommission.create({
+      data: {
+        referralId,
+        referrerUserId,
+        referredUserId,
+        orderId,
+        amountToman,
+        percent,
+        status: ReferralCommissionStatus.CANCELLED,
+      },
+      select: { id: true },
+    });
+  } catch (err) {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) {
+      throw err;
+    }
+  }
+}
+
+/**
  * Credits the referrer of `order`'s buyer when the order is COMPLETED, enabled,
- * and completed at/after the activation horizon. Returns a structured outcome;
+ * and completed inside an active payout window. Returns a structured outcome;
  * never throws for a business reason.
  */
 export async function creditReferralCommissionForOrder(
@@ -87,15 +122,12 @@ export async function creditReferralCommissionForOrder(
   if (order.status !== OrderStatus.COMPLETED || order.completedAt === null) {
     return { status: "not-completed" };
   }
-  // Activation horizon: a null horizon (payouts never enabled) is fail-closed, and
-  // an order completed before the horizon is never back-filled.
-  const horizon = await getReferralCommissionsStartedAt();
-  if (
-    !isOrderWithinReferralHorizon({
-      orderCompletedAtEpoch: order.completedAt.getTime(),
-      horizonEpoch: horizon?.getTime() ?? null,
-    })
-  ) {
+  // Payout ACTIVE-WINDOWS: an order earns a commission ONLY if it completed while
+  // payouts were switched ON. Orders completed before the horizon OR during a pause
+  // (a window gap) are never paid — no historical or paused-period back-fill. An
+  // empty window list (payouts never enabled) is fail-closed.
+  const windows = await getReferralPayoutWindows();
+  if (!isWithinReferralPayoutWindows(order.completedAt.getTime(), windows)) {
     return { status: "before-horizon" };
   }
   // The buyer must have been attributed to a referrer (Referral row on /start).
@@ -104,12 +136,18 @@ export async function creditReferralCommissionForOrder(
     return { status: "no-referrer" };
   }
   if (referral.referrerUserId === order.userId) {
+    // In-window referred order that can never pay → record a terminal CANCELLED
+    // marker so the durable scan stops re-selecting it (convergence).
+    await recordNoCommissionMarker(referral.id, referral.referrerUserId, order.userId, order.id, 0, 0);
     return { status: "self-referral" };
   }
 
   const config = await getReferralConfig();
   const decision = resolveReferralCommission({ orderAmountToman: order.finalPriceToman, config });
   if (!decision.eligible) {
+    // Below-minimum / zero-percent / zero-commission: no payout, but mark it so the
+    // durable no-time-floor scan converges instead of re-selecting it forever.
+    await recordNoCommissionMarker(referral.id, referral.referrerUserId, order.userId, order.id, 0, decision.percent);
     return { status: "not-eligible" };
   }
 
@@ -131,6 +169,20 @@ export async function creditReferralCommissionForOrder(
           },
         });
         if (prior > 0) {
+          // Terminal marker (same tx, claims the unique orderId) so the durable
+          // scan converges instead of re-selecting this order forever.
+          await tx.referralCommission.create({
+            data: {
+              referralId: referral.id,
+              referrerUserId: referral.referrerUserId,
+              referredUserId: order.userId,
+              orderId: order.id,
+              amountToman: 0,
+              percent: decision.percent,
+              status: ReferralCommissionStatus.CANCELLED,
+            },
+            select: { id: true },
+          });
           return { status: "not-eligible" };
         }
       }
@@ -240,6 +292,10 @@ async function runClawbackStep(
     if (commission === null) {
       return { status: "no-op" as const, recoveredToman: 0, outstandingToman: 0 };
     }
+    // Lock the Referral row BEFORE the User row to keep the SAME acquisition order
+    // as the credit path (Referral → User). Without this, a concurrent credit
+    // (Referral→User) and clawback (User→Referral) could deadlock.
+    await tx.$queryRaw`SELECT id FROM "Referral" WHERE id = ${commission.referralId} FOR UPDATE`;
     // Only a PAID (first reversal) or REVERSAL_PENDING (retry) row is actionable.
     let outstanding: number;
     if (commission.status === ReferralCommissionStatus.PAID) {
