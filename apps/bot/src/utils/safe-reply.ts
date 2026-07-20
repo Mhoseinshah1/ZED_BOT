@@ -1,5 +1,5 @@
 import { errorMessage } from "@zedbot/shared";
-import type { InlineKeyboard, Keyboard } from "grammy";
+import type { InlineKeyboard, InputFile, Keyboard } from "grammy";
 
 import type { BotContext } from "../core/context.js";
 import { logger } from "../core/logger.js";
@@ -55,6 +55,29 @@ export async function safeReplyWithMarkup(
     await ctx.reply(text, { reply_markup: replyMarkup });
   } catch (err) {
     logger.debug("reply with markup failed", { error: errorMessage(err) });
+  }
+}
+
+/**
+ * Sends a photo (an in-memory InputFile) without ever throwing - a blocked user
+ * or deleted chat resolves to `false`, a success to `true`. The caller stays
+ * fail-soft (falls back to the copyable text link). Only the safe Telegram error
+ * class is logged; the caption/keyboard/image bytes never appear in the log.
+ */
+export async function safeReplyWithPhoto(
+  ctx: BotContext,
+  photo: InputFile,
+  opts: { caption: string; keyboard?: InlineKeyboard },
+): Promise<boolean> {
+  try {
+    await ctx.replyWithPhoto(photo, {
+      caption: opts.caption,
+      ...(opts.keyboard === undefined ? {} : { reply_markup: opts.keyboard }),
+    });
+    return true;
+  } catch (err) {
+    logger.debug("reply with photo failed", { error: errorMessage(err) });
+    return false;
   }
 }
 

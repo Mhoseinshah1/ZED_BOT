@@ -1,7 +1,14 @@
-import { OrderType, prisma, type Order, type User } from "@zedbot/database";
+import { OrderType, prisma, type Order, type Service, type User } from "@zedbot/database";
 import { errorMessage, NOTIF_ANALYTICS_ENABLED_KEY, referralCorrelationHash } from "@zedbot/shared";
+import { InputFile } from "grammy";
 
 import { logger } from "../core/logger.js";
+import { serviceAccountLabel, serviceConfigLinks } from "../handlers/user-services/service-views.js";
+import {
+  deliverConfigQrCodes,
+  deliverSubscriptionQr,
+  type QrPhotoSender,
+} from "./qr-delivery.service.js";
 import { enqueueAttributionReconcile, enqueueReferralCredit } from "./ops-queue.service.js";
 import { getBooleanSetting } from "./settings.service.js";
 import { TRIAL_CONVERTED_USER_TEXT } from "./trial-conversion.service.js";
@@ -118,6 +125,48 @@ async function sendSafe(
     await api.sendMessage(chatId, text, other);
   } catch (err) {
     logger.warn("fulfillment notice failed", { error: errorMessage(err) });
+  }
+}
+
+/**
+ * §6 post-purchase QR presentation - ADDITIVE and strictly fail-soft. Runs only
+ * AFTER a successful provision (and only on the FIRST provision - the caller gates
+ * on !alreadyExisted so an idempotent replay never resends photos). Sends the
+ * subscription QR and one QR per config from the EXACT stored payloads. Requires a
+ * photo-capable api: production always passes grammY's Api; a text-only fake simply
+ * skips QR. NEVER throws and NEVER affects the Service/Order success - a generation
+ * or Telegram send failure is swallowed and the user still has the copyable text.
+ * Logs carry only safe counts/events, never the URLs, configs or image bytes.
+ */
+export async function deliverPostPurchaseQrCodes(
+  api: DeliverySendApi,
+  chatId: string,
+  service: Service,
+): Promise<void> {
+  const sendPhoto = api.sendPhoto;
+  if (typeof sendPhoto !== "function") {
+    return;
+  }
+  const send: QrPhotoSender = async ({ png, caption, filename }) => {
+    try {
+      await sendPhoto.call(api, chatId, new InputFile(png, filename), { caption });
+      return true;
+    } catch (err) {
+      logger.warn("post-purchase qr photo failed", { error: errorMessage(err) });
+      return false;
+    }
+  };
+  try {
+    const label = serviceAccountLabel(service);
+    if (service.subscriptionUrl !== null && service.subscriptionUrl !== "") {
+      await deliverSubscriptionQr(service.subscriptionUrl, label, send);
+    }
+    const links = serviceConfigLinks(service);
+    if (links.length > 0) {
+      await deliverConfigQrCodes(links, label, send);
+    }
+  } catch (err) {
+    logger.warn("post-purchase qr delivery skipped", { error: errorMessage(err) });
   }
 }
 
@@ -351,6 +400,12 @@ async function dispatchPaidOrderFulfillmentInner(
         await sendSafe(api, chatId, buildServiceInfoMessage(result.service), {
           parse_mode: "HTML",
         });
+        // §6: additive, fail-soft QR delivery on the FIRST provision only. An
+        // idempotent replay (alreadyExisted) resends the text info exactly as
+        // before but never re-sends the QR photos, preserving anti-spam behavior.
+        if (!result.alreadyExisted) {
+          await deliverPostPurchaseQrCodes(api, chatId, result.service);
+        }
         return { kind: "SERVICE", op: "provision", ok: true, refunded: false, error: null };
       }
       await sendSafe(
