@@ -454,7 +454,12 @@ servicesHandler.callbackQuery(/^user:svc:qr_configs:([0-9a-f-]+)$/, async (ctx) 
   await safeAnswerCallback(ctx);
   const sid = serviceShortId(service);
   const label = serviceAccountLabel(service);
-  const backKb = new InlineKeyboard().text("بازگشت به سرویس", svcCb.view(sid));
+  // Additive: keep the copyable text configs one tap away (mirrors the
+  // subscription QR keyboard's «لینک متنی» button), then the back navigation.
+  const backKb = new InlineKeyboard()
+    .text("لینک متنی 📄", svcCb.configs(sid))
+    .row()
+    .text("بازگشت به سرویس", svcCb.view(sid));
 
   // One config -> one photo carrying the back keyboard (§5).
   if (links.length === 1) {

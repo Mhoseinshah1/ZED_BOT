@@ -164,7 +164,8 @@ d("user-service QR callbacks", () => {
     expect(cap.photos).toHaveLength(1);
     expect(cap.photos[0].decoded).toBe("vmess://ONLY<one>");
     expect(cap.photos[0].caption).toBe(`کانفیگ 1 از 1\nنام سرویس: ${service.username}`);
-    expect(cap.photos[0].buttons).toEqual(["بازگشت به سرویس"]);
+    // Additive text-link button (to the copyable configs) + back navigation.
+    expect(cap.photos[0].buttons).toEqual(["لینک متنی 📄", "بازگشت به سرویس"]);
   });
 
   it("config QR: multiple configs -> ordered individual photos + a trailing back message", async () => {

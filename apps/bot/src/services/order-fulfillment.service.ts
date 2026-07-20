@@ -143,13 +143,15 @@ export async function deliverPostPurchaseQrCodes(
   chatId: string,
   service: Service,
 ): Promise<void> {
-  const sendPhoto = api.sendPhoto;
-  if (typeof sendPhoto !== "function") {
+  if (typeof api.sendPhoto !== "function") {
     return;
   }
+  // Bind once so the closure calls the grammY Api method with the right `this`
+  // (strict narrowing on the optional property does not survive into the closure).
+  const sendPhoto = api.sendPhoto.bind(api);
   const send: QrPhotoSender = async ({ png, caption, filename }) => {
     try {
-      await sendPhoto.call(api, chatId, new InputFile(png, filename), { caption });
+      await sendPhoto(chatId, new InputFile(png, filename), { caption });
       return true;
     } catch (err) {
       logger.warn("post-purchase qr photo failed", { error: errorMessage(err) });
