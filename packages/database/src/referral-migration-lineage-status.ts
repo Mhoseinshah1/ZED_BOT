@@ -4,10 +4,8 @@ import {
   REFERRAL_AFFILIATE_MIGRATION_NAME,
   type ReferralMigrationChecksumClass,
 } from "./migration-checksum.js";
-import {
-  countCurrentlyFailedOrStuckMigrations,
-  readMigrationAttemptState,
-} from "./migration-attempts.js";
+import { readMigrationAttemptState } from "./migration-attempts.js";
+import { evaluateMigrationDeploymentState } from "./migration-deployment.js";
 import {
   checkOrdinaryMigrationsImmutable,
   checkReferralSchemaPostconditions,
@@ -16,15 +14,21 @@ import {
 
 // =============================================================================
 // Referral migration LINEAGE STATUS — an OWNER/operator-only DIAGNOSTIC command.
-// Run standalone via scripts/referral-migration-lineage-status.sh. It shows the
-// selected migration attempt + status, the checksum classification, every schema
-// postcondition, the exact unique-index ownership/column result, current unresolved
-// migration failures, historical rolled-back attempts (separately), and the final
-// activation verdict.
+// Run standalone via scripts/referral-migration-lineage-status.sh. It reports the
+// referral migration lineage, the schema postconditions, the exact unique-index
+// ownership/column result, and the FULL migration-deployment state (on-disk vs DB),
+// then prints a FINAL MIGRATION READINESS VERDICT.
+//
+// SCOPE: this command checks MIGRATION health only. It does NOT run the full referral
+// activation gate (Redis / control queue / worker + execute heartbeats / wallet ledger
+// / payout windows / attribution / integrity), so it deliberately never claims that
+// full referral activation is allowed — the OWNER readiness gate
+// (assessReferralActivationReadiness) remains the authoritative complete verdict.
 //
 // GUARANTEES: read-only (moves no money, modifies no rows or migration metadata);
 // prints NO credentials / DATABASE_URL and NO order / user / commission ids or row
-// contents. The checksums it prints are SHA-256 of a public migration file (not secrets).
+// contents. The values it prints are public migration names and SHA-256 checksums of a
+// public migration file, never secrets.
 // =============================================================================
 
 const EXIT_OK = 0;
@@ -42,32 +46,25 @@ export async function printReferralMigrationLineageStatus(
   out: (line: string) => void = (l) => console.log(l),
 ): Promise<number> {
   const attemptState = await readMigrationAttemptState(REFERRAL_AFFILIATE_MIGRATION_NAME);
-  const recordedChecksum = attemptState.latestSuccessful?.checksum ?? null;
-  // Reuse the authoritative recorded checksum (avoids a second _prisma_migrations read).
-  const lineage = await evaluateReferralMigrationLineage(undefined, recordedChecksum);
-  const classification = classifyReferralMigrationChecksum(recordedChecksum);
+  // The referral lineage uses the CURRENT applied checksum (null unless currently applied).
+  const lineage = await evaluateReferralMigrationLineage(undefined, attemptState.currentChecksum);
+  const classification = classifyReferralMigrationChecksum(attemptState.currentChecksum);
   const postconditions = await checkReferralSchemaPostconditions();
-  const currentlyFailed = await countCurrentlyFailedOrStuckMigrations();
+  const deployment = await evaluateMigrationDeploymentState();
   const ordinary = await checkOrdinaryMigrationsImmutable();
 
-  // The FINAL verdict mirrors the real activation gate's migration-history dimension: the
-  // referral lineage must allow activation AND there must be NO currently failed/stuck
-  // migration anywhere (checkMigrationsHealthy) AND EVERY OTHER applied migration must be
-  // immutable (evaluateMigrationHistory blocks on ordinary checksum drift / a missing
-  // file). Historical rolled-back attempts alone do NOT block. So a valid referral lineage
-  // is still BLOCKED when an unrelated migration is stuck OR has drifted OR lost its file.
-  const finalActivationAllowed = lineage.activationAllowed && currentlyFailed === 0 && ordinary.ok;
+  // The verdict is a MIGRATION-READINESS verdict ONLY: the referral lineage must allow,
+  // every shipped migration must be currently applied (deployment ready — no pending /
+  // currently-failed / rolled-back-not-reapplied / missing-file), and every other applied
+  // migration must be immutable. This command does NOT run the Redis / heartbeat / wallet /
+  // payout-window / attribution / integrity checks, so it never claims full activation.
+  const migrationReadinessOk = lineage.activationAllowed && deployment.ready && ordinary.ok;
 
   out("referral-migration-lineage-status:");
   out(`  migration:                ${REFERRAL_AFFILIATE_MIGRATION_NAME}`);
 
   out("  --- referral migration lineage ---");
   out(`  selected attempt:         ${attemptState.status}`);
-  out(
-    `  latest successful attempt: ${
-      attemptState.latestSuccessful === null ? "(none)" : "present (finished, not rolled back)"
-    }`,
-  );
   out(`  lineage status:           ${lineage.status}`);
   out(`  checksum classification:  ${classification}`);
   out(
@@ -76,7 +73,7 @@ export async function printReferralMigrationLineageStatus(
     }`,
   );
   out(`  detail:                   ${lineage.detail}`);
-  out(`  recorded checksum:        ${recordedChecksum ?? "(no successful attempt)"}`);
+  out(`  recorded checksum:        ${attemptState.currentChecksum ?? "(not currently applied)"}`);
   out(`  on-disk checksum:         ${lineage.onDiskChecksum ?? "(migration file missing)"}`);
 
   out("  --- referral schema postconditions ---");
@@ -99,19 +96,32 @@ export async function printReferralMigrationLineageStatus(
     out(`    verdict:                ${iv.ok ? "OK" : "FAILED"} (${iv.detail})`);
   }
 
-  out("  --- migration attempt health ---");
-  out(`  current unresolved migration failures: ${currentlyFailed}`);
-  out(`  historical rolled-back attempts:       ${attemptState.historicalRolledBackCount}`);
+  out("  --- migration deployment state (on-disk vs database) ---");
+  out(`  on-disk migrations: ${deployment.onDiskCount}; currently applied: ${deployment.appliedCount}`);
+  out(`  pending (shipped, not applied):        ${deployment.pending.length}${deployment.pending.length ? ` [${deployment.pending.join(", ")}]` : ""}`);
+  out(`  currently failed/stuck:                ${deployment.currentlyFailed.length}${deployment.currentlyFailed.length ? ` [${deployment.currentlyFailed.join(", ")}]` : ""}`);
+  out(`  rolled back (not reapplied):           ${deployment.rolledBackNotReapplied.length}${deployment.rolledBackNotReapplied.length ? ` [${deployment.rolledBackNotReapplied.join(", ")}]` : ""}`);
+  out(`  applied but file missing:              ${deployment.missingFile.length}${deployment.missingFile.length ? ` [${deployment.missingFile.join(", ")}]` : ""}`);
+  out(`  shipped but incomplete (no SQL):       ${deployment.incompleteOnDisk.length}${deployment.incompleteOnDisk.length ? ` [${deployment.incompleteOnDisk.join(", ")}]` : ""}`);
+  out(`  historical rolled-back attempts (referral): ${attemptState.rolledBackCount}`);
+  out(`  deployment ready: ${deployment.ready ? "YES" : `NO (${deployment.blocker})`}`);
 
   out("  --- other applied migrations (immutability) ---");
   out(`  ordinary migrations immutable: ${ordinary.ok ? "OK" : "FAILED"} (${ordinary.detail})`);
 
   out("  --- final verdict ---");
   out(
-    `  FINAL ACTIVATION VERDICT: ${finalActivationAllowed ? "ALLOWED" : "BLOCKED"} ` +
-      `(lineage ${lineage.activationAllowed ? "ALLOWED" : "BLOCKED"}, ${currentlyFailed} live migration failure(s), ` +
+    `  FINAL MIGRATION READINESS VERDICT: ${migrationReadinessOk ? "PASSED" : "BLOCKED"} ` +
+      `(lineage ${lineage.activationAllowed ? "ALLOWED" : "BLOCKED"}, deployment ${deployment.ready ? "READY" : "BLOCKED"}, ` +
       `ordinary migrations ${ordinary.ok ? "immutable" : "DRIFTED"})`,
   );
+  if (migrationReadinessOk) {
+    out("  Migration checks passed. Full referral activation still requires the OWNER readiness gate");
+    out("  (Redis, control queue, worker + execute heartbeats, wallet ledger, payout windows, attribution, integrity).");
+  } else {
+    out("  Migration checks did NOT pass — resolve the blocker above.");
+    out("  (Full referral activation also requires the OWNER readiness gate beyond these migration checks.)");
+  }
   return EXIT_OK;
 }
 

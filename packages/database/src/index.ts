@@ -28,6 +28,7 @@ export {
 export {
   readLatestMigrationAttempt,
   readLatestSuccessfulMigrationAttempt,
+  readAllMigrationAttempts,
   countCurrentlyFailedOrStuckMigrations,
   classifyMigrationAttempt,
   readMigrationAttemptState,
@@ -35,6 +36,11 @@ export {
   type MigrationAttemptStatus,
   type MigrationAttemptState,
 } from "./migration-attempts.js";
+export {
+  evaluateMigrationDeploymentState,
+  type MigrationDeploymentState,
+  type MigrationDeploymentEntry,
+} from "./migration-deployment.js";
 export {
   resolveMigrationsDir,
   checkReferralSchemaPostconditions,

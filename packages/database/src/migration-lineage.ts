@@ -11,7 +11,12 @@ import {
   readPrismaMigrationChecksum,
   type ReferralMigrationChecksumClass,
 } from "./migration-checksum.js";
-import { readLatestSuccessfulMigrationAttempt } from "./migration-attempts.js";
+import {
+  classifyMigrationAttempt,
+  getLatestSuccessfulAttempt,
+  readAllMigrationAttempts,
+  readMigrationAttemptState,
+} from "./migration-attempts.js";
 
 // =============================================================================
 // Referral migration LINEAGE evaluation. `20260719180000` shipped in two logical SQL
@@ -305,13 +310,14 @@ export async function checkReferralSchemaPostconditions(): Promise<ReferralSchem
 }
 
 /**
- * Reads the recorded checksum of the known migration — the LATEST SUCCESSFUL attempt's
- * checksum (finished, not rolled back, ordered by started_at DESC). Never an old failed
- * or rolled-back attempt.
+ * Reads the CURRENTLY-APPLIED recorded checksum of the known migration — the latest
+ * successful attempt's checksum ONLY when the migration is APPLIED (a success started
+ * after every rollback). Returns null when the referral migration is not currently
+ * applied (never applied, currently failed, or rolled back without reapply), so a stale
+ * pre-rollback success can never be mistaken for the live checksum.
  */
 async function readRecordedChecksum(): Promise<string | null> {
-  const attempt = await readLatestSuccessfulMigrationAttempt(REFERRAL_AFFILIATE_MIGRATION_NAME);
-  return attempt?.checksum ?? null;
+  return (await readMigrationAttemptState(REFERRAL_AFFILIATE_MIGRATION_NAME)).currentChecksum;
 }
 
 /**
@@ -428,13 +434,13 @@ export interface OrdinaryMigrationsIntegrity {
 }
 
 /**
- * Verifies that EVERY OTHER applied migration (i.e. not the dual-lineage referral one) is
- * immutable — its on-disk `migration.sql` exists and its SHA-256 equals the latest
- * SUCCESSFUL attempt's recorded checksum. This mirrors the ordinary-migration branch of
- * the real activation gate (`evaluateMigrationHistory`), so a diagnostic verdict built
- * from it cannot claim activation is allowed while an unrelated migration has drifted or
- * lost its file. The referral migration is intentionally skipped here — it is judged by
- * the dual-checksum lineage evaluator. Read-only.
+ * Verifies that EVERY OTHER currently-APPLIED migration (i.e. not the dual-lineage
+ * referral one) is immutable — its on-disk `migration.sql` exists and its SHA-256 equals
+ * the CURRENT applied checksum (the latest success that started after every rollback).
+ * Only APPLIED migrations are checked here; pending / currently-failed / rolled-back-not-
+ * reapplied migrations are blocked by the deployment-state helper, not by this checksum
+ * pass, so a since-rolled-back stale success is never used. The referral migration is
+ * skipped — it is judged by the dual-checksum lineage evaluator. Read-only.
  */
 export async function checkOrdinaryMigrationsImmutable(
   migrationsDir: string | null = resolveMigrationsDir(),
@@ -442,20 +448,18 @@ export async function checkOrdinaryMigrationsImmutable(
   if (migrationsDir === null) {
     return { ok: false, checked: 0, driftedMigration: null, missingMigration: null, detail: "migrations dir not found" };
   }
-  const applied = await prisma.$queryRaw<Array<{ migration_name: string; checksum: string }>>`
-    SELECT DISTINCT ON (migration_name) migration_name, checksum
-    FROM _prisma_migrations
-    WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL
-    ORDER BY migration_name, started_at DESC`;
+  const attemptsByName = await readAllMigrationAttempts();
   let checked = 0;
-  for (const row of applied) {
-    if (row.migration_name === REFERRAL_AFFILIATE_MIGRATION_NAME) continue; // referral → lineage
-    const file = resolvePath(migrationsDir, row.migration_name, "migration.sql");
+  for (const [name, attempts] of [...attemptsByName.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (name === REFERRAL_AFFILIATE_MIGRATION_NAME) continue; // referral → lineage
+    if (classifyMigrationAttempt(attempts) !== "APPLIED") continue; // non-applied → deployment state
+    const currentChecksum = getLatestSuccessfulAttempt(attempts)?.checksum ?? null;
+    const file = resolvePath(migrationsDir, name, "migration.sql");
     if (!existsSync(file)) {
-      return { ok: false, checked, driftedMigration: null, missingMigration: row.migration_name, detail: `missing file for ${row.migration_name}` };
+      return { ok: false, checked, driftedMigration: null, missingMigration: name, detail: `missing file for ${name}` };
     }
-    if (readPrismaMigrationChecksum(file) !== row.checksum) {
-      return { ok: false, checked, driftedMigration: row.migration_name, missingMigration: null, detail: `checksum drift in ${row.migration_name}` };
+    if (currentChecksum !== null && readPrismaMigrationChecksum(file) !== currentChecksum) {
+      return { ok: false, checked, driftedMigration: name, missingMigration: null, detail: `checksum drift in ${name}` };
     }
     checked += 1;
   }

@@ -1,33 +1,28 @@
 import { prisma } from "./client.js";
 
 // =============================================================================
-// Prisma migration-ATTEMPT selection — the AUTHORITATIVE, deterministic helpers
-// for reasoning about `_prisma_migrations` rows. Prisma keeps EVERY attempt of a
-// migration forever, including failed and rolled-back rows: a migration that failed,
-// was `migrate resolve --rolled-back`, then successfully re-applied leaves BOTH the
-// old rolled-back row AND the new successful row. Selecting "the first row" or
-// "any rolled_back row" is therefore wrong — it can pick an outdated/failed attempt
-// or block forever on ancient history.
-//
-// Contract (used identically by migration health AND lineage evaluation):
-//   - a SUCCESSFUL attempt is  finished_at IS NOT NULL AND rolled_back_at IS NULL;
-//   - a CURRENTLY failed/stuck attempt is  finished_at IS NULL AND rolled_back_at IS NULL;
-//   - a HISTORICAL rolled-back attempt is  rolled_back_at IS NOT NULL (diagnostic only —
-//     it must NOT block once a later successful attempt exists);
-//   - when several attempts exist, the LATEST is  ORDER BY started_at DESC LIMIT 1.
+// Prisma migration-ATTEMPT selection — the AUTHORITATIVE, deterministic lifecycle
+// model for `_prisma_migrations` rows. Prisma keeps EVERY attempt of a migration
+// forever, including failed and rolled-back rows. The order of attempts matters:
+//   - a migration that failed, was `migrate resolve --rolled-back`, then successfully
+//     re-applied is APPLIED (a success STARTED AFTER the rollback);
+//   - a migration that succeeded and was LATER rolled back (with no reapply) is NOT
+//     applied — an older success must NEVER be read as proof of the current state.
+// Selecting "the latest successful row ever" or "any rolled_back row" is therefore
+// wrong; the state must be derived from the full ordered attempt history.
 // Read-only; never modifies `_prisma_migrations`.
 // =============================================================================
 
-/** Per-migration lifecycle classification derived from its recorded attempts. */
+/** Per-migration lifecycle derived from the FULL ordered attempt history. */
 export type MigrationAttemptStatus =
-  /** No row at all for this migration name. */
+  /** No attempt row exists for this migration name. */
   | "NOT_APPLIED"
-  /** A latest successful attempt exists (even if older attempts were rolled back). */
-  | "APPLIED"
   /** The latest attempt is unfinished and not rolled back — a live failure/stuck state. */
   | "CURRENTLY_FAILED"
-  /** The latest attempt was rolled back and NO successful attempt has replaced it. */
-  | "HISTORICALLY_ROLLED_BACK";
+  /** A rollback is the latest relevant outcome and NO success started after it. */
+  | "ROLLED_BACK_NOT_REAPPLIED"
+  /** A successful attempt exists that started AFTER every rollback (currently applied). */
+  | "APPLIED";
 
 export interface MigrationAttempt {
   migrationName: string;
@@ -55,6 +50,25 @@ function toAttempt(r: RawAttemptRow): MigrationAttempt {
   };
 }
 
+const isSuccessful = (a: MigrationAttempt): boolean => a.finishedAt !== null && a.rolledBackAt === null;
+const isRolledBack = (a: MigrationAttempt): boolean => a.rolledBackAt !== null;
+const isStuck = (a: MigrationAttempt): boolean => a.finishedAt === null && a.rolledBackAt === null;
+
+/**
+ * The most-recently STARTED successful attempt (finished, not rolled back) among an
+ * attempt array, or null. Order-independent — the single source of truth for "latest
+ * success ever" that both the deployment-state helper and the ordinary-immutability check
+ * consume. NOTE: a later rollback may still supersede it; use it only after confirming the
+ * migration is APPLIED (see classifyMigrationAttempt).
+ */
+export function getLatestSuccessfulAttempt(attempts: readonly MigrationAttempt[]): MigrationAttempt | null {
+  let latest: MigrationAttempt | null = null;
+  for (const a of attempts) {
+    if (isSuccessful(a) && (latest === null || a.startedAt > latest.startedAt)) latest = a;
+  }
+  return latest;
+}
+
 /** The single most-recently STARTED attempt for a migration (any outcome), or null. */
 export async function readLatestMigrationAttempt(name: string): Promise<MigrationAttempt | null> {
   const rows = await prisma.$queryRaw<RawAttemptRow[]>`
@@ -68,8 +82,9 @@ export async function readLatestMigrationAttempt(name: string): Promise<Migratio
 
 /**
  * The most-recently STARTED SUCCESSFUL attempt (finished, not rolled back), or null.
- * This is the authoritative source of the migration's applied checksum — never an
- * old failed / rolled-back attempt.
+ * NOTE: this is "latest success EVER" — it does NOT prove the migration is currently
+ * applied (a later rollback may supersede it). Use `readMigrationAttemptState().currentChecksum`
+ * for the authoritative currently-applied checksum.
  */
 export async function readLatestSuccessfulMigrationAttempt(name: string): Promise<MigrationAttempt | null> {
   const rows = await prisma.$queryRaw<RawAttemptRow[]>`
@@ -81,49 +96,80 @@ export async function readLatestSuccessfulMigrationAttempt(name: string): Promis
   return rows[0] ? toAttempt(rows[0]) : null;
 }
 
-/**
- * Count of migrations that are CURRENTLY failed or stuck across the whole history
- * (finished_at IS NULL AND rolled_back_at IS NULL). Historical rolled-back rows are
- * deliberately excluded — they do not represent a live failure.
- */
-export async function countCurrentlyFailedOrStuckMigrations(): Promise<number> {
-  const rows = await prisma.$queryRaw<Array<{ n: number }>>`
-    SELECT count(*)::int AS n
+/** Reads every `_prisma_migrations` attempt, grouped by migration name (ordered by started_at ASC). */
+export async function readAllMigrationAttempts(): Promise<Map<string, MigrationAttempt[]>> {
+  const rows = await prisma.$queryRaw<RawAttemptRow[]>`
+    SELECT migration_name, checksum, started_at, finished_at, rolled_back_at
     FROM _prisma_migrations
-    WHERE finished_at IS NULL AND rolled_back_at IS NULL`;
-  return rows[0]?.n ?? 0;
+    ORDER BY migration_name, started_at ASC`;
+  const byName = new Map<string, MigrationAttempt[]>();
+  for (const r of rows) {
+    const a = toAttempt(r);
+    const list = byName.get(a.migrationName);
+    if (list) list.push(a);
+    else byName.set(a.migrationName, [a]);
+  }
+  return byName;
 }
 
 /**
- * Classifies a migration from its latest and latest-successful attempts. A live
- * failure (latest attempt unfinished & not rolled back) wins; otherwise the presence
- * of ANY successful attempt means APPLIED, so a rolled-back-then-reapplied migration
- * is APPLIED, not blocked.
+ * Classifies a migration from its FULL attempt history (order-independent input).
+ * The latest attempt decides a live failure; otherwise a rollback blocks UNLESS a
+ * success started strictly after the latest rollback. An older success preceding a
+ * newer rollback is NEVER treated as applied.
  */
-export function classifyMigrationAttempt(
-  latest: MigrationAttempt | null,
-  latestSuccessful: MigrationAttempt | null,
-): MigrationAttemptStatus {
-  if (latest === null) return "NOT_APPLIED";
-  if (latest.finishedAt === null && latest.rolledBackAt === null) return "CURRENTLY_FAILED";
-  if (latestSuccessful !== null) return "APPLIED";
-  return "HISTORICALLY_ROLLED_BACK";
+export function classifyMigrationAttempt(attempts: readonly MigrationAttempt[]): MigrationAttemptStatus {
+  if (attempts.length === 0) return "NOT_APPLIED";
+  let latest: MigrationAttempt | null = null;
+  let latestSuccessful: MigrationAttempt | null = null;
+  let latestRolledBack: MigrationAttempt | null = null;
+  for (const a of attempts) {
+    if (latest === null || a.startedAt > latest.startedAt) latest = a;
+    if (isSuccessful(a) && (latestSuccessful === null || a.startedAt > latestSuccessful.startedAt)) latestSuccessful = a;
+    if (isRolledBack(a) && (latestRolledBack === null || a.startedAt > latestRolledBack.startedAt)) latestRolledBack = a;
+  }
+  if (latest !== null && isStuck(latest)) return "CURRENTLY_FAILED";
+  if (latestSuccessful === null) return "ROLLED_BACK_NOT_REAPPLIED";
+  if (latestRolledBack === null) return "APPLIED";
+  return latestSuccessful.startedAt > latestRolledBack.startedAt ? "APPLIED" : "ROLLED_BACK_NOT_REAPPLIED";
+}
+
+/**
+ * Number of migrations whose lifecycle is CURRENTLY_FAILED (a live failed/stuck latest
+ * attempt). A rolled-back-not-reapplied migration is NOT counted here — that is a
+ * distinct blocking state surfaced by the deployment-state helper.
+ */
+export async function countCurrentlyFailedOrStuckMigrations(): Promise<number> {
+  const byName = await readAllMigrationAttempts();
+  let n = 0;
+  for (const attempts of byName.values()) {
+    if (classifyMigrationAttempt(attempts) === "CURRENTLY_FAILED") n += 1;
+  }
+  return n;
 }
 
 export interface MigrationAttemptState {
   status: MigrationAttemptStatus;
   /** Most-recent attempt of any outcome. */
   latest: MigrationAttempt | null;
-  /** Most-recent successful attempt — the authoritative applied checksum source. */
+  /** Most-recent successful attempt ever (may be stale if a later rollback superseded it). */
   latestSuccessful: MigrationAttempt | null;
-  /** How many recorded attempts were rolled back (diagnostic only; does not block). */
-  historicalRolledBackCount: number;
+  /** Most-recent rolled-back attempt. */
+  latestRolledBack: MigrationAttempt | null;
+  /**
+   * The recorded checksum of the CURRENT applied state — the latest successful attempt's
+   * checksum ONLY when the migration is APPLIED (a success started after every rollback).
+   * null when NOT_APPLIED / CURRENTLY_FAILED / ROLLED_BACK_NOT_REAPPLIED.
+   */
+  currentChecksum: string | null;
+  /** How many recorded attempts were rolled back (diagnostic only). */
+  rolledBackCount: number;
 }
 
 /**
- * Reads the full attempt history of ONE migration in a single query and derives its
- * authoritative state (status + latest + latest-successful + historical rollback count).
- * This is the single helper migration health and lineage evaluation both consume.
+ * Reads the full attempt history of ONE migration and derives its authoritative state.
+ * `currentChecksum` is non-null ONLY when the migration is currently APPLIED, so callers
+ * cannot mistake an older, since-rolled-back success for the live checksum.
  */
 export async function readMigrationAttemptState(name: string): Promise<MigrationAttemptState> {
   const rows = await prisma.$queryRaw<RawAttemptRow[]>`
@@ -132,14 +178,16 @@ export async function readMigrationAttemptState(name: string): Promise<Migration
     WHERE migration_name = ${name}
     ORDER BY started_at DESC`;
   const attempts = rows.map(toAttempt);
-  const latest = attempts[0] ?? null;
-  // Rows are already ORDER BY started_at DESC, so the first success IS the latest.
-  const latestSuccessful = attempts.find((a) => a.finishedAt !== null && a.rolledBackAt === null) ?? null;
-  const historicalRolledBackCount = attempts.filter((a) => a.rolledBackAt !== null).length;
+  const latest = attempts[0] ?? null; // rows are DESC
+  const latestSuccessful = attempts.find(isSuccessful) ?? null;
+  const latestRolledBack = attempts.find(isRolledBack) ?? null;
+  const status = classifyMigrationAttempt(attempts);
   return {
-    status: classifyMigrationAttempt(latest, latestSuccessful),
+    status,
     latest,
     latestSuccessful,
-    historicalRolledBackCount,
+    latestRolledBack,
+    currentChecksum: status === "APPLIED" ? (latestSuccessful?.checksum ?? null) : null,
+    rolledBackCount: attempts.filter(isRolledBack).length,
   };
 }
