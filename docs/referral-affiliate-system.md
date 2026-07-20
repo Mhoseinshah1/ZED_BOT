@@ -351,3 +351,18 @@ Coverage: `referral-terminal-safety.test.ts` (§10.1, §10.3),
 `referral-payout-windows.test.ts` (§10.2), `referral-migration-preflight.test.ts`
 (§10.4), `referral-log-redaction.test.ts` (§10.5), `referral-activation-gate.test.ts`
 (§10.6).
+
+## 11. Migration-lineage compatibility (PR #111 follow-up)
+
+`20260719180000` shipped in two byte forms (PR #108 original vs PR #110 embedded
+preflight) with identical final schema. The activation gate now accepts **both known
+Prisma checksums** for that one migration — the PR #110 form only after every schema
+postcondition passes — while still rejecting any unknown edit. The checksum helper
+matches Prisma exactly (raw-byte SHA-256, no LF/CRLF normalisation); the preflight
+resolves `ReferralCommission` through the connection search_path (custom schemas
+supported); the execute consumer correlates on the raw `job.data` id (matching
+producers); a CI Docker step proves the runtime image ships `prisma/migrations`; and
+`scripts/referral-migration-lineage-status.sh` is an OWNER read-only diagnostic. Full
+audit + operator procedure: `referral-migration-lineage.md`. Coverage:
+`referral-migration-checksum.test.ts`, `referral-migration-lineage.test.ts`,
+`referral-migration-preflight-schema.test.ts`, `referral-execute-correlation.test.ts`.

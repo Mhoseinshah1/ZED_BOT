@@ -1,0 +1,6 @@
+# Prisma migration SQL files must stay LF-terminated. Prisma records the checksum of
+# the RAW file bytes in _prisma_migrations (it does NOT normalize CRLF->LF — verified
+# empirically against Prisma 6.19.3), so a CRLF checkout would make the on-disk
+# SHA-256 disagree with the recorded checksum. Pinning eol=lf keeps them identical on
+# every platform, including Windows dev machines.
+packages/database/prisma/migrations/**/*.sql text eol=lf

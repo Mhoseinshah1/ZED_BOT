@@ -233,6 +233,8 @@ jobs:
             scripts/backup-db.sh \
             scripts/doctor.sh \
             scripts/migrate.sh \
+            scripts/referral-migration-preflight.sh \
+            scripts/referral-migration-lineage-status.sh \
             scripts/validate-env.sh \
             scripts/zedbot \
             scripts/zedbot.sh \
@@ -258,6 +260,33 @@ jobs:
 
       - name: Build the app image
         run: docker build -t zedbot-app .
+
+      - name: Runtime image ships the migration history (referral activation gate)
+        run: |
+          # The referral activation gate's migration-history check reads
+          # packages/database/prisma/migrations FROM INSIDE the container. Prove the
+          # directory and the target migration ship in the runtime image, the
+          # resolver finds them, and the Prisma checksum is computable — so the gate
+          # can never be permanently blocked by a missing migrations directory.
+          docker run --rm zedbot-app sh -c 'test -d packages/database/prisma/migrations'
+          docker run --rm zedbot-app sh -c 'test -f packages/database/prisma/migrations/20260719180000_referral_affiliate_commissions/migration.sql'
+          # Resolve @zedbot/database from apps/bot — the referral activation gate lives
+          # there (apps/bot/dist/services/referral-activation.service.js) and imports the
+          # package, so pnpm links it under apps/bot/node_modules. A bare `node -e` eval
+          # resolves specifiers relative to its cwd, so run it from the same workspace the
+          # gate resolves from (running the eval from /repo would miss the un-hoisted link).
+          # resolveMigrationsDir() uses import.meta.url, so it is independent of the cwd.
+          docker run --rm --workdir /repo/apps/bot -e DATABASE_URL='postgresql://x:x@127.0.0.1:5432/x?schema=public' zedbot-app \
+            node --input-type=module -e '
+              import { resolveMigrationsDir, readPrismaMigrationChecksum, REFERRAL_AFFILIATE_MIGRATION_NAME, REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL } from "@zedbot/database";
+              import { join } from "node:path";
+              const dir = resolveMigrationsDir();
+              if (!dir) { console.error("resolveMigrationsDir() returned null inside the runtime image"); process.exit(1); }
+              const sum = readPrismaMigrationChecksum(join(dir, REFERRAL_AFFILIATE_MIGRATION_NAME, "migration.sql"));
+              if (!/^[0-9a-f]{64}$/.test(sum)) { console.error("checksum not computable:", sum); process.exit(1); }
+              if (sum !== REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL) { console.error("on-disk checksum drifted from the committed original:", sum); process.exit(1); }
+              console.log("runtime migrations dir:", dir, "| checksum OK");
+            '
 
       - name: Image ships PostgreSQL 16 client tools and runs as non-root
         run: |

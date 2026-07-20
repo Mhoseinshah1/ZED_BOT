@@ -9,3 +9,18 @@ export {
   type ButtonTextSeed,
   type MessageTemplateSeed,
 } from "./seed-data.js";
+export {
+  REFERRAL_AFFILIATE_MIGRATION_NAME,
+  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL,
+  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110,
+  prismaMigrationChecksum,
+  readPrismaMigrationChecksum,
+} from "./migration-checksum.js";
+export {
+  resolveMigrationsDir,
+  checkReferralSchemaPostconditions,
+  evaluateReferralMigrationLineage,
+  type ReferralMigrationLineageStatus,
+  type ReferralMigrationLineage,
+  type ReferralSchemaPostcondition,
+} from "./migration-lineage.js";

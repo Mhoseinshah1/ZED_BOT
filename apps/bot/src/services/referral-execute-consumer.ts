@@ -35,6 +35,29 @@ import {
 
 const log = createLogger("bot:referral-consumer");
 
+/**
+ * Derives the log correlation token from the VALIDATED RAW job payload — `orderId`
+ * for credit/reversal, `commissionId` for debt recovery — never from the BullMQ
+ * job id (which is prefixed, e.g. `ref-credit-<orderId>`). Producers hash the raw
+ * entity id, so hashing the same raw value here makes the producer's and consumer's
+ * correlation tokens identical. Never logs the raw id itself.
+ */
+export function referralExecuteJobCorrelation(
+  jobName: string | undefined,
+  data: { orderId?: unknown; commissionId?: unknown } | undefined,
+): string | undefined {
+  if (data === undefined || data === null) return undefined;
+  const raw =
+    jobName === REFERRAL_JOB_NAMES.RECOVER_REFERRAL_COMMISSION
+      ? typeof data.commissionId === "string"
+        ? data.commissionId
+        : undefined
+      : typeof data.orderId === "string"
+        ? data.orderId
+        : undefined;
+  return raw !== undefined && raw !== "" ? referralCorrelationHash(raw) : undefined;
+}
+
 export interface ReferralExecuteConsumer {
   stop: () => Promise<void>;
 }
@@ -87,10 +110,10 @@ export function startReferralExecuteConsumer(): ReferralExecuteConsumer | null {
     log.info("referral commission execute consumer ready");
   });
   worker.on("failed", (job, err) => {
-    // The BullMQ job id embeds the order/commission id (e.g. `ref-credit-<orderId>`),
-    // so log a NON-REVERSIBLE correlation token instead of the raw id.
+    // Correlate from the RAW validated payload (matches the producer's hash), never
+    // the prefixed BullMQ job id. Never logs the raw id.
     log.error("referral execute job failed", {
-      corr: job?.id ? referralCorrelationHash(job.id) : undefined,
+      corr: referralExecuteJobCorrelation(job?.name, job?.data as { orderId?: unknown; commissionId?: unknown } | undefined),
       jobName: job?.name,
       attemptsMade: job?.attemptsMade,
       error: errorMessage(err),
