@@ -45,20 +45,26 @@ export async function printReferralMigrationLineageStatus(
   const postconditions = await checkReferralSchemaPostconditions();
   const currentlyFailed = await countCurrentlyFailedOrStuckMigrations();
 
+  // The FINAL verdict mirrors the real activation gate: the referral lineage must allow
+  // activation AND there must be NO currently failed/stuck migration anywhere (which the
+  // gate enforces via checkMigrationsHealthy). Historical rolled-back attempts alone do
+  // NOT block. A valid lineage while an unrelated migration is stuck is still BLOCKED.
+  const finalActivationAllowed = lineage.activationAllowed && currentlyFailed === 0;
+
   out("referral-migration-lineage-status:");
   out(`  migration:                ${REFERRAL_AFFILIATE_MIGRATION_NAME}`);
+
+  out("  --- referral migration lineage ---");
   out(`  selected attempt:         ${attemptState.status}`);
   out(
     `  latest successful attempt: ${
       attemptState.latestSuccessful === null ? "(none)" : "present (finished, not rolled back)"
     }`,
   );
-  out(`  historical rolled-back attempts: ${attemptState.historicalRolledBackCount}`);
-  out(`  current unresolved migration failures: ${currentlyFailed}`);
   out(`  lineage status:           ${lineage.status}`);
   out(`  checksum classification:  ${classification}`);
   out(
-    `  activation:               ${lineage.activationAllowed ? "ALLOWED" : "BLOCKED"}${
+    `  lineage activation:       ${lineage.activationAllowed ? "ALLOWED" : "BLOCKED"}${
       lineage.legacyVariant ? " (compatible legacy — non-blocking warning)" : ""
     }`,
   );
@@ -66,7 +72,7 @@ export async function printReferralMigrationLineageStatus(
   out(`  recorded checksum:        ${recordedChecksum ?? "(no successful attempt)"}`);
   out(`  on-disk checksum:         ${lineage.onDiskChecksum ?? "(migration file missing)"}`);
 
-  out("  schema postconditions:");
+  out("  --- referral schema postconditions ---");
   for (const p of postconditions.postconditions) {
     out(`    ${p.ok ? "OK  " : "FAIL"}  ${p.key}`);
   }
@@ -86,7 +92,15 @@ export async function printReferralMigrationLineageStatus(
     out(`    verdict:                ${iv.ok ? "OK" : "FAILED"} (${iv.detail})`);
   }
 
-  out(`  FINAL ACTIVATION VERDICT: ${lineage.activationAllowed ? "ALLOWED" : "BLOCKED"}`);
+  out("  --- migration attempt health ---");
+  out(`  current unresolved migration failures: ${currentlyFailed}`);
+  out(`  historical rolled-back attempts:       ${attemptState.historicalRolledBackCount}`);
+
+  out("  --- final verdict ---");
+  out(
+    `  FINAL ACTIVATION VERDICT: ${finalActivationAllowed ? "ALLOWED" : "BLOCKED"} ` +
+      `(lineage ${lineage.activationAllowed ? "ALLOWED" : "BLOCKED"} AND ${currentlyFailed} live migration failure(s))`,
+  );
   return EXIT_OK;
 }
 

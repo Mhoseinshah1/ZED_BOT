@@ -1,3 +1,7 @@
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import {
   OrderStatus,
   REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_CRLF,
@@ -212,6 +216,97 @@ d("referral migration lineage evaluator (§3/§4/§5)", () => {
     const l = await evaluateReferralMigrationLineage(undefined, REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_CRLF);
     expect(l.recordedChecksum).toBe(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_CRLF);
     expect(l.status).toBe("KNOWN_COMPATIBLE_LEGACY_VARIANT");
+  });
+});
+
+// =============================================================================
+// §1 — the SHIPPED on-disk file must ALWAYS be the canonical current bytes. Historical
+// compatibility applies only to the RECORDED checksum, never to arbitrary on-disk bytes.
+// These tests point the evaluator at temp migration dirs holding modified files; the
+// live schema (real migrated DB) stays intact, so a modified file must STILL block.
+// =============================================================================
+d("on-disk migration file integrity (§1)", () => {
+  const canonicalFile = join(resolveMigrationsDir() ?? "", REFERRAL_AFFILIATE_MIGRATION_NAME, "migration.sql");
+
+  function mkMigrationsDir(bytes: Buffer | "CANONICAL"): string {
+    const dir = mkdtempSync(join(tmpdir(), "ondisk-mig-"));
+    mkdirSync(join(dir, REFERRAL_AFFILIATE_MIGRATION_NAME), { recursive: true });
+    const file = join(dir, REFERRAL_AFFILIATE_MIGRATION_NAME, "migration.sql");
+    if (bytes === "CANONICAL") copyFileSync(canonicalFile, file);
+    else writeFileSync(file, bytes);
+    return dir;
+  }
+  const lf = (): Buffer => readFileSync(canonicalFile);
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it("canonical file + ORIGINAL_LF recorded → EXACT_MATCH (allowed, no warning)", async () => {
+    const l = await evaluateReferralMigrationLineage(mkMigrationsDir("CANONICAL"), REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF);
+    expect(l.status).toBe("EXACT_MATCH");
+    expect(l.activationAllowed).toBe(true);
+    expect(l.legacyVariant).toBe(false);
+  });
+
+  it.each(KNOWN_LEGACY_VARIANTS)(
+    "canonical file + %s recorded → KNOWN_COMPATIBLE_LEGACY_VARIANT (allowed, warning)",
+    async (_name, checksum) => {
+      const l = await evaluateReferralMigrationLineage(mkMigrationsDir("CANONICAL"), checksum);
+      expect(l.status).toBe("KNOWN_COMPATIBLE_LEGACY_VARIANT");
+      expect(l.activationAllowed).toBe(true);
+      expect(l.legacyVariant).toBe(true);
+    },
+  );
+
+  it("canonical file + UNKNOWN recorded → CHECKSUM_DRIFT (blocked)", async () => {
+    const l = await evaluateReferralMigrationLineage(mkMigrationsDir("CANONICAL"), "f".repeat(64));
+    expect(l.status).toBe("CHECKSUM_DRIFT");
+    expect(l.activationAllowed).toBe(false);
+  });
+
+  it("appended comment on disk → CHECKSUM_DRIFT even with an allowlisted recorded checksum (the P1 case)", async () => {
+    const appended = mkMigrationsDir(Buffer.concat([lf(), Buffer.from("\n-- harmless-looking appended comment\n")]));
+    for (const recorded of [
+      REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF,
+      REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_LF,
+      REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_CRLF,
+    ]) {
+      const l = await evaluateReferralMigrationLineage(appended, recorded);
+      expect(l.status).toBe("CHECKSUM_DRIFT");
+      expect(l.activationAllowed).toBe(false);
+      expect(l.legacyVariant).toBe(false);
+    }
+  });
+
+  it("a CRLF current on-disk file → CHECKSUM_DRIFT", async () => {
+    const crlf = mkMigrationsDir(Buffer.from(lf().toString("latin1").replace(/\n/g, "\r\n"), "latin1"));
+    const l = await evaluateReferralMigrationLineage(crlf, REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF);
+    expect(l.status).toBe("CHECKSUM_DRIFT");
+    expect(l.activationAllowed).toBe(false);
+  });
+
+  it("a whitespace-only on-disk modification → CHECKSUM_DRIFT", async () => {
+    const ws = mkMigrationsDir(Buffer.concat([lf(), Buffer.from("   ")]));
+    const l = await evaluateReferralMigrationLineage(ws, REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF);
+    expect(l.status).toBe("CHECKSUM_DRIFT");
+    expect(l.activationAllowed).toBe(false);
+  });
+
+  it("modified SQL on disk → CHECKSUM_DRIFT", async () => {
+    const sqlmod = mkMigrationsDir(Buffer.from(lf().toString("utf8").replace("CREATE", "create"), "utf8"));
+    const l = await evaluateReferralMigrationLineage(sqlmod, REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF);
+    expect(l.status).toBe("CHECKSUM_DRIFT");
+    expect(l.activationAllowed).toBe(false);
+  });
+
+  it("an altered file blocks BEFORE the schema postconditions run (they never mask it)", async () => {
+    // Recorded checksum is a known legacy variant and the live schema is intact, yet the
+    // modified on-disk bytes must still block — and without even consulting the schema.
+    const appended = mkMigrationsDir(Buffer.concat([lf(), Buffer.from("\n-- x\n")]));
+    const l = await evaluateReferralMigrationLineage(appended, REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_LF);
+    expect(l.status).toBe("CHECKSUM_DRIFT");
+    expect(l.postconditions).toBeNull();
   });
 });
 

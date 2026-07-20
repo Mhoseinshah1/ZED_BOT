@@ -17,7 +17,7 @@ import {
   prismaMigrationChecksum,
   readPrismaMigrationChecksum,
 } from "@zedbot/database";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 process.env.APP_SECRET ??= "referral-migration-checksum-tests-secret-0123456789";
 
@@ -164,5 +164,76 @@ const hasDb = typeof process.env.DATABASE_URL === "string" && process.env.DATABA
     expect(out).toContain("FINAL ACTIVATION VERDICT: ALLOWED");
     expect(out).not.toMatch(/postgres(ql)?:\/\//i);
     expect(out).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  });
+});
+
+// =============================================================================
+// §2 — the operator command's FINAL ACTIVATION VERDICT combines the referral lineage
+// AND the presence of any currently failed/stuck migration (which the real gate blocks
+// on via checkMigrationsHealthy). Historical rolled-back attempts alone do NOT block.
+// These tests insert synthetic _prisma_migrations rows / rewrite the recorded checksum
+// and restore everything.
+// =============================================================================
+(hasDb ? describe : describe.skip)("lineage-status FINAL verdict combines lineage + live failures (§2)", () => {
+  async function setReferralRecorded(checksum: string): Promise<void> {
+    await prisma.$executeRawUnsafe(
+      `UPDATE _prisma_migrations SET checksum=$1 WHERE migration_name=$2 AND rolled_back_at IS NULL`,
+      checksum,
+      REFERRAL_AFFILIATE_MIGRATION_NAME,
+    );
+  }
+  async function cleanup(): Promise<void> {
+    await prisma.$executeRawUnsafe(`DELETE FROM _prisma_migrations WHERE id LIKE 'verdict-test-%'`);
+    await setReferralRecorded(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF);
+  }
+  async function finalVerdict(): Promise<"ALLOWED" | "BLOCKED"> {
+    const lines: string[] = [];
+    await printReferralMigrationLineageStatus((l) => lines.push(l));
+    const line = lines.find((l) => l.includes("FINAL ACTIVATION VERDICT:")) ?? "";
+    // Parse the verdict token immediately after the label (the line ALSO reports the
+    // separate "lineage ALLOWED/BLOCKED" dimension, so a naive substring check is wrong).
+    const m = line.match(/FINAL ACTIVATION VERDICT:\s+(ALLOWED|BLOCKED)/);
+    return m?.[1] === "BLOCKED" ? "BLOCKED" : "ALLOWED";
+  }
+  async function insertRow(id: string, name: string, finished: boolean, rolledBack: boolean): Promise<void> {
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO _prisma_migrations (id, checksum, migration_name, started_at, finished_at, rolled_back_at, applied_steps_count)
+       VALUES ($1, 'x', $2, now(), ${finished ? "now()" : "NULL"}, ${rolledBack ? "now()" : "NULL"}, 0)`,
+      id,
+      name,
+    );
+  }
+
+  afterEach(async () => {
+    await cleanup();
+  });
+  afterAll(async () => {
+    await cleanup();
+    await prisma.$disconnect();
+  });
+
+  it("valid lineage + zero live failures → ALLOWED", async () => {
+    expect(await finalVerdict()).toBe("ALLOWED");
+  });
+
+  it("valid lineage + one UNRELATED live migration failure → BLOCKED", async () => {
+    await insertRow("verdict-test-stuck", "29991230000000_unrelated_stuck", false, false);
+    expect(await finalVerdict()).toBe("BLOCKED");
+  });
+
+  it("valid lineage + a HISTORICAL rolled-back attempt only → ALLOWED", async () => {
+    await insertRow("verdict-test-rb", "29991230000000_unrelated_rolledback", false, true);
+    expect(await finalVerdict()).toBe("ALLOWED");
+  });
+
+  it("invalid lineage + zero live failures → BLOCKED", async () => {
+    await setReferralRecorded("f".repeat(64)); // unknown recorded checksum → lineage blocked
+    expect(await finalVerdict()).toBe("BLOCKED");
+  });
+
+  it("valid lineage + a CURRENTLY failed referral target migration → BLOCKED", async () => {
+    // A stuck attempt row for the referral migration itself makes it a live failure.
+    await insertRow("verdict-test-ref-stuck", REFERRAL_AFFILIATE_MIGRATION_NAME, false, false);
+    expect(await finalVerdict()).toBe("BLOCKED");
   });
 });

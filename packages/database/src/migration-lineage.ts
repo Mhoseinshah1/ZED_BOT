@@ -6,6 +6,7 @@ import { prisma } from "./client.js";
 import {
   classifyReferralMigrationChecksum,
   REFERRAL_AFFILIATE_CURRENT_ONDISK_VARIANT,
+  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF,
   REFERRAL_AFFILIATE_MIGRATION_NAME,
   readPrismaMigrationChecksum,
   type ReferralMigrationChecksumClass,
@@ -314,10 +315,13 @@ async function readRecordedChecksum(): Promise<string | null> {
 }
 
 /**
- * Evaluates the lineage of the ONE known referral migration. Accepts ONLY the four
- * empirically verified historical checksums (ORIGINAL/PR110 × LF/CRLF), and ONLY after
- * every schema postcondition passes (EXACT_MATCH included). Any other recorded checksum
- * is CHECKSUM_DRIFT and is blocked regardless of the current schema. Never edits anything.
+ * Evaluates the lineage of the ONE known referral migration. The SHIPPED on-disk file
+ * must be the canonical current bytes (ORIGINAL_LF `eadac093…`) — any modification
+ * blocks. On top of that, the RECORDED `_prisma_migrations` checksum must be one of the
+ * four empirically verified historical variants (ORIGINAL/PR110 × LF/CRLF), and ONLY
+ * after every schema postcondition passes (EXACT_MATCH included). Any other recorded
+ * checksum, or a modified on-disk file, is CHECKSUM_DRIFT and is blocked regardless of the
+ * current schema. Never edits anything.
  *
  * `providedChecksum` lets the caller pass an already-fetched authoritative recorded
  * checksum (the latest successful attempt's) to avoid a second `_prisma_migrations`
@@ -348,6 +352,21 @@ export async function evaluateReferralMigrationLineage(
 
   if (onDiskChecksum === null) {
     return { ...base, status: "FILE_MISSING", activationAllowed: false, legacyVariant: false, detail: "migration file not found on disk" };
+  }
+  // The SHIPPED on-disk file must ALWAYS be the canonical current bytes (ORIGINAL_LF).
+  // Historical compatibility applies ONLY to the checksum recorded in `_prisma_migrations`,
+  // NEVER to arbitrary bytes currently on disk: an appended comment, a whitespace or
+  // line-ending change, or any SQL edit must block — even when the recorded checksum and
+  // the live schema are otherwise valid. This check therefore precedes the recorded-checksum
+  // classification and the schema postconditions.
+  if (onDiskChecksum !== REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF) {
+    return {
+      ...base,
+      status: "CHECKSUM_DRIFT",
+      activationAllowed: false,
+      legacyVariant: false,
+      detail: "on-disk migration file has been modified (checksum differs from the canonical current file)",
+    };
   }
   if (checksumClass === "NOT_APPLIED") {
     // Not recorded as a successful attempt — surfaced separately by the migration-attempt
