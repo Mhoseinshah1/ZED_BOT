@@ -2,11 +2,13 @@
 # =============================================================================
 # Referral migration LINEAGE STATUS (OWNER/operator diagnostic).
 #
-# Reports whether this database applied the ORIGINAL (PR #108) or the compatible
-# PR #110 form of the 20260719180000 migration, and whether every schema
-# postcondition holds. READ-ONLY: it moves no money, changes no rows, and never
-# rewrites migration metadata. It prints no credentials / DATABASE_URL and no
-# order/user/commission ids.
+# Reports the selected migration attempt and its status, the checksum classification
+# (ORIGINAL_LF / ORIGINAL_CRLF / PR110_LF / PR110_CRLF / UNKNOWN / NOT_APPLIED), every
+# schema postcondition, the exact unique-index ownership/column result, current
+# unresolved migration failures, historical rolled-back attempts (separately), and the
+# final activation verdict for the 20260719180000 migration. READ-ONLY: it moves no
+# money, changes no rows, and never rewrites migration metadata. It prints no
+# credentials / DATABASE_URL and no order/user/commission ids.
 #
 #   sudo bash scripts/referral-migration-lineage-status.sh
 # =============================================================================
