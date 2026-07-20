@@ -377,9 +377,18 @@ export async function getManualOrderByShortId(shortId: string): Promise<ManualOr
 
 // --- delivery ---------------------------------------------------------------------------
 
-/** Minimal Telegram surface (mock-friendly, mirrors the receipt notifier). */
+/**
+ * Minimal Telegram surface (mock-friendly, mirrors the receipt notifier).
+ *
+ * `sendPhoto` is OPTIONAL: the production callers always pass grammY's real `Api`
+ * (which implements it), while text-only fakes stay valid unchanged. The one
+ * consumer - the fail-soft post-purchase QR presentation step - checks for it and
+ * simply skips QR delivery when it is absent, so a successful provision is never
+ * turned into a failure by a missing photo capability. `photo` is an InputFile.
+ */
 export interface DeliverySendApi {
   sendMessage(chatId: string, text: string, other?: Record<string, unknown>): Promise<unknown>;
+  sendPhoto?(chatId: string, photo: unknown, other?: Record<string, unknown>): Promise<unknown>;
 }
 
 /** The message the buyer receives on delivery. */

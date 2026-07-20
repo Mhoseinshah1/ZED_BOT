@@ -31,6 +31,8 @@ export const svcCb = {
   refresh: (sid: string): string => `user:svc:refresh:${sid}`,
   link: (sid: string): string => `user:svc:link:${sid}`,
   configs: (sid: string): string => `user:svc:configs:${sid}`,
+  qrSub: (sid: string): string => `user:svc:qr_sub:${sid}`,
+  qrConfigs: (sid: string): string => `user:svc:qr_configs:${sid}`,
   disable: (sid: string): string => `user:svc:disable:${sid}`,
   disableYes: (sid: string): string => `user:svc:disable:${sid}:yes`,
   enable: (sid: string): string => `user:svc:enable:${sid}`,
@@ -238,11 +240,13 @@ const NO_DETAIL_ACTIONS: ServiceDetailActions = {
 
 /**
  * Master-requirements arrangement (Section 8): fixed row slots with every
- * unimplemented capability HIDDEN instead of rendered dead - QR Code, note
- * editing, service transfer and tutorials are outside this phase, so their
- * slots collapse. Action buttons render only when the capability model +
- * remote-model classification allow them (the routes re-validate on click,
- * so a stale button still fails safely).
+ * unimplemented capability HIDDEN instead of rendered dead - note editing,
+ * service transfer and tutorials are outside this phase, so their slots
+ * collapse. The QR-code slots ARE implemented (service-config-qrcode phase):
+ * a «QR اشتراک 📷» / «QR کانفیگ‌ها 📷» button renders next to each text link,
+ * but only when its stored payload exists. Action buttons render only when the
+ * capability model + remote-model classification allow them (the routes
+ * re-validate on click, so a stale button still fails safely).
  */
 export function serviceDetailKeyboard(
   service: Service,
@@ -251,20 +255,18 @@ export function serviceDetailKeyboard(
   const sid = serviceShortId(service);
   // Row 1: refresh.
   const kb = new InlineKeyboard().text("بروزرسانی اطلاعات ♻️", svcCb.refresh(sid)).row();
-  // Row 2: subscription link + configs (doc right/left order; only what is
-  // actually stored).
+  // Row 2: subscription link + its QR (only when the payload is actually stored).
+  // The QR button is ADDITIVE - the copyable text link button always stays.
   const hasLink = service.subscriptionUrl !== null && service.subscriptionUrl !== "";
   const hasConfigs = serviceConfigLinks(service).length > 0;
   if (hasLink) {
-    kb.text("لینک اشتراک 🔗", svcCb.link(sid));
+    kb.text("لینک اشتراک 🔗", svcCb.link(sid)).text("QR اشتراک 📷", svcCb.qrSub(sid)).row();
   }
+  // Row 3: configs + their QR (only when at least one config is stored).
   if (hasConfigs) {
-    kb.text("کانفیگ‌ها 📄", svcCb.configs(sid));
+    kb.text("کانفیگ‌ها 📄", svcCb.configs(sid)).text("QR کانفیگ‌ها 📷", svcCb.qrConfigs(sid)).row();
   }
-  if (hasLink || hasConfigs) {
-    kb.row();
-  }
-  // Row 3: link regeneration (QR Code slot hidden - not implemented).
+  // Row 4: link regeneration (QR Code slot now implemented above).
   if (actions.canRegenerateLink) {
     kb.text("تغییر لینک 🔄", svcCb.regenLink(sid)).row();
   }

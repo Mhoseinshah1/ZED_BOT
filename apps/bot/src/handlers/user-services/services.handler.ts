@@ -1,5 +1,5 @@
 import type { Service } from "@zedbot/database";
-import { Composer, InlineKeyboard } from "grammy";
+import { Composer, InlineKeyboard, InputFile } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
@@ -36,10 +36,29 @@ import {
   resolveServiceDetailActions,
   serviceShortId,
 } from "../../services/user-services.service.js";
+import { generateQrPng } from "../../services/qr-code.service.js";
+import {
+  CONFIG_QR_FILENAME,
+  configFailureSummary,
+  configOverflowSummary,
+  configQrCaption,
+  deliverConfigQrCodes,
+  deliverSubscriptionQr,
+  QR_GENERATION_FAILED_TEXT,
+  QR_NO_CONFIGS_TEXT,
+  QR_NO_SUBSCRIPTION_TEXT,
+  QR_SEND_FAILED_TEXT,
+} from "../../services/qr-delivery.service.js";
 import { escapeHtml } from "../../utils/html.js";
-import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
+import {
+  safeAnswerCallback,
+  safeEditOrReply,
+  safeReply,
+  safeReplyWithPhoto,
+} from "../../utils/safe-reply.js";
 import {
   regenLinkConfirmKeyboard,
+  serviceAccountLabel,
   serviceConfigLinks,
   serviceDetailKeyboard,
   serviceDetailText,
@@ -308,14 +327,19 @@ servicesHandler.callbackQuery(/^user:svc:regen_link:([0-9a-f-]+):yes$/, async (c
   await safeAnswerCallback(ctx, REGEN_SUCCESS_TEXT);
   const sid = serviceShortId(outcome.service);
   const lines = [REGEN_SUCCESS_TEXT];
-  if (outcome.service.subscriptionUrl !== null && outcome.service.subscriptionUrl !== "") {
+  const hasNewLink =
+    outcome.service.subscriptionUrl !== null && outcome.service.subscriptionUrl !== "";
+  if (hasNewLink) {
     // <code> is tap-to-copy in official Telegram clients.
-    lines.push("", "لینک اشتراک جدید 🔗", `<code>${escapeHtml(outcome.service.subscriptionUrl)}</code>`);
+    lines.push("", "لینک اشتراک جدید 🔗", `<code>${escapeHtml(outcome.service.subscriptionUrl ?? "")}</code>`);
   }
-  const kb = new InlineKeyboard()
-    .text("بازگشت به سرویس", svcCb.view(sid))
-    .row()
-    .text("بازگشت به منو", CB.USER_MENU);
+  const kb = new InlineKeyboard();
+  if (hasNewLink) {
+    // §7: the QR reuses the owner-scoped qr_sub route, which re-loads the Service
+    // and reads the NEWLY stored subscriptionUrl - never stale pre-regen data.
+    kb.text("QR لینک جدید 📷", svcCb.qrSub(sid)).row();
+  }
+  kb.text("بازگشت به سرویس", svcCb.view(sid)).row().text("بازگشت به منو", CB.USER_MENU);
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
 });
 
@@ -367,4 +391,108 @@ servicesHandler.callbackQuery(/^user:svc:configs:([0-9a-f-]+)$/, async (ctx) => 
     lines.push(`+${links.length - MAX_CONFIGS_SHOWN} کانفیگ دیگر نمایش داده نشد.`);
   }
   await safeReply(ctx, lines.join("\n").trimEnd(), undefined, HTML);
+});
+
+// --- QR codes (service-config-qrcode phase) ----------------------------------
+// ADDITIVE presentation over the SAME stored payloads - the copyable text link /
+// config handlers above are unchanged. Every route re-loads the Service
+// owner-scoped (never trusts the callback), answers the callback query BEFORE the
+// (relatively expensive) QR generation, and is fail-soft: a generation / Telegram
+// send failure falls back to the text link and never crashes the bot. Nothing is
+// persisted; the QR is regenerated on demand from Service.subscriptionUrl /
+// Service.configLinks. The raw payloads never appear in a caption, filename or log.
+
+servicesHandler.callbackQuery(/^user:svc:qr_sub:([0-9a-f-]+)$/, async (ctx) => {
+  const user = ctx.dbUser;
+  if (user === null) {
+    return;
+  }
+  const service = await getOwnedServiceByShortId(ctx.match[1], user.id);
+  if (service === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  if (service.subscriptionUrl === null || service.subscriptionUrl === "") {
+    await safeAnswerCallback(ctx, QR_NO_SUBSCRIPTION_TEXT);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const sid = serviceShortId(service);
+  // Additive keyboard: the copyable text link stays one tap away.
+  const keyboard = new InlineKeyboard()
+    .text("لینک متنی 🔗", svcCb.link(sid))
+    .row()
+    .text("بازگشت به سرویس", svcCb.view(sid));
+  const outcome = await deliverSubscriptionQr(
+    service.subscriptionUrl,
+    serviceAccountLabel(service),
+    ({ png, caption, filename }) =>
+      safeReplyWithPhoto(ctx, new InputFile(png, filename), { caption, keyboard }),
+  );
+  if (outcome === "GEN_FAILED") {
+    await safeReply(ctx, QR_GENERATION_FAILED_TEXT, keyboard);
+  } else if (outcome === "SEND_FAILED") {
+    await safeReply(ctx, QR_SEND_FAILED_TEXT, keyboard);
+  }
+});
+
+servicesHandler.callbackQuery(/^user:svc:qr_configs:([0-9a-f-]+)$/, async (ctx) => {
+  const user = ctx.dbUser;
+  if (user === null) {
+    return;
+  }
+  const service = await getOwnedServiceByShortId(ctx.match[1], user.id);
+  if (service === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  const links = serviceConfigLinks(service);
+  if (links.length === 0) {
+    await safeAnswerCallback(ctx, QR_NO_CONFIGS_TEXT);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const sid = serviceShortId(service);
+  const label = serviceAccountLabel(service);
+  // Additive: keep the copyable text configs one tap away (mirrors the
+  // subscription QR keyboard's «لینک متنی» button), then the back navigation.
+  const backKb = new InlineKeyboard()
+    .text("لینک متنی 📄", svcCb.configs(sid))
+    .row()
+    .text("بازگشت به سرویس", svcCb.view(sid));
+
+  // One config -> one photo carrying the back keyboard (§5).
+  if (links.length === 1) {
+    const qr = await generateQrPng(links[0]);
+    if (!qr.ok) {
+      await safeReply(ctx, QR_GENERATION_FAILED_TEXT, backKb);
+      return;
+    }
+    const sent = await safeReplyWithPhoto(ctx, new InputFile(qr.png, CONFIG_QR_FILENAME), {
+      caption: configQrCaption(1, 1, label),
+      keyboard: backKb,
+    });
+    if (!sent) {
+      await safeReply(ctx, QR_SEND_FAILED_TEXT, backKb);
+    }
+    return;
+  }
+
+  // Multiple configs -> bounded, ordered, sequential photos (one QR each, never
+  // several joined), then ONE trailing summary + back keyboard.
+  const result = await deliverConfigQrCodes(links, label, ({ png, caption, filename }) =>
+    safeReplyWithPhoto(ctx, new InputFile(png, filename), { caption }),
+  );
+  const summary: string[] = [];
+  if (result.skipped > 0) {
+    summary.push(configOverflowSummary(result.skipped));
+  }
+  const failedCount = result.genFailed + result.sendFailed;
+  if (failedCount > 0) {
+    summary.push(configFailureSummary(failedCount));
+  }
+  if (summary.length === 0) {
+    summary.push("کیوآرکد کانفیگ‌ها ارسال شد.");
+  }
+  await safeReply(ctx, summary.join("\n\n"), backKb);
 });
