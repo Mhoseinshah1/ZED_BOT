@@ -1,9 +1,13 @@
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, resolve as resolvePath } from "node:path";
+import { existsSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 
-import { prisma } from "@zedbot/database";
+import {
+  REFERRAL_AFFILIATE_MIGRATION_NAME,
+  evaluateReferralMigrationLineage,
+  prisma,
+  readPrismaMigrationChecksum,
+  resolveMigrationsDir,
+} from "@zedbot/database";
 import {
   REFERRAL_PAYOUT_WINDOWS_KEY,
   parseReferralPayoutWindowsStrict,
@@ -40,26 +44,33 @@ export interface ReferralActivationCheck {
   detail: string | null;
 }
 
+/** The migration-history dimension the OWNER activation page renders (§9). */
+export type ReferralMigrationHistoryStatus =
+  | "HEALTHY"
+  | "KNOWN_COMPATIBLE_LEGACY_VARIANT"
+  | "CHECKSUM_DRIFT"
+  | "FILE_MISSING"
+  | "SCHEMA_POSTCONDITION_FAILED";
+
+export interface ReferralMigrationHistory {
+  status: ReferralMigrationHistoryStatus;
+  /** True for CHECKSUM_DRIFT / FILE_MISSING / SCHEMA_POSTCONDITION_FAILED (blocks activation). */
+  blocking: boolean;
+  /** True ONLY for KNOWN_COMPATIBLE_LEGACY_VARIANT — the non-blocking OWNER warning. */
+  legacyWarning: boolean;
+  detail: string | null;
+}
+
 export interface ReferralActivationReadiness {
   /** True only when EVERY check passed. */
   ready: boolean;
   checks: ReferralActivationCheck[];
+  /** The migration-history dimension broken out for the OWNER UI (§9). */
+  migrationHistory: ReferralMigrationHistory;
 }
 
 function check(key: string, label: string, ok: boolean, detail: string | null = null): ReferralActivationCheck {
   return { key, label, ok, detail: ok ? null : detail };
-}
-
-/** Resolves the on-disk prisma migrations directory (shipped in the image). */
-function resolveMigrationsDir(): string | null {
-  try {
-    const require = createRequire(import.meta.url);
-    const dbEntry = require.resolve("@zedbot/database"); // .../packages/database/dist/index.js
-    const dir = resolvePath(dirname(dbEntry), "..", "prisma", "migrations");
-    return existsSync(dir) ? dir : null;
-  } catch {
-    return null;
-  }
 }
 
 /** Migrations are healthy when none are pending / rolled back and at least one applied. */
@@ -85,32 +96,56 @@ async function checkMigrationsHealthy(): Promise<ReferralActivationCheck> {
 }
 
 /**
- * Immutable migration-history check: every APPLIED migration's on-disk SHA-256 must
- * still equal the checksum recorded in `_prisma_migrations`. A mismatch means an
- * already-applied migration file was edited after the fact (the exact hazard §4
- * fixes) — activation is refused until the history is restored.
+ * Immutable migration-history check WITH dual-lineage awareness (§3). Every APPLIED
+ * migration's on-disk SHA-256 must equal its recorded checksum — EXCEPT the one known
+ * referral migration (`20260719180000`), which additionally accepts the exact known
+ * PR #110 checksum (after every schema postcondition passes). Any other mismatch is
+ * CHECKSUM_DRIFT and blocks. Returns a typed migration-history status for the UI.
  */
-async function checkMigrationHistoryImmutable(): Promise<ReferralActivationCheck> {
-  const label = "تاریخچه مهاجرت دست‌نخورده";
+async function evaluateMigrationHistory(): Promise<{ check: ReferralActivationCheck; history: ReferralMigrationHistory }> {
+  const label = "تاریخچه مهاجرت";
+  const build = (status: ReferralMigrationHistoryStatus, detail: string | null): { check: ReferralActivationCheck; history: ReferralMigrationHistory } => {
+    const blocking = status === "CHECKSUM_DRIFT" || status === "FILE_MISSING" || status === "SCHEMA_POSTCONDITION_FAILED";
+    const legacyWarning = status === "KNOWN_COMPATIBLE_LEGACY_VARIANT";
+    return {
+      check: check("migration-history-immutable", label, !blocking, blocking ? detail : null),
+      history: { status, blocking, legacyWarning, detail },
+    };
+  };
+
   const dir = resolveMigrationsDir();
-  if (dir === null) return check("migration-history-immutable", label, false, "migrations dir not found");
+  if (dir === null) return build("FILE_MISSING", "migrations dir not found");
   try {
     const applied = await prisma.$queryRaw<Array<{ migration_name: string; checksum: string; finished_at: Date | null }>>`
       SELECT migration_name, checksum, finished_at FROM _prisma_migrations WHERE rolled_back_at IS NULL`;
+    let legacyWarning = false;
     for (const row of applied) {
       if (row.finished_at === null) continue; // still applying — covered by migrations-healthy
-      const file = resolvePath(dir, row.migration_name, "migration.sql");
-      if (!existsSync(file)) {
-        return check("migration-history-immutable", label, false, `missing file for ${row.migration_name}`);
+
+      if (row.migration_name === REFERRAL_AFFILIATE_MIGRATION_NAME) {
+        // The one migration with two known historical byte forms — evaluate lineage.
+        const lineage = await evaluateReferralMigrationLineage(dir);
+        if (lineage.status === "EXACT_MATCH") continue;
+        if (lineage.status === "KNOWN_COMPATIBLE_LEGACY_VARIANT") {
+          legacyWarning = true;
+          continue;
+        }
+        // FILE_MISSING / SCHEMA_POSTCONDITION_FAILED / CHECKSUM_DRIFT all block.
+        return build(lineage.status, lineage.detail);
       }
-      const sha = createHash("sha256").update(readFileSync(file, "utf8")).digest("hex");
-      if (sha !== row.checksum) {
-        return check("migration-history-immutable", label, false, `checksum drift in ${row.migration_name}`);
+
+      // Ordinary migration: strict exact match against the recorded checksum.
+      const file = resolvePath(dir, row.migration_name, "migration.sql");
+      if (!existsSync(file)) return build("FILE_MISSING", `missing file for ${row.migration_name}`);
+      if (readPrismaMigrationChecksum(file) !== row.checksum) {
+        return build("CHECKSUM_DRIFT", `checksum drift in ${row.migration_name}`);
       }
     }
-    return check("migration-history-immutable", label, true);
+    return legacyWarning
+      ? build("KNOWN_COMPATIBLE_LEGACY_VARIANT", "known compatible PR#110 lineage")
+      : build("HEALTHY", null);
   } catch {
-    return check("migration-history-immutable", label, false, "history unreadable");
+    return build("CHECKSUM_DRIFT", "history unreadable");
   }
 }
 
@@ -215,9 +250,20 @@ async function checkNoUnresolvedIntegrityIssue(): Promise<ReferralActivationChec
  * OWNER can enable payouts only when `ready` is true. Ordered exactly as §6 lists.
  */
 export async function assessReferralActivationReadiness(): Promise<ReferralActivationReadiness> {
-  const checks = await Promise.all([
+  const [
+    migrationsHealthy,
+    migrationHistory,
+    workerHeartbeat,
+    controlQueue,
+    executeConsumer,
+    walletLedger,
+    payoutWindows,
+    attributionMismatch,
+    duplicateOrder,
+    integrityIssue,
+  ] = await Promise.all([
     checkMigrationsHealthy(),
-    checkMigrationHistoryImmutable(),
+    evaluateMigrationHistory(),
     checkWorkerHeartbeat(),
     checkControlQueueReachable(),
     checkExecuteConsumerHeartbeat(),
@@ -227,19 +273,39 @@ export async function assessReferralActivationReadiness(): Promise<ReferralActiv
     checkNoDuplicateCommissionOrder(),
     checkNoUnresolvedIntegrityIssue(),
   ]);
-  return { ready: checks.every((c) => c.ok), checks };
+  // Order exactly as §6 lists; the migration-history check reflects the dual-lineage
+  // verdict (a KNOWN_COMPATIBLE_LEGACY_VARIANT is ok=true, non-blocking).
+  const checks = [
+    migrationsHealthy,
+    migrationHistory.check,
+    workerHeartbeat,
+    controlQueue,
+    executeConsumer,
+    walletLedger,
+    payoutWindows,
+    attributionMismatch,
+    duplicateOrder,
+    integrityIssue,
+  ];
+  return { ready: checks.every((c) => c.ok), checks, migrationHistory: migrationHistory.history };
+}
+
+/** The migration-history dimension only (cheap — no heartbeat/Redis reads), for the UI. */
+export async function getReferralMigrationHistory(): Promise<ReferralMigrationHistory> {
+  return (await evaluateMigrationHistory()).history;
 }
 
 export type EnableReferralPayoutsResult =
-  | { status: "enabled"; flipped: boolean; startedAt: Date }
+  | { status: "enabled"; flipped: boolean; startedAt: Date; migrationHistory: ReferralMigrationHistory }
   | { status: "blocked"; readiness: ReferralActivationReadiness };
 
 /**
  * GATED enable: the OWNER-facing activation path. Runs the full integrity gate and,
  * only if every check passes, performs the ATOMIC enable (horizon + payout window +
  * master switch in one transaction). If anything is unhealthy it returns the failing
- * checks and changes nothing — payouts stay off. Disabling is never gated (see
- * disableReferralPayouts), so this can never trap the OWNER with payouts stuck on.
+ * checks and changes nothing — payouts stay off. A KNOWN_COMPATIBLE_LEGACY_VARIANT
+ * migration history does NOT block (the gate passes) but is surfaced as a non-blocking
+ * warning. Disabling is never gated, so this can never trap the OWNER with payouts on.
  */
 export async function enableReferralPayoutsGated(now: Date = new Date()): Promise<EnableReferralPayoutsResult> {
   const readiness = await assessReferralActivationReadiness();
@@ -247,5 +313,5 @@ export async function enableReferralPayoutsGated(now: Date = new Date()): Promis
     return { status: "blocked", readiness };
   }
   const { flipped, startedAt } = await enableReferralPayouts(now);
-  return { status: "enabled", flipped, startedAt };
+  return { status: "enabled", flipped, startedAt, migrationHistory: readiness.migrationHistory };
 }

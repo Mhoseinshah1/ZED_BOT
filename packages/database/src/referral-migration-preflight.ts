@@ -27,15 +27,21 @@ const EXIT_DUPLICATES_FOUND = 1;
 const EXIT_PREFLIGHT_ERROR = 2;
 
 export async function runReferralMigrationPreflight(prisma: PrismaClient): Promise<number> {
-  // A brand-new database has not created the table yet — nothing to verify. Using
-  // to_regclass keeps this a safe no-op that never throws on a missing relation.
+  // SCHEMA-SAFE existence check. `to_regclass` with an UNQUALIFIED, quoted identifier
+  // resolves the table through the connection's active search_path (Prisma sets it from
+  // the DATABASE_URL `?schema=` param), so this works whether ReferralCommission lives
+  // in `public` or a configured custom schema — and returns null on a brand-new database
+  // where the table does not exist yet. No untrusted schema name is ever concatenated
+  // into SQL; the resolution is done entirely by PostgreSQL from the session search_path.
   const reg = await prisma.$queryRaw<Array<{ regclass: string | null }>>`
-    SELECT to_regclass('"public"."ReferralCommission"')::text AS regclass`;
+    SELECT to_regclass('"ReferralCommission"')::text AS regclass`;
   if (!reg[0] || reg[0].regclass === null) {
     console.log("referral-migration-preflight: ReferralCommission table absent (fresh database) — OK");
     return EXIT_OK;
   }
 
+  // Unqualified table name → PostgreSQL resolves it via the same search_path, so the
+  // duplicate check runs against whichever schema actually holds the table.
   const rows = await prisma.$queryRaw<Array<{ dup_groups: bigint; dup_rows: bigint }>>`
     SELECT
       count(*)::bigint AS dup_groups,

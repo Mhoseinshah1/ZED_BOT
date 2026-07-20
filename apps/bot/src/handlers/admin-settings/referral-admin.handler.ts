@@ -5,7 +5,10 @@ import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
 import {
   enableReferralPayoutsGated,
+  getReferralMigrationHistory,
   type ReferralActivationReadiness,
+  type ReferralMigrationHistory,
+  type ReferralMigrationHistoryStatus,
 } from "../../services/referral-activation.service.js";
 import { enqueueReferralReconcileNow, readReferralWorkerStatus } from "../../services/ops-queue.service.js";
 import {
@@ -27,6 +30,17 @@ import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
 // =============================================================================
 
 const OWNER_ONLY_TEXT = "این بخش فقط برای مالک ربات در دسترس است.";
+
+/** Persian labels for the migration-history dimension (§9). */
+const MIGRATION_HISTORY_LABEL: Record<ReferralMigrationHistoryStatus, string> = {
+  HEALTHY: "سالم",
+  KNOWN_COMPATIBLE_LEGACY_VARIANT: "نسخه قدیمی سازگار",
+  CHECKSUM_DRIFT: "ناسازگار",
+  FILE_MISSING: "فایل migration موجود نیست",
+  SCHEMA_POSTCONDITION_FAILED: "ساختار پایگاه‌داده ناقص",
+};
+/** The exact non-blocking OWNER warning for a known compatible PR #110 lineage. */
+const LEGACY_VARIANT_WARNING = "تاریخچه این نصب از نسخه سازگار قدیمی migration استفاده می‌کند.";
 
 export const REF_ADMIN_CB = {
   root: "admin:referral:root",
@@ -55,7 +69,16 @@ function toman(n: number): string {
   return faDigits(n.toLocaleString("en-US"));
 }
 
-function overviewText(s: ReferralAdminStats, worker: ReferralWorkerLine): string {
+/** One line for the migration-history dimension; a warning line follows for legacy. */
+function migrationHistoryLines(mh: ReferralMigrationHistory): string[] {
+  const lines = ["", "<b>تاریخچه migration:</b>", `وضعیت: ${MIGRATION_HISTORY_LABEL[mh.status]}`];
+  if (mh.legacyWarning) {
+    lines.push(`⚠️ ${LEGACY_VARIANT_WARNING}`);
+  }
+  return lines;
+}
+
+function overviewText(s: ReferralAdminStats, worker: ReferralWorkerLine, mh: ReferralMigrationHistory): string {
   return [
     "👥 <b>زیرمجموعه‌گیری و پاداش</b>",
     "",
@@ -71,6 +94,7 @@ function overviewText(s: ReferralAdminStats, worker: ReferralWorkerLine): string
     `بازگردانی‌شده (کامل): ${faDigits(s.reversedCommissionCount)} مورد — ${toman(s.reversedCommissionToman)} تومان`,
     `در انتظار بازگردانی (بدهی): ${faDigits(s.reversalPendingCount)} مورد — ${toman(s.reversalPendingOutstandingToman)} تومان`,
     `<b>پاداش خالص باقی‌مانده:</b> ${toman(s.netCommissionToman)} تومان`,
+    ...migrationHistoryLines(mh),
     "",
     "<b>وضعیت پردازش‌گر:</b>",
     `آخرین بررسی: ${worker.lastScan}`,
@@ -108,13 +132,17 @@ function overviewKeyboard(s: ReferralAdminStats): InlineKeyboard {
 }
 
 async function renderOverview(ctx: BotContext, toast?: string): Promise<void> {
-  const [stats, status] = await Promise.all([getReferralAdminStats(), readReferralWorkerStatus()]);
+  const [stats, status, migrationHistory] = await Promise.all([
+    getReferralAdminStats(),
+    readReferralWorkerStatus(),
+    getReferralMigrationHistory(),
+  ]);
   const worker: ReferralWorkerLine = {
     lastScan: status?.lastScanAt ? faDigits(status.lastScanAt.slice(0, 19).replace("T", " ")) : "نامشخص",
     executeFailures: status?.executeFailures ?? 0,
   };
   await safeAnswerCallback(ctx, toast);
-  await safeEditOrReply(ctx, overviewText(stats, worker), overviewKeyboard(stats), { parseMode: "HTML" });
+  await safeEditOrReply(ctx, overviewText(stats, worker, migrationHistory), overviewKeyboard(stats), { parseMode: "HTML" });
 }
 
 async function ownerGuard(ctx: BotContext): Promise<boolean> {
@@ -138,6 +166,8 @@ referralAdminHandler.callbackQuery(REF_ADMIN_CB.root, async (ctx) => {
 function activationBlockedText(readiness: ReferralActivationReadiness): string {
   const lines = [
     "⛔ <b>فعال‌سازی پاداش مسدود شد</b>",
+    "",
+    `<b>وضعیت تاریخچه migration:</b> ${MIGRATION_HISTORY_LABEL[readiness.migrationHistory.status]}`,
     "",
     "پیش از فعال‌سازی، همهٔ بررسی‌های یکپارچگی باید سبز باشند:",
     "",
@@ -168,7 +198,13 @@ referralAdminHandler.callbackQuery(REF_ADMIN_CB.enable, async (ctx) => {
   if (result.flipped) {
     logger.info("referral system enabled");
   }
-  await renderOverview(ctx, result.flipped ? "پاداش زیرمجموعه‌گیری فعال شد ✅" : "پاداش از قبل فعال است.");
+  // A known compatible PR #110 lineage activates but surfaces the non-blocking warning.
+  const toast = result.migrationHistory.legacyWarning
+    ? LEGACY_VARIANT_WARNING
+    : result.flipped
+      ? "پاداش زیرمجموعه‌گیری فعال شد ✅"
+      : "پاداش از قبل فعال است.";
+  await renderOverview(ctx, toast);
 });
 
 referralAdminHandler.callbackQuery(REF_ADMIN_CB.disable, async (ctx) => {
