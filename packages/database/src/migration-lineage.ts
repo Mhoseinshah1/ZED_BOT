@@ -415,3 +415,49 @@ export async function evaluateReferralMigrationLineage(
     detail: `known compatible ${checksumClass} lineage with valid schema`,
   };
 }
+
+export interface OrdinaryMigrationsIntegrity {
+  ok: boolean;
+  /** How many applied migrations (excluding the referral one) were checked. */
+  checked: number;
+  /** First migration whose on-disk SHA-256 diverges from its recorded checksum (null if none). */
+  driftedMigration: string | null;
+  /** First applied migration whose on-disk file is absent (null if none). */
+  missingMigration: string | null;
+  detail: string;
+}
+
+/**
+ * Verifies that EVERY OTHER applied migration (i.e. not the dual-lineage referral one) is
+ * immutable — its on-disk `migration.sql` exists and its SHA-256 equals the latest
+ * SUCCESSFUL attempt's recorded checksum. This mirrors the ordinary-migration branch of
+ * the real activation gate (`evaluateMigrationHistory`), so a diagnostic verdict built
+ * from it cannot claim activation is allowed while an unrelated migration has drifted or
+ * lost its file. The referral migration is intentionally skipped here — it is judged by
+ * the dual-checksum lineage evaluator. Read-only.
+ */
+export async function checkOrdinaryMigrationsImmutable(
+  migrationsDir: string | null = resolveMigrationsDir(),
+): Promise<OrdinaryMigrationsIntegrity> {
+  if (migrationsDir === null) {
+    return { ok: false, checked: 0, driftedMigration: null, missingMigration: null, detail: "migrations dir not found" };
+  }
+  const applied = await prisma.$queryRaw<Array<{ migration_name: string; checksum: string }>>`
+    SELECT DISTINCT ON (migration_name) migration_name, checksum
+    FROM _prisma_migrations
+    WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL
+    ORDER BY migration_name, started_at DESC`;
+  let checked = 0;
+  for (const row of applied) {
+    if (row.migration_name === REFERRAL_AFFILIATE_MIGRATION_NAME) continue; // referral → lineage
+    const file = resolvePath(migrationsDir, row.migration_name, "migration.sql");
+    if (!existsSync(file)) {
+      return { ok: false, checked, driftedMigration: null, missingMigration: row.migration_name, detail: `missing file for ${row.migration_name}` };
+    }
+    if (readPrismaMigrationChecksum(file) !== row.checksum) {
+      return { ok: false, checked, driftedMigration: row.migration_name, missingMigration: null, detail: `checksum drift in ${row.migration_name}` };
+    }
+    checked += 1;
+  }
+  return { ok: true, checked, driftedMigration: null, missingMigration: null, detail: "all ordinary applied migrations immutable" };
+}

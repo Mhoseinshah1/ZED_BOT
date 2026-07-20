@@ -236,4 +236,30 @@ const hasDb = typeof process.env.DATABASE_URL === "string" && process.env.DATABA
     await insertRow("verdict-test-ref-stuck", REFERRAL_AFFILIATE_MIGRATION_NAME, false, false);
     expect(await finalVerdict()).toBe("BLOCKED");
   });
+
+  it("valid lineage + an ORDINARY migration with checksum drift → BLOCKED", async () => {
+    // Pick any applied non-referral migration and corrupt its RECORDED checksum so the
+    // on-disk file no longer matches — the real gate blocks on this, so the verdict must too.
+    const rows = await prisma.$queryRaw<Array<{ migration_name: string; checksum: string }>>`
+      SELECT migration_name, checksum FROM _prisma_migrations
+      WHERE migration_name <> ${REFERRAL_AFFILIATE_MIGRATION_NAME}
+        AND finished_at IS NOT NULL AND rolled_back_at IS NULL
+      ORDER BY started_at ASC LIMIT 1`;
+    const target = rows[0];
+    expect(target).toBeDefined();
+    if (!target) return;
+    try {
+      await prisma.$executeRawUnsafe(
+        `UPDATE _prisma_migrations SET checksum='deadbeef' WHERE migration_name=$1 AND rolled_back_at IS NULL`,
+        target.migration_name,
+      );
+      expect(await finalVerdict()).toBe("BLOCKED");
+    } finally {
+      await prisma.$executeRawUnsafe(
+        `UPDATE _prisma_migrations SET checksum=$1 WHERE migration_name=$2 AND rolled_back_at IS NULL`,
+        target.checksum,
+        target.migration_name,
+      );
+    }
+  });
 });

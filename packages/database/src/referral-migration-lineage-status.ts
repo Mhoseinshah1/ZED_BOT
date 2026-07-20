@@ -8,7 +8,11 @@ import {
   countCurrentlyFailedOrStuckMigrations,
   readMigrationAttemptState,
 } from "./migration-attempts.js";
-import { checkReferralSchemaPostconditions, evaluateReferralMigrationLineage } from "./migration-lineage.js";
+import {
+  checkOrdinaryMigrationsImmutable,
+  checkReferralSchemaPostconditions,
+  evaluateReferralMigrationLineage,
+} from "./migration-lineage.js";
 
 // =============================================================================
 // Referral migration LINEAGE STATUS — an OWNER/operator-only DIAGNOSTIC command.
@@ -44,12 +48,15 @@ export async function printReferralMigrationLineageStatus(
   const classification = classifyReferralMigrationChecksum(recordedChecksum);
   const postconditions = await checkReferralSchemaPostconditions();
   const currentlyFailed = await countCurrentlyFailedOrStuckMigrations();
+  const ordinary = await checkOrdinaryMigrationsImmutable();
 
-  // The FINAL verdict mirrors the real activation gate: the referral lineage must allow
-  // activation AND there must be NO currently failed/stuck migration anywhere (which the
-  // gate enforces via checkMigrationsHealthy). Historical rolled-back attempts alone do
-  // NOT block. A valid lineage while an unrelated migration is stuck is still BLOCKED.
-  const finalActivationAllowed = lineage.activationAllowed && currentlyFailed === 0;
+  // The FINAL verdict mirrors the real activation gate's migration-history dimension: the
+  // referral lineage must allow activation AND there must be NO currently failed/stuck
+  // migration anywhere (checkMigrationsHealthy) AND EVERY OTHER applied migration must be
+  // immutable (evaluateMigrationHistory blocks on ordinary checksum drift / a missing
+  // file). Historical rolled-back attempts alone do NOT block. So a valid referral lineage
+  // is still BLOCKED when an unrelated migration is stuck OR has drifted OR lost its file.
+  const finalActivationAllowed = lineage.activationAllowed && currentlyFailed === 0 && ordinary.ok;
 
   out("referral-migration-lineage-status:");
   out(`  migration:                ${REFERRAL_AFFILIATE_MIGRATION_NAME}`);
@@ -96,10 +103,14 @@ export async function printReferralMigrationLineageStatus(
   out(`  current unresolved migration failures: ${currentlyFailed}`);
   out(`  historical rolled-back attempts:       ${attemptState.historicalRolledBackCount}`);
 
+  out("  --- other applied migrations (immutability) ---");
+  out(`  ordinary migrations immutable: ${ordinary.ok ? "OK" : "FAILED"} (${ordinary.detail})`);
+
   out("  --- final verdict ---");
   out(
     `  FINAL ACTIVATION VERDICT: ${finalActivationAllowed ? "ALLOWED" : "BLOCKED"} ` +
-      `(lineage ${lineage.activationAllowed ? "ALLOWED" : "BLOCKED"} AND ${currentlyFailed} live migration failure(s))`,
+      `(lineage ${lineage.activationAllowed ? "ALLOWED" : "BLOCKED"}, ${currentlyFailed} live migration failure(s), ` +
+      `ordinary migrations ${ordinary.ok ? "immutable" : "DRIFTED"})`,
   );
   return EXIT_OK;
 }

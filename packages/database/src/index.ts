@@ -39,10 +39,12 @@ export {
   resolveMigrationsDir,
   checkReferralSchemaPostconditions,
   verifyReferralOrderIdUniqueIndex,
+  checkOrdinaryMigrationsImmutable,
   evaluateReferralMigrationLineage,
   type ReferralMigrationLineageStatus,
   type ReferralMigrationLineage,
   type ReferralSchemaPostcondition,
   type ReferralSchemaPostconditionsResult,
   type ReferralUniqueIndexVerification,
+  type OrdinaryMigrationsIntegrity,
 } from "./migration-lineage.js";
