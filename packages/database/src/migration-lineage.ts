@@ -4,36 +4,37 @@ import { fileURLToPath } from "node:url";
 
 import { prisma } from "./client.js";
 import {
-  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL,
-  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110,
+  classifyReferralMigrationChecksum,
+  REFERRAL_AFFILIATE_CURRENT_ONDISK_VARIANT,
   REFERRAL_AFFILIATE_MIGRATION_NAME,
   readPrismaMigrationChecksum,
+  type ReferralMigrationChecksumClass,
 } from "./migration-checksum.js";
+import { readLatestSuccessfulMigrationAttempt } from "./migration-attempts.js";
 
 // =============================================================================
-// Referral migration LINEAGE evaluation. `20260719180000` shipped in two byte
-// forms with identical FINAL schema but different checksums:
-//   - ORIGINAL (PR #108, also the current restored file);
-//   - PR #110 (embedded duplicate-orderId preflight block).
-// A database that applied the PR #110 form recorded THAT checksum, so a strict
-// "on-disk == recorded" activation gate would wrongly block it forever even though
-// its schema is valid. This module accepts BOTH known checksums for that ONE
-// migration — and ONLY after every required SCHEMA postcondition passes — while
-// still rejecting any UNKNOWN modification. It never edits the migration file or
-// `_prisma_migrations`, and every query is read-only. Shared by the activation gate
-// and the operator lineage-status command.
+// Referral migration LINEAGE evaluation. `20260719180000` shipped in two logical SQL
+// forms (PR #108 ORIGINAL, PR #110 embedded-preflight) with an IDENTICAL final schema,
+// each applyable from an LF OR CRLF checkout — four empirically verified checksums in
+// all (see migration-checksum.ts). A database that applied any of them recorded THAT
+// checksum, so a strict "on-disk == recorded" gate would wrongly block a valid install
+// forever. This module accepts ONLY those four known checksums for that ONE migration —
+// and ONLY after EVERY schema postcondition passes (including EXACT_MATCH, since a
+// checksum can be right while the live schema has drifted) — and rejects everything
+// else. It never edits the migration file or `_prisma_migrations`; every query is
+// read-only. Shared by the activation gate and the operator lineage-status command.
 // =============================================================================
 
 export type ReferralMigrationLineageStatus =
-  /** on-disk checksum == recorded checksum (an ordinary immutable migration). */
+  /** on-disk checksum == recorded checksum AND all schema postconditions pass. */
   | "EXACT_MATCH"
-  /** recorded == the known PR #110 checksum AND all schema postconditions pass. */
+  /** recorded == a known non-current variant AND all schema postconditions pass. */
   | "KNOWN_COMPATIBLE_LEGACY_VARIANT"
-  /** recorded is neither known checksum (an unknown / tampered history). */
+  /** recorded is not in the empirically verified allowlist (unknown / tampered). */
   | "CHECKSUM_DRIFT"
   /** the migration file is absent on disk (cannot verify). */
   | "FILE_MISSING"
-  /** recorded == the known PR #110 checksum but a schema postcondition failed. */
+  /** recorded is a known variant but a schema postcondition failed (drifted schema). */
   | "SCHEMA_POSTCONDITION_FAILED";
 
 export interface ReferralSchemaPostcondition {
@@ -41,10 +42,41 @@ export interface ReferralSchemaPostcondition {
   ok: boolean;
 }
 
+/**
+ * Exact catalog verification of the one-commission-per-order UNIQUE index, tied to the
+ * resolved ReferralCommission table OID (never trusting the index NAME alone).
+ */
+export interface ReferralUniqueIndexVerification {
+  ok: boolean;
+  /** An index with the expected name is bound to the resolved ReferralCommission OID. */
+  exists: boolean;
+  /** pg_index.indrelid == the resolved ReferralCommission table OID. */
+  belongsToReferralCommission: boolean;
+  /** The index relation lives in the same schema as ReferralCommission. */
+  sameSchema: boolean;
+  /** pg_index.indisunique. */
+  isUnique: boolean;
+  /** pg_index.indisvalid. */
+  isValid: boolean;
+  /** pg_index.indisready. */
+  isReady: boolean;
+  /** pg_index.indpred IS NULL (not a partial index). */
+  noPredicate: boolean;
+  /** pg_index.indexprs IS NULL (not an expression index). */
+  noExpression: boolean;
+  /** Exactly one key column and no INCLUDE columns (indnatts == indnkeyatts == 1). */
+  singleKeyColumn: boolean;
+  /** The single key column is exactly ReferralCommission.orderId. */
+  targetsOrderId: boolean;
+  detail: string;
+}
+
 export interface ReferralMigrationLineage {
   status: ReferralMigrationLineageStatus;
-  /** Recorded `_prisma_migrations.checksum` for the known migration (null if not applied). */
+  /** Recorded `_prisma_migrations.checksum` of the latest SUCCESSFUL attempt (null if none). */
   recordedChecksum: string | null;
+  /** Classification of the recorded checksum against the empirical allowlist. */
+  checksumClass: ReferralMigrationChecksumClass;
   /** SHA-256 of the on-disk migration file (null if missing / dir unresolved). */
   onDiskChecksum: string | null;
   /** True when the status permits activation (EXACT_MATCH or KNOWN_COMPATIBLE_LEGACY_VARIANT). */
@@ -53,8 +85,10 @@ export interface ReferralMigrationLineage {
   legacyVariant: boolean;
   /** Short, id-free detail for logs / the operator command. */
   detail: string;
-  /** The schema postconditions evaluated (only populated when the recorded checksum is PR #110). */
+  /** The schema postconditions evaluated (null only when the checksum is UNKNOWN/absent). */
   postconditions: ReferralSchemaPostcondition[] | null;
+  /** The exact unique-index verification (null only when the checksum is UNKNOWN/absent). */
+  indexVerification: ReferralUniqueIndexVerification | null;
 }
 
 /**
@@ -86,16 +120,134 @@ async function resolveReferralSchema(): Promise<string | null> {
 }
 
 /**
- * Verifies every required SCHEMA postcondition of the referral affiliate migration —
- * regardless of which byte form applied it. Schema-aware (custom search_path safe):
- * the schema name is read from the catalog and passed as a BIND PARAMETER (never
- * concatenated), and table-data reads use the unqualified name so search_path
- * resolves it. Read-only; count-only; never touches an order/user id.
+ * EXACT catalog verification of the `ReferralCommission_orderId_key` UNIQUE index.
+ * Ties the index to the resolved table OID via `pg_index.indrelid`, then asserts every
+ * required property (unique / valid / ready / no predicate / no expression / a single
+ * key column that is exactly `orderId`). Trusting the index NAME alone is insufficient:
+ * a unique index of the same name on ANOTHER table, or a partial / expression / wrong-
+ * column index, must NOT satisfy the one-commission-per-order guarantee. Read-only.
  */
-export async function checkReferralSchemaPostconditions(): Promise<{
+export async function verifyReferralOrderIdUniqueIndex(schema: string): Promise<ReferralUniqueIndexVerification> {
+  const rows = await prisma.$queryRaw<
+    Array<{
+      index_schema: string;
+      indisunique: boolean;
+      indisvalid: boolean;
+      indisready: boolean;
+      no_predicate: boolean;
+      no_expression: boolean;
+      indnatts: number;
+      indnkeyatts: number;
+      key_column: string | null;
+    }>
+  >`
+    SELECT
+      n.nspname AS index_schema,
+      i.indisunique,
+      i.indisvalid,
+      i.indisready,
+      (i.indpred IS NULL) AS no_predicate,
+      (i.indexprs IS NULL) AS no_expression,
+      i.indnatts::int AS indnatts,
+      i.indnkeyatts::int AS indnkeyatts,
+      a.attname AS key_column
+    FROM pg_index i
+    JOIN pg_class ic ON ic.oid = i.indexrelid
+    JOIN pg_namespace n ON n.oid = ic.relnamespace
+    LEFT JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+    WHERE i.indrelid = to_regclass(format('%I.%I', ${schema}::text, 'ReferralCommission'))
+      AND ic.relname = 'ReferralCommission_orderId_key'`;
+
+  if (rows.length === 0) {
+    // No index of that name is bound to the resolved ReferralCommission OID. This also
+    // covers "the index was dropped" and "a same-named index exists on another table"
+    // (that index has a different indrelid, so it never matches here).
+    return {
+      ok: false,
+      exists: false,
+      belongsToReferralCommission: false,
+      sameSchema: false,
+      isUnique: false,
+      isValid: false,
+      isReady: false,
+      noPredicate: false,
+      noExpression: false,
+      singleKeyColumn: false,
+      targetsOrderId: false,
+      detail: "no unique index named ReferralCommission_orderId_key on ReferralCommission",
+    };
+  }
+
+  const r = rows[0];
+  const exists = true;
+  const belongsToReferralCommission = true; // enforced by indrelid = to_regclass(...)
+  const sameSchema = r.index_schema === schema;
+  const isUnique = r.indisunique === true;
+  const isValid = r.indisvalid === true;
+  const isReady = r.indisready === true;
+  const noPredicate = r.no_predicate === true;
+  const noExpression = r.no_expression === true;
+  const singleKeyColumn = r.indnatts === 1 && r.indnkeyatts === 1;
+  const targetsOrderId = r.key_column === "orderId";
+  const ok =
+    belongsToReferralCommission &&
+    sameSchema &&
+    isUnique &&
+    isValid &&
+    isReady &&
+    noPredicate &&
+    noExpression &&
+    singleKeyColumn &&
+    targetsOrderId;
+  const detail = ok
+    ? "exact unique index on ReferralCommission(orderId) verified"
+    : `index checks failed: ${[
+        !sameSchema && "wrong-schema",
+        !isUnique && "not-unique",
+        !isValid && "invalid",
+        !isReady && "not-ready",
+        !noPredicate && "partial",
+        !noExpression && "expression",
+        !singleKeyColumn && "multi-column",
+        !targetsOrderId && "wrong-column",
+      ]
+        .filter(Boolean)
+        .join(",")}`;
+  return {
+    ok,
+    exists,
+    belongsToReferralCommission,
+    sameSchema,
+    isUnique,
+    isValid,
+    isReady,
+    noPredicate,
+    noExpression,
+    singleKeyColumn,
+    targetsOrderId,
+    detail,
+  };
+}
+
+export interface ReferralSchemaPostconditionsResult {
   ok: boolean;
   postconditions: ReferralSchemaPostcondition[];
-}> {
+  /** The exact unique-index verification (null only when the table is absent). */
+  indexVerification: ReferralUniqueIndexVerification | null;
+  /** The resolved schema that holds ReferralCommission (null when absent). */
+  schema: string | null;
+}
+
+/**
+ * Verifies every required STRUCTURAL schema postcondition of the referral affiliate
+ * migration — regardless of which byte form applied it. Migration-attempt state
+ * (finished / rolled back / stuck) is NOT part of this: that is the authoritative
+ * migration-attempt helper's job (see migration-attempts.ts). Schema-aware (custom
+ * search_path safe): the schema name is read from the catalog and passed as a BIND
+ * PARAMETER (never concatenated); table-data reads use the unqualified name so
+ * search_path resolves it. Read-only; count-only; never touches an order/user id.
+ */
+export async function checkReferralSchemaPostconditions(): Promise<ReferralSchemaPostconditionsResult> {
   const schema = await resolveReferralSchema();
   const pc: ReferralSchemaPostcondition[] = [];
   const push = (key: string, ok: boolean): void => {
@@ -110,15 +262,11 @@ export async function checkReferralSchemaPostconditions(): Promise<{
       "reversal-wallet-tx-column",
       "reversed-at-column",
       "orderid-unique-index",
-      "index-is-unique",
       "no-duplicate-orderid",
-      "migration-finished",
-      "migration-not-rolled-back",
-      "no-migration-failure",
     ]) {
       push(k, false);
     }
-    return { ok: false, postconditions: pc };
+    return { ok: false, postconditions: pc, indexVerification: null, schema: null };
   }
   push("table-exists", true);
 
@@ -139,14 +287,9 @@ export async function checkReferralSchemaPostconditions(): Promise<{
   push("reversal-wallet-tx-column", colSet.has("reversalWalletTransactionId"));
   push("reversed-at-column", colSet.has("reversedAt"));
 
-  const idxRows = await prisma.$queryRaw<Array<{ indisunique: boolean }>>`
-    SELECT i.indisunique
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    JOIN pg_index i ON i.indexrelid = c.oid
-    WHERE n.nspname = ${schema} AND c.relname = 'ReferralCommission_orderId_key'`;
-  push("orderid-unique-index", idxRows.length > 0);
-  push("index-is-unique", idxRows.length > 0 && idxRows.every((r) => r.indisunique === true));
+  // EXACT unique-index verification (§3) — tied to the ReferralCommission OID, exact key.
+  const indexVerification = await verifyReferralOrderIdUniqueIndex(schema);
+  push("orderid-unique-index", indexVerification.ok);
 
   const [dupRow] = await prisma.$queryRaw<Array<{ n: number }>>`
     SELECT count(*)::int AS n FROM (
@@ -157,35 +300,32 @@ export async function checkReferralSchemaPostconditions(): Promise<{
     ) d`;
   push("no-duplicate-orderid", (dupRow?.n ?? 0) === 0);
 
-  const [migRow] = await prisma.$queryRaw<Array<{ finished: boolean; rolled_back: boolean }>>`
-    SELECT (finished_at IS NOT NULL) AS finished, (rolled_back_at IS NOT NULL) AS rolled_back
-    FROM _prisma_migrations
-    WHERE migration_name = ${REFERRAL_AFFILIATE_MIGRATION_NAME}`;
-  push("migration-finished", migRow?.finished === true);
-  push("migration-not-rolled-back", migRow !== undefined && migRow.rolled_back === false);
-
-  const [failRow] = await prisma.$queryRaw<Array<{ n: number }>>`
-    SELECT count(*)::int AS n FROM _prisma_migrations WHERE rolled_back_at IS NOT NULL`;
-  push("no-migration-failure", (failRow?.n ?? 0) === 0);
-
-  return { ok: pc.every((p) => p.ok), postconditions: pc };
-}
-
-/** Reads the recorded checksum of the known migration from `_prisma_migrations`. */
-async function readRecordedChecksum(): Promise<string | null> {
-  const rows = await prisma.$queryRaw<Array<{ checksum: string }>>`
-    SELECT checksum FROM _prisma_migrations
-    WHERE migration_name = ${REFERRAL_AFFILIATE_MIGRATION_NAME} AND rolled_back_at IS NULL`;
-  return rows[0]?.checksum ?? null;
+  return { ok: pc.every((p) => p.ok), postconditions: pc, indexVerification, schema };
 }
 
 /**
- * Evaluates the lineage of the ONE known referral migration. Accepts the ORIGINAL and
- * the PR #110 checksums only (the latter after all schema postconditions pass); any
- * other recorded checksum is CHECKSUM_DRIFT. Never edits anything.
+ * Reads the recorded checksum of the known migration — the LATEST SUCCESSFUL attempt's
+ * checksum (finished, not rolled back, ordered by started_at DESC). Never an old failed
+ * or rolled-back attempt.
+ */
+async function readRecordedChecksum(): Promise<string | null> {
+  const attempt = await readLatestSuccessfulMigrationAttempt(REFERRAL_AFFILIATE_MIGRATION_NAME);
+  return attempt?.checksum ?? null;
+}
+
+/**
+ * Evaluates the lineage of the ONE known referral migration. Accepts ONLY the four
+ * empirically verified historical checksums (ORIGINAL/PR110 × LF/CRLF), and ONLY after
+ * every schema postcondition passes (EXACT_MATCH included). Any other recorded checksum
+ * is CHECKSUM_DRIFT and is blocked regardless of the current schema. Never edits anything.
+ *
+ * `providedChecksum` lets the caller pass an already-fetched authoritative recorded
+ * checksum (the latest successful attempt's) to avoid a second `_prisma_migrations`
+ * query. Pass `undefined` (the default) to have this function read it.
  */
 export async function evaluateReferralMigrationLineage(
   migrationsDir: string | null = resolveMigrationsDir(),
+  providedChecksum?: string | null,
 ): Promise<ReferralMigrationLineage> {
   const onDiskChecksum =
     migrationsDir === null
@@ -195,67 +335,64 @@ export async function evaluateReferralMigrationLineage(
           return existsSync(file) ? readPrismaMigrationChecksum(file) : null;
         })();
 
-  const recordedChecksum = await readRecordedChecksum();
+  const recordedChecksum = providedChecksum !== undefined ? providedChecksum : await readRecordedChecksum();
+  const checksumClass = classifyReferralMigrationChecksum(recordedChecksum);
 
-  const base = { recordedChecksum, onDiskChecksum, postconditions: null as ReferralSchemaPostcondition[] | null };
+  const base = {
+    recordedChecksum,
+    onDiskChecksum,
+    checksumClass,
+    postconditions: null as ReferralSchemaPostcondition[] | null,
+    indexVerification: null as ReferralUniqueIndexVerification | null,
+  };
 
   if (onDiskChecksum === null) {
-    return {
-      ...base,
-      status: "FILE_MISSING",
-      activationAllowed: false,
-      legacyVariant: false,
-      detail: "migration file not found on disk",
-    };
+    return { ...base, status: "FILE_MISSING", activationAllowed: false, legacyVariant: false, detail: "migration file not found on disk" };
   }
-  if (recordedChecksum === null) {
-    // The migration is not recorded as applied — surfaced separately by the
-    // migrations-healthy check; treat as drift for the lineage dimension.
-    return {
-      ...base,
-      status: "CHECKSUM_DRIFT",
-      activationAllowed: false,
-      legacyVariant: false,
-      detail: "migration not recorded as applied",
-    };
+  if (checksumClass === "NOT_APPLIED") {
+    // Not recorded as a successful attempt — surfaced separately by the migration-attempt
+    // gate; treat as drift for the lineage dimension (blocked).
+    return { ...base, status: "CHECKSUM_DRIFT", activationAllowed: false, legacyVariant: false, detail: "migration not recorded as a successful attempt" };
   }
-  if (recordedChecksum === onDiskChecksum) {
-    return { ...base, status: "EXACT_MATCH", activationAllowed: true, legacyVariant: false, detail: "on-disk checksum matches recorded" };
+  if (checksumClass === "UNKNOWN") {
+    // Unknown checksum → blocked REGARDLESS of the current schema (no postconditions).
+    return { ...base, status: "CHECKSUM_DRIFT", activationAllowed: false, legacyVariant: false, detail: "recorded checksum is not an empirically verified historical variant" };
   }
-  // Drift: the recorded checksum differs from the current file. Accept ONLY the known
-  // PR #110 checksum for the current (original) on-disk file, and only after the schema
-  // postconditions confirm the final schema is intact.
-  const isKnownLegacy =
-    recordedChecksum === REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110 &&
-    onDiskChecksum === REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL;
-  if (!isKnownLegacy) {
-    return {
-      ...base,
-      status: "CHECKSUM_DRIFT",
-      activationAllowed: false,
-      legacyVariant: false,
-      detail: "recorded checksum is neither the original nor the known PR#110 variant",
-    };
-  }
+
+  // A KNOWN variant. EVERY accepted lineage must prove the financial schema invariant,
+  // so the postconditions run for EXACT_MATCH and legacy variants alike (§4).
   const postconditions = await checkReferralSchemaPostconditions();
   if (!postconditions.ok) {
     return {
-      recordedChecksum,
-      onDiskChecksum,
+      ...base,
+      postconditions: postconditions.postconditions,
+      indexVerification: postconditions.indexVerification,
       status: "SCHEMA_POSTCONDITION_FAILED",
       activationAllowed: false,
       legacyVariant: false,
       detail: `failed: ${postconditions.postconditions.filter((p) => !p.ok).map((p) => p.key).join(",")}`,
+    };
+  }
+
+  const isCurrentOnDisk = checksumClass === REFERRAL_AFFILIATE_CURRENT_ONDISK_VARIANT && recordedChecksum === onDiskChecksum;
+  if (isCurrentOnDisk) {
+    return {
+      ...base,
       postconditions: postconditions.postconditions,
+      indexVerification: postconditions.indexVerification,
+      status: "EXACT_MATCH",
+      activationAllowed: true,
+      legacyVariant: false,
+      detail: "on-disk checksum matches recorded and schema postconditions pass",
     };
   }
   return {
-    recordedChecksum,
-    onDiskChecksum,
+    ...base,
+    postconditions: postconditions.postconditions,
+    indexVerification: postconditions.indexVerification,
     status: "KNOWN_COMPATIBLE_LEGACY_VARIANT",
     activationAllowed: true,
     legacyVariant: true,
-    detail: "known compatible PR#110 lineage with valid schema",
-    postconditions: postconditions.postconditions,
+    detail: `known compatible ${checksumClass} lineage with valid schema`,
   };
 }

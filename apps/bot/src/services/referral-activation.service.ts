@@ -3,6 +3,7 @@ import { resolve as resolvePath } from "node:path";
 
 import {
   REFERRAL_AFFILIATE_MIGRATION_NAME,
+  countCurrentlyFailedOrStuckMigrations,
   evaluateReferralMigrationLineage,
   prisma,
   readPrismaMigrationChecksum,
@@ -73,22 +74,23 @@ function check(key: string, label: string, ok: boolean, detail: string | null = 
   return { key, label, ok, detail: ok ? null : detail };
 }
 
-/** Migrations are healthy when none are pending / rolled back and at least one applied. */
+/**
+ * Migrations are healthy when at least one has SUCCESSFULLY applied and NONE are
+ * CURRENTLY failed/stuck (finished_at IS NULL AND rolled_back_at IS NULL). Prisma keeps
+ * rolled-back rows forever, so a migration that was rolled back and then reapplied leaves
+ * a historical rolled-back row that must NOT be treated as a live failure — otherwise
+ * activation is blocked forever. Only the currently-failed/stuck count blocks here.
+ */
 async function checkMigrationsHealthy(): Promise<ReferralActivationCheck> {
   const label = "مهاجرت‌های پایگاه‌داده سالم";
   try {
-    const rows = await prisma.$queryRaw<Array<{ pending: bigint; failed: bigint; total: bigint }>>`
-      SELECT
-        count(*) FILTER (WHERE finished_at IS NULL AND rolled_back_at IS NULL)::bigint AS pending,
-        count(*) FILTER (WHERE rolled_back_at IS NOT NULL)::bigint AS failed,
-        count(*)::bigint AS total
-      FROM _prisma_migrations`;
-    const pending = Number(rows[0]?.pending ?? 0n);
-    const failed = Number(rows[0]?.failed ?? 0n);
-    const total = Number(rows[0]?.total ?? 0n);
-    if (total === 0) return check("migrations-healthy", label, false, "no migrations applied");
-    if (pending > 0) return check("migrations-healthy", label, false, `${pending} pending`);
-    if (failed > 0) return check("migrations-healthy", label, false, `${failed} rolled back`);
+    const [appliedRow] = await prisma.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*)::bigint AS n FROM _prisma_migrations
+      WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`;
+    const applied = Number(appliedRow?.n ?? 0n);
+    const currentlyFailed = await countCurrentlyFailedOrStuckMigrations();
+    if (applied === 0) return check("migrations-healthy", label, false, "no migrations applied");
+    if (currentlyFailed > 0) return check("migrations-healthy", label, false, `${currentlyFailed} currently failed/stuck`);
     return check("migrations-healthy", label, true);
   } catch {
     return check("migrations-healthy", label, false, "migrations table unreadable");
@@ -96,11 +98,15 @@ async function checkMigrationsHealthy(): Promise<ReferralActivationCheck> {
 }
 
 /**
- * Immutable migration-history check WITH dual-lineage awareness (§3). Every APPLIED
- * migration's on-disk SHA-256 must equal its recorded checksum — EXCEPT the one known
- * referral migration (`20260719180000`), which additionally accepts the exact known
- * PR #110 checksum (after every schema postcondition passes). Any other mismatch is
- * CHECKSUM_DRIFT and blocks. Returns a typed migration-history status for the UI.
+ * Immutable migration-history check WITH dual-lineage awareness (§3/§4). Judges each
+ * migration by its LATEST SUCCESSFUL attempt (finished, not rolled back) — so a
+ * migration that was rolled back and later reapplied is judged by its successful
+ * checksum, NEVER blocked forever by the historical rolled-back row. Every ordinary
+ * migration's on-disk SHA-256 must equal that recorded checksum; the one known referral
+ * migration additionally accepts the empirically verified LF/CRLF legacy checksums, and
+ * — for EVERY accepted lineage, EXACT_MATCH included — only after all schema
+ * postconditions pass. Any other mismatch is CHECKSUM_DRIFT and blocks. Returns a typed
+ * migration-history status for the UI.
  */
 async function evaluateMigrationHistory(): Promise<{ check: ReferralActivationCheck; history: ReferralMigrationHistory }> {
   const label = "تاریخچه مهاجرت";
@@ -116,15 +122,22 @@ async function evaluateMigrationHistory(): Promise<{ check: ReferralActivationCh
   const dir = resolveMigrationsDir();
   if (dir === null) return build("FILE_MISSING", "migrations dir not found");
   try {
-    const applied = await prisma.$queryRaw<Array<{ migration_name: string; checksum: string; finished_at: Date | null }>>`
-      SELECT migration_name, checksum, finished_at FROM _prisma_migrations WHERE rolled_back_at IS NULL`;
+    // The LATEST SUCCESSFUL attempt per migration name. Rolled-back and currently-failed
+    // rows are excluded here (currently-failed is enforced by migrations-healthy), so a
+    // reapplied migration is judged by its successful checksum, not blocked by history.
+    const applied = await prisma.$queryRaw<Array<{ migration_name: string; checksum: string }>>`
+      SELECT DISTINCT ON (migration_name) migration_name, checksum
+      FROM _prisma_migrations
+      WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL
+      ORDER BY migration_name, started_at DESC`;
     let legacyWarning = false;
+    let referralSeen = false;
     for (const row of applied) {
-      if (row.finished_at === null) continue; // still applying — covered by migrations-healthy
-
       if (row.migration_name === REFERRAL_AFFILIATE_MIGRATION_NAME) {
-        // The one migration with two known historical byte forms — evaluate lineage.
-        const lineage = await evaluateReferralMigrationLineage(dir);
+        referralSeen = true;
+        // Pass the already-fetched authoritative recorded checksum to avoid a second
+        // _prisma_migrations read (§7); the lineage re-runs the schema postconditions.
+        const lineage = await evaluateReferralMigrationLineage(dir, row.checksum);
         if (lineage.status === "EXACT_MATCH") continue;
         if (lineage.status === "KNOWN_COMPATIBLE_LEGACY_VARIANT") {
           legacyWarning = true;
@@ -134,15 +147,22 @@ async function evaluateMigrationHistory(): Promise<{ check: ReferralActivationCh
         return build(lineage.status, lineage.detail);
       }
 
-      // Ordinary migration: strict exact match against the recorded checksum.
+      // Ordinary migration: strict exact match against the latest successful checksum.
       const file = resolvePath(dir, row.migration_name, "migration.sql");
       if (!existsSync(file)) return build("FILE_MISSING", `missing file for ${row.migration_name}`);
       if (readPrismaMigrationChecksum(file) !== row.checksum) {
         return build("CHECKSUM_DRIFT", `checksum drift in ${row.migration_name}`);
       }
     }
+    // The referral migration has no successful attempt at all (never applied, currently
+    // failed, or rolled back without reapply). The lineage with recorded=null is always a
+    // blocking CHECKSUM_DRIFT ("not recorded as a successful attempt").
+    if (!referralSeen) {
+      const lineage = await evaluateReferralMigrationLineage(dir, null);
+      return build("CHECKSUM_DRIFT", lineage.detail);
+    }
     return legacyWarning
-      ? build("KNOWN_COMPATIBLE_LEGACY_VARIANT", "known compatible PR#110 lineage")
+      ? build("KNOWN_COMPATIBLE_LEGACY_VARIANT", "known compatible legacy lineage")
       : build("HEALTHY", null);
   } catch {
     return build("CHECKSUM_DRIFT", "history unreadable");

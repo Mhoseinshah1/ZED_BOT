@@ -1,17 +1,17 @@
 import {
   OrderStatus,
+  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_CRLF,
+  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF,
+  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_CRLF,
+  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_LF,
+  REFERRAL_AFFILIATE_MIGRATION_NAME,
   ReferralCommissionStatus,
+  evaluateReferralMigrationLineage,
   prisma,
+  resolveMigrationsDir,
   type Order,
   type Referral,
   type User,
-} from "@zedbot/database";
-import {
-  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL,
-  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110,
-  REFERRAL_AFFILIATE_MIGRATION_NAME,
-  evaluateReferralMigrationLineage,
-  resolveMigrationsDir,
 } from "@zedbot/database";
 import {
   REFERRAL_COMMISSIONS_STARTED_AT_KEY,
@@ -38,9 +38,10 @@ import { disableReferralPayouts, isReferralSystemEnabled } from "../src/services
 import { clearSettingsCache } from "../src/services/settings.service.js";
 
 // =============================================================================
-// §3/§9/§11 — dual-lineage activation. Needs a migrated database (and Redis for
-// the gate-integration block). Some tests temporarily rewrite the recorded checksum
-// / drop the unique index to construct the failure states; every one restores.
+// §3/§4/§5/§10 — dual-lineage activation. Needs a migrated database (and Redis for the
+// gate-integration block). Some tests temporarily rewrite the recorded checksum, drop the
+// unique index, or insert synthetic _prisma_migrations rows to construct the failure
+// states; every one restores.
 // =============================================================================
 
 const redisOptions = getRedisOptions();
@@ -52,22 +53,38 @@ const runTag = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 10
 
 async function setRecorded(checksum: string): Promise<void> {
   await prisma.$executeRawUnsafe(
-    `UPDATE _prisma_migrations SET checksum=$1 WHERE migration_name=$2`,
+    `UPDATE _prisma_migrations SET checksum=$1 WHERE migration_name=$2 AND rolled_back_at IS NULL`,
     checksum,
     REFERRAL_AFFILIATE_MIGRATION_NAME,
   );
 }
 async function restoreRecorded(): Promise<void> {
-  await setRecorded(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL);
+  await setRecorded(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_LF);
+}
+async function dropUniqueIndex(): Promise<void> {
+  await prisma.$executeRawUnsafe(`DROP INDEX IF EXISTS "ReferralCommission_orderId_key"`);
+}
+async function restoreUniqueIndex(): Promise<void> {
+  await prisma.$executeRawUnsafe(
+    `CREATE UNIQUE INDEX IF NOT EXISTS "ReferralCommission_orderId_key" ON "ReferralCommission"("orderId")`,
+  );
 }
 
-d("referral migration lineage evaluator (§3)", () => {
+const KNOWN_LEGACY_VARIANTS: Array<[string, string]> = [
+  ["PR110_LF", REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_LF],
+  ["ORIGINAL_CRLF", REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_CRLF],
+  ["PR110_CRLF", REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_CRLF],
+];
+
+d("referral migration lineage evaluator (§3/§4/§5)", () => {
   let seq = 0;
   afterEach(async () => {
     await restoreRecorded();
+    await restoreUniqueIndex();
   });
   afterAll(async () => {
     await restoreRecorded();
+    await restoreUniqueIndex();
     await prisma.$disconnect();
   });
 
@@ -85,51 +102,86 @@ d("referral migration lineage evaluator (§3)", () => {
   }
 
   it("the resolver finds the shipped migrations directory (never null in this repo)", () => {
-    const dir = resolveMigrationsDir();
-    expect(dir).not.toBeNull();
+    expect(resolveMigrationsDir()).not.toBeNull();
   });
 
-  it("ORIGINAL lineage → EXACT_MATCH (activation allowed, no warning)", async () => {
+  it("ORIGINAL_LF lineage → EXACT_MATCH (allowed, no warning, postconditions pass)", async () => {
     const l = await evaluateReferralMigrationLineage();
     expect(l.status).toBe("EXACT_MATCH");
     expect(l.activationAllowed).toBe(true);
     expect(l.legacyVariant).toBe(false);
-    expect(l.recordedChecksum).toBe(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL);
-  });
-
-  it("PR#110 recorded checksum + valid schema → KNOWN_COMPATIBLE_LEGACY_VARIANT", async () => {
-    await setRecorded(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110);
-    const l = await evaluateReferralMigrationLineage();
-    expect(l.status).toBe("KNOWN_COMPATIBLE_LEGACY_VARIANT");
-    expect(l.activationAllowed).toBe(true);
-    expect(l.legacyVariant).toBe(true);
+    expect(l.checksumClass).toBe("ORIGINAL_LF");
     expect(l.postconditions?.every((p) => p.ok)).toBe(true);
+    expect(l.indexVerification?.ok).toBe(true);
   });
 
-  it("an UNKNOWN recorded checksum → CHECKSUM_DRIFT (blocks)", async () => {
+  it.each(KNOWN_LEGACY_VARIANTS)(
+    "%s recorded checksum + valid schema → KNOWN_COMPATIBLE_LEGACY_VARIANT (warning)",
+    async (_name, checksum) => {
+      await setRecorded(checksum);
+      const l = await evaluateReferralMigrationLineage();
+      expect(l.status).toBe("KNOWN_COMPATIBLE_LEGACY_VARIANT");
+      expect(l.activationAllowed).toBe(true);
+      expect(l.legacyVariant).toBe(true);
+      expect(l.postconditions?.every((p) => p.ok)).toBe(true);
+    },
+  );
+
+  it("an UNKNOWN recorded checksum → CHECKSUM_DRIFT (blocks, no postconditions run)", async () => {
     await setRecorded("deadbeef".repeat(8));
     const l = await evaluateReferralMigrationLineage();
     expect(l.status).toBe("CHECKSUM_DRIFT");
     expect(l.activationAllowed).toBe(false);
+    expect(l.checksumClass).toBe("UNKNOWN");
+    // Unknown is blocked REGARDLESS of the schema — postconditions are not consulted.
+    expect(l.postconditions).toBeNull();
   });
 
-  it("known PR#110 checksum but a NON-unique index → SCHEMA_POSTCONDITION_FAILED", async () => {
-    await setRecorded(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110);
+  it("§4: EXACT_MATCH but a manually dropped unique index → SCHEMA_POSTCONDITION_FAILED (blocks)", async () => {
+    await dropUniqueIndex();
+    try {
+      const l = await evaluateReferralMigrationLineage();
+      expect(l.status).toBe("SCHEMA_POSTCONDITION_FAILED");
+      expect(l.activationAllowed).toBe(false);
+      expect(l.postconditions?.find((p) => p.key === "orderid-unique-index")?.ok).toBe(false);
+      expect(l.indexVerification?.ok).toBe(false);
+    } finally {
+      await restoreUniqueIndex();
+    }
+  });
+
+  it.each(KNOWN_LEGACY_VARIANTS)(
+    "§4: %s lineage with a broken schema → SCHEMA_POSTCONDITION_FAILED (blocks)",
+    async (_name, checksum) => {
+      await setRecorded(checksum);
+      await dropUniqueIndex();
+      try {
+        const l = await evaluateReferralMigrationLineage();
+        expect(l.status).toBe("SCHEMA_POSTCONDITION_FAILED");
+        expect(l.activationAllowed).toBe(false);
+      } finally {
+        await restoreUniqueIndex();
+      }
+    },
+  );
+
+  it("known checksum but a NON-unique index → SCHEMA_POSTCONDITION_FAILED", async () => {
+    await setRecorded(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_LF);
     try {
       await prisma.$executeRawUnsafe(`DROP INDEX "ReferralCommission_orderId_key"`);
       await prisma.$executeRawUnsafe(`CREATE INDEX "ReferralCommission_orderId_key" ON "ReferralCommission"("orderId")`);
       const l = await evaluateReferralMigrationLineage();
       expect(l.status).toBe("SCHEMA_POSTCONDITION_FAILED");
-      expect(l.activationAllowed).toBe(false);
-      expect(l.postconditions?.find((p) => p.key === "index-is-unique")?.ok).toBe(false);
+      expect(l.indexVerification?.isUnique).toBe(false);
+      expect(l.postconditions?.find((p) => p.key === "orderid-unique-index")?.ok).toBe(false);
     } finally {
-      await prisma.$executeRawUnsafe(`DROP INDEX IF EXISTS "ReferralCommission_orderId_key"`);
-      await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX "ReferralCommission_orderId_key" ON "ReferralCommission"("orderId")`);
+      await dropUniqueIndex();
+      await restoreUniqueIndex();
     }
   });
 
-  it("known PR#110 checksum but a DUPLICATE orderId → SCHEMA_POSTCONDITION_FAILED", async () => {
-    await setRecorded(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110);
+  it("known checksum but a DUPLICATE orderId → SCHEMA_POSTCONDITION_FAILED", async () => {
+    await setRecorded(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_LF);
     const { referral, referred, order } = await makeCommissionable();
     try {
       await prisma.$executeRawUnsafe(`DROP INDEX "ReferralCommission_orderId_key"`);
@@ -151,14 +203,19 @@ d("referral migration lineage evaluator (§3)", () => {
       expect(l.postconditions?.find((p) => p.key === "no-duplicate-orderid")?.ok).toBe(false);
     } finally {
       await prisma.referralCommission.deleteMany({ where: { orderId: order.id } });
-      await prisma.$executeRawUnsafe(
-        `CREATE UNIQUE INDEX IF NOT EXISTS "ReferralCommission_orderId_key" ON "ReferralCommission"("orderId")`,
-      );
+      await restoreUniqueIndex();
     }
+  });
+
+  it("§7: a provided recorded checksum is used verbatim (no second _prisma_migrations read)", async () => {
+    // Even though the DB records ORIGINAL_LF, passing a legacy checksum drives the legacy path.
+    const l = await evaluateReferralMigrationLineage(undefined, REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_CRLF);
+    expect(l.recordedChecksum).toBe(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110_CRLF);
+    expect(l.status).toBe("KNOWN_COMPATIBLE_LEGACY_VARIANT");
   });
 });
 
-dg("dual-lineage activation gate integration (§3/§9)", () => {
+dg("dual-lineage activation gate integration (§3/§4/§10)", () => {
   let redis: Redis | null = null;
   function client(): Redis {
     if (redis === null) {
@@ -189,6 +246,15 @@ dg("dual-lineage activation gate integration (§3/§9)", () => {
     });
     clearSettingsCache();
   }
+  async function clearSyntheticMigrations(): Promise<void> {
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM _prisma_migrations WHERE id LIKE 'lineage-gate-test-%'`,
+    );
+    // Any extra rows for the referral migration beyond the single real applied one.
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM _prisma_migrations WHERE id LIKE 'lineage-gate-rb-%'`,
+    );
+  }
 
   beforeEach(async () => {
     await resetSettings();
@@ -196,15 +262,19 @@ dg("dual-lineage activation gate integration (§3/§9)", () => {
   });
   afterEach(async () => {
     await restoreRecorded();
+    await restoreUniqueIndex();
+    await clearSyntheticMigrations();
   });
   afterAll(async () => {
     await restoreRecorded();
+    await restoreUniqueIndex();
+    await clearSyntheticMigrations();
     await resetSettings();
     if (redis !== null) await redis.quit().catch(() => undefined);
     await prisma.$disconnect();
   });
 
-  it("ORIGINAL lineage: activation SUCCEEDS with a HEALTHY migration history", async () => {
+  it("ORIGINAL_LF lineage: activation SUCCEEDS with a HEALTHY migration history", async () => {
     const readiness = await assessReferralActivationReadiness();
     expect(readiness.migrationHistory.status).toBe("HEALTHY");
     expect(readiness.migrationHistory.legacyWarning).toBe(false);
@@ -218,20 +288,21 @@ dg("dual-lineage activation gate integration (§3/§9)", () => {
     expect(await isReferralSystemEnabled()).toBe(true);
   });
 
-  it("PR#110 lineage: activation SUCCEEDS but flags the non-blocking legacy warning", async () => {
-    await setRecorded(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_PR110);
-    const mh = await getReferralMigrationHistory();
-    expect(mh.status).toBe("KNOWN_COMPATIBLE_LEGACY_VARIANT");
-    expect(mh.legacyWarning).toBe(true);
-    expect(mh.blocking).toBe(false);
+  it.each(KNOWN_LEGACY_VARIANTS)(
+    "%s lineage: activation SUCCEEDS but flags the non-blocking legacy warning",
+    async (_name, checksum) => {
+      await setRecorded(checksum);
+      const mh = await getReferralMigrationHistory();
+      expect(mh.status).toBe("KNOWN_COMPATIBLE_LEGACY_VARIANT");
+      expect(mh.legacyWarning).toBe(true);
+      expect(mh.blocking).toBe(false);
 
-    const result = await enableReferralPayoutsGated();
-    expect(result.status).toBe("enabled");
-    if (result.status === "enabled") {
-      expect(result.migrationHistory.legacyWarning).toBe(true);
-    }
-    expect(await isReferralSystemEnabled()).toBe(true);
-  });
+      const result = await enableReferralPayoutsGated();
+      expect(result.status).toBe("enabled");
+      if (result.status === "enabled") expect(result.migrationHistory.legacyWarning).toBe(true);
+      expect(await isReferralSystemEnabled()).toBe(true);
+    },
+  );
 
   it("UNKNOWN modified migration: activation is BLOCKED (payouts stay off)", async () => {
     await setRecorded("abc1234567".repeat(6) + "abcd"); // 64 hex, unknown
@@ -245,12 +316,48 @@ dg("dual-lineage activation gate integration (§3/§9)", () => {
     expect(await isReferralSystemEnabled()).toBe(false);
   });
 
+  it("§4: EXACT_MATCH checksum but a dropped unique index BLOCKS activation", async () => {
+    await dropUniqueIndex();
+    try {
+      const readiness = await assessReferralActivationReadiness();
+      expect(readiness.migrationHistory.status).toBe("SCHEMA_POSTCONDITION_FAILED");
+      expect(readiness.migrationHistory.blocking).toBe(true);
+      expect((await enableReferralPayoutsGated()).status).toBe("blocked");
+      expect(await isReferralSystemEnabled()).toBe(false);
+    } finally {
+      await restoreUniqueIndex();
+    }
+  });
+
+  it("§2/§10: a HISTORICAL rolled-back attempt of the referral migration does NOT block after reapply", async () => {
+    // Add an OLDER rolled-back attempt row alongside the real successful one.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO _prisma_migrations (id, checksum, migration_name, started_at, finished_at, rolled_back_at, applied_steps_count)
+       VALUES ('lineage-gate-rb-1', 'oldbadchecksum', $1, '2020-01-01T00:00:00Z', NULL, '2020-01-01T00:05:00Z', 0)`,
+      REFERRAL_AFFILIATE_MIGRATION_NAME,
+    );
+    const readiness = await assessReferralActivationReadiness();
+    expect(readiness.migrationHistory.status).toBe("HEALTHY");
+    expect(readiness.checks.find((c) => c.key === "migrations-healthy")?.ok).toBe(true);
+    expect((await enableReferralPayoutsGated()).status).toBe("enabled");
+    expect(await isReferralSystemEnabled()).toBe(true);
+  });
+
+  it("§2/§10: a CURRENTLY failed/stuck migration BLOCKS activation", async () => {
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO _prisma_migrations (id, checksum, migration_name, started_at, finished_at, rolled_back_at, applied_steps_count)
+       VALUES ('lineage-gate-test-stuck', 'stuck', '29991231000000_stuck_migration', now(), NULL, NULL, 0)`,
+    );
+    const readiness = await assessReferralActivationReadiness();
+    expect(readiness.checks.find((c) => c.key === "migrations-healthy")?.ok).toBe(false);
+    expect((await enableReferralPayoutsGated()).status).toBe("blocked");
+    expect(await isReferralSystemEnabled()).toBe(false);
+  });
+
   it("DISABLING is never gated even under an unknown migration history", async () => {
-    // Enable under the original lineage first.
     await restoreRecorded();
     await writeFreshHeartbeats();
     expect((await enableReferralPayoutsGated()).status).toBe("enabled");
-    // Now corrupt the recorded checksum — disable must still work.
     await setRecorded("f".repeat(64));
     expect(await disableReferralPayouts()).toBe(true);
     expect(await isReferralSystemEnabled()).toBe(false);
