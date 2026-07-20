@@ -270,7 +270,13 @@ jobs:
           # can never be permanently blocked by a missing migrations directory.
           docker run --rm zedbot-app sh -c 'test -d packages/database/prisma/migrations'
           docker run --rm zedbot-app sh -c 'test -f packages/database/prisma/migrations/20260719180000_referral_affiliate_commissions/migration.sql'
-          docker run --rm -e DATABASE_URL='postgresql://x:x@127.0.0.1:5432/x?schema=public' zedbot-app \
+          # Resolve @zedbot/database from apps/bot — the referral activation gate lives
+          # there (apps/bot/dist/services/referral-activation.service.js) and imports the
+          # package, so pnpm links it under apps/bot/node_modules. A bare `node -e` eval
+          # resolves specifiers relative to its cwd, so run it from the same workspace the
+          # gate resolves from (running the eval from /repo would miss the un-hoisted link).
+          # resolveMigrationsDir() uses import.meta.url, so it is independent of the cwd.
+          docker run --rm --workdir /repo/apps/bot -e DATABASE_URL='postgresql://x:x@127.0.0.1:5432/x?schema=public' zedbot-app \
             node --input-type=module -e '
               import { resolveMigrationsDir, readPrismaMigrationChecksum, REFERRAL_AFFILIATE_MIGRATION_NAME, REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL } from "@zedbot/database";
               import { join } from "node:path";
