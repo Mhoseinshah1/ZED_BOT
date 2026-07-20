@@ -297,17 +297,16 @@ d("referral review blockers", () => {
     expect(q2.added.some((j) => j.data.orderId === belowMin.id)).toBe(false);
   });
 
-  // --- B8: migration preflight ordering -------------------------------------
+  // --- B8: migration restored to immutable original; preflight is separate ----
 
-  it("B8: the duplicate preflight runs BEFORE the unique-index creation in one migration", () => {
+  it("B8: the applied migration is restored to its original (no in-migration preflight)", () => {
+    // §4 reverses the PR #110 approach: the duplicate check must NOT live inside the
+    // already-applied migration (an immutable file). The migration is restored to its
+    // PR #108 original — it still creates the unique index but carries no DO $$/RAISE
+    // preflight. The duplicate check now runs as a SEPARATE deployment step.
     const sql = readFileSync(GUARD_INDEX_MIGRATION, "utf8");
-    const raiseIdx = sql.indexOf("RAISE EXCEPTION");
-    // Match the actual DDL (not the explanatory comment) — the create statement.
-    const createIdx = sql.indexOf('CREATE UNIQUE INDEX "ReferralCommission_orderId_key"');
-    expect(raiseIdx).toBeGreaterThanOrEqual(0);
-    expect(createIdx).toBeGreaterThanOrEqual(0);
-    // The RAISE (preflight) must appear BEFORE the unique-index creation.
-    expect(raiseIdx).toBeLessThan(createIdx);
-    expect(sql).toMatch(/HAVING count\(\*\) > 1/);
+    expect(sql).toContain('CREATE UNIQUE INDEX "ReferralCommission_orderId_key"');
+    expect(sql).not.toMatch(/RAISE EXCEPTION/);
+    expect(sql).not.toMatch(/DO \$\$/);
   });
 });

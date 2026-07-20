@@ -15,7 +15,8 @@ import {
   closeReferralPayoutWindow,
   errorMessage,
   openReferralPayoutWindow,
-  parseReferralPayoutWindows,
+  parseReferralPayoutWindowsStrict,
+  referralCorrelationHash,
   type ReferralConfig,
   type ReferralPayoutWindow,
 } from "@zedbot/shared";
@@ -108,13 +109,16 @@ export async function applyReferralIfEligible(user: User, payload: string): Prom
       });
     } catch (err) {
       if (err instanceof ReferralAttributionMismatchError) {
-        logger.warn("referral attribution mismatch — kept existing attribution", { referredUserId: user.id });
+        // PII-safe: a non-reversible correlation token, never the raw user id.
+        logger.warn("referral attribution mismatch — kept existing attribution", {
+          corr: referralCorrelationHash(user.id),
+        });
         return;
       }
       throw err;
     }
     if (linked) {
-      logger.info("referral applied", { referredUserId: user.id, referrerUserId: referrer.id });
+      logger.info("referral applied", { corr: referralCorrelationHash(user.id) });
     }
   } catch (err) {
     logger.warn("referral parsing failed, /start continues", { error: errorMessage(err) });
@@ -150,16 +154,26 @@ export async function getReferralCommissionsStartedAt(): Promise<Date | null> {
  * until the first explicit toggle materialises real windows.
  */
 export async function getReferralPayoutWindows(): Promise<ReferralPayoutWindow[]> {
-  const parsed = parseReferralPayoutWindows(await getSetting(REFERRAL_PAYOUT_WINDOWS_KEY, ""));
-  if (parsed.length > 0) {
-    return parsed;
+  const parsed = parseReferralPayoutWindowsStrict(await getSetting(REFERRAL_PAYOUT_WINDOWS_KEY, ""));
+  if (!parsed.valid) {
+    // Corrupt / malformed windows → FAIL CLOSED. NEVER synthesise an open window
+    // from the horizon on top of an untrustworthy store (that would reopen payouts
+    // and back-fill paused-period orders). Use only the trustworthy subset (often []).
+    logger.warn("referral payout windows failed integrity check — failing closed", {
+      issues: parsed.issues,
+    });
+    return parsed.windows;
+  }
+  if (parsed.windows.length > 0) {
+    return parsed.windows;
   }
   const horizon = await getReferralCommissionsStartedAt();
   return horizon === null ? [] : [{ from: horizon.toISOString(), to: null }];
 }
 
 /** Reads the current window list inside a transaction (no cache), with the same
- *  horizon-synthesis fallback as getReferralPayoutWindows. */
+ *  horizon-synthesis fallback as getReferralPayoutWindows. Fail-closed: a corrupt
+ *  store never synthesises an open window. */
 async function readWindowsTx(
   tx: Prisma.TransactionClient,
 ): Promise<ReferralPayoutWindow[]> {
@@ -167,9 +181,12 @@ async function readWindowsTx(
     tx.setting.findUnique({ where: { key: REFERRAL_PAYOUT_WINDOWS_KEY }, select: { value: true } }),
     tx.setting.findUnique({ where: { key: REFERRAL_COMMISSIONS_STARTED_AT_KEY }, select: { value: true } }),
   ]);
-  const parsed = parseReferralPayoutWindows(winRow?.value ?? null);
-  if (parsed.length > 0) {
-    return parsed;
+  const parsed = parseReferralPayoutWindowsStrict(winRow?.value ?? null);
+  if (!parsed.valid) {
+    return parsed.windows; // fail closed — never synthesise from horizon on corruption
+  }
+  if (parsed.windows.length > 0) {
+    return parsed.windows;
   }
   return horizonRow === null ? [] : [{ from: horizonRow.value, to: null }];
 }
@@ -186,13 +203,12 @@ export async function enableReferralPayouts(
   const nowIso = now.toISOString();
   const result = await prisma.$transaction(async (tx) => {
     // Horizon: create-if-absent (never overwritten) — the earliest active instant.
-    await tx.setting.upsert({
+    // `upsert` already returns the row (created or pre-existing), so there is no
+    // need for a second findUnique roundtrip.
+    const horizonRow = await tx.setting.upsert({
       where: { key: REFERRAL_COMMISSIONS_STARTED_AT_KEY },
       create: { key: REFERRAL_COMMISSIONS_STARTED_AT_KEY, value: nowIso, type: "STRING" },
       update: {},
-    });
-    const horizonRow = await tx.setting.findUnique({
-      where: { key: REFERRAL_COMMISSIONS_STARTED_AT_KEY },
       select: { value: true },
     });
     const enabledRow = await tx.setting.findUnique({
@@ -212,7 +228,7 @@ export async function enableReferralPayouts(
       create: { key: REFERRAL_SYSTEM_ENABLED_KEY, value: "true", type: "BOOLEAN" },
       update: { value: "true", type: "BOOLEAN" },
     });
-    return { flipped: !wasEnabled, startedAt: horizonRow?.value ?? nowIso };
+    return { flipped: !wasEnabled, startedAt: horizonRow.value };
   });
   clearSettingsCache();
   return { flipped: result.flipped, startedAt: new Date(result.startedAt) };

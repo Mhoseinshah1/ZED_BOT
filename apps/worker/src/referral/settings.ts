@@ -4,9 +4,12 @@ import {
   REFERRAL_FIRST_PURCHASE_ONLY_KEY,
   REFERRAL_PAYOUT_WINDOWS_KEY,
   REFERRAL_SYSTEM_ENABLED_KEY,
-  parseReferralPayoutWindows,
+  createLogger,
+  parseReferralPayoutWindowsStrict,
   type ReferralPayoutWindow,
 } from "@zedbot/shared";
+
+const log = createLogger("worker:referral-settings");
 
 // =============================================================================
 // Referral SETTINGS reader (worker side). Reads the SAME Setting rows the bot
@@ -59,9 +62,17 @@ export async function getReferralCommissionsStartedAt(): Promise<Date | null> {
  * horizon, preserving the old "all post-horizon eligible" behaviour.
  */
 export async function getReferralPayoutWindows(): Promise<ReferralPayoutWindow[]> {
-  const parsed = parseReferralPayoutWindows(await settingValue(REFERRAL_PAYOUT_WINDOWS_KEY));
-  if (parsed.length > 0) {
-    return parsed;
+  const parsed = parseReferralPayoutWindowsStrict(await settingValue(REFERRAL_PAYOUT_WINDOWS_KEY));
+  if (!parsed.valid) {
+    // Corrupt / malformed windows → FAIL CLOSED. The scan credits nothing rather
+    // than fall back to a synthesised open window (which would back-fill orders).
+    log.warn("referral payout windows failed integrity check — scan fails closed", {
+      issues: parsed.issues,
+    });
+    return parsed.windows;
+  }
+  if (parsed.windows.length > 0) {
+    return parsed.windows;
   }
   const horizon = await getReferralCommissionsStartedAt();
   return horizon === null ? [] : [{ from: horizon.toISOString(), to: null }];

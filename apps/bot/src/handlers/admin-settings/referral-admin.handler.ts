@@ -3,10 +3,13 @@ import { Composer, InlineKeyboard } from "grammy";
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
+import {
+  enableReferralPayoutsGated,
+  type ReferralActivationReadiness,
+} from "../../services/referral-activation.service.js";
 import { enqueueReferralReconcileNow, readReferralWorkerStatus } from "../../services/ops-queue.service.js";
 import {
   disableReferralPayouts,
-  enableReferralPayouts,
   getReferralAdminStats,
   setReferralCommissionPercent,
   setReferralFirstPurchaseOnly,
@@ -131,22 +134,48 @@ referralAdminHandler.callbackQuery(REF_ADMIN_CB.root, async (ctx) => {
   ctx.session.lastMenu = REF_ADMIN_CB.root;
 });
 
+/** Renders the failing activation-integrity checks when enable is BLOCKED. */
+function activationBlockedText(readiness: ReferralActivationReadiness): string {
+  const lines = [
+    "⛔ <b>فعال‌سازی پاداش مسدود شد</b>",
+    "",
+    "پیش از فعال‌سازی، همهٔ بررسی‌های یکپارچگی باید سبز باشند:",
+    "",
+    ...readiness.checks.map((c) => `${c.ok ? "✅" : "⛔"} ${c.label}${c.ok || c.detail === null ? "" : ` — ${c.detail}`}`),
+    "",
+    "پس از رفع موارد بالا دوباره تلاش کنید. (غیرفعال‌سازی همیشه در دسترس است.)",
+  ];
+  return lines.join("\n");
+}
+
 referralAdminHandler.callbackQuery(REF_ADMIN_CB.enable, async (ctx) => {
   if (!(await ownerGuard(ctx))) return;
-  // Stamps the activation horizon exactly once (preserved across re-enables), so
-  // only orders completed at/after this instant ever earn a commission.
-  const { flipped } = await enableReferralPayouts();
-  if (flipped) {
-    logger.info("referral system enabled", { adminId: ctx.admin?.id });
+  // ACTIVATION INTEGRITY GATE: enable only when the system is provably healthy
+  // end-to-end. When it passes, the horizon + payout window + master switch flip
+  // atomically in one transaction; when it fails, nothing changes and the OWNER
+  // sees exactly which checks blocked activation.
+  const result = await enableReferralPayoutsGated();
+  if (result.status === "blocked") {
+    await safeAnswerCallback(ctx, "فعال‌سازی مسدود شد — بررسی یکپارچگی ناموفق بود.");
+    await safeEditOrReply(
+      ctx,
+      activationBlockedText(result.readiness),
+      new InlineKeyboard().text("بازگشت 🔙", REF_ADMIN_CB.root),
+      { parseMode: "HTML" },
+    );
+    return;
   }
-  await renderOverview(ctx, flipped ? "پاداش زیرمجموعه‌گیری فعال شد ✅" : "پاداش از قبل فعال است.");
+  if (result.flipped) {
+    logger.info("referral system enabled");
+  }
+  await renderOverview(ctx, result.flipped ? "پاداش زیرمجموعه‌گیری فعال شد ✅" : "پاداش از قبل فعال است.");
 });
 
 referralAdminHandler.callbackQuery(REF_ADMIN_CB.disable, async (ctx) => {
   if (!(await ownerGuard(ctx))) return;
   const flipped = await disableReferralPayouts();
   if (flipped) {
-    logger.info("referral system disabled", { adminId: ctx.admin?.id });
+    logger.info("referral system disabled");
   }
   await renderOverview(ctx, flipped ? "پاداش زیرمجموعه‌گیری غیرفعال شد." : "پاداش از قبل غیرفعال است.");
 });

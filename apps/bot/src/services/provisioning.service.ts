@@ -14,7 +14,7 @@ import {
   type User,
 } from "@zedbot/database";
 import { type CreateServiceAccountResult } from "@zedbot/panel-adapters";
-import { errorMessage } from "@zedbot/shared";
+import { errorMessage, referralCorrelationHash } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
@@ -209,7 +209,7 @@ export async function failOrderWithRefund(
   // call site. A no-op for the common pre-completion failure (no commission).
   if (refunded) {
     void enqueueReferralReverse(order.id).catch((err) => {
-      logger.warn("referral commission reversal enqueue skipped", { orderId: order.id, error: errorMessage(err) });
+      logger.warn("referral commission reversal enqueue skipped", { corr: referralCorrelationHash(order.id), error: errorMessage(err) });
     });
   }
   return refunded;
