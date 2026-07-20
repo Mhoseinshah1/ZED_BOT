@@ -54,6 +54,21 @@ const isSuccessful = (a: MigrationAttempt): boolean => a.finishedAt !== null && 
 const isRolledBack = (a: MigrationAttempt): boolean => a.rolledBackAt !== null;
 const isStuck = (a: MigrationAttempt): boolean => a.finishedAt === null && a.rolledBackAt === null;
 
+/**
+ * The most-recently STARTED successful attempt (finished, not rolled back) among an
+ * attempt array, or null. Order-independent — the single source of truth for "latest
+ * success ever" that both the deployment-state helper and the ordinary-immutability check
+ * consume. NOTE: a later rollback may still supersede it; use it only after confirming the
+ * migration is APPLIED (see classifyMigrationAttempt).
+ */
+export function getLatestSuccessfulAttempt(attempts: readonly MigrationAttempt[]): MigrationAttempt | null {
+  let latest: MigrationAttempt | null = null;
+  for (const a of attempts) {
+    if (isSuccessful(a) && (latest === null || a.startedAt > latest.startedAt)) latest = a;
+  }
+  return latest;
+}
+
 /** The single most-recently STARTED attempt for a migration (any outcome), or null. */
 export async function readLatestMigrationAttempt(name: string): Promise<MigrationAttempt | null> {
   const rows = await prisma.$queryRaw<RawAttemptRow[]>`

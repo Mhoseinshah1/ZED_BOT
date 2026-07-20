@@ -3,8 +3,8 @@ import { resolve as resolvePath } from "node:path";
 
 import {
   classifyMigrationAttempt,
+  getLatestSuccessfulAttempt,
   readAllMigrationAttempts,
-  type MigrationAttempt,
   type MigrationAttemptStatus,
 } from "./migration-attempts.js";
 import { resolveMigrationsDir } from "./migration-lineage.js";
@@ -33,7 +33,7 @@ export interface MigrationDeploymentEntry {
 
 export interface MigrationDeploymentState {
   ready: boolean;
-  /** Number of migration directories shipped on disk. */
+  /** Number of complete migration directories shipped on disk (have migration.sql). */
   onDiskCount: number;
   /** Number of migrations currently APPLIED. */
   appliedCount: number;
@@ -45,26 +45,33 @@ export interface MigrationDeploymentState {
   rolledBackNotReapplied: string[];
   /** Migrations APPLIED in the DB whose migration file is absent on disk. */
   missingFile: string[];
+  /** Shipped migration directories that exist but are missing migration.sql (partial/corrupt). */
+  incompleteOnDisk: string[];
   /** First blocking reason (id-free machine string), null when ready. */
   blocker: string | null;
   /** Per-migration detail in deterministic name order (counts/names only). */
   entries: MigrationDeploymentEntry[];
 }
 
-/** Lists the migration directory names shipped on disk (deterministic sort). */
-function listOnDiskMigrations(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true })
-    .filter((e) => e.isDirectory() && existsSync(resolvePath(dir, e.name, "migration.sql")))
-    .map((e) => e.name)
-    .sort();
-}
+/** A Prisma migration directory is named `<14-digit timestamp>_<slug>`. */
+const MIGRATION_DIR_NAME = /^\d{14}_/;
 
-function latestSuccessfulChecksum(attempts: readonly MigrationAttempt[]): string | null {
-  let latest: MigrationAttempt | null = null;
-  for (const a of attempts) {
-    if (a.finishedAt !== null && a.rolledBackAt === null && (latest === null || a.startedAt > latest.startedAt)) latest = a;
+/**
+ * Enumerates the shipped migration directories, split by whether `migration.sql` is present.
+ * A directory that looks like a migration (Prisma timestamp-prefixed name) but is missing its
+ * `migration.sql` is a partial/corrupt shipped artifact — it is surfaced as `incomplete` (a
+ * blocking state) instead of being silently dropped, so an incomplete deployment can never read
+ * as ready. Both lists are deterministically sorted.
+ */
+function listOnDiskMigrations(dir: string): { complete: string[]; incomplete: string[] } {
+  const complete: string[] = [];
+  const incomplete: string[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (!e.isDirectory() || !MIGRATION_DIR_NAME.test(e.name)) continue;
+    if (existsSync(resolvePath(dir, e.name, "migration.sql"))) complete.push(e.name);
+    else incomplete.push(e.name);
   }
-  return latest?.checksum ?? null;
+  return { complete: complete.sort(), incomplete: incomplete.sort() };
 }
 
 /**
@@ -84,13 +91,14 @@ export async function evaluateMigrationDeploymentState(
     currentlyFailed: [],
     rolledBackNotReapplied: [],
     missingFile: [],
+    incompleteOnDisk: [],
     blocker,
     entries: [],
   });
 
   if (migrationsDir === null) return empty("migrations-dir-missing");
 
-  const onDiskNames = listOnDiskMigrations(migrationsDir);
+  const { complete: onDiskNames, incomplete: incompleteOnDisk } = listOnDiskMigrations(migrationsDir);
   const onDiskSet = new Set(onDiskNames);
   const attemptsByName = await readAllMigrationAttempts();
 
@@ -107,7 +115,7 @@ export async function evaluateMigrationDeploymentState(
     const attempts = attemptsByName.get(name) ?? [];
     const onDisk = onDiskSet.has(name);
     const state = classifyMigrationAttempt(attempts);
-    const currentChecksum = state === "APPLIED" ? latestSuccessfulChecksum(attempts) : null;
+    const currentChecksum = state === "APPLIED" ? (getLatestSuccessfulAttempt(attempts)?.checksum ?? null) : null;
     entries.push({ migrationName: name, onDisk, state, currentChecksum });
 
     switch (state) {
@@ -128,7 +136,10 @@ export async function evaluateMigrationDeploymentState(
   }
 
   let blocker: string | null = null;
-  if (onDiskNames.length === 0) blocker = "no-migrations-on-disk";
+  // A shipped-but-incomplete migration directory (no migration.sql) is a corrupt deployment
+  // artifact — surface it first so it can never be silently dropped into a "ready" verdict.
+  if (incompleteOnDisk.length > 0) blocker = `incomplete-on-disk:${incompleteOnDisk[0]}`;
+  else if (onDiskNames.length === 0) blocker = "no-migrations-on-disk";
   else if (pending.length > 0) blocker = `pending:${pending[0]}`;
   else if (currentlyFailed.length > 0) blocker = `currently-failed:${currentlyFailed[0]}`;
   else if (rolledBackNotReapplied.length > 0) blocker = `rolled-back-not-reapplied:${rolledBackNotReapplied[0]}`;
@@ -142,6 +153,7 @@ export async function evaluateMigrationDeploymentState(
     currentlyFailed,
     rolledBackNotReapplied,
     missingFile,
+    incompleteOnDisk,
     blocker,
     entries,
   };

@@ -13,9 +13,9 @@ import {
 } from "./migration-checksum.js";
 import {
   classifyMigrationAttempt,
+  getLatestSuccessfulAttempt,
   readAllMigrationAttempts,
   readMigrationAttemptState,
-  type MigrationAttempt,
 } from "./migration-attempts.js";
 
 // =============================================================================
@@ -453,7 +453,7 @@ export async function checkOrdinaryMigrationsImmutable(
   for (const [name, attempts] of [...attemptsByName.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     if (name === REFERRAL_AFFILIATE_MIGRATION_NAME) continue; // referral → lineage
     if (classifyMigrationAttempt(attempts) !== "APPLIED") continue; // non-applied → deployment state
-    const currentChecksum = currentAppliedChecksum(attempts);
+    const currentChecksum = getLatestSuccessfulAttempt(attempts)?.checksum ?? null;
     const file = resolvePath(migrationsDir, name, "migration.sql");
     if (!existsSync(file)) {
       return { ok: false, checked, driftedMigration: null, missingMigration: name, detail: `missing file for ${name}` };
@@ -464,13 +464,4 @@ export async function checkOrdinaryMigrationsImmutable(
     checked += 1;
   }
   return { ok: true, checked, driftedMigration: null, missingMigration: null, detail: "all ordinary applied migrations immutable" };
-}
-
-/** The latest successful attempt's checksum among a migration's attempts (or null). */
-function currentAppliedChecksum(attempts: readonly MigrationAttempt[]): string | null {
-  let latest: MigrationAttempt | null = null;
-  for (const a of attempts) {
-    if (a.finishedAt !== null && a.rolledBackAt === null && (latest === null || a.startedAt > latest.startedAt)) latest = a;
-  }
-  return latest?.checksum ?? null;
 }

@@ -135,6 +135,18 @@ d("migration deployment state — on-disk vs database (§2/§5)", () => {
     expect(entry?.onDisk).toBe(true);
   });
 
+  it("a shipped migration directory MISSING migration.sql → BLOCKS (incomplete-on-disk, never silently dropped)", async () => {
+    const dir = tmp();
+    const name = "29991231000000_partial_no_sql";
+    mkdirSync(join(dir, name), { recursive: true }); // directory exists, but NO migration.sql inside
+    const dep = await evaluateMigrationDeploymentState(dir);
+    expect(dep.ready).toBe(false);
+    expect(dep.incompleteOnDisk).toContain(name);
+    expect(dep.blocker).toBe(`incomplete-on-disk:${name}`);
+    // It must NOT be counted as a usable on-disk migration.
+    expect(dep.onDiskCount).toBe(dep.appliedCount);
+  });
+
   it("a currently-stuck (unfinished, not rolled back) migration → BLOCKS (currently-failed)", async () => {
     await insertAttempt("deploy-test-stuck", "29991231000000_currently_stuck", { finished: false, rolledBack: false });
     const dep = await evaluateMigrationDeploymentState(tmp());

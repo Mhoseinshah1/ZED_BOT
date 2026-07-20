@@ -102,6 +102,7 @@ export async function printReferralMigrationLineageStatus(
   out(`  currently failed/stuck:                ${deployment.currentlyFailed.length}${deployment.currentlyFailed.length ? ` [${deployment.currentlyFailed.join(", ")}]` : ""}`);
   out(`  rolled back (not reapplied):           ${deployment.rolledBackNotReapplied.length}${deployment.rolledBackNotReapplied.length ? ` [${deployment.rolledBackNotReapplied.join(", ")}]` : ""}`);
   out(`  applied but file missing:              ${deployment.missingFile.length}${deployment.missingFile.length ? ` [${deployment.missingFile.join(", ")}]` : ""}`);
+  out(`  shipped but incomplete (no SQL):       ${deployment.incompleteOnDisk.length}${deployment.incompleteOnDisk.length ? ` [${deployment.incompleteOnDisk.join(", ")}]` : ""}`);
   out(`  historical rolled-back attempts (referral): ${attemptState.rolledBackCount}`);
   out(`  deployment ready: ${deployment.ready ? "YES" : `NO (${deployment.blocker})`}`);
 
