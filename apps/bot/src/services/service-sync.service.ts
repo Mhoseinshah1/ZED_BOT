@@ -216,6 +216,7 @@ export async function syncServiceFromPanel(
 async function readServiceAccountAndSyncUnlocked(
   serviceId: string,
   userId: string,
+  persist = true,
 ): Promise<PanelReadOutcome> {
   const service = await prisma.service.findFirst({
     where: {
@@ -289,6 +290,20 @@ async function readServiceAccountAndSyncUnlocked(
       panelType: panel.type,
       account: result,
       diagnosticCode: code,
+    };
+  }
+
+  // Read-only mode (the OWNER preview): the account was read live, but the row
+  // is NOT written — the preview promises to change nothing. Callers still get
+  // the live `account` for the report; evidence stays LIVE_PANEL.
+  if (!persist) {
+    return {
+      kind: "read-ok",
+      service: serviceRow,
+      panelId: panel.id,
+      panelType: panel.type,
+      account: result,
+      diagnosticCode: null,
     };
   }
 
@@ -381,6 +396,7 @@ async function syncServiceFromPanelUnlocked(
 export async function readServiceForDiagnostics(
   serviceId: string,
   userId: string,
+  opts: { persist?: boolean } = {},
 ): Promise<PanelReadOutcome> {
   const acquisition = await acquireServiceLock(serviceOperationLockKey(serviceId));
   if (!acquisition.ok) {
@@ -394,7 +410,7 @@ export async function readServiceForDiagnostics(
     };
   }
   try {
-    return await readServiceAccountAndSyncUnlocked(serviceId, userId);
+    return await readServiceAccountAndSyncUnlocked(serviceId, userId, opts.persist ?? true);
   } finally {
     await acquisition.lock.release();
   }

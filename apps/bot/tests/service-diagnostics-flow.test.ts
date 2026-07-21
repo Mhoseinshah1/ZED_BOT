@@ -6,6 +6,12 @@ import {
 } from "@zedbot/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+// encryptSecret (used to seed the test panel's credentials) reads APP_SECRET at
+// call time; CI does not export it for the bot test process, so set a local
+// fallback here (same pattern as service-live-sync.test.ts) — never overriding a
+// real one.
+process.env.APP_SECRET ??= "service-diagnostics-tests-secret-1";
+
 // One controllable panel read: the mocked adapter records every call so tests can
 // assert AT MOST ONE authenticated read per diagnosis and control its outcome.
 const panelState = vi.hoisted(() => ({ account: { ok: false } as Record<string, unknown>, reads: 0 }));
@@ -207,6 +213,19 @@ d("service-diagnostics: one panel read + evidence policy", () => {
     expect(run.report.overall).toBe("NEEDS_SUPPORT");
     const after = await prisma.service.findUniqueOrThrow({ where: { id: service.id } });
     expect(after.usedBytes).toBe(before.usedBytes);
+  });
+
+  it("the OWNER read-only preview (persist:false) reads live but NEVER writes the row", async () => {
+    const before = await prisma.service.findUniqueOrThrow({ where: { id: service.id } });
+    // A DIFFERENT usage than the stored row, so a persisted write would be visible.
+    panelState.account = { ok: true, status: "active", usedBytes: 7n * GIB, totalBytes: 10n * GIB, remainingBytes: 3n * GIB };
+    const run = await runServiceDiagnostics(service, owner.id, { persist: false });
+    expect(run.report.evidenceSource).toBe("LIVE_PANEL"); // still a live read
+    const after = await prisma.service.findUniqueOrThrow({ where: { id: service.id } });
+    expect(after.usedBytes).toBe(before.usedBytes); // row untouched
+    expect(after.lastSubscriptionUpdateAt?.getTime() ?? 0).toBe(
+      before.lastSubscriptionUpdateAt?.getTime() ?? 0,
+    );
   });
 });
 

@@ -237,8 +237,9 @@ event summary, and a read-only **preview** by service short id.
   money and changes no Service; disabling deletes no data.
 - Cooldown / recent-connection: preset buttons + per-setting reset to default.
 - Preview: an admin-authorized (any owner) read-only diagnosis of an entered
-  service short id. It clearly says it is a preview, creates **no** ticket, and
-  moves no money / mutates no panel beyond the existing safe row sync.
+  service short id. It runs the one bounded panel read with **`persist: false`**,
+  so the customer's Service row is never written; it clearly says it is a
+  preview, creates **no** ticket, and moves no money / mutates no panel.
 
 Settings keys (typed contract in `packages/shared/src/service-diagnostics.ts`):
 `service_diagnostics_enabled`, `service_diagnostics_cooldown_seconds`,

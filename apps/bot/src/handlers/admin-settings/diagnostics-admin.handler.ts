@@ -219,9 +219,11 @@ diagnosticsAdminTextHandler.on("message:text", async (ctx, next) => {
     await safeReply(ctx, NOT_FOUND, new InlineKeyboard().text("بازگشت", DIAG_ADMIN_CB.root));
     return;
   }
-  // Read-only preview: one bounded panel read scoped to the service's OWNER; the
-  // report is rendered without any user action button and never becomes a ticket.
-  const run = await runServiceDiagnostics(service, service.userId);
+  // Read-only preview: one bounded panel read scoped to the service's OWNER, with
+  // persist:false so the customer's Service row is NEVER written (the page
+  // promises to change nothing). The report is rendered without any user action
+  // button and never becomes a ticket.
+  const run = await runServiceDiagnostics(service, service.userId, { persist: false });
   const lines = [
     "پیش‌نمایش عیب‌یابی (فقط برای مالک) 👁",
     // Raw username — the whole assembled string is escaped ONCE below.

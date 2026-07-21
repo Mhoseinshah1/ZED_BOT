@@ -545,6 +545,7 @@ export interface DiagnosticRun {
 export async function runServiceDiagnostics(
   service: Service,
   userId: string,
+  opts: { persist?: boolean } = {},
 ): Promise<DiagnosticRun> {
   const startedAt = Date.now();
   // A transient DB hiccup while loading the panel must NOT throw out of a
@@ -583,7 +584,7 @@ export async function runServiceDiagnostics(
         timer = setTimeout(() => resolve("diag-timeout"), diagnosticsReadTimeoutMs());
       });
       const raced = await Promise.race([
-        readServiceForDiagnostics(service.id, userId),
+        readServiceForDiagnostics(service.id, userId, { persist: opts.persist ?? true }),
         budget,
       ]).finally(() => clearTimeout(timer));
 
