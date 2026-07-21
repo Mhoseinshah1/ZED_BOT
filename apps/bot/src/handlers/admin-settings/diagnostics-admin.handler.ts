@@ -98,7 +98,9 @@ async function renderLanding(ctx: BotContext): Promise<void> {
     `• عدم دسترسی به پنل: ${counts[DIAGNOSTIC_EVENTS.LIVE_READ_UNAVAILABLE] ?? 0}`,
     `• ارجاع به پشتیبانی: ${counts[DIAGNOSTIC_EVENTS.SUPPORT_HANDOFF] ?? 0}`,
     "",
-    escapeHtml(limitations),
+    // Raw here — the whole assembled string is escaped ONCE below (escaping the
+    // limitations copy here too would double-escape its entities).
+    limitations,
   ];
   const text = clampEscapedText(escapeHtml(lines.join("\n")));
 
@@ -222,7 +224,8 @@ diagnosticsAdminTextHandler.on("message:text", async (ctx, next) => {
   const run = await runServiceDiagnostics(service, service.userId);
   const lines = [
     "پیش‌نمایش عیب‌یابی (فقط برای مالک) 👁",
-    `سرویس: ${escapeHtml(service.username)}`,
+    // Raw username — the whole assembled string is escaped ONCE below.
+    `سرویس: ${service.username}`,
     "",
     `نتیجه کلی: ${diagnosticOverallLabel(run.report.overall)}`,
     `منبع اطلاعات: ${diagnosticEvidenceLabel(run.report.evidenceSource)}`,

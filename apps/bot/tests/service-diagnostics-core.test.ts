@@ -256,6 +256,13 @@ describe("service-diagnostics: QUOTA", () => {
     expect(codeOf(checks, "QUOTA")).toBe(c.QUOTA_UNKNOWN);
   });
 
+  it("finite total but omitted remaining stays UNKNOWN, never a reassuring PASS", () => {
+    const { checks } = evaluateDiagnosticChecks(
+      evidence({ read: readOk({ ok: true, totalBytes: 10n * GIB }) }),
+    );
+    expect(codeOf(checks, "QUOTA")).toBe(c.QUOTA_UNKNOWN);
+  });
+
   it("stored volumeBytes 0 (unlimited convention) is not exhausted", () => {
     const { checks } = evaluateDiagnosticChecks(
       evidence({ read: null, readSupported: false, service: svc({ volumeBytes: 0n, remainingBytes: 0n }) }),

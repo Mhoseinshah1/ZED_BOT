@@ -84,6 +84,8 @@ export type PanelReadKind =
 export interface PanelReadOutcome {
   kind: PanelReadKind;
   service: Service | null;
+  /** Panel id for ops logs; null on service-missing / lock failure. */
+  panelId: string | null;
   /** Panel type snapshot (marzban/xui) for safe logs; null on service-missing. */
   panelType: string | null;
   /** Normalized panel result when a read was attempted; null otherwise. */
@@ -228,6 +230,7 @@ async function readServiceAccountAndSyncUnlocked(
     return {
       kind: "service-missing",
       service: null,
+      panelId: null,
       panelType: null,
       account: null,
       diagnosticCode: null,
@@ -239,6 +242,7 @@ async function readServiceAccountAndSyncUnlocked(
     return {
       kind: "panel-inactive",
       service: serviceRow,
+      panelId: panel.id,
       panelType: panel.type,
       account: null,
       diagnosticCode: null,
@@ -281,6 +285,7 @@ async function readServiceAccountAndSyncUnlocked(
     return {
       kind,
       service: serviceRow,
+      panelId: panel.id,
       panelType: panel.type,
       account: result,
       diagnosticCode: code,
@@ -295,6 +300,7 @@ async function readServiceAccountAndSyncUnlocked(
   return {
     kind: "read-ok",
     service: updated,
+    panelId: panel.id,
     panelType: panel.type,
     account: result,
     diagnosticCode: null,
@@ -344,6 +350,7 @@ async function syncServiceFromPanelUnlocked(
           eventType: OPS_EVENTS.PANEL_CONNECTION_FAILED,
           message: "panel connection failed during service sync",
           metadata: {
+            panelId: outcome.panelId ?? "unknown",
             panelType: outcome.panelType ?? "unknown",
             code: outcome.diagnosticCode ?? "unknown",
           },
@@ -380,6 +387,7 @@ export async function readServiceForDiagnostics(
     return {
       kind: "read-error",
       service: null,
+      panelId: null,
       panelType: null,
       account: null,
       diagnosticCode: acquisition.reason === "contended" ? "locked" : "lock-unavailable",

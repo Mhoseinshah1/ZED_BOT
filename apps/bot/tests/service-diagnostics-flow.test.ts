@@ -101,6 +101,10 @@ afterAll(async () => {
   if (!hasDb || !hasRedis) {
     return;
   }
+  // Restore the DB-wide master switch to its default (off) so this file never
+  // leaks an enabled diagnostics flag into other test files sharing the DB.
+  await setSetting(SERVICE_DIAGNOSTICS_ENABLED_KEY, "false", "BOOLEAN").catch(() => undefined);
+  clearSettingsCache();
   await clearCooldown(serviceDiagnosticsCooldownKey(owner.id, service.id)).catch(() => undefined);
 });
 

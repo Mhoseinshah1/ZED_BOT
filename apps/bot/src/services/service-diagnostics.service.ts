@@ -11,6 +11,7 @@ import {
   type ServiceDiagnosticCheckStatus,
   type ServiceDiagnosticOverall,
   type ServiceDiagnosticReport,
+  SERVICE_DIAGNOSTICS_RECENT_CONNECTION_DEFAULT,
   worstOverall,
 } from "@zedbot/shared";
 
@@ -173,11 +174,17 @@ function evaluateQuota(ev: DiagnosticEvidence): DiagnosticCheckResult {
     if (account.totalBytes === null) {
       return { key: "QUOTA", status: "INFO", code: c.QUOTA_UNLIMITED, contributes: "HEALTHY" };
     }
-    const remaining = account.remainingBytes ?? null;
-    if (remaining !== null && remaining <= 0n) {
+    // Finite total but the panel omitted remaining — the fields are independently
+    // optional, and the contract keeps missing fields UNKNOWN (never a reassuring
+    // PASS) rather than guessing the remaining quota.
+    if (account.remainingBytes === undefined || account.remainingBytes === null) {
+      return { key: "QUOTA", status: "UNKNOWN", code: c.QUOTA_UNKNOWN, contributes: "HEALTHY" };
+    }
+    const remaining = account.remainingBytes;
+    if (remaining <= 0n) {
       return { key: "QUOTA", status: "FAIL", code: c.QUOTA_EXHAUSTED, contributes: "ACTION_REQUIRED" };
     }
-    if (remaining !== null && isLowQuota(remaining, account.totalBytes)) {
+    if (isLowQuota(remaining, account.totalBytes)) {
       return { key: "QUOTA", status: "WARNING", code: c.QUOTA_LOW, contributes: "HEALTHY" };
     }
     return { key: "QUOTA", status: "PASS", code: c.QUOTA_OK, contributes: "HEALTHY" };
@@ -540,10 +547,19 @@ export async function runServiceDiagnostics(
   userId: string,
 ): Promise<DiagnosticRun> {
   const startedAt = Date.now();
-  const [panel, recentConnectionHours] = await Promise.all([
-    prisma.panel.findUnique({ where: { id: service.panelId } }),
-    diagnosticsRecentConnectionHours(),
-  ]);
+  // A transient DB hiccup while loading the panel must NOT throw out of a
+  // diagnosis (the handler renders a report, never a crash) — degrade to a
+  // stored-only report with no panel.
+  let panel: Panel | null = null;
+  let recentConnectionHours = SERVICE_DIAGNOSTICS_RECENT_CONNECTION_DEFAULT;
+  try {
+    [panel, recentConnectionHours] = await Promise.all([
+      prisma.panel.findUnique({ where: { id: service.panelId } }),
+      diagnosticsRecentConnectionHours(),
+    ]);
+  } catch {
+    panel = null;
+  }
 
   const readSupported =
     panel !== null &&
@@ -558,28 +574,49 @@ export async function runServiceDiagnostics(
     // Explicit diagnosis requests FRESH evidence (bypasses the display TTL), but
     // is cut off at a bounded budget so the callback never hangs. On timeout the
     // underlying read continues safely in the background (never rejects) and
-    // persists for next time; the cooldown bounds how often that can happen.
-    let timer: NodeJS.Timeout | undefined;
-    const budget = new Promise<"diag-timeout">((resolve) => {
-      timer = setTimeout(() => resolve("diag-timeout"), diagnosticsReadTimeoutMs());
-    });
-    const raced = await Promise.race([
-      readServiceForDiagnostics(service.id, userId),
-      budget,
-    ]).finally(() => clearTimeout(timer));
+    // persists for next time; the cooldown bounds how often that can happen. The
+    // whole read is wrapped so a DB/adapter error degrades to stored evidence
+    // instead of throwing — runServiceDiagnostics NEVER throws.
+    try {
+      let timer: NodeJS.Timeout | undefined;
+      const budget = new Promise<"diag-timeout">((resolve) => {
+        timer = setTimeout(() => resolve("diag-timeout"), diagnosticsReadTimeoutMs());
+      });
+      const raced = await Promise.race([
+        readServiceForDiagnostics(service.id, userId),
+        budget,
+      ]).finally(() => clearTimeout(timer));
 
-    if (raced === "diag-timeout") {
-      read = { kind: "unreachable", service, panelType: panel?.type ?? null, account: null, diagnosticCode: "timeout" };
-      evidenceSource = evidenceFromStored(service);
-    } else {
-      read = raced;
-      if (raced.kind === "read-ok" && raced.service !== null) {
-        freshest = raced.service;
-        evidenceSource = "LIVE_PANEL";
+      if (raced === "diag-timeout") {
+        read = {
+          kind: "unreachable",
+          service,
+          panelId: panel?.id ?? null,
+          panelType: panel?.type ?? null,
+          account: null,
+          diagnosticCode: "timeout",
+        };
+        evidenceSource = evidenceFromStored(service);
       } else {
-        freshest = raced.service ?? service;
-        evidenceSource = evidenceFromStored(freshest);
+        read = raced;
+        if (raced.kind === "read-ok" && raced.service !== null) {
+          freshest = raced.service;
+          evidenceSource = "LIVE_PANEL";
+        } else {
+          freshest = raced.service ?? service;
+          evidenceSource = evidenceFromStored(freshest);
+        }
       }
+    } catch {
+      read = {
+        kind: "read-error",
+        service,
+        panelId: panel?.id ?? null,
+        panelType: panel?.type ?? null,
+        account: null,
+        diagnosticCode: "exception",
+      };
+      evidenceSource = evidenceFromStored(service);
     }
   }
 
@@ -595,7 +632,7 @@ export async function runServiceDiagnostics(
   const { checks, overall } = evaluateDiagnosticChecks(evidence);
 
   const [actions, guideAvailable] = await Promise.all([
-    resolveServiceDetailActions(freshest),
+    safeResolveActions(freshest),
     guideEntryAvailable(freshest),
   ]);
   const recommendedActions = resolveRecommendedActions(overall, checks, {
@@ -655,6 +692,22 @@ async function guideEntryAvailable(service: Service): Promise<boolean> {
     return await isConnectionGuideEntryVisible(service);
   } catch {
     return false;
+  }
+}
+
+/** resolveServiceDetailActions, but a DB error degrades to "no actions" instead
+ * of throwing (keeps runServiceDiagnostics throw-free). */
+async function safeResolveActions(service: Service): Promise<ServiceDetailActions> {
+  try {
+    return await resolveServiceDetailActions(service);
+  } catch {
+    return {
+      toggleAction: null,
+      canBuyExtraVolume: false,
+      canBuyExtraTime: false,
+      canRegenerateLink: false,
+      canRenew: false,
+    };
   }
 }
 

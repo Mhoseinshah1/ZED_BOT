@@ -70,6 +70,15 @@ async function handleDiagRun(ctx: BotContext, sid: string): Promise<void> {
   if (service === null || user === null) {
     return;
   }
+  // A fresh run/retry DISARMS any pending support handoff. The handoff-cancel
+  // middleware exempts all `user:svc:diag:` callbacks (so the preview/confirm
+  // steps keep their snapshot), which would otherwise let a re-run inherit an
+  // armed `support:message` flow and turn the user's next ordinary message into a
+  // ticket. The snapshot is replaced below; here we only clear the ARMED state.
+  if (ctx.session.currentFlow === "support:message") {
+    ctx.session.currentFlow = null;
+    delete ctx.session.temp.supportDraft;
+  }
   // Answer immediately (§7 step 4) so the client stops the loading spinner.
   await safeAnswerCallback(ctx);
 
