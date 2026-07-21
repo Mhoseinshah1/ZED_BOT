@@ -1,9 +1,15 @@
 import { OrderType, prisma, type Order, type Service, type User } from "@zedbot/database";
 import { errorMessage, NOTIF_ANALYTICS_ENABLED_KEY, referralCorrelationHash } from "@zedbot/shared";
-import { InputFile } from "grammy";
+import { InlineKeyboard, InputFile } from "grammy";
 
 import { logger } from "../core/logger.js";
-import { serviceAccountLabel, serviceConfigLinks } from "../handlers/user-services/service-views.js";
+import { guideEntryLabel } from "../handlers/user-services/guide-views.js";
+import {
+  serviceAccountLabel,
+  serviceConfigLinks,
+  svcCb,
+} from "../handlers/user-services/service-views.js";
+import { isConnectionGuideEntryVisible } from "./connection-guide.service.js";
 import {
   deliverConfigQrCodes,
   deliverSubscriptionQr,
@@ -169,6 +175,36 @@ export async function deliverPostPurchaseQrCodes(
     }
   } catch (err) {
     logger.warn("post-purchase qr delivery skipped", { error: errorMessage(err) });
+  }
+}
+
+/** Short entry-prompt (code constant — control-flow copy, not editable). */
+const POST_PURCHASE_GUIDE_PROMPT = "برای آموزش اتصال دستگاه خود، روی دکمه زیر بزنید 📱";
+
+/**
+ * §15 post-purchase guide entry - ADDITIVE, fail-soft, FIRST-provision only (the
+ * caller gates on !alreadyExisted, so an idempotent replay never re-sends it).
+ * Sends ONLY an entry BUTTON that opens the new Service's guide page (never a
+ * per-platform tutorial, never a secret). Gated by the same entry visibility as
+ * the detail button (master switch on + active app + usable payload). NEVER
+ * throws and NEVER affects the Service/Order success.
+ */
+export async function deliverPostPurchaseGuideEntry(
+  api: DeliverySendApi,
+  chatId: string,
+  service: Service,
+): Promise<void> {
+  try {
+    if (!(await isConnectionGuideEntryVisible(service))) {
+      return;
+    }
+    const keyboard = new InlineKeyboard().text(
+      await guideEntryLabel(),
+      svcCb.guide(service.id.slice(0, 8)),
+    );
+    await api.sendMessage(chatId, POST_PURCHASE_GUIDE_PROMPT, { reply_markup: keyboard });
+  } catch (err) {
+    logger.warn("post-purchase guide entry skipped", { error: errorMessage(err) });
   }
 }
 
@@ -402,11 +438,13 @@ async function dispatchPaidOrderFulfillmentInner(
         await sendSafe(api, chatId, buildServiceInfoMessage(result.service), {
           parse_mode: "HTML",
         });
-        // §6: additive, fail-soft QR delivery on the FIRST provision only. An
-        // idempotent replay (alreadyExisted) resends the text info exactly as
-        // before but never re-sends the QR photos, preserving anti-spam behavior.
+        // §6/§15: additive, fail-soft QR delivery + connection-guide entry button
+        // on the FIRST provision only. An idempotent replay (alreadyExisted)
+        // resends the text info exactly as before but never re-sends the QR photos
+        // or a second guide entry, preserving anti-spam behavior.
         if (!result.alreadyExisted) {
           await deliverPostPurchaseQrCodes(api, chatId, result.service);
+          await deliverPostPurchaseGuideEntry(api, chatId, result.service);
         }
         return { kind: "SERVICE", op: "provision", ok: true, refunded: false, error: null };
       }

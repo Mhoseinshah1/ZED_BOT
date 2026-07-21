@@ -49,6 +49,15 @@ import {
   QR_NO_SUBSCRIPTION_TEXT,
   QR_SEND_FAILED_TEXT,
 } from "../../services/qr-delivery.service.js";
+import {
+  getActiveGuideAppBySlug,
+  getCompatibleGuideAppsForPlatform,
+  getGuidePlatformsForService,
+  isConnectionGuideEntryVisible,
+  isConnectionGuidesEnabled,
+  resolveGuideMethods,
+  serviceHasConnectionPayload,
+} from "../../services/connection-guide.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import {
   safeAnswerCallback,
@@ -56,6 +65,16 @@ import {
   safeReply,
   safeReplyWithPhoto,
 } from "../../utils/safe-reply.js";
+import { GUIDE_PLATFORM_NEUTRAL_LABEL, guidePlatformFromCode } from "@zedbot/shared";
+import {
+  GUIDE_HTML,
+  guideAppDetailPage,
+  guideAppPage,
+  guideEntryLabel,
+  guidePlatformPage,
+  guideTemplateText,
+  platformLabel,
+} from "./guide-views.js";
 import {
   regenLinkConfirmKeyboard,
   serviceAccountLabel,
@@ -92,11 +111,14 @@ export async function renderServiceDetail(
   service: Service,
   staleNotice: string | null = null,
 ): Promise<void> {
-  const actions = await resolveServiceDetailActions(service);
+  const [actions, guide] = await Promise.all([
+    resolveServiceDetailActions(service),
+    buildServiceGuideEntry(service),
+  ]);
   await safeEditOrReply(
     ctx,
     serviceDetailText(service, staleNotice),
-    serviceDetailKeyboard(service, actions),
+    serviceDetailKeyboard(service, actions, guide),
     HTML,
   );
 }
@@ -150,6 +172,11 @@ servicesHandler.callbackQuery(/^user:svc:view:([0-9a-f-]+)$/, async (ctx) => {
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
   }
+  // Returning to the service detail cancels any pending guide→support handoff, so
+  // the "بازگشت به سرویس" button on the support prompt (and any other path back
+  // here) can't leave the user stuck in support:message — their next plain
+  // message would otherwise be consumed into a ticket. No-op when none pending.
+  clearGuideHandoff(ctx);
   await safeAnswerCallback(ctx);
   const display = await syncServiceForDisplay(service, user.id);
   await renderServiceDetail(ctx, display.service, display.notice);
@@ -339,6 +366,12 @@ servicesHandler.callbackQuery(/^user:svc:regen_link:([0-9a-f-]+):yes$/, async (c
     // and reads the NEWLY stored subscriptionUrl - never stale pre-regen data.
     kb.text("QR لینک جدید 📷", svcCb.qrSub(sid)).row();
   }
+  // §16: the guide route always re-loads the current Service, so it uses the
+  // NEW link/config state - never the stale pre-regen data.
+  const regenGuide = await guideNextButton(outcome.service);
+  if (regenGuide !== null) {
+    kb.text(regenGuide.label, regenGuide.cb).row();
+  }
   kb.text("بازگشت به سرویس", svcCb.view(sid)).row().text("بازگشت به منو", CB.USER_MENU);
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
 });
@@ -357,12 +390,24 @@ servicesHandler.callbackQuery(/^user:svc:link:([0-9a-f-]+)$/, async (ctx) => {
     await safeAnswerCallback(ctx, "لینک اشتراک برای این سرویس ثبت نشده است.");
     return;
   }
+  // Tapping a connection method (even from a stale guide keyboard) means the user
+  // has left the support handoff — cancel it so their next message isn't consumed
+  // into a ticket. No-op when none pending.
+  clearGuideHandoff(ctx);
   await safeAnswerCallback(ctx);
+  // §16: additive «آموزش اتصال 📱» next-action + back nav (existing text link kept).
+  const linkSid = serviceShortId(service);
+  const linkKb = new InlineKeyboard();
+  const linkGuide = await guideNextButton(service);
+  if (linkGuide !== null) {
+    linkKb.text(linkGuide.label, linkGuide.cb).row();
+  }
+  linkKb.text("بازگشت به سرویس", svcCb.view(linkSid)).text("بازگشت به منوی اصلی", CB.USER_MENU);
   // <code> is tap-to-copy in official Telegram clients.
   await safeReply(
     ctx,
     `لینک اشتراک شما:\n<code>${escapeHtml(service.subscriptionUrl)}</code>`,
-    undefined,
+    linkKb,
     HTML,
   );
 });
@@ -382,6 +427,7 @@ servicesHandler.callbackQuery(/^user:svc:configs:([0-9a-f-]+)$/, async (ctx) => 
     await safeAnswerCallback(ctx, "کانفیگی برای این سرویس ثبت نشده است.");
     return;
   }
+  clearGuideHandoff(ctx); // leaving the support handoff via a stale guide keyboard
   await safeAnswerCallback(ctx);
   const lines = ["کانفیگ‌های سرویس شما:", ""];
   for (const link of links.slice(0, MAX_CONFIGS_SHOWN)) {
@@ -390,7 +436,15 @@ servicesHandler.callbackQuery(/^user:svc:configs:([0-9a-f-]+)$/, async (ctx) => 
   if (links.length > MAX_CONFIGS_SHOWN) {
     lines.push(`+${links.length - MAX_CONFIGS_SHOWN} کانفیگ دیگر نمایش داده نشد.`);
   }
-  await safeReply(ctx, lines.join("\n").trimEnd(), undefined, HTML);
+  // §16: additive «آموزش اتصال 📱» next-action + back nav (existing configs kept).
+  const cfgSid = serviceShortId(service);
+  const cfgKb = new InlineKeyboard();
+  const cfgGuide = await guideNextButton(service);
+  if (cfgGuide !== null) {
+    cfgKb.text(cfgGuide.label, cfgGuide.cb).row();
+  }
+  cfgKb.text("بازگشت به سرویس", svcCb.view(cfgSid)).text("بازگشت به منوی اصلی", CB.USER_MENU);
+  await safeReply(ctx, lines.join("\n").trimEnd(), cfgKb, HTML);
 });
 
 // --- QR codes (service-config-qrcode phase) ----------------------------------
@@ -416,13 +470,17 @@ servicesHandler.callbackQuery(/^user:svc:qr_sub:([0-9a-f-]+)$/, async (ctx) => {
     await safeAnswerCallback(ctx, QR_NO_SUBSCRIPTION_TEXT);
     return;
   }
+  clearGuideHandoff(ctx); // leaving the support handoff via a stale guide keyboard
   await safeAnswerCallback(ctx);
   const sid = serviceShortId(service);
-  // Additive keyboard: the copyable text link stays one tap away.
-  const keyboard = new InlineKeyboard()
-    .text("لینک متنی 🔗", svcCb.link(sid))
-    .row()
-    .text("بازگشت به سرویس", svcCb.view(sid));
+  // Additive keyboard: the copyable text link stays one tap away, plus the §16
+  // «آموزش اتصال 📱» next-action when the guide entry gate is satisfied.
+  const keyboard = new InlineKeyboard().text("لینک متنی 🔗", svcCb.link(sid)).row();
+  const subGuide = await guideNextButton(service);
+  if (subGuide !== null) {
+    keyboard.text(subGuide.label, subGuide.cb).row();
+  }
+  keyboard.text("بازگشت به سرویس", svcCb.view(sid));
   const outcome = await deliverSubscriptionQr(
     service.subscriptionUrl,
     serviceAccountLabel(service),
@@ -451,15 +509,19 @@ servicesHandler.callbackQuery(/^user:svc:qr_configs:([0-9a-f-]+)$/, async (ctx) 
     await safeAnswerCallback(ctx, QR_NO_CONFIGS_TEXT);
     return;
   }
+  clearGuideHandoff(ctx); // leaving the support handoff via a stale guide keyboard
   await safeAnswerCallback(ctx);
   const sid = serviceShortId(service);
   const label = serviceAccountLabel(service);
   // Additive: keep the copyable text configs one tap away (mirrors the
-  // subscription QR keyboard's «لینک متنی» button), then the back navigation.
-  const backKb = new InlineKeyboard()
-    .text("لینک متنی 📄", svcCb.configs(sid))
-    .row()
-    .text("بازگشت به سرویس", svcCb.view(sid));
+  // subscription QR keyboard's «لینک متنی» button), the §16 «آموزش اتصال 📱»
+  // next-action when eligible, then the back navigation.
+  const backKb = new InlineKeyboard().text("لینک متنی 📄", svcCb.configs(sid)).row();
+  const cfgQrGuide = await guideNextButton(service);
+  if (cfgQrGuide !== null) {
+    backKb.text(cfgQrGuide.label, cfgQrGuide.cb).row();
+  }
+  backKb.text("بازگشت به سرویس", svcCb.view(sid));
 
   // One config -> one photo carrying the back keyboard (§5).
   if (links.length === 1) {
@@ -495,4 +557,241 @@ servicesHandler.callbackQuery(/^user:svc:qr_configs:([0-9a-f-]+)$/, async (ctx) 
     summary.push("کیوآرکد کانفیگ‌ها ارسال شد.");
   }
   await safeReply(ctx, summary.join("\n\n"), backKb);
+});
+
+// --- Device connection guides (feat/device-connection-guides) -----------------
+// «آموزش اتصال 📱» — operator-managed, per-platform "how to connect" pages under
+// an eligible Service. Every route re-loads the Service OWNER-scoped, rechecks
+// the master switch (fail-closed), reloads the active guide app, answers the
+// callback BEFORE rendering, and never trusts the callback/session as data. No
+// Service secret ever enters the guide text, a URL button, a caption or a
+// callback — connection payloads stay behind the existing owner-scoped
+// link/config/QR callbacks reused here.
+
+/** Detail-page entry gate: null unless the master switch is on, an active app
+ * exists AND this Service has a usable connection payload. */
+async function buildServiceGuideEntry(service: Service): Promise<{ label: string } | null> {
+  if (!(await isConnectionGuideEntryVisible(service))) {
+    return null;
+  }
+  return { label: await guideEntryLabel() };
+}
+
+/** «آموزش اتصال 📱» next-action button spec for the link/QR/regen responses (§16),
+ * or null when the guide entry gate is not satisfied. Function declaration →
+ * hoisted, so the earlier link/config/QR handlers can call it. */
+async function guideNextButton(
+  service: Service,
+): Promise<{ label: string; cb: string } | null> {
+  if (!(await isConnectionGuideEntryVisible(service))) {
+    return null;
+  }
+  return { label: await guideEntryLabel(), cb: svcCb.guide(serviceShortId(service)) };
+}
+
+/** Clears a pending guide→support handoff (only when one is actually pending),
+ * so returning to any guide page cleanly cancels it. */
+function clearGuideHandoff(ctx: BotContext): void {
+  if (ctx.session.temp.guideSupportContext === undefined) {
+    return;
+  }
+  if (ctx.session.currentFlow === "support:message") {
+    ctx.session.currentFlow = null;
+  }
+  delete ctx.session.temp.supportDraft;
+  delete ctx.session.temp.guideSupportContext;
+}
+
+/** Route prefix that OWNS the guide→support handoff (it SETS the ids-only context
+ * and arms `support:message`); it must be the sole callback exempt from the guard. */
+const GUIDE_SUPPORT_HANDOFF_PREFIX = "user:svc:gsup:";
+
+/** grammY middleware (mounted on the user area) that cancels a pending guide→
+ * support handoff on ANY user callback except the handoff route itself. Inline
+ * keyboards on older guide messages stay tappable after the prompt is edited, so
+ * a lifecycle action (enable/renew/extra-volume) — or any other button, now or in
+ * future — could otherwise navigate away while `support:message` stays armed and
+ * silently turn the user's next message into a ticket. Text updates (the actual
+ * ticket) are not callbacks, so they pass through untouched. */
+export function guideHandoffCancelMiddleware(): (
+  ctx: BotContext,
+  next: () => Promise<void>,
+) => Promise<void> {
+  return async (ctx, next) => {
+    const data = ctx.callbackQuery?.data;
+    if (data !== undefined && !data.startsWith(GUIDE_SUPPORT_HANDOFF_PREFIX)) {
+      clearGuideHandoff(ctx);
+    }
+    await next();
+  };
+}
+
+/** Owner-scoped reload + master-switch recheck shared by every guide route.
+ * Returns the Service, or null after emitting the correct safe response. */
+async function requireGuideService(ctx: BotContext, sid: string): Promise<Service | null> {
+  // Entering ANY guide route (browse a page, or hit the disabled/no-payload/
+  // not-found notice) is a navigation away from a pending support handoff, so
+  // cancel it up front — otherwise the early-return notice paths below would leave
+  // `support:message` armed and the user's next message would become a ticket.
+  // The support-handoff route reloads via this helper and then sets a FRESH
+  // handoff, so clearing here first is safe. No-op when none is pending.
+  clearGuideHandoff(ctx);
+  const user = ctx.dbUser;
+  if (user === null) {
+    return null;
+  }
+  const service = await getOwnedServiceByShortId(sid, user.id);
+  if (service === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return null;
+  }
+  if (!(await isConnectionGuidesEnabled())) {
+    // Fail closed: a stale/direct callback while the system is disabled shows a
+    // safe notice and never renders any guide content.
+    await safeAnswerCallback(ctx);
+    const kb = new InlineKeyboard()
+      .text("بازگشت به سرویس", svcCb.view(sid))
+      .text("بازگشت به منوی اصلی", CB.USER_MENU);
+    await safeEditOrReply(ctx, await guideTemplateText("connection_guides_disabled"), kb, GUIDE_HTML);
+    return null;
+  }
+  if (!serviceHasConnectionPayload(service)) {
+    // The Service lost its connection payload (subscription/config) after the
+    // entry button or a guide page was sent. The entry is normally hidden for
+    // this state, so a stale/direct callback must not lead into a dead-end guide
+    // with no working action — show the safe no-payload notice instead.
+    await safeAnswerCallback(ctx);
+    const kb = new InlineKeyboard()
+      .text("بازگشت به سرویس", svcCb.view(sid))
+      .text("بازگشت به منوی اصلی", CB.USER_MENU);
+    await safeEditOrReply(ctx, await guideTemplateText("connection_guides_no_payload"), kb, GUIDE_HTML);
+    return null;
+  }
+  return service;
+}
+
+async function renderGuidePlatformSelection(ctx: BotContext, service: Service): Promise<void> {
+  // Only platforms whose apps are actually usable for THIS service (a supported
+  // method backed by a real payload) — never a platform that leads to dead-ends.
+  const platforms = await getGuidePlatformsForService(service);
+  const page = await guidePlatformPage(service, platforms);
+  await safeEditOrReply(ctx, page.text, page.keyboard, GUIDE_HTML);
+}
+
+async function renderGuideAppSelection(
+  ctx: BotContext,
+  service: Service,
+  platform: Parameters<typeof guideAppPage>[1],
+): Promise<void> {
+  const apps = await getCompatibleGuideAppsForPlatform(platform, service);
+  const page = await guideAppPage(service, platform, apps);
+  await safeEditOrReply(ctx, page.text, page.keyboard, GUIDE_HTML);
+}
+
+// Platform-selection page.
+servicesHandler.callbackQuery(/^user:svc:guide:([0-9a-f-]+)$/, async (ctx) => {
+  const sid = ctx.match[1];
+  const service = await requireGuideService(ctx, sid);
+  if (service === null) {
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  await renderGuidePlatformSelection(ctx, service);
+});
+
+// Application-selection page for a platform.
+servicesHandler.callbackQuery(/^user:svc:guide:([0-9a-f-]+):([a-z0-9]+)$/, async (ctx) => {
+  const sid = ctx.match[1];
+  const platform = guidePlatformFromCode(ctx.match[2]);
+  const service = await requireGuideService(ctx, sid);
+  if (service === null) {
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  if (platform === null) {
+    await renderGuidePlatformSelection(ctx, service);
+    return;
+  }
+  await renderGuideAppSelection(ctx, service, platform);
+});
+
+// Application guide page.
+servicesHandler.callbackQuery(/^user:svc:guide:([0-9a-f-]+):([a-z0-9]+):([a-z0-9-]+)$/, async (ctx) => {
+  const sid = ctx.match[1];
+  const platform = guidePlatformFromCode(ctx.match[2]);
+  const slug = ctx.match[3];
+  const service = await requireGuideService(ctx, sid);
+  if (service === null) {
+    return;
+  }
+  if (platform === null) {
+    await safeAnswerCallback(ctx);
+    await renderGuidePlatformSelection(ctx, service);
+    return;
+  }
+  const app = await getActiveGuideAppBySlug(slug);
+  if (app === null || app.platform !== platform) {
+    // Inactive/removed after the keyboard rendered — safe notice + app list.
+    await safeAnswerCallback(ctx, await getMessageTemplate("connection_guides_stale_app"));
+    await renderGuideAppSelection(ctx, service, platform);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const actions = await resolveServiceDetailActions(service);
+  const methods = resolveGuideMethods(app, service);
+  const page = await guideAppDetailPage(service, platform, app, methods, actions);
+  await safeEditOrReply(ctx, page.text, page.keyboard, GUIDE_HTML);
+});
+
+/** Safe support handoff subject: device + app only, bounded, never a secret. */
+function buildGuideSupportSubject(platformNeutral: string, appName: string): string {
+  const subject = `راهنمای اتصال — ${platformNeutral} / ${appName}`;
+  return subject.length <= 100 ? subject : subject.slice(0, 100);
+}
+
+// Support handoff — seeds a SAFE context and routes into the EXISTING ticket flow.
+servicesHandler.callbackQuery(/^user:svc:gsup:([0-9a-f-]+):([a-z0-9]+):([a-z0-9-]+)$/, async (ctx) => {
+  const sid = ctx.match[1];
+  const pcode = ctx.match[2];
+  const platform = guidePlatformFromCode(pcode);
+  const slug = ctx.match[3];
+  const service = await requireGuideService(ctx, sid);
+  if (service === null) {
+    return;
+  }
+  if (platform === null) {
+    await safeAnswerCallback(ctx);
+    await renderGuidePlatformSelection(ctx, service);
+    return;
+  }
+  const app = await getActiveGuideAppBySlug(slug);
+  if (app === null || app.platform !== platform) {
+    await safeAnswerCallback(ctx, await getMessageTemplate("connection_guides_stale_app"));
+    await renderGuideAppSelection(ctx, service, platform);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  // Seed the existing support MESSAGE flow: the subject encodes the device + app
+  // (no secret), and the short-lived, ids-only context lets the prompt show the
+  // selection and lets the cancel button return to the exact guide page. The
+  // ticket itself is created by the existing support text handler when the user
+  // writes their message — no second support engine.
+  ctx.session.temp.supportDraft = {
+    subject: buildGuideSupportSubject(GUIDE_PLATFORM_NEUTRAL_LABEL[platform], app.displayName),
+  };
+  ctx.session.temp.guideSupportContext = { sid, pcode, slug };
+  ctx.session.currentFlow = "support:message";
+  // Rendered as SAFE bounded plain text (raw values, escaped + clamped once) so an
+  // operator-edited handoff template can't overflow Telegram's limit or ship
+  // malformed HTML and fail the send.
+  const text = await guideTemplateText("connection_guides_support_handoff", {
+    service_name: serviceAccountLabel(service),
+    device: await platformLabel(platform),
+    app: app.displayName,
+  });
+  const kb = new InlineKeyboard()
+    .text("انصراف و بازگشت به راهنما", svcCb.guideApp(sid, pcode, slug))
+    .row()
+    .text("بازگشت به سرویس", svcCb.view(sid));
+  await safeEditOrReply(ctx, text, kb, GUIDE_HTML);
 });

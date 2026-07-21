@@ -1,0 +1,443 @@
+import { prisma, type ConnectionGuideApp, type Panel, type Service, type User } from "@zedbot/database";
+import { CONNECTION_GUIDES_ENABLED_KEY, GUIDE_PAGE_TEXT_MAX, GUIDE_PLATFORM_CODE } from "@zedbot/shared";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+process.env.APP_SECRET ??= "guide-user-ui-tests-secret-0123456789";
+
+import { initialSession } from "../src/core/session.js";
+import { guideTemplateText } from "../src/handlers/user-services/guide-views.js";
+import {
+  guideHandoffCancelMiddleware,
+  servicesHandler,
+} from "../src/handlers/user-services/services.handler.js";
+import {
+  createGuideApp,
+  invalidateGuideCache,
+  setGuideAppActive,
+  validateGuideAppInput,
+} from "../src/services/connection-guide.service.js";
+import { clearSettingsCache, setSetting } from "../src/services/settings.service.js";
+import { serviceShortId } from "../src/services/user-services.service.js";
+
+// =============================================================================
+// §6/§7/§8/§10/§11/§14 - the user connection-guide callbacks over a real DB.
+// A captured fake ctx records edits/replies/toasts + the rendered keyboards so
+// we can assert owner-scoping, the disabled fail-closed path, method rendering,
+// that NO Service secret appears in guide text or callback data, and the safe
+// support handoff.
+// =============================================================================
+
+const hasDb = typeof process.env.DATABASE_URL === "string" && process.env.DATABASE_URL !== "";
+const d = hasDb ? describe : describe.skip;
+const runTag = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+
+const SUB_SECRET = "https://sub.example.com/SUBSCRIPTIONSECRET?token=DEADBEEF";
+const CONFIG_SECRET = "vmess://CONFIGSECRETBASE64==";
+
+interface Btn {
+  text: string;
+  data?: string;
+  url?: string;
+}
+interface Captured {
+  edits: Array<{ text: string; buttons: Btn[] }>;
+  replies: Array<{ text: string; buttons: Btn[] }>;
+  toasts: Array<string | undefined>;
+  session: ReturnType<typeof initialSession>;
+}
+
+function flatButtons(markup: unknown): Btn[] {
+  const kb = (markup as { inline_keyboard?: Array<Array<Record<string, string>>> })?.inline_keyboard;
+  if (!Array.isArray(kb)) return [];
+  return kb.flat().map((b) => ({ text: b.text, data: b.callback_data, url: b.url }));
+}
+
+function fakeCtx(data: string, user: User | null, session = initialSession()) {
+  const cap: Captured = { edits: [], replies: [], toasts: [], session };
+  const callbackQuery = {
+    id: "cbq",
+    chat_instance: "ci",
+    from: { id: 1, is_bot: false, first_name: "T" },
+    data,
+    message: { message_id: 5, date: 0, chat: { id: 1, type: "private" } },
+  };
+  const ctx = {
+    session,
+    dbUser: user,
+    from: { id: 1, first_name: "T" },
+    callbackQuery,
+    update: { update_id: 1, callback_query: callbackQuery },
+    match: undefined as unknown,
+    reply: async (text: string, other?: { reply_markup?: unknown }) => {
+      cap.replies.push({ text, buttons: flatButtons(other?.reply_markup) });
+      return {};
+    },
+    editMessageText: async (text: string, other?: { reply_markup?: unknown }) => {
+      cap.edits.push({ text, buttons: flatButtons(other?.reply_markup) });
+      return {};
+    },
+    answerCallbackQuery: async (p?: { text?: string }) => {
+      cap.toasts.push(p?.text);
+      return true;
+    },
+  };
+  return { ctx: ctx as never, cap };
+}
+
+async function run(data: string, user: User | null, session = initialSession()): Promise<Captured> {
+  const { ctx, cap } = fakeCtx(data, user, session);
+  await servicesHandler.middleware()(ctx, async () => undefined);
+  return cap;
+}
+
+/** Every callback string a rendered page emits, joined for secret scanning. */
+function allCallbackData(cap: Captured): string {
+  return [...cap.edits, ...cap.replies]
+    .flatMap((m) => m.buttons.map((b) => b.data ?? b.url ?? ""))
+    .join("\n");
+}
+function allText(cap: Captured): string {
+  return [...cap.edits, ...cap.replies].map((m) => m.text).join("\n");
+}
+
+describe("guideHandoffCancelMiddleware (pure)", () => {
+  function ctxWith(data: string | undefined) {
+    const session = initialSession();
+    session.currentFlow = "support:message";
+    session.temp.guideSupportContext = { sid: "abcdef12", pcode: "ios", slug: "app" };
+    session.temp.supportDraft = { subject: "s" };
+    const ctx = {
+      session,
+      callbackQuery: data === undefined ? undefined : { data },
+    } as never;
+    return { ctx, session };
+  }
+
+  it("cancels a pending handoff on any non-gsup callback (enable/renew/volume/nav)", async () => {
+    for (const data of [
+      "user:svc:enable:abcdef12",
+      "user:svc:rn:abcdef12",
+      "user:svc:ev:abcdef12",
+      "user:svc:view:abcdef12",
+      "user:svc:guide:abcdef12",
+    ]) {
+      const { ctx, session } = ctxWith(data);
+      let called = false;
+      await guideHandoffCancelMiddleware()(ctx, async () => {
+        called = true;
+      });
+      expect(called).toBe(true);
+      expect(session.currentFlow).toBeNull();
+      expect(session.temp.guideSupportContext).toBeUndefined();
+      expect(session.temp.supportDraft).toBeUndefined();
+    }
+  });
+
+  it("PRESERVES the handoff on the gsup route (which arms it) and on text updates", async () => {
+    const armed = { sid: "abcdef12", pcode: "ios", slug: "app" };
+    const { ctx, session } = ctxWith("user:svc:gsup:abcdef12:ios:app");
+    await guideHandoffCancelMiddleware()(ctx, async () => undefined);
+    expect(session.temp.guideSupportContext).toEqual(armed);
+    // A text update (the actual ticket) carries no callbackQuery → untouched.
+    const { ctx: ctx2, session: s2 } = ctxWith(undefined);
+    await guideHandoffCancelMiddleware()(ctx2, async () => undefined);
+    expect(s2.temp.guideSupportContext).toEqual(armed);
+    expect(s2.currentFlow).toBe("support:message");
+  });
+});
+
+d("user connection-guide callbacks", () => {
+  let panel: Panel;
+  let owner: User;
+  let stranger: User;
+  let service: Service;
+  let iosApp: ConnectionGuideApp;
+  const iosCode = GUIDE_PLATFORM_CODE.IOS;
+
+  async function makeApp(over: Record<string, unknown>): Promise<ConnectionGuideApp> {
+    const v = validateGuideAppInput({
+      platform: "IOS",
+      displayName: "V2Box",
+      iconEmoji: "📦",
+      primaryDownloadUrl: "https://apps.apple.com/app/v2box",
+      alternateDownloadUrl: null,
+      supportsSubscription: true,
+      supportsQr: true,
+      supportsIndividualConfigs: true,
+      instructions: "برنامه را نصب کنید، سپس لینک اشتراک را وارد نمایید.",
+      troubleshooting: "اگر وصل نشد، سرور دیگری را امتحان کنید.",
+      sortOrder: 0,
+      ...over,
+    });
+    if (!v.ok) throw new Error("fixture invalid");
+    return createGuideApp(v.value, "admin-test");
+  }
+
+  beforeAll(async () => {
+    await prisma.connectionGuideApp.deleteMany({});
+    panel = await prisma.panel.create({
+      data: { type: "MARZBAN", name: `guide-ui-${runTag}`, baseUrl: "https://p.test", status: "ACTIVE", renewalEnabled: false },
+    });
+    owner = await prisma.user.create({ data: { telegramId: runTag + 1n } });
+    stranger = await prisma.user.create({ data: { telegramId: runTag + 2n } });
+    service = await prisma.service.create({
+      data: {
+        userId: owner.id,
+        panelId: panel.id,
+        panelType: "MARZBAN",
+        username: `guide_acct_${runTag}`,
+        status: "ACTIVE",
+        volumeBytes: 0n,
+        usedBytes: 0n,
+        subscriptionUrl: SUB_SECRET,
+        configLinks: [CONFIG_SECRET],
+      },
+    });
+    iosApp = await makeApp({});
+    await setGuideAppActive(iosApp.id, true, "admin-test");
+    await setSetting(CONNECTION_GUIDES_ENABLED_KEY, "true", "BOOLEAN");
+    clearSettingsCache();
+    invalidateGuideCache();
+  });
+
+  afterAll(async () => {
+    await prisma.connectionGuideApp.deleteMany({});
+    await prisma.service.deleteMany({ where: { panelId: panel.id } });
+    await prisma.user.deleteMany({ where: { id: { in: [owner.id, stranger.id] } } });
+    await prisma.panel.delete({ where: { id: panel.id } });
+    await setSetting(CONNECTION_GUIDES_ENABLED_KEY, "false", "BOOLEAN");
+    clearSettingsCache();
+    await prisma.$disconnect();
+  });
+
+  const sid = (): string => serviceShortId(service);
+
+  it("platform page: owner sees only platforms with an active app", async () => {
+    const cap = await run(`user:svc:guide:${sid()}`, owner);
+    const labels = cap.edits.at(-1)?.buttons.map((b) => b.text) ?? [];
+    expect(labels.some((l) => l.includes("آیفون"))).toBe(true);
+    // No platform without an active app (e.g. Linux) is shown.
+    expect(labels.some((l) => l.includes("لینوکس"))).toBe(false);
+  });
+
+  it("a STRANGER cannot open the guide (owner-scoped)", async () => {
+    const cap = await run(`user:svc:guide:${sid()}`, stranger);
+    expect(cap.toasts).toContain("مورد یافت نشد.");
+    expect(cap.edits).toHaveLength(0);
+  });
+
+  it("fails CLOSED when the master switch is disabled", async () => {
+    await setSetting(CONNECTION_GUIDES_ENABLED_KEY, "false", "BOOLEAN");
+    clearSettingsCache();
+    const cap = await run(`user:svc:guide:${sid()}`, owner);
+    expect(allText(cap)).toContain("در دسترس نیست");
+    // Re-enable for the rest of the suite.
+    await setSetting(CONNECTION_GUIDES_ENABLED_KEY, "true", "BOOLEAN");
+    clearSettingsCache();
+  });
+
+  it("app page lists the active app; guide page shows method buttons + downloads + NO secret", async () => {
+    const appPage = await run(`user:svc:guide:${sid()}:${iosCode}`, owner);
+    expect(appPage.edits.at(-1)?.buttons.some((b) => b.text.includes("V2Box"))).toBe(true);
+
+    const guide = await run(`user:svc:guide:${sid()}:${iosCode}:${iosApp.slug}`, owner);
+    const buttons = guide.edits.at(-1)?.buttons ?? [];
+    // Method buttons reuse the existing owner-scoped routes.
+    expect(buttons.some((b) => b.data === `user:svc:link:${sid()}`)).toBe(true);
+    expect(buttons.some((b) => b.data === `user:svc:qr_sub:${sid()}`)).toBe(true);
+    expect(buttons.some((b) => b.data === `user:svc:configs:${sid()}`)).toBe(true);
+    expect(buttons.some((b) => b.data === `user:svc:qr_configs:${sid()}`)).toBe(true);
+    // Download is a validated HTTPS url button.
+    const dl = buttons.find((b) => b.text.includes("دانلود برنامه"));
+    expect(dl?.url).toBe("https://apps.apple.com/app/v2box");
+    // NO Service secret in the text or in any callback/url.
+    expect(allText(guide)).not.toContain("SUBSCRIPTIONSECRET");
+    expect(allText(guide)).not.toContain("CONFIGSECRET");
+    expect(allText(guide)).not.toContain("DEADBEEF");
+    expect(allCallbackData(guide)).not.toContain("SUBSCRIPTIONSECRET");
+    expect(allCallbackData(guide)).not.toContain("CONFIGSECRET");
+    // The download URL never embeds a Service secret.
+    expect(dl?.url).not.toContain("SUBSCRIPTIONSECRET");
+  });
+
+  it("every emitted guide callback is <= 64 bytes", async () => {
+    const guide = await run(`user:svc:guide:${sid()}:${iosCode}:${iosApp.slug}`, owner);
+    for (const b of guide.edits.at(-1)?.buttons ?? []) {
+      if (b.data !== undefined) {
+        expect(Buffer.byteLength(b.data, "utf8"), b.data).toBeLessThanOrEqual(64);
+      }
+    }
+  });
+
+  it("unsupported method is NOT offered (app without config support)", async () => {
+    const subOnly = await makeApp({ displayName: "SubOnly", supportsIndividualConfigs: false });
+    await setGuideAppActive(subOnly.id, true, "admin-test");
+    invalidateGuideCache();
+    const guide = await run(`user:svc:guide:${sid()}:${iosCode}:${subOnly.slug}`, owner);
+    const buttons = guide.edits.at(-1)?.buttons ?? [];
+    expect(buttons.some((b) => b.data === `user:svc:link:${sid()}`)).toBe(true);
+    expect(buttons.some((b) => b.data === `user:svc:configs:${sid()}`)).toBe(false);
+  });
+
+  it("a QR-only app renders a standalone QR button (no text-link method enabled)", async () => {
+    const qrOnly = await makeApp({
+      displayName: "QROnly",
+      supportsSubscription: false,
+      supportsIndividualConfigs: false,
+      supportsQr: true,
+    });
+    await setGuideAppActive(qrOnly.id, true, "admin-test");
+    invalidateGuideCache();
+    const guide = await run(`user:svc:guide:${sid()}:${iosCode}:${qrOnly.slug}`, owner);
+    const buttons = guide.edits.at(-1)?.buttons ?? [];
+    // The service has a subscriptionUrl, so a subscription-QR action is offered
+    // even though the text-link method is off — the guide is not a dead end.
+    expect(buttons.some((b) => b.data === `user:svc:qr_sub:${sid()}`)).toBe(true);
+    // No text-link button (that method is disabled on this app).
+    expect(buttons.some((b) => b.data === `user:svc:link:${sid()}`)).toBe(false);
+  });
+
+  it("an inactive app fails safely (stale) and returns to the app list", async () => {
+    const gone = await makeApp({ displayName: "Gone" });
+    await setGuideAppActive(gone.id, true, "admin-test");
+    invalidateGuideCache();
+    await setGuideAppActive(gone.id, false, "admin-test"); // deactivated after render
+    invalidateGuideCache();
+    const cap = await run(`user:svc:guide:${sid()}:${iosCode}:${gone.slug}`, owner);
+    expect(cap.toasts.some((t) => typeof t === "string" && t.includes("در دسترس نیست"))).toBe(true);
+  });
+
+  it("fails SAFELY (no-payload notice) when the Service lost its payload after the button was sent", async () => {
+    // Simulate the payload being removed after the guide entry/page was shown.
+    await prisma.service.update({
+      where: { id: service.id },
+      data: { subscriptionUrl: null, configLinks: [] },
+    });
+    const cap = await run(`user:svc:guide:${sid()}:${iosCode}:${iosApp.slug}`, owner);
+    expect(allText(cap)).toContain("اطلاعات اتصالی"); // connection_guides_no_payload notice
+    // Restore for the remaining tests.
+    await prisma.service.update({
+      where: { id: service.id },
+      data: { subscriptionUrl: SUB_SECRET, configLinks: [CONFIG_SECRET] },
+    });
+  });
+
+  it("support handoff: seeds a SAFE ticket flow (no secret) and a cancel back to the guide", async () => {
+    const session = initialSession();
+    const cap = await run(`user:svc:gsup:${sid()}:${iosCode}:${iosApp.slug}`, owner, session);
+    // Routed into the existing support MESSAGE flow with ids-only context.
+    expect(session.currentFlow).toBe("support:message");
+    expect(session.temp.guideSupportContext).toEqual({ sid: sid(), pcode: iosCode, slug: iosApp.slug });
+    // Subject carries device+app but NEVER a secret.
+    expect(session.temp.supportDraft?.subject).toBeDefined();
+    expect(session.temp.supportDraft?.subject).not.toContain("SUBSCRIPTIONSECRET");
+    // Cancel returns to the exact guide app page.
+    const cancel = cap.edits.at(-1)?.buttons.find((b) => b.text.includes("بازگشت به راهنما"));
+    expect(cancel?.data).toBe(`user:svc:guide:${sid()}:${iosCode}:${iosApp.slug}`);
+    // No secret in the handoff prompt.
+    expect(allText(cap)).not.toContain("SUBSCRIPTIONSECRET");
+  });
+
+  it("returning to the service via «بازگشت به سرویس» CANCELS a pending support handoff", async () => {
+    // Reproduce the exact P2 sequence: enter the handoff, then press the guide
+    // prompt's "بازگشت به سرویس" button (a plain user:svc:view route). Without the
+    // fix the user stays in support:message and their next message becomes a ticket.
+    const session = initialSession();
+    await run(`user:svc:gsup:${sid()}:${iosCode}:${iosApp.slug}`, owner, session);
+    expect(session.currentFlow).toBe("support:message");
+    // Serve stored values so the detail sync never touches the (unreachable) panel.
+    await prisma.service.update({ where: { id: service.id }, data: { lastSubscriptionUpdateAt: new Date() } });
+    await run(`user:svc:view:${sid()}`, owner, session);
+    expect(session.currentFlow).toBeNull();
+    expect(session.temp.guideSupportContext).toBeUndefined();
+    expect(session.temp.supportDraft).toBeUndefined();
+  });
+
+  it("tapping a connection method (stale guide keyboard) CANCELS a pending support handoff", async () => {
+    const session = initialSession();
+    await run(`user:svc:gsup:${sid()}:${iosCode}:${iosApp.slug}`, owner, session);
+    expect(session.currentFlow).toBe("support:message");
+    // Tap the subscription-link button from an (older) guide message.
+    await run(`user:svc:link:${sid()}`, owner, session);
+    expect(session.currentFlow).toBeNull();
+    expect(session.temp.guideSupportContext).toBeUndefined();
+    expect(session.temp.supportDraft).toBeUndefined();
+  });
+
+  it("an app with no usable method for THIS service is filtered out / shows no dead-end", async () => {
+    const cfgOnly = await makeApp({
+      displayName: "ConfigsOnly",
+      supportsSubscription: false,
+      supportsQr: false,
+      supportsIndividualConfigs: true,
+    });
+    await setGuideAppActive(cfgOnly.id, true, "admin-test");
+    invalidateGuideCache();
+    // Service has ONLY a subscription payload → a configs-only app is unusable here.
+    await prisma.service.update({ where: { id: service.id }, data: { configLinks: [] } });
+    // The incompatible app is NOT offered in the app list.
+    const list = await run(`user:svc:guide:${sid()}:${iosCode}`, owner);
+    const labels = list.edits.at(-1)?.buttons.map((b) => b.text) ?? [];
+    expect(labels.some((t) => t.includes("ConfigsOnly"))).toBe(false);
+    // A direct/stale detail callback shows the safe unavailable variant — no method buttons.
+    const detail = await run(`user:svc:guide:${sid()}:${iosCode}:${cfgOnly.slug}`, owner);
+    const data = detail.edits.at(-1)?.buttons.map((b) => b.data) ?? [];
+    expect(data.some((d) => d === `user:svc:link:${sid()}`)).toBe(false);
+    expect(data.some((d) => d === `user:svc:configs:${sid()}`)).toBe(false);
+    // Support is still offered.
+    expect(data.some((d) => typeof d === "string" && d.startsWith(`user:svc:gsup:${sid()}`))).toBe(true);
+    // Restore shared state.
+    await prisma.service.update({ where: { id: service.id }, data: { configLinks: [CONFIG_SECRET] } });
+    await setGuideAppActive(cfgOnly.id, false, "admin-test");
+    invalidateGuideCache();
+  });
+
+  it("cancels a pending support handoff even on the disabled early-return path", async () => {
+    const session = initialSession();
+    await run(`user:svc:gsup:${sid()}:${iosCode}:${iosApp.slug}`, owner, session);
+    expect(session.currentFlow).toBe("support:message");
+    // Master switch disabled after the prompt was shown; tapping "back to guide"
+    // hits the disabled notice, which early-returns from requireGuideService —
+    // the handoff must still be cancelled.
+    await setSetting(CONNECTION_GUIDES_ENABLED_KEY, "false", "BOOLEAN");
+    clearSettingsCache();
+    await run(`user:svc:guide:${sid()}:${iosCode}:${iosApp.slug}`, owner, session);
+    expect(session.currentFlow).toBeNull();
+    expect(session.temp.guideSupportContext).toBeUndefined();
+    expect(session.temp.supportDraft).toBeUndefined();
+    await setSetting(CONNECTION_GUIDES_ENABLED_KEY, "true", "BOOLEAN");
+    clearSettingsCache();
+  });
+
+  it("guide templates are rendered as escaped plain text — never raw operator HTML", async () => {
+    // Operator-editable templates are sent with parse_mode HTML; treating them as
+    // plain text (escape template + values once) means stray/crossed/unclosed
+    // markup can never make Telegram reject the message.
+    const out = await guideTemplateText("connection_guides_app_page_intro", {
+      app: "<b>x</b>",
+      service_name: "<i>y", // unclosed / crossed on purpose
+    });
+    expect(out).not.toContain("<b>");
+    expect(out).not.toContain("<i>");
+    expect(out).toContain("&lt;");
+  });
+
+  it("a fully-populated guide page stays within Telegram's message limit (§P1)", async () => {
+    // A valid app may carry 3000 + 2000 chars; with the intro/status that exceeds
+    // Telegram's 4096 limit and BOTH the edit and reply fallback would fail
+    // silently. The body must be clamped and never split an HTML entity.
+    const big = await makeApp({
+      displayName: "BigGuide",
+      instructions: "a<&d ".repeat(600), // 3000 chars incl. HTML-special chars
+      troubleshooting: "x>y&z ".repeat(300), // 1800 chars incl. HTML-special chars
+    });
+    await setGuideAppActive(big.id, true, "admin-test");
+    invalidateGuideCache();
+    const cap = await run(`user:svc:guide:${sid()}:${iosCode}:${big.slug}`, owner);
+    const text = cap.edits.at(-1)?.text ?? "";
+    expect(text.length).toBeLessThanOrEqual(GUIDE_PAGE_TEXT_MAX);
+    // The clamp truncated (…) and left no dangling/partial HTML entity at the end.
+    expect(text).toContain("…");
+    expect(/&[^;]{0,9}$/.test(text)).toBe(false);
+  });
+});

@@ -57,6 +57,8 @@ export function clearSupportState(ctx: BotContext): void {
     ctx.session.currentFlow = null;
   }
   delete ctx.session.temp.supportDraft;
+  // Connection-guide handoff context never outlives the support flow.
+  delete ctx.session.temp.guideSupportContext;
 }
 
 /** Fix D landing rows - exported for tests (labels are ButtonText-backed). */

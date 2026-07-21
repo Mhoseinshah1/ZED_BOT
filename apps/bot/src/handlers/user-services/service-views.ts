@@ -39,6 +39,14 @@ export const svcCb = {
   enableYes: (sid: string): string => `user:svc:enable:${sid}:yes`,
   regenLink: (sid: string): string => `user:svc:regen_link:${sid}`,
   regenLinkYes: (sid: string): string => `user:svc:regen_link:${sid}:yes`,
+  // Device connection guides (feat/device-connection-guides). Progressive routes,
+  // all emitting the single prefix `user:svc:guide:` (the nav-integrity scan stops
+  // at the first `${`). `p` is a compact platform code, `slug` a bounded app slug.
+  guide: (sid: string): string => `user:svc:guide:${sid}`,
+  guidePlatform: (sid: string, p: string): string => `user:svc:guide:${sid}:${p}`,
+  guideApp: (sid: string, p: string, slug: string): string => `user:svc:guide:${sid}:${p}:${slug}`,
+  guideSupport: (sid: string, p: string, slug: string): string =>
+    `user:svc:gsup:${sid}:${p}:${slug}`,
 } as const;
 
 const STATUS_LABELS: Record<ServiceStatus, string> = {
@@ -240,9 +248,11 @@ const NO_DETAIL_ACTIONS: ServiceDetailActions = {
 
 /**
  * Master-requirements arrangement (Section 8): fixed row slots with every
- * unimplemented capability HIDDEN instead of rendered dead - note editing,
- * service transfer and tutorials are outside this phase, so their slots
- * collapse. The QR-code slots ARE implemented (service-config-qrcode phase):
+ * unimplemented capability HIDDEN instead of rendered dead - note editing and
+ * service transfer are outside this phase, so their slots collapse. The
+ * connection-tutorial slot IS implemented (feat/device-connection-guides): the
+ * «آموزش اتصال 📱» entry renders when `guide` is non-null (the async gate passed).
+ * The QR-code slots ARE implemented (service-config-qrcode phase):
  * a «QR اشتراک 📷» / «QR کانفیگ‌ها 📷» button renders next to each text link,
  * but only when its stored payload exists. Action buttons render only when the
  * capability model + remote-model classification allow them (the routes
@@ -251,6 +261,7 @@ const NO_DETAIL_ACTIONS: ServiceDetailActions = {
 export function serviceDetailKeyboard(
   service: Service,
   actions: ServiceDetailActions = NO_DETAIL_ACTIONS,
+  guide: { label: string } | null = null,
 ): InlineKeyboard {
   const sid = serviceShortId(service);
   // Row 1: refresh.
@@ -270,7 +281,14 @@ export function serviceDetailKeyboard(
   if (actions.canRegenerateLink) {
     kb.text("تغییر لینک 🔄", svcCb.regenLink(sid)).row();
   }
-  // Row 4: renewal + extra volume - both routes re-validate on click.
+  // Row 4b: device connection guide (feat/device-connection-guides). Rendered
+  // AFTER the link/config/QR rows and BEFORE the financial actions, ONLY when the
+  // async entry gate passed (master switch on + >=1 active app + usable payload);
+  // `guide` is null otherwise. The route re-validates everything on click.
+  if (guide !== null) {
+    kb.text(guide.label, svcCb.guide(sid)).row();
+  }
+  // Row 5: renewal + extra volume - both routes re-validate on click.
   if (actions.canRenew) {
     kb.text("تمدید سرویس ♻️", rncb.service(sid));
   }
@@ -306,8 +324,7 @@ export function serviceDetailKeyboard(
   // Callback owned by user-notifications/notification.handler.ts; literal here
   // for the same import-cycle reason as the list keyboard above.
   kb.text("اعلان‌های این سرویس 🔔", `user:nsvc:${sid}`).row();
-  // Row 7: support entry - routes into the existing ticket flow (tutorials
-  // slot hidden - placeholder only).
+  // Row 7: support entry - routes into the existing ticket flow.
   kb.text("مشکل دارم", CB.USER_SUPPORT).row();
   // Row 8: back navigation (doc right/left order).
   kb.text("بازگشت به لیست", svcCb.list(1)).text("بازگشت به منوی اصلی", CB.USER_MENU);

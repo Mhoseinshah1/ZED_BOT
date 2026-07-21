@@ -140,3 +140,20 @@ Callback data is `ntf:<shortId>:<action>` (c=continue/reselect, d=view, n=suppre
 | `notif_btn_auto_renewal_wallet` | کیف پول من 🏦 | `w` (VIEW_WALLET, reused) |
 
 Callback data is `ntf:<shortId>:<code>`; the label is never authorization. The cancel button opens the existing confirmation and cancels via the existing `cancelMandate` service (no money moves from notification code).
+
+## Device connection guides (feat/device-connection-guides)
+
+| key | default text | notes |
+| --- | --- | --- |
+| `service_connection_guide` | آموزش اتصال 📱 | Service-detail + link/QR/post-purchase entry. |
+| `guide_platform_ios` | آیفون / آیپد 🍎 | Platform button (label never drives routing). |
+| `guide_platform_android` | اندروید 🤖 | |
+| `guide_platform_windows` | ویندوز 🪟 | |
+| `guide_platform_macos` | مک 🍏 | |
+| `guide_platform_linux` | لینوکس 🐧 | |
+| `guide_platform_android_tv` | اندروید تی‌وی 📺 | |
+| `guide_download_primary` | دانلود برنامه ⬇️ | HTTPS URL button. |
+| `guide_download_alternate` | دانلود جایگزین ⬇️ | Rendered only when an alternate URL exists. |
+| `guide_support` | هنوز وصل نمی‌شود؟ پشتیبانی 🛠 | Support handoff. |
+| `guide_back_platforms` | بازگشت به انتخاب دستگاه | |
+| `guide_back_apps` | بازگشت به برنامه‌ها | |

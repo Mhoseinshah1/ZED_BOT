@@ -69,3 +69,21 @@ Rendered by the worker delivery from a safe snapshot (keys mirror
 | `notification_wallet_auto_renewal_upcoming` | notification | `service_name`, `product_name`, `current_price`, `maximum_charge`, `expected_charge_time`, `service_expiry` | Durable advance notice ~24h before a wallet auto-renewal charge. No wallet balance. Delivered variables are re-rendered from LIVE state at send time (never a stale price). See [wallet-auto-renewal-precharge-notices.md](./wallet-auto-renewal-precharge-notices.md). |
 
 Note: the former at-charge `AUTO_RENEWAL_CHARGING_TEXT` "renewing now" message was removed — the advance notice replaces it.
+
+## Device connection guides (feat/device-connection-guides)
+
+| Key | Category | Variables | Notes |
+| --- | --- | --- | --- |
+| `connection_guides_disabled` | empty_state | — | Shown when a guide callback fires while the master switch is off. |
+| `connection_guides_choose_platform` | general | `service_name` | Platform-selection page header. |
+| `connection_guides_choose_app` | general | `device`, `service_name` | Application-selection page header. |
+| `connection_guides_app_page_intro` | general | `app`, `service_name` | Guide page intro (name HTML-escaped). |
+| `connection_guides_no_apps` | empty_state | — | No active guide app configured. |
+| `connection_guides_no_payload` | empty_state | — | Service has no connection payload. |
+| `connection_guides_stale_app` | empty_state | — | Selected app became inactive. |
+| `connection_guides_support_handoff` | support | `service_name`, `device`, `app` | Support prompt (no secret). |
+| `connection_guides_service_active` | general | — | Status decision: ACTIVE. |
+| `connection_guides_service_disabled` | general | — | Status decision: DISABLED. |
+| `connection_guides_service_expired` | general | — | Status decision: EXPIRED. |
+| `connection_guides_service_limited` | general | — | Status decision: LIMITED. |
+| `connection_guides_service_unavailable` | general | — | FAILED/CREATING/DELETED safe explanation. |
