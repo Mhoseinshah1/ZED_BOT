@@ -98,6 +98,30 @@ export async function getAvailablePlatforms(): Promise<GuidePlatform[]> {
   return GUIDE_PLATFORMS.filter((p) => present.has(p));
 }
 
+/** Platforms (canonical order) that have >=1 active app which is actually usable
+ * for THIS Service — i.e. a supported method backed by a real payload. Filters out
+ * apps whose only enabled methods don't match the Service's available payloads, so
+ * the user is never offered a guide that leads to no connection action. */
+export async function getGuidePlatformsForService(
+  service: Pick<Service, "subscriptionUrl" | "configLinks">,
+): Promise<GuidePlatform[]> {
+  const all = await getActiveGuideApps();
+  const present = new Set(
+    all.filter((a) => resolveGuideMethods(a, service).anyAvailable).map((a) => a.platform),
+  );
+  return GUIDE_PLATFORMS.filter((p) => present.has(p));
+}
+
+/** Active apps for a platform that are usable for THIS Service (>=1 method backed
+ * by a real payload), bounded like {@link getActiveGuideAppsForPlatform}. */
+export async function getCompatibleGuideAppsForPlatform(
+  platform: GuidePlatform,
+  service: Pick<Service, "subscriptionUrl" | "configLinks">,
+): Promise<ConnectionGuideApp[]> {
+  const apps = await getActiveGuideAppsForPlatform(platform);
+  return apps.filter((a) => resolveGuideMethods(a, service).anyAvailable);
+}
+
 /** A single ACTIVE app by slug (from the cached active set), or null. */
 export async function getActiveGuideAppBySlug(slug: string): Promise<ConnectionGuideApp | null> {
   if (!isValidGuideSlug(slug)) {
@@ -141,7 +165,9 @@ export async function isConnectionGuideEntryVisible(
     if (!(await isConnectionGuidesEnabled())) {
       return false;
     }
-    return (await getAvailablePlatforms()).length > 0;
+    // Require at least one active app that is actually usable for this Service, so
+    // the entry is never shown when it would lead only to no-connection-action guides.
+    return (await getGuidePlatformsForService(service)).length > 0;
   } catch (err) {
     logger.warn("connection-guide entry visibility check failed", { error: String(err) });
     return false;

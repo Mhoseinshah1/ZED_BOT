@@ -81,8 +81,15 @@ describe("HTTPS download-URL validation (§12) - pure, never fetches", () => {
 });
 
 describe("clampHtmlMessage (§P1) - HTML-aware, tag-balanced truncation", () => {
-  it("returns short text unchanged", () => {
+  it("returns short, well-formed text unchanged", () => {
     expect(clampHtmlMessage("<b>hi</b>")).toBe("<b>hi</b>");
+    expect(clampHtmlMessage("plain text")).toBe("plain text");
+  });
+  it("balances a short template's unclosed tag even without truncation", () => {
+    // An operator can save "<b>note" (under the length limit); Telegram would
+    // reject the whole message, so a dangling tag is re-closed here too.
+    expect(clampHtmlMessage("<b>note")).toBe("<b>note</b>");
+    expect(clampHtmlMessage("a <i>b <b>c")).toBe("a <i>b <b>c</b></i>");
   });
   it("clamps to the limit and re-closes a tag left open by the cut", () => {
     const html = `<b>${"a".repeat(5000)}</b>`; // opening tag near the start, close at the very end
@@ -148,6 +155,19 @@ describe("method availability (§10) - pure", () => {
     expect(resolveGuideMethods(app(), svc()).qr).toBe(true);
     expect(resolveGuideMethods(app({ supportsQr: false }), svc()).qr).toBe(false);
     expect(resolveGuideMethods(app(), svc({ subscriptionUrl: null, configLinks: [] })).qr).toBe(false);
+  });
+  it("an app whose only method has no matching payload is NOT usable (anyAvailable=false)", () => {
+    // Configs-only app + a Service that has only a subscription URL → dead-end.
+    const cfgOnly = app({
+      supportsSubscription: false,
+      supportsQr: false,
+      supportsIndividualConfigs: true,
+    });
+    const m = resolveGuideMethods(cfgOnly, svc({ configLinks: [] }));
+    expect(m.subscription).toBe(false);
+    expect(m.configs).toBe(false);
+    expect(m.qr).toBe(false);
+    expect(m.anyAvailable).toBe(false);
   });
   it("a QR-ONLY app still exposes the QR action for the available payload", () => {
     const qrOnly = app({

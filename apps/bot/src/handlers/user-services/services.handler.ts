@@ -51,8 +51,8 @@ import {
 } from "../../services/qr-delivery.service.js";
 import {
   getActiveGuideAppBySlug,
-  getActiveGuideAppsForPlatform,
-  getAvailablePlatforms,
+  getCompatibleGuideAppsForPlatform,
+  getGuidePlatformsForService,
   isConnectionGuideEntryVisible,
   isConnectionGuidesEnabled,
   resolveGuideMethods,
@@ -389,6 +389,10 @@ servicesHandler.callbackQuery(/^user:svc:link:([0-9a-f-]+)$/, async (ctx) => {
     await safeAnswerCallback(ctx, "لینک اشتراک برای این سرویس ثبت نشده است.");
     return;
   }
+  // Tapping a connection method (even from a stale guide keyboard) means the user
+  // has left the support handoff — cancel it so their next message isn't consumed
+  // into a ticket. No-op when none pending.
+  clearGuideHandoff(ctx);
   await safeAnswerCallback(ctx);
   // §16: additive «آموزش اتصال 📱» next-action + back nav (existing text link kept).
   const linkSid = serviceShortId(service);
@@ -422,6 +426,7 @@ servicesHandler.callbackQuery(/^user:svc:configs:([0-9a-f-]+)$/, async (ctx) => 
     await safeAnswerCallback(ctx, "کانفیگی برای این سرویس ثبت نشده است.");
     return;
   }
+  clearGuideHandoff(ctx); // leaving the support handoff via a stale guide keyboard
   await safeAnswerCallback(ctx);
   const lines = ["کانفیگ‌های سرویس شما:", ""];
   for (const link of links.slice(0, MAX_CONFIGS_SHOWN)) {
@@ -464,6 +469,7 @@ servicesHandler.callbackQuery(/^user:svc:qr_sub:([0-9a-f-]+)$/, async (ctx) => {
     await safeAnswerCallback(ctx, QR_NO_SUBSCRIPTION_TEXT);
     return;
   }
+  clearGuideHandoff(ctx); // leaving the support handoff via a stale guide keyboard
   await safeAnswerCallback(ctx);
   const sid = serviceShortId(service);
   // Additive keyboard: the copyable text link stays one tap away, plus the §16
@@ -502,6 +508,7 @@ servicesHandler.callbackQuery(/^user:svc:qr_configs:([0-9a-f-]+)$/, async (ctx) 
     await safeAnswerCallback(ctx, QR_NO_CONFIGS_TEXT);
     return;
   }
+  clearGuideHandoff(ctx); // leaving the support handoff via a stale guide keyboard
   await safeAnswerCallback(ctx);
   const sid = serviceShortId(service);
   const label = serviceAccountLabel(service);
@@ -632,7 +639,9 @@ async function requireGuideService(ctx: BotContext, sid: string): Promise<Servic
 }
 
 async function renderGuidePlatformSelection(ctx: BotContext, service: Service): Promise<void> {
-  const platforms = await getAvailablePlatforms();
+  // Only platforms whose apps are actually usable for THIS service (a supported
+  // method backed by a real payload) — never a platform that leads to dead-ends.
+  const platforms = await getGuidePlatformsForService(service);
   const page = await guidePlatformPage(service, platforms);
   await safeEditOrReply(ctx, page.text, page.keyboard, GUIDE_HTML);
 }
@@ -642,7 +651,7 @@ async function renderGuideAppSelection(
   service: Service,
   platform: Parameters<typeof guideAppPage>[1],
 ): Promise<void> {
-  const apps = await getActiveGuideAppsForPlatform(platform);
+  const apps = await getCompatibleGuideAppsForPlatform(platform, service);
   const page = await guideAppPage(service, platform, apps);
   await safeEditOrReply(ctx, page.text, page.keyboard, GUIDE_HTML);
 }

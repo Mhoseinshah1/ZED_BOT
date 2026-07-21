@@ -142,7 +142,11 @@ export async function guideAppDetailPage(
   const sid = service.id.slice(0, 8);
   const pcode = GUIDE_PLATFORM_CODE[platform];
   const accountLabel = serviceAccountLabel(service);
-  const showFull = guideStatusShowsFullGuide(service.status);
+  // Only render the full guide when the status is connectable AND the app actually
+  // exposes a usable method for this Service; otherwise fall through to the safe
+  // "unavailable" + support-only variant so the user is never shown a guide with
+  // no working connection action.
+  const showFull = guideStatusShowsFullGuide(service.status) && methods.anyAvailable;
 
   const intro = await getMessageTemplate("connection_guides_app_page_intro", undefined, {
     app: escapeHtml(app.displayName),

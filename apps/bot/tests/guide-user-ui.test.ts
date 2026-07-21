@@ -303,6 +303,45 @@ d("user connection-guide callbacks", () => {
     expect(session.temp.supportDraft).toBeUndefined();
   });
 
+  it("tapping a connection method (stale guide keyboard) CANCELS a pending support handoff", async () => {
+    const session = initialSession();
+    await run(`user:svc:gsup:${sid()}:${iosCode}:${iosApp.slug}`, owner, session);
+    expect(session.currentFlow).toBe("support:message");
+    // Tap the subscription-link button from an (older) guide message.
+    await run(`user:svc:link:${sid()}`, owner, session);
+    expect(session.currentFlow).toBeNull();
+    expect(session.temp.guideSupportContext).toBeUndefined();
+    expect(session.temp.supportDraft).toBeUndefined();
+  });
+
+  it("an app with no usable method for THIS service is filtered out / shows no dead-end", async () => {
+    const cfgOnly = await makeApp({
+      displayName: "ConfigsOnly",
+      supportsSubscription: false,
+      supportsQr: false,
+      supportsIndividualConfigs: true,
+    });
+    await setGuideAppActive(cfgOnly.id, true, "admin-test");
+    invalidateGuideCache();
+    // Service has ONLY a subscription payload → a configs-only app is unusable here.
+    await prisma.service.update({ where: { id: service.id }, data: { configLinks: [] } });
+    // The incompatible app is NOT offered in the app list.
+    const list = await run(`user:svc:guide:${sid()}:${iosCode}`, owner);
+    const labels = list.edits.at(-1)?.buttons.map((b) => b.text) ?? [];
+    expect(labels.some((t) => t.includes("ConfigsOnly"))).toBe(false);
+    // A direct/stale detail callback shows the safe unavailable variant — no method buttons.
+    const detail = await run(`user:svc:guide:${sid()}:${iosCode}:${cfgOnly.slug}`, owner);
+    const data = detail.edits.at(-1)?.buttons.map((b) => b.data) ?? [];
+    expect(data.some((d) => d === `user:svc:link:${sid()}`)).toBe(false);
+    expect(data.some((d) => d === `user:svc:configs:${sid()}`)).toBe(false);
+    // Support is still offered.
+    expect(data.some((d) => typeof d === "string" && d.startsWith(`user:svc:gsup:${sid()}`))).toBe(true);
+    // Restore shared state.
+    await prisma.service.update({ where: { id: service.id }, data: { configLinks: [CONFIG_SECRET] } });
+    await setGuideAppActive(cfgOnly.id, false, "admin-test");
+    invalidateGuideCache();
+  });
+
   it("a fully-populated guide page stays within Telegram's message limit (§P1)", async () => {
     // A valid app may carry 3000 + 2000 chars; with the intro/status that exceeds
     // Telegram's 4096 limit and BOTH the edit and reply fallback would fail

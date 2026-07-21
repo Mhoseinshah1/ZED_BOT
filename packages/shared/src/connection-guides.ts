@@ -143,7 +143,11 @@ function openTagClosers(html: string): string {
  * and the reply fallback). Guarantees the returned length is `<= max`. */
 export function clampHtmlMessage(text: string, max: number = GUIDE_PAGE_TEXT_MAX): string {
   if (text.length <= max) {
-    return text;
+    // Even without truncation an operator may have saved a template with an
+    // unclosed tag (e.g. "<b>note"); Telegram would reject the whole message, so
+    // re-close any dangling tag here too.
+    const closers = openTagClosers(text);
+    return closers === "" ? text : `${text}${closers}`;
   }
   const ELLIPSIS = " …";
   const trim = (s: string): string => {
