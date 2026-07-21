@@ -29,6 +29,7 @@ import {
 import {
   type PanelReadOutcome,
   readServiceForDiagnostics,
+  type ServiceReadLogContext,
   serviceSyncTtlMs,
 } from "./service-sync.service.js";
 import { writeSystemLog } from "./system-log.service.js";
@@ -583,8 +584,16 @@ export async function runServiceDiagnostics(
       const budget = new Promise<"diag-timeout">((resolve) => {
         timer = setTimeout(() => resolve("diag-timeout"), diagnosticsReadTimeoutMs());
       });
+      // §3: the read primitive must log NOTHING reversible for a diagnosis — no
+      // serviceId/panelId/userId/username/URL/raw error — only a non-reversible
+      // correlation hash. persist:false is the OWNER read-only preview.
+      const persist = opts.persist ?? true;
+      const logContext: ServiceReadLogContext = {
+        mode: persist ? "DIAGNOSTICS" : "OWNER_PREVIEW",
+        correlation: correlationHash(userId, service.id),
+      };
       const raced = await Promise.race([
-        readServiceForDiagnostics(service.id, userId, { persist: opts.persist ?? true }),
+        readServiceForDiagnostics(service.id, userId, { persist, logContext }),
         budget,
       ]).finally(() => clearTimeout(timer));
 

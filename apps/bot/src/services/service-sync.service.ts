@@ -94,6 +94,96 @@ export interface PanelReadOutcome {
   diagnosticCode: string | null;
 }
 
+// -----------------------------------------------------------------------------
+// §3 privacy-safe logging for the read primitive. The SAME one-read primitive
+// backs three callers with different privacy needs, so every caller declares
+// how its logs must be shaped:
+//   NORMAL_SYNC   — the display/refresh path: our own DB ids (serviceId/panelId)
+//                   are fine (documented, non-secret, and logged bot-wide), but a
+//                   raw adapter error is NOT — it may embed a URL/host/token.
+//   DIAGNOSTICS   — an explicit user diagnosis: log NOTHING reversible — no
+//   OWNER_PREVIEW   serviceId/panelId/userId/username/URL/raw error — only the
+//                   operation, panel type, a sanitized code + bounded category,
+//                   the outcome and a NON-reversible correlation hash.
+// The correlation is a pre-computed sha256(userId:serviceId) slice — a token,
+// never a secret; we never hash a URL/credential and then log it.
+// -----------------------------------------------------------------------------
+
+export type ServiceReadLogContext =
+  | { mode: "NORMAL_SYNC" }
+  | { mode: "DIAGNOSTICS"; correlation: string }
+  | { mode: "OWNER_PREVIEW"; correlation: string };
+
+const NORMAL_SYNC_LOG_CONTEXT: ServiceReadLogContext = { mode: "NORMAL_SYNC" };
+
+/**
+ * Maps a raw adapter error string to a BOUNDED, non-identifying category. The
+ * raw string may embed a subscription URL, panel host, token or a panel-body
+ * fragment, so this NEVER echoes it — it only pattern-matches into a fixed,
+ * closed vocabulary that is always safe to log.
+ */
+export function scrubErrorCategory(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined || raw === "") {
+    return "none";
+  }
+  const s = raw.toLowerCase();
+  if (s.includes("timeout") || s.includes("etimedout") || s.includes("timed out")) return "timeout";
+  if (s.includes("econnrefused") || s.includes("connection refused")) return "conn-refused";
+  if (s.includes("enotfound") || s.includes("getaddrinfo") || s.includes("dns")) return "dns";
+  if (s.includes("econnreset") || s.includes("socket hang up") || s.includes("epipe")) return "conn-reset";
+  if (
+    s.includes("certificate") ||
+    s.includes("self-signed") ||
+    s.includes("self signed") ||
+    s.includes(" ssl") ||
+    s.includes("tls")
+  ) {
+    return "tls";
+  }
+  if (s.includes("401") || s.includes("403") || s.includes("unauthorized") || s.includes("forbidden")) return "auth";
+  if (s.includes("404") || s.includes("not found")) return "not-found";
+  if (s.includes("429") || s.includes("rate limit") || s.includes("too many")) return "rate-limited";
+  if (
+    s.includes("500") ||
+    s.includes("502") ||
+    s.includes("503") ||
+    s.includes("504") ||
+    s.includes("gateway") ||
+    s.includes("bad gateway")
+  ) {
+    return "server-error";
+  }
+  if (s.includes("json") || s.includes("parse") || s.includes("unexpected token") || s.includes("malformed")) {
+    return "malformed";
+  }
+  return "other";
+}
+
+/** The base log fields for a read, shaped by the caller's privacy mode. In
+ * DIAGNOSTICS/OWNER_PREVIEW mode NOTHING reversible is included — no serviceId,
+ * no panelId, no userId — only the operation, panel type and correlation hash. */
+function readLogBaseFields(
+  ctx: ServiceReadLogContext,
+  serviceId: string,
+  panelId: string,
+  panelType: string,
+): Record<string, unknown> {
+  if (ctx.mode === "NORMAL_SYNC") {
+    return { serviceId, panelId, panelType };
+  }
+  return { operation: ctx.mode, panelType, correlation: ctx.correlation };
+}
+
+/** A safe, mode-aware read-error outcome (never carries credentials/URLs). */
+function readErrorOutcome(
+  code: string,
+  service: Service | null = null,
+  panelId: string | null = null,
+  panelType: string | null = null,
+): PanelReadOutcome {
+  return { kind: "read-error", service, panelId, panelType, account: null, diagnosticCode: code };
+}
+
 export type SyncServiceResult =
   | { ok: true; service: Service; message: string }
   | {
@@ -265,16 +355,34 @@ async function readServiceAccountAndSyncUnlocked(
   serviceId: string,
   userId: string,
   persist = true,
+  logContext: ServiceReadLogContext = NORMAL_SYNC_LOG_CONTEXT,
 ): Promise<PanelReadOutcome> {
-  const service = await prisma.service.findFirst({
-    where: {
-      id: serviceId,
-      userId,
-      deletedAt: null,
-      status: { not: ServiceStatus.DELETED },
-    },
-    include: { panel: true },
-  });
+  // §4: the owner-scoped DB lookup is wrapped — a DB hiccup degrades to a safe
+  // typed read-error instead of throwing out of the primitive.
+  let service: Prisma.ServiceGetPayload<{ include: { panel: true } }> | null;
+  try {
+    service = await prisma.service.findFirst({
+      where: {
+        id: serviceId,
+        userId,
+        deletedAt: null,
+        status: { not: ServiceStatus.DELETED },
+      },
+      include: { panel: true },
+    });
+  } catch {
+    // No panel/service context yet — log only the operation + correlation.
+    if (logContext.mode !== "NORMAL_SYNC") {
+      logger.warn("service diagnostics read error", {
+        operation: logContext.mode,
+        stage: "db-lookup",
+        correlation: logContext.correlation,
+      });
+    } else {
+      logger.warn("service sync error", { serviceId, stage: "db-lookup" });
+    }
+    return readErrorOutcome("db-error");
+  }
   if (service === null) {
     return {
       kind: "service-missing",
@@ -298,12 +406,15 @@ async function readServiceAccountAndSyncUnlocked(
     };
   }
 
-  logger.info("service sync started", {
-    serviceId: service.id,
-    panelId: panel.id,
-    panelType: panel.type,
-  });
+  const baseFields = readLogBaseFields(logContext, service.id, panel.id, panel.type);
+  logger.info(
+    logContext.mode === "NORMAL_SYNC" ? "service sync started" : "service diagnostics read started",
+    baseFields,
+  );
 
+  // §4: adapter construction + the account read are wrapped; a thrown error
+  // becomes a NORMAL failed-read result (the raw message is sanitized below,
+  // never logged verbatim).
   let result: GetServiceAccountResult;
   try {
     const adapter = buildAdapterForPanel(panel);
@@ -317,12 +428,17 @@ async function readServiceAccountAndSyncUnlocked(
 
   if (!result.ok) {
     const code = result.diagnostic?.code ?? null;
-    logger.warn("service sync failed", {
-      serviceId: service.id,
-      panelId: panel.id,
-      notFound: result.notFound === true,
-      error: result.errorMessage ?? "unknown",
-    });
+    // §3: NEVER log the raw errorMessage (it may embed a URL/host/token). Log a
+    // sanitized code + a bounded scrubbed category instead, in every mode.
+    logger.warn(
+      logContext.mode === "NORMAL_SYNC" ? "service sync failed" : "service diagnostics read failed",
+      {
+        ...baseFields,
+        notFound: result.notFound === true,
+        code: code ?? "unknown",
+        category: scrubErrorCategory(result.errorMessage),
+      },
+    );
     const kind: PanelReadKind =
       result.notFound === true
         ? "not-found"
@@ -347,6 +463,12 @@ async function readServiceAccountAndSyncUnlocked(
   // over the fresh state (consistent with LIVE_PANEL evidence) without any DB
   // write; `account` also carries the live result.
   if (!persist) {
+    logger.info(
+      logContext.mode === "NORMAL_SYNC"
+        ? "service sync succeeded"
+        : "service diagnostics read succeeded",
+      baseFields,
+    );
     return {
       kind: "read-ok",
       service: projectServiceFromAccount(serviceRow, result),
@@ -357,11 +479,32 @@ async function readServiceAccountAndSyncUnlocked(
     };
   }
 
-  const updated = await prisma.service.update({
-    where: { id: service.id },
-    data: buildUpdateData(serviceRow, result),
-  });
-  logger.info("service sync succeeded", { serviceId: service.id, panelId: panel.id });
+  // §4: the persist write is wrapped. A successful read whose DB update fails
+  // must not throw out of the primitive; it fails closed to a safe read-error
+  // that still carries the STORED row (a failed read NEVER overwrites the row).
+  let updated: Service;
+  try {
+    updated = await prisma.service.update({
+      where: { id: service.id },
+      data: buildUpdateData(serviceRow, result),
+    });
+  } catch {
+    if (logContext.mode !== "NORMAL_SYNC") {
+      logger.warn("service diagnostics read error", {
+        operation: logContext.mode,
+        stage: "db-update",
+        panelType: panel.type,
+        correlation: logContext.correlation,
+      });
+    } else {
+      logger.warn("service sync error", { serviceId: service.id, panelId: panel.id, stage: "db-update" });
+    }
+    return readErrorOutcome("persist-error", serviceRow, panel.id, panel.type);
+  }
+  logger.info(
+    logContext.mode === "NORMAL_SYNC" ? "service sync succeeded" : "service diagnostics read succeeded",
+    baseFields,
+  );
   return {
     kind: "read-ok",
     service: updated,
@@ -446,23 +589,38 @@ async function syncServiceFromPanelUnlocked(
 export async function readServiceForDiagnostics(
   serviceId: string,
   userId: string,
-  opts: { persist?: boolean } = {},
+  opts: { persist?: boolean; logContext: ServiceReadLogContext },
 ): Promise<PanelReadOutcome> {
-  const acquisition = await acquireServiceLock(serviceOperationLockKey(serviceId));
+  // §4: TRULY never-throw. Every step is wrapped so no exception escapes:
+  //   - lock ACQUISITION (Redis down / throwing) → safe lock-unavailable;
+  //   - the read body → itself never-throw, but guarded as defence in depth;
+  //   - lock RELEASE (in finally) → swallowed so it can NEVER replace the
+  //     classified result.
+  let acquisition: Awaited<ReturnType<typeof acquireServiceLock>>;
+  try {
+    acquisition = await acquireServiceLock(serviceOperationLockKey(serviceId));
+  } catch {
+    return readErrorOutcome("lock-unavailable");
+  }
   if (!acquisition.ok) {
-    return {
-      kind: "read-error",
-      service: null,
-      panelId: null,
-      panelType: null,
-      account: null,
-      diagnosticCode: acquisition.reason === "contended" ? "locked" : "lock-unavailable",
-    };
+    return readErrorOutcome(acquisition.reason === "contended" ? "locked" : "lock-unavailable");
   }
   try {
-    return await readServiceAccountAndSyncUnlocked(serviceId, userId, opts.persist ?? true);
+    return await readServiceAccountAndSyncUnlocked(
+      serviceId,
+      userId,
+      opts.persist ?? true,
+      opts.logContext,
+    );
+  } catch {
+    return readErrorOutcome("read-error");
   } finally {
-    await acquisition.lock.release();
+    try {
+      await acquisition.lock.release();
+    } catch {
+      // A release failure must NEVER replace the classified result above; a
+      // stale lock expires on its own TTL. Swallowed intentionally.
+    }
   }
 }
 

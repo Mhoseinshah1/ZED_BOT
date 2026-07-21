@@ -324,24 +324,58 @@ supportTextHandler.on("message:text", async (ctx, next) => {
       await safeReply(ctx, DRAFT_EXPIRED_TEXT);
       return;
     }
-    // Service self-diagnostics handoff: re-resolve the Service OWNER-scoped and
-    // re-validate the SAFE snapshot before attaching. A stale/foreign context
-    // (service no longer owned, or a snapshot that fails the strict validator)
-    // silently drops the attachment — a normal ticket is still created, but it
-    // can NEVER carry another Service/user's report.
+    // §5 attachment integrity + idempotency. CLAIM the whole handoff
+    // synchronously (flow + draft + diagnostic context) BEFORE any await, so a
+    // repeated OR concurrent submission of the same handoff can never create a
+    // second ticket or attach the same snapshot twice: a second update sees the
+    // flow already cleared and bails. The claim is restored only if ticket
+    // creation fails, so a corrected retry still works and still carries the
+    // snapshot. (The bot processes updates sequentially; this claim keeps the
+    // guarantee even under a concurrent runner.)
+    const claimedSubject = draft.subject;
     const diagContext = ctx.session.temp.diagnosticSupportContext;
-    let attachedServiceId: string | null = null;
-    let attachment: SupportTicketAttachment | undefined;
-    if (diagContext !== undefined) {
-      const owned = await getOwnedServiceById(diagContext.serviceId, user.id);
-      const safeSnapshot = validateDiagnosticSnapshot(diagContext.snapshot);
-      if (owned !== null && safeSnapshot !== null) {
-        attachedServiceId = owned.id;
-        attachment = { serviceId: owned.id, diagnosticSnapshot: safeSnapshot };
+    ctx.session.currentFlow = null;
+    delete ctx.session.temp.supportDraft;
+    delete ctx.session.temp.diagnosticSupportContext;
+    const restoreClaim = (): void => {
+      ctx.session.currentFlow = MESSAGE_FLOW;
+      ctx.session.temp.supportDraft = draft;
+      if (diagContext !== undefined) {
+        ctx.session.temp.diagnosticSupportContext = diagContext;
       }
+    };
+
+    // Re-resolve the Service OWNER-scoped and strictly re-validate the SAFE
+    // snapshot before attaching. A stale/foreign context (service no longer
+    // owned, or a snapshot that fails the strict validator) silently drops the
+    // attachment — a normal ticket is still created, but it can NEVER carry
+    // another Service/user's report or a mismatched serviceId/snapshot pair.
+    let attachedServiceId: string | null = null;
+    let outcome: Awaited<ReturnType<typeof createSupportTicket>>;
+    try {
+      let attachment: SupportTicketAttachment | undefined;
+      if (diagContext !== undefined) {
+        const owned = await getOwnedServiceById(diagContext.serviceId, user.id);
+        const safeSnapshot = validateDiagnosticSnapshot(diagContext.snapshot);
+        // owned.id is resolved FROM diagContext.serviceId, so the attached
+        // serviceId + snapshot are always a consistent, owner-scoped pair.
+        if (owned !== null && safeSnapshot !== null && owned.id === diagContext.serviceId) {
+          attachedServiceId = owned.id;
+          attachment = { serviceId: owned.id, diagnosticSnapshot: safeSnapshot };
+        }
+      }
+      outcome = await createSupportTicket(user.id, claimedSubject, text, attachment);
+    } catch (err) {
+      // A THROWN owner-lookup / ticket-creation error (e.g. a transient DB
+      // outage) during the claimed window must restore the WHOLE claim — the
+      // claim was consumed synchronously before this await, so without this the
+      // user would silently lose the armed handoff and its diagnostic snapshot.
+      restoreClaim();
+      throw err;
     }
-    const outcome = await createSupportTicket(user.id, draft.subject, text, attachment);
     if (!outcome.ok) {
+      // Restore the whole claim so a corrected retry still works + attaches.
+      restoreClaim();
       await safeReply(ctx, outcome.safeMessage, cancelKb);
       return;
     }

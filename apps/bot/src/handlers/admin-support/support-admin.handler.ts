@@ -1,4 +1,4 @@
-import { validateDiagnosticSnapshot } from "@zedbot/shared";
+import { clampEscapedText, validateDiagnosticSnapshot } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -136,8 +136,16 @@ function diagnosticSummaryLines(ticket: TicketWithMessages): string[] {
   return lines;
 }
 
-function detailText(ticket: TicketWithMessages): string {
-  const lines = [
+/** Whole-message budget kept safely under Telegram's 4096-char hard limit —
+ * exceeding it makes BOTH safeEditOrReply's edit AND its reply fallback fail, so
+ * the admin cannot open the ticket at all. */
+const SUPPORT_DETAIL_TEXT_MAX = 3900;
+
+export function detailText(ticket: TicketWithMessages): string {
+  // Header — the ONLY part with live <code> tags (bounded: an 8-char id, the
+  // numeric telegram id, a Telegram-bounded username, a ≤100-char subject). It
+  // is never truncated, so a live tag can never be split.
+  const header = [
     `تیکت 🎫 <code>${ticket.id.slice(0, 8)}</code>`,
     "",
     `کاربر: <code>${ticket.user.telegramId}</code>${
@@ -150,20 +158,25 @@ function detailText(ticket: TicketWithMessages): string {
     `ایجاد: ${ticket.createdAt.toISOString().slice(0, 10)} | به‌روزرسانی: ${ticket.updatedAt.toISOString().slice(0, 10)}`,
   ];
   if (ticket.closedAt !== null) {
-    lines.push(
+    header.push(
       `بسته شده: ${ticket.closedAt.toISOString().slice(0, 10)}${
         ticket.closedByAdminId === null ? "" : ` | ادمین: ${ticket.closedByAdminId.slice(0, 8)}`
       }`,
     );
   }
-  lines.push(...diagnosticSummaryLines(ticket));
-  lines.push("", "پیام‌ها:");
+  // Body — the potentially unbounded part (the diagnostic summary + up to ten
+  // 300-char message previews + a long linked service username). It is FULLY
+  // escaped plain text (no live tags), so it can be safely clamped without
+  // breaking parse_mode: HTML — the header is reserved first.
+  const body = [...diagnosticSummaryLines(ticket), "", "پیام‌ها:"];
   for (const message of ticket.messages) {
     const label =
       message.senderType === "USER" ? "👤 کاربر" : message.senderType === "ADMIN" ? "👨‍💼 پشتیبانی" : "⚙️ سیستم";
-    lines.push(`${label}: ${escapeHtml(ticketMessagePreview(message.text))}`);
+    body.push(`${label}: ${escapeHtml(ticketMessagePreview(message.text))}`);
   }
-  return lines.join("\n");
+  const headerText = header.join("\n");
+  const bodyBudget = Math.max(0, SUPPORT_DETAIL_TEXT_MAX - headerText.length - 1);
+  return `${headerText}\n${clampEscapedText(body.join("\n"), bodyBudget)}`;
 }
 
 async function renderDetail(ctx: BotContext, ticket: TicketWithMessages): Promise<void> {

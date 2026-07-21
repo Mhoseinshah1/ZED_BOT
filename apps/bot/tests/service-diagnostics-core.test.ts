@@ -1,13 +1,18 @@
 import type { Panel, Service } from "@zedbot/database";
 import {
   buildDiagnosticSnapshot,
+  DIAGNOSTIC_CODE_CONTRACT,
   DIAGNOSTIC_CODES,
   DIAGNOSTIC_SNAPSHOT_MAX_CHECKS,
+  DIAGNOSTIC_SNAPSHOT_REQUIRED_KEYS,
   DIAGNOSTIC_SNAPSHOT_VERSION,
+  diagnosticCodeSpec,
+  KNOWN_DIAGNOSTIC_CODES,
   resolveDiagnosticsCooldownSeconds,
   resolveDiagnosticsReadTimeoutMs,
   resolveDiagnosticsRecentConnectionHours,
   SERVICE_DIAGNOSTIC_CHECK_KEYS,
+  SERVICE_DIAGNOSTIC_CHECK_STATUSES,
   SERVICE_DIAGNOSTICS_COOLDOWN_DEFAULT,
   SERVICE_DIAGNOSTICS_COOLDOWN_MAX,
   SERVICE_DIAGNOSTICS_COOLDOWN_MIN,
@@ -15,10 +20,13 @@ import {
   validateDiagnosticSnapshot,
   worstOverall,
   worstOverallOf,
+  type DiagnosticSnapshotCheck,
+  type ServiceDiagnosticCheck,
   type ServiceDiagnosticReport,
 } from "@zedbot/shared";
 import { describe, expect, it } from "vitest";
 
+import { detailText } from "../src/handlers/admin-support/support-admin.handler.js";
 import {
   type DiagnosticCheckResult,
   type DiagnosticEvidence,
@@ -28,6 +36,7 @@ import {
   resolveRecommendedActions,
 } from "../src/services/service-diagnostics.service.js";
 import type { PanelReadOutcome } from "../src/services/service-sync.service.js";
+import { TICKET_MESSAGE_MAX } from "../src/services/support-ticket.service.js";
 import type { ServiceDetailActions } from "../src/services/user-services.service.js";
 
 // =============================================================================
@@ -477,27 +486,48 @@ describe("service-diagnostics: recommended actions", () => {
 });
 
 describe("service-diagnostics: snapshot schema", () => {
+  // A full, canonical, VALID report — one check per authoritative key (a real
+  // report always emits all of them). Strict validation requires the EXACT set.
+  const FULL_CHECKS: ServiceDiagnosticCheck[] = [
+    { key: "SERVICE_STATE", status: "PASS", code: c.SERVICE_STATE_ACTIVE, userMessage: "a" },
+    { key: "PANEL_STATE", status: "PASS", code: c.PANEL_OK, userMessage: "b" },
+    { key: "PANEL_ACCOUNT", status: "PASS", code: c.ACCOUNT_PRESENT, userMessage: "c" },
+    { key: "QUOTA", status: "PASS", code: c.QUOTA_OK, userMessage: "d" },
+    { key: "EXPIRY", status: "PASS", code: c.EXPIRY_OK, userMessage: "e" },
+    { key: "CONNECTION_PAYLOAD", status: "PASS", code: c.PAYLOAD_PRESENT, userMessage: "f" },
+    { key: "CONNECTION_HISTORY", status: "PASS", code: c.HISTORY_RECENT, userMessage: "g" },
+    { key: "DATA_FRESHNESS", status: "INFO", code: c.FRESHNESS_LIVE, userMessage: "h" },
+  ];
   function report(overrides: Partial<ServiceDiagnosticReport> = {}): ServiceDiagnosticReport {
     return {
-      overall: "ACTION_REQUIRED",
+      overall: "HEALTHY",
       evidenceSource: "LIVE_PANEL",
       checkedAt: NOW,
-      checks: [
-        { key: "QUOTA", status: "FAIL", code: c.QUOTA_EXHAUSTED, userMessage: "x" },
-        { key: "EXPIRY", status: "PASS", code: c.EXPIRY_OK, userMessage: "y" },
-      ],
-      recommendedActions: ["RENEW_SERVICE", "OPEN_SUPPORT"],
+      checks: FULL_CHECKS.map((ck) => ({ ...ck })),
+      recommendedActions: ["RETRY_DIAGNOSTIC", "OPEN_SUPPORT"],
       ...overrides,
     };
   }
+  /** A validator-shaped snapshot check (key/status/code only). */
+  function snapCheck(
+    key: (typeof SERVICE_DIAGNOSTIC_CHECK_KEYS)[number],
+    status: string,
+    code: string,
+  ): DiagnosticSnapshotCheck {
+    return { key, status: status as DiagnosticSnapshotCheck["status"], code };
+  }
+  /** The canonical, fully-valid v1 snapshot as a plain record for mutation. */
+  function validSnap(): Record<string, unknown> {
+    return buildDiagnosticSnapshot(report(), "RETRY_DIAGNOSTIC") as unknown as Record<string, unknown>;
+  }
 
   it("builds a valid snapshot that round-trips through the validator", () => {
-    const snap = buildDiagnosticSnapshot(report(), "RENEW_SERVICE");
+    const snap = buildDiagnosticSnapshot(report(), "RETRY_DIAGNOSTIC");
     expect(snap.version).toBe(DIAGNOSTIC_SNAPSHOT_VERSION);
-    expect(snap.primaryRecommendation).toBe("RENEW_SERVICE");
+    expect(snap.primaryRecommendation).toBe("RETRY_DIAGNOSTIC");
     const validated = validateDiagnosticSnapshot(snap);
     expect(validated).not.toBeNull();
-    expect(validated?.checks).toHaveLength(2);
+    expect(validated?.checks).toHaveLength(SERVICE_DIAGNOSTIC_CHECK_KEYS.length);
   });
 
   it("carries only key/status/code per check — no free-form or secret fields", () => {
@@ -508,40 +538,232 @@ describe("service-diagnostics: snapshot schema", () => {
     expect(JSON.stringify(snap)).not.toContain("userMessage");
   });
 
-  it("rejects unknown enum members, over-length codes and too many checks", () => {
-    expect(validateDiagnosticSnapshot({ ...buildDiagnosticSnapshot(report()), overall: "BOGUS" })).toBeNull();
+  // --- §2 contract completeness -------------------------------------------------
+
+  it("the code contract covers EXACTLY the known codes (no missing, no extra)", () => {
+    const contractCodes = Object.keys(DIAGNOSTIC_CODE_CONTRACT).sort();
+    const knownCodes = [...KNOWN_DIAGNOSTIC_CODES].sort();
+    expect(contractCodes).toEqual(knownCodes);
+  });
+
+  it("every code's contract key + statuses are members of the typed enums", () => {
+    for (const [code, spec] of Object.entries(DIAGNOSTIC_CODE_CONTRACT)) {
+      expect(SERVICE_DIAGNOSTIC_CHECK_KEYS).toContain(spec.key);
+      expect(spec.statuses.length).toBeGreaterThan(0);
+      for (const status of spec.statuses) {
+        expect(SERVICE_DIAGNOSTIC_CHECK_STATUSES).toContain(status);
+      }
+      expect(diagnosticCodeSpec(code)).toBe(spec);
+    }
+    expect(diagnosticCodeSpec("NOT_A_REAL_CODE")).toBeNull();
+    // Prototype pollution guard: `toString`/`constructor` are not "known" codes.
+    expect(diagnosticCodeSpec("toString")).toBeNull();
+    expect(diagnosticCodeSpec("constructor")).toBeNull();
+  });
+
+  it("the evaluator only ever emits codes/statuses that satisfy the contract", () => {
+    // Cross-check the deterministic engine against the contract over many inputs.
+    for (const key of SERVICE_DIAGNOSTIC_CHECK_KEYS) {
+      const codesForKey = Object.entries(DIAGNOSTIC_CODE_CONTRACT)
+        .filter(([, spec]) => spec.key === key)
+        .map(([code]) => code);
+      expect(codesForKey.length).toBeGreaterThan(0);
+    }
+  });
+
+  // --- §2 strict acceptance -----------------------------------------------------
+
+  it("normalizes checks to canonical order regardless of input ordering", () => {
+    const snap = validSnap();
+    snap.checks = [...(snap.checks as unknown[])].reverse();
+    const validated = validateDiagnosticSnapshot(snap);
+    expect(validated).not.toBeNull();
+    expect(validated?.checks.map((ck) => ck.key)).toEqual([...SERVICE_DIAGNOSTIC_CHECK_KEYS]);
+  });
+
+  it("accepts an optional primaryRecommendation only when it is a known action", () => {
+    expect(validateDiagnosticSnapshot({ ...validSnap(), primaryRecommendation: "OPEN_SUPPORT" })).not.toBeNull();
+    expect(validateDiagnosticSnapshot({ ...validSnap(), primaryRecommendation: "NOPE" })).toBeNull();
+  });
+
+  // --- §2 strict rejection ------------------------------------------------------
+
+  it("rejects an unknown overall / evidenceSource", () => {
+    expect(validateDiagnosticSnapshot({ ...validSnap(), overall: "BOGUS" })).toBeNull();
+    expect(validateDiagnosticSnapshot({ ...validSnap(), evidenceSource: "BOGUS" })).toBeNull();
+  });
+
+  it("rejects a missing required check (fewer than the version's set)", () => {
+    const snap = validSnap();
+    snap.checks = (snap.checks as unknown[]).slice(0, SERVICE_DIAGNOSTIC_CHECK_KEYS.length - 1);
+    expect(validateDiagnosticSnapshot(snap)).toBeNull();
+  });
+
+  it("rejects an extra / too-many checks", () => {
+    const snap = validSnap();
+    snap.checks = [
+      ...(snap.checks as unknown[]),
+      snapCheck("QUOTA", "PASS", c.QUOTA_OK),
+    ];
+    expect(validateDiagnosticSnapshot(snap)).toBeNull();
     expect(
       validateDiagnosticSnapshot({
-        ...buildDiagnosticSnapshot(report()),
-        checks: [{ key: "QUOTA", status: "FAIL", code: "x".repeat(60) }],
+        ...validSnap(),
+        checks: Array.from({ length: DIAGNOSTIC_SNAPSHOT_MAX_CHECKS + 1 }, () =>
+          snapCheck("QUOTA", "PASS", c.QUOTA_OK),
+        ),
       }),
     ).toBeNull();
-    expect(
-      validateDiagnosticSnapshot({
-        ...buildDiagnosticSnapshot(report()),
-        checks: Array.from({ length: DIAGNOSTIC_SNAPSHOT_MAX_CHECKS + 1 }, () => ({
-          key: "QUOTA",
-          status: "FAIL",
-          code: c.QUOTA_EXHAUSTED,
-        })),
-      }),
-    ).toBeNull();
+  });
+
+  it("rejects a duplicate key (even if it displaces a required one)", () => {
+    const snap = validSnap();
+    const checks = [...(snap.checks as DiagnosticSnapshotCheck[])];
+    // Replace EXPIRY with a second QUOTA → duplicate key, still 8 entries.
+    checks[4] = snapCheck("QUOTA", "WARNING", c.QUOTA_LOW);
+    snap.checks = checks;
+    expect(validateDiagnosticSnapshot(snap)).toBeNull();
+  });
+
+  it("rejects a duplicate code across two keys", () => {
+    const snap = validSnap();
+    const checks = [...(snap.checks as DiagnosticSnapshotCheck[])];
+    // Give EXPIRY the QUOTA_OK code → duplicate code AND code↔key mismatch.
+    checks[4] = snapCheck("EXPIRY", "PASS", c.QUOTA_OK);
+    snap.checks = checks;
+    expect(validateDiagnosticSnapshot(snap)).toBeNull();
+  });
+
+  it("rejects an unknown code", () => {
+    const snap = validSnap();
+    const checks = [...(snap.checks as DiagnosticSnapshotCheck[])];
+    checks[3] = snapCheck("QUOTA", "PASS", "QUOTA_TOTALLY_MADE_UP");
+    snap.checks = checks;
+    expect(validateDiagnosticSnapshot(snap)).toBeNull();
+  });
+
+  it("rejects a code that does not belong to its stated key", () => {
+    const snap = validSnap();
+    const checks = [...(snap.checks as DiagnosticSnapshotCheck[])];
+    // QUOTA_OK is valid, but attached to EXPIRY it violates code↔key.
+    checks[4] = snapCheck("EXPIRY", "PASS", c.QUOTA_OK);
+    snap.checks = checks;
+    expect(validateDiagnosticSnapshot(snap)).toBeNull();
+  });
+
+  it("rejects a status not allowed for the code (contract-driven, not prefix)", () => {
+    const snap = validSnap();
+    const checks = [...(snap.checks as DiagnosticSnapshotCheck[])];
+    // QUOTA_OK's only allowed status is PASS — FAIL must be rejected.
+    checks[3] = snapCheck("QUOTA", "FAIL", c.QUOTA_OK);
+    snap.checks = checks;
+    expect(validateDiagnosticSnapshot(snap)).toBeNull();
+  });
+
+  it("rejects an over-length / malformed code shape", () => {
+    const snap = validSnap();
+    const checks = [...(snap.checks as DiagnosticSnapshotCheck[])];
+    checks[3] = snapCheck("QUOTA", "PASS", "x".repeat(60));
+    snap.checks = checks;
+    expect(validateDiagnosticSnapshot(snap)).toBeNull();
   });
 
   it("rejects a wrong version and non-object input", () => {
-    expect(validateDiagnosticSnapshot({ ...buildDiagnosticSnapshot(report()), version: 2 })).toBeNull();
+    expect(validateDiagnosticSnapshot({ ...validSnap(), version: 2 })).toBeNull();
+    expect(validateDiagnosticSnapshot({ ...validSnap(), version: "1" })).toBeNull();
     expect(validateDiagnosticSnapshot(null)).toBeNull();
     expect(validateDiagnosticSnapshot("nope")).toBeNull();
     expect(validateDiagnosticSnapshot(42)).toBeNull();
+    expect(validateDiagnosticSnapshot([])).toBeNull();
+  });
+
+  it("only version 1 has a required-key set today (migration surface)", () => {
+    expect(DIAGNOSTIC_SNAPSHOT_REQUIRED_KEYS[DIAGNOSTIC_SNAPSHOT_VERSION]).toEqual([
+      ...SERVICE_DIAGNOSTIC_CHECK_KEYS,
+    ]);
+    expect(DIAGNOSTIC_SNAPSHOT_REQUIRED_KEYS[2]).toBeUndefined();
   });
 
   it("rejects an injected secret-shaped field inside a check", () => {
-    const snap = buildDiagnosticSnapshot(report()) as unknown as Record<string, unknown>;
+    const snap = validSnap();
     (snap.checks as Array<Record<string, unknown>>)[0].token = "https://sub.example.com/SECRET";
     const validated = validateDiagnosticSnapshot(snap);
     // The validator strips unknown fields — the round-trip never carries `token`.
+    expect(validated).not.toBeNull();
     expect(JSON.stringify(validated)).not.toContain("SECRET");
     expect(JSON.stringify(validated)).not.toContain("token");
+  });
+});
+
+describe("service-diagnostics: admin ticket detail stays under Telegram's limit (§6/#11)", () => {
+  const validSnapshot = {
+    version: 1,
+    overall: "NEEDS_SUPPORT",
+    evidenceSource: "LIVE_PANEL",
+    checkedAt: NOW.toISOString(),
+    checks: [
+      { key: "SERVICE_STATE", status: "PASS", code: c.SERVICE_STATE_ACTIVE },
+      { key: "PANEL_STATE", status: "FAIL", code: c.PANEL_AUTH_FAILED },
+      { key: "PANEL_ACCOUNT", status: "FAIL", code: c.ACCOUNT_NOT_FOUND },
+      { key: "QUOTA", status: "UNKNOWN", code: c.QUOTA_UNKNOWN },
+      { key: "EXPIRY", status: "PASS", code: c.EXPIRY_OK },
+      { key: "CONNECTION_PAYLOAD", status: "FAIL", code: c.PAYLOAD_MISSING },
+      { key: "CONNECTION_HISTORY", status: "WARNING", code: c.HISTORY_OLD },
+      { key: "DATA_FRESHNESS", status: "INFO", code: c.FRESHNESS_LIVE },
+    ],
+  };
+
+  /** A worst-case diagnostic ticket: a long linked service username, a full
+   * snapshot, and ten maximum-length message previews. */
+  function worstCaseTicket() {
+    const messages = Array.from({ length: 10 }, (_unused, i) => ({
+      senderType: i % 2 === 0 ? "USER" : "ADMIN",
+      text: "م".repeat(TICKET_MESSAGE_MAX),
+    }));
+    return {
+      id: "abcdef01-2345-6789-abcd-ef0123456789",
+      user: { telegramId: 123456789012345n, username: "a".repeat(32) },
+      subject: "س".repeat(100),
+      status: "WAITING_ADMIN",
+      createdAt: NOW,
+      updatedAt: NOW,
+      closedAt: null,
+      closedByAdminId: null,
+      diagnosticSnapshot: validSnapshot,
+      service: { username: "ب".repeat(300), status: "ACTIVE" },
+      messages,
+    } as unknown as Parameters<typeof detailText>[0];
+  }
+
+  it("clamps the assembled detail to under 4096 chars while keeping the header + summary", () => {
+    const text = detailText(worstCaseTicket());
+    expect(text.length).toBeLessThanOrEqual(4096);
+    // The header (never truncated) and the diagnostic summary header survive.
+    expect(text).toContain("تیکت 🎫");
+    expect(text).toContain("گزارش عیب‌یابی");
+    // No unbalanced <code> tag was cut (equal open/close counts).
+    const opens = (text.match(/<code>/g) ?? []).length;
+    const closes = (text.match(/<\/code>/g) ?? []).length;
+    expect(opens).toBe(closes);
+  });
+
+  it("leaves a small ordinary ticket unchanged (no needless truncation)", () => {
+    const small = {
+      id: "00000000-1111-2222-3333-444444444444",
+      user: { telegramId: 55n, username: null },
+      subject: "سوال کوتاه",
+      status: "WAITING_ADMIN",
+      createdAt: NOW,
+      updatedAt: NOW,
+      closedAt: null,
+      closedByAdminId: null,
+      diagnosticSnapshot: null,
+      service: null,
+      messages: [{ senderType: "USER", text: "سلام" }],
+    } as unknown as Parameters<typeof detailText>[0];
+    const text = detailText(small);
+    expect(text.length).toBeLessThan(500);
+    expect(text).not.toContain("…");
   });
 });
 

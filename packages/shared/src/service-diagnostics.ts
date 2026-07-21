@@ -211,6 +211,77 @@ export const KNOWN_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set(
   Object.values(DIAGNOSTIC_CODES),
 );
 
+// --- the single source of truth: code → (check key + allowed statuses) --------
+// EVERY diagnostic code belongs to exactly one check key and may only carry the
+// statuses listed here — the SAME contract the deterministic evaluator emits.
+// This is the ONE place validation, Persian rendering and version migrations
+// look up a code's meaning: nothing derives a code's key/status from string
+// prefixes at runtime. Immutable; a new code is added HERE (and to
+// DIAGNOSTIC_CODES) or it does not exist.
+
+export interface DiagnosticCodeSpec {
+  /** The check key this code belongs to. */
+  key: ServiceDiagnosticCheckKey;
+  /** The statuses this code is allowed to carry (usually exactly one). */
+  statuses: readonly ServiceDiagnosticCheckStatus[];
+}
+
+export const DIAGNOSTIC_CODE_CONTRACT: Readonly<Record<DiagnosticCode, DiagnosticCodeSpec>> = {
+  // SERVICE_STATE
+  SERVICE_STATE_ACTIVE: { key: "SERVICE_STATE", statuses: ["PASS"] },
+  SERVICE_STATE_DISABLED: { key: "SERVICE_STATE", statuses: ["FAIL"] },
+  SERVICE_STATE_EXPIRED: { key: "SERVICE_STATE", statuses: ["FAIL"] },
+  SERVICE_STATE_LIMITED: { key: "SERVICE_STATE", statuses: ["WARNING"] },
+  SERVICE_STATE_CREATING: { key: "SERVICE_STATE", statuses: ["WARNING"] },
+  SERVICE_STATE_FAILED: { key: "SERVICE_STATE", statuses: ["FAIL"] },
+  // PANEL_STATE
+  PANEL_OK: { key: "PANEL_STATE", statuses: ["PASS"] },
+  PANEL_MISSING: { key: "PANEL_STATE", statuses: ["FAIL"] },
+  PANEL_INACTIVE: { key: "PANEL_STATE", statuses: ["FAIL"] },
+  PANEL_READ_UNSUPPORTED: { key: "PANEL_STATE", statuses: ["INFO"] },
+  PANEL_UNREACHABLE: { key: "PANEL_STATE", statuses: ["FAIL"] },
+  PANEL_TIMEOUT: { key: "PANEL_STATE", statuses: ["FAIL"] },
+  PANEL_AUTH_FAILED: { key: "PANEL_STATE", statuses: ["FAIL"] },
+  PANEL_BUSY: { key: "PANEL_STATE", statuses: ["WARNING"] },
+  // PANEL_ACCOUNT
+  ACCOUNT_PRESENT: { key: "PANEL_ACCOUNT", statuses: ["PASS"] },
+  ACCOUNT_NOT_FOUND: { key: "PANEL_ACCOUNT", statuses: ["FAIL"] },
+  ACCOUNT_UNVERIFIED: { key: "PANEL_ACCOUNT", statuses: ["UNKNOWN"] },
+  // QUOTA
+  QUOTA_UNLIMITED: { key: "QUOTA", statuses: ["INFO"] },
+  QUOTA_OK: { key: "QUOTA", statuses: ["PASS"] },
+  QUOTA_LOW: { key: "QUOTA", statuses: ["WARNING"] },
+  QUOTA_EXHAUSTED: { key: "QUOTA", statuses: ["FAIL"] },
+  QUOTA_UNKNOWN: { key: "QUOTA", statuses: ["UNKNOWN"] },
+  // EXPIRY
+  EXPIRY_NONE: { key: "EXPIRY", statuses: ["INFO"] },
+  EXPIRY_OK: { key: "EXPIRY", statuses: ["PASS"] },
+  EXPIRY_NEAR: { key: "EXPIRY", statuses: ["WARNING"] },
+  EXPIRY_EXPIRED: { key: "EXPIRY", statuses: ["FAIL"] },
+  EXPIRY_UNKNOWN: { key: "EXPIRY", statuses: ["UNKNOWN"] },
+  // CONNECTION_PAYLOAD
+  PAYLOAD_PRESENT: { key: "CONNECTION_PAYLOAD", statuses: ["PASS"] },
+  PAYLOAD_MISSING: { key: "CONNECTION_PAYLOAD", statuses: ["FAIL"] },
+  // CONNECTION_HISTORY
+  HISTORY_RECENT: { key: "CONNECTION_HISTORY", statuses: ["PASS"] },
+  HISTORY_OLD: { key: "CONNECTION_HISTORY", statuses: ["WARNING"] },
+  HISTORY_NONE: { key: "CONNECTION_HISTORY", statuses: ["INFO"] },
+  HISTORY_UNKNOWN: { key: "CONNECTION_HISTORY", statuses: ["UNKNOWN"] },
+  // DATA_FRESHNESS
+  FRESHNESS_LIVE: { key: "DATA_FRESHNESS", statuses: ["INFO"] },
+  FRESHNESS_CACHE: { key: "DATA_FRESHNESS", statuses: ["INFO"] },
+  FRESHNESS_STORED: { key: "DATA_FRESHNESS", statuses: ["WARNING"] },
+};
+
+/** Looks up a code's contract, or null for an unknown code. The ONLY sanctioned
+ * way to learn a code's check key + allowed statuses (used by the validator and
+ * available to the Persian renderer / migrations). */
+export function diagnosticCodeSpec(code: string): DiagnosticCodeSpec | null {
+  return Object.prototype.hasOwnProperty.call(DIAGNOSTIC_CODE_CONTRACT, code)
+    ? DIAGNOSTIC_CODE_CONTRACT[code as DiagnosticCode]
+    : null;
+}
+
 // --- overall-severity precedence ---------------------------------------------
 // Deterministic ordering (most severe wins). Precedence (§10):
 //   NEEDS_SUPPORT > UNAVAILABLE > ACTION_REQUIRED > DEGRADED > HEALTHY.
@@ -252,6 +323,20 @@ export function worstOverallOf(
 export const DIAGNOSTIC_SNAPSHOT_VERSION = 1;
 /** Hard cap on persisted checks (== number of check keys). */
 export const DIAGNOSTIC_SNAPSHOT_MAX_CHECKS = SERVICE_DIAGNOSTIC_CHECK_KEYS.length;
+
+/**
+ * The EXACT set of check keys a snapshot of a given version must carry — every
+ * key present exactly once, no extras, no omissions. A real report always emits
+ * all authoritative checks, so version 1 requires the full canonical set. A
+ * future schema change bumps DIAGNOSTIC_SNAPSHOT_VERSION and adds its required
+ * set here; the validator reads the set for the snapshot's declared version, so
+ * old-version snapshots keep validating against their own contract (migrations).
+ */
+export const DIAGNOSTIC_SNAPSHOT_REQUIRED_KEYS: Readonly<
+  Record<number, readonly ServiceDiagnosticCheckKey[]>
+> = {
+  [DIAGNOSTIC_SNAPSHOT_VERSION]: SERVICE_DIAGNOSTIC_CHECK_KEYS,
+};
 
 export interface DiagnosticSnapshotCheck {
   key: ServiceDiagnosticCheckKey;
@@ -297,19 +382,33 @@ export function buildDiagnosticSnapshot(
 }
 
 /**
- * Strictly validates an arbitrary JSON value as a DiagnosticSnapshot. Returns
- * the normalized snapshot on success or null on ANY deviation (unknown keys are
- * tolerated but dropped; unknown enum members / over-length codes / too many
- * checks / free-form fields all fail closed). Never throws.
+ * Strictly CROSS-validates an arbitrary JSON value as a DiagnosticSnapshot and
+ * returns a canonically-ordered copy, or null on ANY deviation. Fails closed on:
+ *   - a version with no known required-key set;
+ *   - an unknown overall / evidenceSource / primaryRecommendation;
+ *   - an unparseable checkedAt;
+ *   - a check whose code is not a KNOWN code, whose code does not belong to its
+ *     stated key, or whose status is not allowed for that code (per the single
+ *     DIAGNOSTIC_CODE_CONTRACT — never a runtime string-prefix guess);
+ *   - a duplicate key, a duplicate code, an extra check, or a missing required
+ *     check (the snapshot must carry EXACTLY the version's required key set).
+ * Unknown top-level / per-check fields are tolerated but dropped. On success the
+ * returned checks are re-ordered into canonical SERVICE_DIAGNOSTIC_CHECK_KEYS
+ * order. Never throws.
  */
 export function validateDiagnosticSnapshot(raw: unknown): DiagnosticSnapshot | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     return null;
   }
   const obj = raw as Record<string, unknown>;
-  if (obj.version !== DIAGNOSTIC_SNAPSHOT_VERSION) {
+  if (typeof obj.version !== "number") {
     return null;
   }
+  const requiredKeys = DIAGNOSTIC_SNAPSHOT_REQUIRED_KEYS[obj.version];
+  if (requiredKeys === undefined) {
+    return null;
+  }
+  const requiredKeySet: ReadonlySet<string> = new Set(requiredKeys);
   if (typeof obj.overall !== "string" || !OVERALL_SET.has(obj.overall)) {
     return null;
   }
@@ -323,10 +422,12 @@ export function validateDiagnosticSnapshot(raw: unknown): DiagnosticSnapshot | n
   if (Number.isNaN(parsedAt)) {
     return null;
   }
-  if (!Array.isArray(obj.checks) || obj.checks.length > DIAGNOSTIC_SNAPSHOT_MAX_CHECKS) {
+  // Exactly the required number of checks — no extras, no omissions.
+  if (!Array.isArray(obj.checks) || obj.checks.length !== requiredKeys.length) {
     return null;
   }
-  const checks: DiagnosticSnapshotCheck[] = [];
+  const byKey = new Map<ServiceDiagnosticCheckKey, DiagnosticSnapshotCheck>();
+  const seenCodes = new Set<string>();
   for (const entry of obj.checks) {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
       return null;
@@ -338,14 +439,38 @@ export function validateDiagnosticSnapshot(raw: unknown): DiagnosticSnapshot | n
     if (typeof c.status !== "string" || !CHECK_STATUS_SET.has(c.status)) {
       return null;
     }
+    // Bounded code shape (defence in depth) AND a KNOWN code whose contract
+    // matches the stated key + status — no string-prefix inference.
     if (typeof c.code !== "string" || !SNAPSHOT_CODE_PATTERN.test(c.code)) {
       return null;
     }
-    checks.push({
-      key: c.key as ServiceDiagnosticCheckKey,
-      status: c.status as ServiceDiagnosticCheckStatus,
-      code: c.code,
-    });
+    const spec = diagnosticCodeSpec(c.code);
+    if (spec === null) {
+      return null; // unknown code
+    }
+    const key = c.key as ServiceDiagnosticCheckKey;
+    const status = c.status as ServiceDiagnosticCheckStatus;
+    if (spec.key !== key) {
+      return null; // code does not belong to this check key
+    }
+    if (!spec.statuses.includes(status)) {
+      return null; // status not allowed for this code
+    }
+    if (!requiredKeySet.has(key)) {
+      return null; // a check key not required by this version
+    }
+    if (byKey.has(key)) {
+      return null; // duplicate key
+    }
+    if (seenCodes.has(c.code)) {
+      return null; // duplicate code
+    }
+    seenCodes.add(c.code);
+    byKey.set(key, { key, status, code: c.code });
+  }
+  // Every required key must be present exactly once.
+  if (byKey.size !== requiredKeys.length) {
+    return null;
   }
   let primaryRecommendation: ServiceDiagnosticAction | undefined;
   if (obj.primaryRecommendation !== undefined) {
@@ -357,8 +482,16 @@ export function validateDiagnosticSnapshot(raw: unknown): DiagnosticSnapshot | n
     }
     primaryRecommendation = obj.primaryRecommendation as ServiceDiagnosticAction;
   }
+  // Normalize to canonical display order (independent of input ordering).
+  const checks: DiagnosticSnapshotCheck[] = [];
+  for (const key of SERVICE_DIAGNOSTIC_CHECK_KEYS) {
+    const check = byKey.get(key);
+    if (check !== undefined) {
+      checks.push(check);
+    }
+  }
   return {
-    version: DIAGNOSTIC_SNAPSHOT_VERSION,
+    version: obj.version,
     overall: obj.overall as ServiceDiagnosticOverall,
     evidenceSource: obj.evidenceSource as DiagnosticEvidenceSource,
     checkedAt: new Date(parsedAt).toISOString(),

@@ -41,23 +41,50 @@ export const diagnosticsHandler = new Composer<BotContext>();
 const NOT_FOUND = "مورد یافت نشد.";
 const DISABLED_TOAST = "بررسی مشکل سرویس در حال حاضر در دسترس نیست.";
 
-/**
- * Disarms an armed support handoff (`support:message` + the seeded draft) WITHOUT
- * touching the snapshot the preview needs. The handoff-cancel middleware exempts
- * every `user:svc:diag:` callback so the preview/confirm steps keep their
- * snapshot; in exchange, ONLY `:sup_yes` may leave the flow armed — every other
- * diagnostic route calls this so a stale keyboard can never turn the user's next
- * ordinary message into a ticket for a previously-armed service.
- */
-function disarmDiagnosticFlow(ctx: BotContext): void {
+// -----------------------------------------------------------------------------
+// §1 handoff-cleanup contract. A diagnostic support handoff is TWO pieces of
+// session state: the ARMED message flow (`currentFlow === "support:message"` +
+// the seeded `supportDraft`), and the stored SNAPSHOT context
+// (`diagnosticSupportContext`) the preview/confirm reuse without a second read.
+//
+//   disarmDiagnosticSupportMessage — cancels ONLY the armed flow (+ draft). Safe
+//     to call unconditionally: a no-op when nothing is armed. Never touches the
+//     snapshot, so a valid preview/confirm can still reuse it.
+//   clearDiagnosticSupportContext — drops ONLY the stored snapshot context.
+//   clearDiagnosticHandoff — both, for every early-return / fail-closed path.
+//
+// The invariant every diagnostic route enforces: cancel the armed flow FIRST,
+// before any master-switch / ownership / Service check, so a stale keyboard can
+// never turn the user's next ordinary message into a ticket for a
+// previously-armed service. ONLY a fully-validated `:sup_yes` re-arms.
+// -----------------------------------------------------------------------------
+
+/** Cancels an armed support-message handoff (flow + seeded draft) WITHOUT
+ * touching the stored snapshot. Idempotent: a no-op when nothing is armed. */
+function disarmDiagnosticSupportMessage(ctx: BotContext): void {
   if (ctx.session.currentFlow === "support:message") {
     ctx.session.currentFlow = null;
   }
   delete ctx.session.temp.supportDraft;
 }
 
+/** Drops the stored diagnostic snapshot context (the preview/confirm payload). */
+function clearDiagnosticSupportContext(ctx: BotContext): void {
+  delete ctx.session.temp.diagnosticSupportContext;
+}
+
+/** Fully clears a diagnostic support handoff: the armed flow AND the snapshot.
+ * Used on every early-return / fail-closed path so nothing survives to capture
+ * the user's next message or be re-armed against a stale snapshot. */
+function clearDiagnosticHandoff(ctx: BotContext): void {
+  disarmDiagnosticSupportMessage(ctx);
+  clearDiagnosticSupportContext(ctx);
+}
+
 /** Owner-scoped reload + master-switch recheck shared by every diagnostics route.
- * Returns the Service, or null after emitting the correct safe response. */
+ * Returns the Service, or null after emitting the correct safe response. Any
+ * thrown master-switch / ownership / DB error fails CLOSED (returns null with the
+ * not-found toast) so the caller drops the whole handoff. */
 async function requireDiagnosableService(
   ctx: BotContext,
   sid: string,
@@ -66,13 +93,44 @@ async function requireDiagnosableService(
   if (user === null) {
     return null;
   }
-  if (!(await isServiceDiagnosticsEnabled())) {
-    await safeAnswerCallback(ctx, DISABLED_TOAST);
+  try {
+    if (!(await isServiceDiagnosticsEnabled())) {
+      await safeAnswerCallback(ctx, DISABLED_TOAST);
+      return null;
+    }
+    const service = await getOwnedServiceByShortId(sid, user.id);
+    if (service === null) {
+      await safeAnswerCallback(ctx, NOT_FOUND);
+      return null;
+    }
+    return service;
+  } catch {
+    // Master-switch read or ownership/DB lookup failure: never surface details,
+    // never leave a handoff armed. The caller (enterDiagnosticRoute) clears it.
+    await safeAnswerCallback(ctx, NOT_FOUND);
     return null;
   }
-  const service = await getOwnedServiceByShortId(sid, user.id);
+}
+
+/**
+ * The shared entry gate for EVERY diagnostic callback. §1 order of operations:
+ *   1. cancel any armed support-message handoff FIRST (before every check), and
+ *   2. owner-reload the Service under the master switch, then
+ *   3. on ANY early return (disabled, unknown/foreign/ambiguous id, dbUser
+ *      absent, DB failure) ALSO drop the stale snapshot context.
+ * Returns the Service on success — the caller decides whether to keep (preview),
+ * replace (a fresh run) or re-arm (confirm) the snapshot — or null after the
+ * correct safe response has been emitted.
+ */
+async function enterDiagnosticRoute(
+  ctx: BotContext,
+  sid: string,
+): Promise<Awaited<ReturnType<typeof getOwnedServiceByShortId>>> {
+  disarmDiagnosticSupportMessage(ctx);
+  const service = await requireDiagnosableService(ctx, sid);
   if (service === null) {
-    await safeAnswerCallback(ctx, NOT_FOUND);
+    // Every early return leaves NOTHING behind — flow AND snapshot both cleared.
+    clearDiagnosticHandoff(ctx);
     return null;
   }
   return service;
@@ -81,13 +139,13 @@ async function requireDiagnosableService(
 /** Runs one diagnosis (respecting the cooldown) and renders the report. */
 async function handleDiagRun(ctx: BotContext, sid: string): Promise<void> {
   const user = ctx.dbUser;
-  const service = await requireDiagnosableService(ctx, sid);
+  // §1: cancel any armed handoff FIRST; an early return also drops the snapshot.
+  // A successful run REPLACES the snapshot below, so the armed flow never
+  // survives a fresh run/retry (only a validated `:sup_yes` re-arms).
+  const service = await enterDiagnosticRoute(ctx, sid);
   if (service === null || user === null) {
     return;
   }
-  // A fresh run/retry DISARMS any pending support handoff (the snapshot is
-  // replaced below); this clears only the ARMED state.
-  disarmDiagnosticFlow(ctx);
   // Answer immediately (§7 step 4) so the client stops the loading spinner.
   await safeAnswerCallback(ctx);
 
@@ -132,19 +190,18 @@ diagnosticsHandler.callbackQuery(/^user:svc:diag:([0-9a-f-]+):retry$/, async (ct
 // snapshot routes the user to re-run (never attaches a stale/foreign report).
 diagnosticsHandler.callbackQuery(/^user:svc:diag:([0-9a-f-]+):support$/, async (ctx) => {
   const sid = ctx.match[1];
-  const service = await requireDiagnosableService(ctx, sid);
+  // §1: enterDiagnosticRoute DISARMS any armed handoff first (a stale keyboard
+  // from an older message can never leave the user's next message captured), and
+  // drops the snapshot on an early return. A VALID preview keeps the latest
+  // unarmed snapshot; only `:sup_yes` re-arms.
+  const service = await enterDiagnosticRoute(ctx, sid);
   if (service === null) {
     return;
   }
   await safeAnswerCallback(ctx);
-  // Opening a preview DISARMS any handoff armed for a DIFFERENT service (a stale
-  // keyboard from an older message): only `:sup_yes` may leave a flow armed, so
-  // the user's next ordinary message can never be captured into a ticket for the
-  // previously-armed service.
-  disarmDiagnosticFlow(ctx);
   const pending = ctx.session.temp.diagnosticSupportContext;
   if (pending === undefined || pending.sid !== sid || pending.serviceId !== service.id) {
-    delete ctx.session.temp.diagnosticSupportContext;
+    clearDiagnosticSupportContext(ctx);
     const page = await renderDiagnosticNotice(sid, "service_diagnostics_stale");
     await safeEditOrReply(ctx, page.text, page.keyboard, DIAG_HTML);
     return;
@@ -159,16 +216,18 @@ diagnosticsHandler.callbackQuery(/^user:svc:diag:([0-9a-f-]+):support$/, async (
 diagnosticsHandler.callbackQuery(/^user:svc:diag:([0-9a-f-]+):sup_yes$/, async (ctx) => {
   const sid = ctx.match[1];
   const user = ctx.dbUser;
-  const service = await requireDiagnosableService(ctx, sid);
+  // §1: enterDiagnosticRoute disarms first + drops the snapshot on any early
+  // return. This route is the ONLY one that may re-arm — and only after every
+  // check AND the snapshot match below succeed.
+  const service = await enterDiagnosticRoute(ctx, sid);
   if (service === null || user === null) {
     return;
   }
   const pending = ctx.session.temp.diagnosticSupportContext;
   if (pending === undefined || pending.sid !== sid || pending.serviceId !== service.id) {
-    // A stale/mismatched confirm must never keep a previously-armed handoff
-    // alive — disarm and drop the snapshot before showing the stale page.
-    disarmDiagnosticFlow(ctx);
-    delete ctx.session.temp.diagnosticSupportContext;
+    // A stale/mismatched confirm must never re-arm: the handoff is already
+    // disarmed above; drop the snapshot too before showing the stale page.
+    clearDiagnosticSupportContext(ctx);
     await safeAnswerCallback(ctx);
     const page = await renderDiagnosticNotice(sid, "service_diagnostics_stale");
     await safeEditOrReply(ctx, page.text, page.keyboard, DIAG_HTML);
