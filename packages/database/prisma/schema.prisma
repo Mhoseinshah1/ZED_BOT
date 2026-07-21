@@ -1899,6 +1899,49 @@ model TutorialMedia {
 }
 
 // =============================================================================
+// Device connection guides (feat/device-connection-guides). Operator-managed,
+// per-platform "how to connect" applications shown under an eligible user
+// Service. Additive: existing installs default to the whole system DISABLED
+// (Setting connection_guides_enabled=false) and no rows are fabricated; the
+// OWNER must configure and activate at least one app before enabling it.
+//
+// `platform` is a typed STRING (not a Postgres enum) - following the same
+// convention as Panel.apiVariant / Panel.authMode - so future devices can be
+// added without a non-transactional `ALTER TYPE ... ADD VALUE` migration. The
+// allowed values are validated in code (packages/shared connection-guides).
+//
+// NO Service secret is ever stored here: only operator-authored labels, HTTPS
+// download URLs and instruction copy. Deletion is soft (isActive=false /
+// archivedAt) so an audited record is never destroyed. `updatedByAdminId` is a
+// plain string (mirrors MessageTemplate/ButtonText) - no FK relation.
+// =============================================================================
+
+model ConnectionGuideApp {
+  id                        String    @id @default(uuid())
+  slug                      String    @unique
+  platform                  String
+  displayName               String
+  iconEmoji                 String
+  primaryDownloadUrl        String
+  alternateDownloadUrl      String?
+  supportsSubscription      Boolean   @default(true)
+  supportsQr                Boolean   @default(true)
+  supportsIndividualConfigs Boolean   @default(true)
+  instructions              String
+  troubleshooting           String    @default("")
+  isActive                  Boolean   @default(false)
+  sortOrder                 Int       @default(0)
+  archivedAt                DateTime?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+  updatedByAdminId          String?
+
+  @@index([platform, isActive, sortOrder])
+  @@index([isActive])
+  @@index([archivedAt])
+}
+
+// =============================================================================
 // Message templates and button texts (Persian by default)
 // =============================================================================
 

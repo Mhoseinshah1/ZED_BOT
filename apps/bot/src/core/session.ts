@@ -295,11 +295,30 @@ export interface SessionData {
     // Support tickets (Phase 32): user new-ticket/reply draft + the admin
     // reply target.
     supportDraft?: { subject?: string; ticketId?: string };
+    // Device connection guides (feat/device-connection-guides): short-lived,
+    // server-side handoff context so the support prompt can show the selected
+    // service/device/app and the cancel button can return to the EXACT guide
+    // page. Ids only (service short id, compact platform code, app slug) - never
+    // a subscription URL, config or credential. Cleared with supportDraft.
+    guideSupportContext?: { sid: string; pcode: string; slug: string };
     adminSupportReplyTicketId?: string;
     // Admin broadcast draft (Phase 33).
     adminBroadcastDraft?: { text?: string };
     // Admin text-settings edit target (Phase 34).
     adminTextEditDraft?: { kind: "template" | "button"; id: string };
+    // Device connection guides admin (feat/device-connection-guides). The
+    // create-wizard accumulator + the single-field editor target. Holds only
+    // operator-authored content in progress (never a Service secret); the app
+    // row is created/updated by the guide service. `field` names which field
+    // the next admin text message edits.
+    adminDeviceGuideDraft?: {
+      mode: "create" | "edit";
+      platform?: string;
+      appId?: string;
+      field?: string;
+      displayName?: string;
+      primaryDownloadUrl?: string;
+    };
     // Checkout-payment reminder config edit (Phase 2, flow "admin_ntf_co:cfg").
     // Holds which rule + which numeric field the next admin text message edits.
     adminCheckoutNtfDraft?: { rule: "abandoned" | "payment"; field: string };

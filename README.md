@@ -315,6 +315,15 @@ retries/reconciliation) — `docs/service-naming-strategies.md`,
 `docs/provisioning-idempotency.md`. OTHER_PRODUCT orders get safe
 deterministic delivery references — `docs/other-product-naming.md`.
 
+**Device connection guides** (disabled by default): an `آموزش اتصال 📱`
+capability under every eligible Service with per-platform, operator-managed
+"how to connect" pages for iPhone/iPad, Android, Windows, macOS, Linux and
+Android TV. Third-party app names and **HTTPS-validated** download URLs are
+managed by the OWNER (never hardcoded, never fetched); the guide reuses the
+existing owner-scoped subscription/config text links and QR codes and never
+embeds a Service secret in text, a URL button or a callback. Behind a master
+switch + admin readiness gate — `docs/device-connection-guides.md`.
+
 **Free-trial VPN accounts** (disabled by default): eligible users can
 claim one real trial account per the operator's policy — an atomic,
 DB-guarded `FreeTrialClaim` entitlement that provisions a real panel

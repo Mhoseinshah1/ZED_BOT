@@ -109,6 +109,12 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   // first-purchase-only, minimum qualifying order) is code-defaulted in
   // @zedbot/shared, so tuning a default never needs a data migration.
   { key: "referral_system_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Device connection guides (feat/device-connection-guides). MASTER switch seeds
+  // FALSE — no user ever sees an «آموزش اتصال 📱» button until the OWNER creates
+  // and activates at least one valid guide app and explicitly enables the system
+  // behind the readiness gate. No guide app is ever seeded (third-party download
+  // URLs are operator-managed only); the code owns platform labels + page copy.
+  { key: "connection_guides_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are

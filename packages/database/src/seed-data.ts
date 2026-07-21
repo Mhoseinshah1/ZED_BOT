@@ -614,6 +614,113 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
       "service_expiry",
     ],
   },
+  // Device connection guides (feat/device-connection-guides). Pure operator copy;
+  // control-flow/validation text stays as code constants. {service_name}/{device}/
+  // {app} are safe, non-secret display values — never a subscription URL or config.
+  {
+    key: "connection_guides_disabled",
+    title: "راهنمای اتصال - غیرفعال",
+    category: "empty_state",
+    defaultContent: "راهنمای اتصال در حال حاضر در دسترس نیست.",
+    allowedVariables: [],
+  },
+  {
+    key: "connection_guides_choose_platform",
+    title: "راهنمای اتصال - انتخاب دستگاه",
+    category: "general",
+    defaultContent:
+      "آموزش اتصال سرویس 📱\n" +
+      "نام سرویس: {service_name}\n" +
+      "\n" +
+      "دستگاه خود را انتخاب کنید:",
+    allowedVariables: ["service_name"],
+  },
+  {
+    key: "connection_guides_choose_app",
+    title: "راهنمای اتصال - انتخاب برنامه",
+    category: "general",
+    defaultContent:
+      "آموزش اتصال — {device}\n" +
+      "نام سرویس: {service_name}\n" +
+      "\n" +
+      "برنامه مورد نظر را انتخاب کنید:",
+    allowedVariables: ["device", "service_name"],
+  },
+  {
+    key: "connection_guides_app_page_intro",
+    title: "راهنمای اتصال - سربرگ برنامه",
+    category: "general",
+    defaultContent: "آموزش اتصال با {app}\n\nنام سرویس:\n{service_name}",
+    allowedVariables: ["app", "service_name"],
+  },
+  {
+    key: "connection_guides_no_apps",
+    title: "راهنمای اتصال - بدون برنامه",
+    category: "empty_state",
+    defaultContent: "هنوز راهنمای اتصالی برای این بخش تنظیم نشده است.",
+    allowedVariables: [],
+  },
+  {
+    key: "connection_guides_no_payload",
+    title: "راهنمای اتصال - بدون اطلاعات اتصال",
+    category: "empty_state",
+    defaultContent: "برای این سرویس اطلاعات اتصالی ثبت نشده است.",
+    allowedVariables: [],
+  },
+  {
+    key: "connection_guides_stale_app",
+    title: "راهنمای اتصال - برنامه نامعتبر",
+    category: "empty_state",
+    defaultContent: "این برنامه دیگر در دسترس نیست؛ لطفاً یکی دیگر را انتخاب کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "connection_guides_support_handoff",
+    title: "راهنمای اتصال - ارجاع به پشتیبانی",
+    category: "support",
+    defaultContent:
+      "اگر هنوز وصل نمی‌شوید، پیام خود را بنویسید تا پشتیبانی بررسی کند.\n" +
+      "\n" +
+      "سرویس: {service_name}\n" +
+      "دستگاه: {device}\n" +
+      "برنامه: {app}",
+    allowedVariables: ["service_name", "device", "app"],
+  },
+  {
+    key: "connection_guides_service_active",
+    title: "راهنمای اتصال - وضعیت فعال",
+    category: "general",
+    defaultContent: "وضعیت سرویس: فعال ✅ — سرویس شما آماده اتصال است.",
+    allowedVariables: [],
+  },
+  {
+    key: "connection_guides_service_disabled",
+    title: "راهنمای اتصال - وضعیت غیرفعال",
+    category: "general",
+    defaultContent: "وضعیت سرویس: غیرفعال ⏸ — ابتدا سرویس را روشن کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "connection_guides_service_expired",
+    title: "راهنمای اتصال - وضعیت منقضی",
+    category: "general",
+    defaultContent: "وضعیت سرویس: منقضی ⌛ — برای اتصال، ابتدا سرویس را تمدید کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "connection_guides_service_limited",
+    title: "راهنمای اتصال - اتمام حجم",
+    category: "general",
+    defaultContent: "وضعیت سرویس: اتمام حجم 📦 — حجم اضافه بخرید یا سرویس را تمدید کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "connection_guides_service_unavailable",
+    title: "راهنمای اتصال - غیرقابل استفاده",
+    category: "general",
+    defaultContent: "این سرویس در حال حاضر قابل استفاده نیست؛ لطفاً با پشتیبانی در تماس باشید.",
+    allowedVariables: [],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -726,4 +833,19 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   },
   { key: "notif_btn_auto_renewal_cancel", title: "اعلان: لغو تمدید خودکار", text: "غیرفعال کردن تمدید خودکار 🚫" },
   { key: "notif_btn_auto_renewal_wallet", title: "اعلان: کیف پول من", text: "کیف پول من 🏦" },
+  // Device connection guides (feat/device-connection-guides). Editable LABELS only;
+  // routing is by fixed callback (never the label). Platform labels power the
+  // platform-selection keyboard; download/support/back power the guide pages.
+  { key: "service_connection_guide", title: "راهنمای اتصال دستگاه", text: "آموزش اتصال 📱" },
+  { key: "guide_platform_ios", title: "راهنما: آیفون/آیپد", text: "آیفون / آیپد 🍎" },
+  { key: "guide_platform_android", title: "راهنما: اندروید", text: "اندروید 🤖" },
+  { key: "guide_platform_windows", title: "راهنما: ویندوز", text: "ویندوز 🪟" },
+  { key: "guide_platform_macos", title: "راهنما: مک", text: "مک 🍏" },
+  { key: "guide_platform_linux", title: "راهنما: لینوکس", text: "لینوکس 🐧" },
+  { key: "guide_platform_android_tv", title: "راهنما: اندروید تی‌وی", text: "اندروید تی‌وی 📺" },
+  { key: "guide_download_primary", title: "راهنما: دانلود برنامه", text: "دانلود برنامه ⬇️" },
+  { key: "guide_download_alternate", title: "راهنما: دانلود جایگزین", text: "دانلود جایگزین ⬇️" },
+  { key: "guide_support", title: "راهنما: پشتیبانی", text: "هنوز وصل نمی‌شود؟ پشتیبانی 🛠" },
+  { key: "guide_back_platforms", title: "راهنما: بازگشت به دستگاه‌ها", text: "بازگشت به انتخاب دستگاه" },
+  { key: "guide_back_apps", title: "راهنما: بازگشت به برنامه‌ها", text: "بازگشت به برنامه‌ها" },
 ];

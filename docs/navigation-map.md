@@ -88,8 +88,14 @@ even when entered from a service detail (kept deliberately — documented in
 | page | buttons |
 | --- | --- |
 | list (`user:svc:list:<page>`) | one per service » `user:svc:view:<sid>` · pagination · بازگشت به منو |
-| detail (`user:svc:view:<sid>`) | بروزرسانی اطلاعات ♻️ · لینک اشتراک 🔗 · کانفیگ‌ها 📄 · تغییر لینک اشتراک 🔄 (»confirm) · **تمدید سرویس ♻️ » `user:renew:svc:<sid>` (Fix A, when renewable)** · خرید حجم اضافه ➕ » `user:ev:svc:<sid>` · خرید زمان اضافه ⏳ » `user:et:svc:<sid>` · خاموش/روشن کردن سرویس (»confirm) · بازگشت به لیست · بازگشت به منوی اصلی |
+| detail (`user:svc:view:<sid>`) | بروزرسانی اطلاعات ♻️ · لینک اشتراک 🔗 · QR اشتراک 📷 · کانفیگ‌ها 📄 · QR کانفیگ‌ها 📷 · تغییر لینک اشتراک 🔄 (»confirm) · **آموزش اتصال 📱 » `user:svc:guide:<sid>` (when the guide gate passes)** · **تمدید سرویس ♻️ » `user:renew:svc:<sid>` (Fix A, when renewable)** · خرید حجم اضافه ➕ » `user:ev:svc:<sid>` · خرید زمان اضافه ⏳ » `user:et:svc:<sid>` · خاموش/روشن کردن سرویس (»confirm) · بازگشت به لیست · بازگشت به منوی اصلی |
 | toggle / regen confirms | تایید ✅ · انصراف » detail |
+| connection guide platform (`user:svc:guide:<sid>`) | one per configured platform » `user:svc:guide:<sid>:<pcode>` · بازگشت به سرویس · بازگشت به منوی اصلی |
+| connection guide apps (`user:svc:guide:<sid>:<pcode>`) | one per active app » `user:svc:guide:<sid>:<pcode>:<slug>` · بازگشت به انتخاب دستگاه · بازگشت به سرویس |
+| connection guide page (`user:svc:guide:<sid>:<pcode>:<slug>`) | لینک اشتراک 🔗/QR اشتراک 📷 » existing `user:svc:link`/`qr_sub` · کانفیگ‌ها 📄/QR کانفیگ‌ها 📷 » existing `user:svc:configs`/`qr_configs` · دانلود برنامه ⬇️ (HTTPS url) · status action (enable/renew/extra) » existing routes · هنوز وصل نمی‌شود؟ پشتیبانی 🛠 » `user:svc:gsup:<sid>:<pcode>:<slug>` · بازگشت به برنامه‌ها · بازگشت به سرویس |
+| connection guide support handoff (`user:svc:gsup:<sid>:<pcode>:<slug>`) | seeds the existing support MESSAGE flow · انصراف و بازگشت به راهنما » guide page · بازگشت به سرویس |
+
+The OWNER manages guide apps under `تنظیمات عمومی ⚙️ → آموزش اتصال 📱` (`admin:devguide:root`): platform pages, add/edit/reorder/enable-disable/archive/preview, and the enable readiness gate. See [device-connection-guides.md](./device-connection-guides.md).
 
 Trial-lifecycle phase: `FREE_TRIAL` services render the SAME per-action
 buttons as paid ones — each is decided by panel capability/state, remote

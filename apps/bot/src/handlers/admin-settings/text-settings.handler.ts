@@ -130,6 +130,10 @@ export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     // literal callback avoids importing the admin handler here.
     .text("زیرمجموعه‌گیری و پاداش 👥", "admin:referral:root")
     .row()
+    // Device connection guides (feat/device-connection-guides). OWNER-only
+    // (handler re-checks); literal callback avoids importing the admin handler.
+    .text("آموزش اتصال 📱", "admin:devguide:root")
+    .row()
     .text("تنظیمات گروه لاگ 📝", LG_CB.root)
     .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);

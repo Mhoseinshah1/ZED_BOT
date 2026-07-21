@@ -97,6 +97,10 @@ import {
   autoRenewalAdminTextHandler,
 } from "./handlers/admin-settings/auto-renewal-admin.handler.js";
 import { referralAdminHandler } from "./handlers/admin-settings/referral-admin.handler.js";
+import {
+  deviceGuidesHandler,
+  deviceGuidesTextHandler,
+} from "./handlers/admin-settings/device-guides.handler.js";
 import { starsSubscriptionAdminHandler } from "./handlers/admin-finance/stars-subscription-admin.handler.js";
 import { userNotificationsHandler } from "./handlers/user-notifications/notification.handler.js";
 import {
@@ -236,6 +240,7 @@ export function createBot(token: string): Bot<BotContext> {
   // admin page (admin:referral:*) — master switch, commission percent, first-
   // purchase-only, minimum order, totals. Never moves money or creates a commission.
   adminArea.use(referralAdminHandler);
+  adminArea.use(deviceGuidesHandler);
   // Telegram Stars subscriptions (Phase 2): OWNER-only «اشتراک‌های ماهانه Stars ⭐»
   // admin page (admin:starsub:*) — master switch + activation gate + counts.
   adminArea.use(starsSubscriptionAdminHandler);
@@ -283,6 +288,7 @@ export function createBot(token: string): Bot<BotContext> {
   // Phase 4: analytics custom date-range input ("admin_analytics:range"). Self-
   // gates on currentFlow.
   adminFlowText.use(analyticsTextHandler);
+  adminFlowText.use(deviceGuidesTextHandler);
   // Phase 2.1: Stars product subscription price input ("admin_starsprod:price").
   // Self-gates on currentFlow, so it passes through for every other admin flow.
   adminFlowText.use(starsProductPriceTextHandler);
