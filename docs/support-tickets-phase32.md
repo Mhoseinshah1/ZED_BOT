@@ -1,5 +1,10 @@
 # ZED_BOT support tickets (Phase 32)
 
+> **Upgraded by Support Tickets V2** — structured categories, service
+> linking and secure Telegram attachments are documented in
+> `docs/support-ticket-attachments.md`. That upgrade is additive: everything
+> below still holds for text-only tickets.
+
 Phase 32 replaces the placeholder «پشتیبانی» page with a structured,
 text-only ticket system: users open tickets and reply, admins answer and
 close, both sides get notified. Ticket tables are the only thing written —

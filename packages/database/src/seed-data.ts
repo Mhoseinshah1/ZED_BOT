@@ -215,6 +215,105 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     defaultContent: "تیکت شما با موفقیت ثبت شد ✅",
     allowedVariables: [],
   },
+  // --- support tickets v2 (categories + service link + attachments) ---------------
+  {
+    key: "support_choose_category",
+    title: "انتخاب دسته‌بندی تیکت",
+    category: "support",
+    defaultContent: "دسته‌بندی مشکل خود را انتخاب کنید:",
+    allowedVariables: [],
+  },
+  {
+    key: "support_choose_service",
+    title: "انتخاب سرویس تیکت",
+    category: "support",
+    defaultContent: "اگر مشکل شما مربوط به یک سرویس است، آن را انتخاب کنید:",
+    allowedVariables: [],
+  },
+  {
+    key: "support_message_or_attachment_prompt",
+    title: "درخواست متن یا فایل تیکت",
+    category: "support",
+    defaultContent:
+      "پیام خود را بنویسید یا یک تصویر / فایل ارسال کنید.\n" +
+      "(متن حداکثر {max} کاراکتر، توضیح فایل حداکثر {caption} کاراکتر)",
+    allowedVariables: ["max", "caption"],
+  },
+  {
+    key: "support_attachment_disabled",
+    title: "پیام غیرفعال بودن ضمیمه",
+    category: "support",
+    defaultContent: "ارسال فایل در حال حاضر امکان‌پذیر نیست. لطفاً مشکل خود را به صورت متن بنویسید.",
+    allowedVariables: [],
+  },
+  {
+    key: "support_attachment_too_large",
+    title: "پیام بزرگ بودن فایل",
+    category: "support",
+    defaultContent: "حجم فایل بیش از حد مجاز است. حداکثر حجم مجاز {max} مگابایت است.",
+    allowedVariables: ["max"],
+  },
+  {
+    key: "support_attachment_type_rejected",
+    title: "پیام نوع فایل نامعتبر",
+    category: "support",
+    defaultContent:
+      "این نوع فایل پشتیبانی نمی‌شود. فرمت‌های مجاز: تصویر، PDF، متن، لاگ و JSON.",
+    allowedVariables: [],
+  },
+  {
+    key: "support_attachment_caption_too_long",
+    title: "پیام طولانی بودن توضیح فایل",
+    category: "support",
+    defaultContent: "توضیح فایل بیش از حد طولانی است. (حداکثر {max} کاراکتر)",
+    allowedVariables: ["max"],
+  },
+  {
+    key: "support_attachment_metadata_invalid",
+    title: "پیام دریافت‌نشدن مشخصات فایل",
+    category: "support",
+    defaultContent: "دریافت این فایل ممکن نشد. لطفاً دوباره تلاش کنید یا فایل دیگری ارسال کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "support_attachment_album_rejected",
+    title: "پیام رد آلبوم فایل",
+    category: "support",
+    defaultContent: "لطفاً فایل‌ها را جداگانه ارسال کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "support_attachment_unavailable",
+    title: "پیام در دسترس نبودن ضمیمه",
+    category: "support",
+    defaultContent: "این ضمیمه دیگر از طریق تلگرام قابل دریافت نیست.",
+    allowedVariables: [],
+  },
+  {
+    key: "support_linked_service_missing",
+    title: "پیام حذف سرویس مرتبط",
+    category: "support",
+    defaultContent: "سرویس مرتبط دیگر در دسترس نیست.",
+    allowedVariables: [],
+  },
+  {
+    key: "support_untrusted_attachment_notice",
+    title: "هشدار فایل غیرقابل‌اعتماد",
+    category: "support",
+    defaultContent:
+      "⚠️ فایل‌های پیوست را کاربران ارسال کرده‌اند و بررسی نشده‌اند؛ با احتیاط باز کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "support_attachment_settings_warning",
+    title: "هشدار صفحهٔ تنظیمات ضمیمه‌ها",
+    category: "support",
+    defaultContent:
+      "این ربات فایل‌ها را دانلود، باز یا اسکن نمی‌کند؛ فقط ارجاع تلگرامی آن‌ها را نگه می‌دارد و نوع/پسوند را با فهرست مجاز می‌سنجد. " +
+      "فایل‌های ارسالی کاربران غیرقابل‌اعتماد هستند و باید با احتیاط باز شوند. " +
+      "غیرفعال‌کردن این بخش فقط ارسال ضمیمهٔ جدید را متوقف می‌کند و هیچ اطلاعاتی را حذف نمی‌کند.",
+    allowedVariables: [],
+  },
   // --- history --------------------------------------------------------------------
   {
     key: "history_landing_text",
@@ -969,4 +1068,17 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "diagnostics_open_guide", title: "عیب‌یابی: راهنمای اتصال", text: "آموزش اتصال 📱" },
   { key: "diagnostics_refresh", title: "عیب‌یابی: بروزرسانی سرویس", text: "بروزرسانی اطلاعات ♻️" },
   { key: "diagnostics_back_service", title: "عیب‌یابی: بازگشت به سرویس", text: "بازگشت به سرویس" },
+  // Support Tickets V2 (feat/support-ticket-attachments-service-context). Editable
+  // LABELS only — callback routing never depends on an editable label (categories
+  // route by stable `user:sup:cat:<code>` codes).
+  { key: "support_category_connection", title: "دسته: مشکل اتصال", text: "مشکل اتصال" },
+  { key: "support_category_payment", title: "دسته: پرداخت و سفارش", text: "پرداخت و سفارش" },
+  { key: "support_category_service", title: "دسته: مدیریت سرویس", text: "مدیریت سرویس" },
+  { key: "support_category_account", title: "دسته: حساب کاربری", text: "حساب کاربری" },
+  { key: "support_category_other", title: "دسته: سایر موارد", text: "سایر موارد" },
+  { key: "support_without_service", title: "تیکت: بدون انتخاب سرویس", text: "بدون انتخاب سرویس" },
+  { key: "support_link_service", title: "تیکت: اتصال به سرویس", text: "اتصال تیکت به یک سرویس" },
+  { key: "support_service_ticket", title: "سرویس: پشتیبانی این سرویس", text: "پشتیبانی این سرویس 🎫" },
+  { key: "support_view_attachment", title: "تیکت: مشاهده ضمیمه", text: "مشاهده ضمیمه 📎" },
+  { key: "support_view_service", title: "تیکت: مشاهده سرویس", text: "مشاهده سرویس 🛍" },
 ];

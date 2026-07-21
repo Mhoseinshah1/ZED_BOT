@@ -341,7 +341,13 @@ async function submitPaymentTicket(
   code: CategoryCode,
   message: string,
 ): Promise<void> {
-  const outcome = await createSupportTicket(userId, paymentTicketSubject(code), message);
+  const outcome = await createSupportTicket({
+    userId,
+    subject: paymentTicketSubject(code),
+    content: { text: message },
+    category: "PAYMENT",
+    origin: "GENERAL",
+  });
   if (!outcome.ok) {
     await safeAnswerCallback(ctx, outcome.safeMessage);
     return;

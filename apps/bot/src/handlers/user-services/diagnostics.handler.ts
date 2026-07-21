@@ -236,7 +236,15 @@ diagnosticsHandler.callbackQuery(/^user:svc:diag:([0-9a-f-]+):sup_yes$/, async (
   await safeAnswerCallback(ctx);
   // Arm the existing support MESSAGE step. The snapshot context (already set) is
   // consumed by supportTextHandler, which re-resolves ownership before attaching.
-  ctx.session.temp.supportDraft = { subject: diagnosticSupportSubject(service.username) };
+  // Support Tickets V2: the diagnostics handoff opens a normal ticket through the
+  // SAME engine, pre-classified CONNECTION / SERVICE_DIAGNOSTICS and linked to the
+  // exact owner-scoped Service. The strict snapshot stays in diagnosticSupportContext.
+  ctx.session.temp.supportDraft = {
+    subject: diagnosticSupportSubject(service.username),
+    category: "CONNECTION",
+    origin: "SERVICE_DIAGNOSTICS",
+    serviceId: service.id,
+  };
   ctx.session.currentFlow = "support:message";
   await logDiagnosticSupportHandoff(user.id, service.id);
   const prompt = await renderSupportArmedPrompt(sid);
