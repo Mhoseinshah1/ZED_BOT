@@ -410,9 +410,17 @@ supportHandler.callbackQuery(/^user:sup:cat:([a-z])$/, async (ctx) => {
   if (user === null) {
     return;
   }
+  // Gate to the NEW-TICKET wizard: a stale category button tapped during an
+  // in-progress reply (draft carries a ticketId) must never overwrite the draft
+  // or advance the flow to the subject step — that would silently convert the
+  // reply into a new-ticket submission.
+  const draft = activeWizardDraft(ctx);
+  if (draft === undefined) {
+    await safeAnswerCallback(ctx);
+    return;
+  }
   const category = supportCategoryFromCallback(ctx.match[1]);
-  const draft = ctx.session.temp.supportDraft;
-  if (category === null || draft === undefined) {
+  if (category === null) {
     await safeAnswerCallback(ctx);
     await renderCategorySelection(ctx);
     return;

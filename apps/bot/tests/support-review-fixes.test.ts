@@ -133,4 +133,15 @@ describe("service-picker callbacks never hijack a reply flow (§13)", () => {
     expect(cap.edits).toBe(0);
     expect(cap.session.temp.supportDraft?.ticketId).toBe("abcdef12-0000-0000-0000-000000000000");
   });
+
+  it("cat button during a reply never overwrites the draft or advances the flow", async () => {
+    const cap: Cap = { edits: 0, session: replySession() };
+    await drive("user:sup:cat:p", cap);
+    // The reply draft is untouched: no category set, flow stays REPLY, and it
+    // never advances to the new-ticket subject step.
+    expect(cap.edits).toBe(0);
+    expect(cap.session.currentFlow).toBe("support:reply");
+    expect(cap.session.temp.supportDraft?.ticketId).toBe("abcdef12-0000-0000-0000-000000000000");
+    expect(cap.session.temp.supportDraft?.category).toBeUndefined();
+  });
 });
