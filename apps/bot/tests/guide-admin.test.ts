@@ -1,5 +1,5 @@
 import { prisma, type Admin } from "@zedbot/database";
-import { CONNECTION_GUIDES_ENABLED_KEY, GUIDE_PLATFORM_CODE } from "@zedbot/shared";
+import { CONNECTION_GUIDES_ENABLED_KEY, GUIDE_PAGE_TEXT_MAX, GUIDE_PLATFORM_CODE } from "@zedbot/shared";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 process.env.APP_SECRET ??= "guide-admin-tests-secret-0123456789";
@@ -12,6 +12,7 @@ import {
 } from "../src/handlers/admin-settings/device-guides.handler.js";
 import {
   DEV_GUIDE_CB,
+  devGuidePreviewText,
   GUIDE_EDIT_FIELDS,
   GUIDE_METHOD_CODES,
 } from "../src/handlers/admin-settings/device-guides-views.js";
@@ -89,6 +90,24 @@ async function cb(cap: Cap, data: string): Promise<void> {
 async function text(cap: Cap, value: string): Promise<void> {
   await deviceGuidesTextHandler.middleware()(ctxFor(cap, { text: value }), async () => undefined);
 }
+
+describe("admin preview text (pure)", () => {
+  it("clamps a fully-populated preview to Telegram's message limit", () => {
+    const app = {
+      displayName: "PreviewApp",
+      iconEmoji: "📦",
+      instructions: "a<&d ".repeat(600), // 3000 chars incl. HTML-special chars
+      troubleshooting: "x>y&z ".repeat(300), // 1800 chars
+      supportsSubscription: true,
+      supportsIndividualConfigs: true,
+      supportsQr: true,
+    } as never;
+    const text = devGuidePreviewText(app);
+    expect(text.length).toBeLessThanOrEqual(GUIDE_PAGE_TEXT_MAX);
+    // No dangling/partial HTML entity at the truncation point.
+    expect(/&[^;]{0,9}$/.test(text)).toBe(false);
+  });
+});
 
 d("device-guide OWNER admin", () => {
   let owner: Admin;

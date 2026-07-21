@@ -123,6 +123,20 @@ describe("method availability (§10) - pure", () => {
     expect(resolveGuideMethods(app({ supportsQr: false }), svc()).qr).toBe(false);
     expect(resolveGuideMethods(app(), svc({ subscriptionUrl: null, configLinks: [] })).qr).toBe(false);
   });
+  it("a QR-ONLY app still exposes the QR action for the available payload", () => {
+    const qrOnly = app({
+      supportsSubscription: false,
+      supportsIndividualConfigs: false,
+      supportsQr: true,
+    });
+    const m = resolveGuideMethods(qrOnly, svc({ configLinks: [] })); // only a subscription payload
+    expect(m.subscription).toBe(false);
+    expect(m.configs).toBe(false);
+    expect(m.qrSubscription).toBe(true); // QR keyed to the payload, not the text-link flag
+    expect(m.qrConfigs).toBe(false);
+    expect(m.qr).toBe(true);
+    expect(m.anyAvailable).toBe(true); // NOT a dead-end app
+  });
 });
 
 describe("validateGuideAppInput (§4) - typed errors, no content echo", () => {

@@ -150,19 +150,28 @@ export async function isConnectionGuideEntryVisible(
 
 // --- method availability -----------------------------------------------------
 export interface GuideMethodAvailability {
-  /** Subscription-link method: Service has a subscriptionUrl AND app supports it. */
+  /** Subscription text-link method: Service has a subscriptionUrl AND app supports it. */
   subscription: boolean;
-  /** Individual-config method: Service has config links AND app supports them. */
+  /** Individual-config text-link method: Service has config links AND app supports them. */
   configs: boolean;
-  /** QR method: app supports QR AND at least one QR-able payload is available. */
+  /** QR method available for the subscription payload: app supports QR AND the
+   * Service has a subscriptionUrl (independent of the subscription text-link flag,
+   * so a QR-only app still exposes its QR action). */
+  qrSubscription: boolean;
+  /** QR method available for the config payload: app supports QR AND the Service
+   * has config links (independent of the config text-link flag). */
+  qrConfigs: boolean;
+  /** True if ANY QR action is available (convenience). */
   qr: boolean;
-  /** Any usable method at all. */
+  /** Any usable method at all (text-link OR QR). */
   anyAvailable: boolean;
 }
 
 /** Resolves which connection methods are BOTH offered by the app AND backed by a
  * real payload on this Service. Pure — reads only the app flags + the Service's
- * own payload presence (never the secret values). */
+ * own payload presence (never the secret values). QR availability is keyed to the
+ * payload (not to the text-link flags) so an app whose only enabled method is QR
+ * still surfaces a working QR action. */
 export function resolveGuideMethods(
   app: Pick<ConnectionGuideApp, "supportsSubscription" | "supportsQr" | "supportsIndividualConfigs">,
   service: Pick<Service, "subscriptionUrl" | "configLinks">,
@@ -171,8 +180,17 @@ export function resolveGuideMethods(
   const hasCfg = serviceHasConfigLinks(service);
   const subscription = hasSub && app.supportsSubscription;
   const configs = hasCfg && app.supportsIndividualConfigs;
-  const qr = app.supportsQr && (subscription || configs);
-  return { subscription, configs, qr, anyAvailable: subscription || configs };
+  const qrSubscription = app.supportsQr && hasSub;
+  const qrConfigs = app.supportsQr && hasCfg;
+  const qr = qrSubscription || qrConfigs;
+  return {
+    subscription,
+    configs,
+    qrSubscription,
+    qrConfigs,
+    qr,
+    anyAvailable: subscription || configs || qr,
+  };
 }
 
 // --- input validation --------------------------------------------------------

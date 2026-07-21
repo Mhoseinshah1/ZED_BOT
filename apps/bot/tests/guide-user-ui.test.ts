@@ -229,6 +229,24 @@ d("user connection-guide callbacks", () => {
     expect(buttons.some((b) => b.data === `user:svc:configs:${sid()}`)).toBe(false);
   });
 
+  it("a QR-only app renders a standalone QR button (no text-link method enabled)", async () => {
+    const qrOnly = await makeApp({
+      displayName: "QROnly",
+      supportsSubscription: false,
+      supportsIndividualConfigs: false,
+      supportsQr: true,
+    });
+    await setGuideAppActive(qrOnly.id, true, "admin-test");
+    invalidateGuideCache();
+    const guide = await run(`user:svc:guide:${sid()}:${iosCode}:${qrOnly.slug}`, owner);
+    const buttons = guide.edits.at(-1)?.buttons ?? [];
+    // The service has a subscriptionUrl, so a subscription-QR action is offered
+    // even though the text-link method is off — the guide is not a dead end.
+    expect(buttons.some((b) => b.data === `user:svc:qr_sub:${sid()}`)).toBe(true);
+    // No text-link button (that method is disabled on this app).
+    expect(buttons.some((b) => b.data === `user:svc:link:${sid()}`)).toBe(false);
+  });
+
   it("an inactive app fails safely (stale) and returns to the app list", async () => {
     const gone = await makeApp({ displayName: "Gone" });
     await setGuideAppActive(gone.id, true, "admin-test");

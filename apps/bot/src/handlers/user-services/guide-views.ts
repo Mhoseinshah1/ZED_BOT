@@ -1,5 +1,6 @@
 import type { Service, ServiceStatus } from "@zedbot/database";
 import {
+  clampEscapedText,
   GUIDE_PAGE_TEXT_MAX,
   GUIDE_PLATFORM_CODE,
   validateHttpsDownloadUrl,
@@ -77,18 +78,6 @@ function backToServiceRow(kb: InlineKeyboard, sid: string): InlineKeyboard {
   return kb.text("بازگشت به سرویس", svcCb.view(sid)).text("بازگشت به منوی اصلی", CB.USER_MENU);
 }
 
-/** Clamps the already-escaped operator body to `budget` code units without ever
- * splitting an HTML entity (which would break the `HTML` parse), appending an
- * ellipsis when truncated. The download/support/action buttons live in the
- * keyboard, so nothing navigable is lost — only overflowing instruction text. */
-function clampGuideBody(escaped: string, budget: number): string {
-  if (escaped.length <= budget) {
-    return escaped;
-  }
-  const ELLIPSIS = " …";
-  const head = escaped.slice(0, Math.max(0, budget - ELLIPSIS.length)).replace(/&[^;]{0,9}$/, "");
-  return `${head}${ELLIPSIS}`;
-}
 
 /** Platform-selection page — only platforms with >=1 active app are shown. */
 export async function guidePlatformPage(
@@ -177,24 +166,30 @@ export async function guideAppDetailPage(
       body += `\n\n${escapeHtml(app.troubleshooting.trim())}`;
     }
     const reserved = intro.length + (statusLine?.length ?? 0) + 8; // separators/newlines
-    body = clampGuideBody(body, Math.max(0, GUIDE_PAGE_TEXT_MAX - reserved));
+    body = clampEscapedText(body, Math.max(0, GUIDE_PAGE_TEXT_MAX - reserved));
     lines.push("", body);
     if (statusLine !== null) {
       lines.push("", statusLine);
     }
 
     // Method buttons reuse the EXISTING owner-scoped callbacks (no second path).
-    if (methods.subscription) {
-      const row = kb.text("لینک اشتراک 🔗", svcCb.link(sid));
-      if (methods.qr) {
-        row.text("QR اشتراک 📷", svcCb.qrSub(sid));
+    // The QR button is keyed to the payload, not to the text-link flag, so a
+    // QR-only app still renders a standalone QR action.
+    if (methods.subscription || methods.qrSubscription) {
+      if (methods.subscription) {
+        kb.text("لینک اشتراک 🔗", svcCb.link(sid));
+      }
+      if (methods.qrSubscription) {
+        kb.text("QR اشتراک 📷", svcCb.qrSub(sid));
       }
       kb.row();
     }
-    if (methods.configs) {
-      const row = kb.text("کانفیگ‌ها 📄", svcCb.configs(sid));
-      if (methods.qr) {
-        row.text("QR کانفیگ‌ها 📷", svcCb.qrConfigs(sid));
+    if (methods.configs || methods.qrConfigs) {
+      if (methods.configs) {
+        kb.text("کانفیگ‌ها 📄", svcCb.configs(sid));
+      }
+      if (methods.qrConfigs) {
+        kb.text("QR کانفیگ‌ها 📷", svcCb.qrConfigs(sid));
       }
       kb.row();
     }
@@ -240,7 +235,10 @@ export async function guideAppDetailPage(
   kb.text(await getButtonText("guide_back_apps"), svcCb.guidePlatform(sid, pcode)).row();
   backToServiceRow(kb, sid);
 
-  return { text: lines.join("\n"), keyboard: kb };
+  // Final guard: even after the per-body budget, an operator who edited the intro
+  // or a status template to extreme lengths could still push the whole message
+  // past Telegram's limit; clamp the assembled text so the send can never fail.
+  return { text: clampEscapedText(lines.join("\n"), GUIDE_PAGE_TEXT_MAX), keyboard: kb };
 }
 
 export { HTML as GUIDE_HTML };

@@ -1,5 +1,6 @@
 import type { ConnectionGuideApp } from "@zedbot/database";
 import {
+  clampEscapedText,
   GUIDE_DISPLAY_NAME_MAX,
   GUIDE_INSTRUCTIONS_MAX,
   GUIDE_PLATFORM_CODE,
@@ -226,7 +227,10 @@ export function devGuidePreviewText(app: ConnectionGuideApp): string {
     "",
     `روش‌ها: اشتراک ${yesNo(app.supportsSubscription)} | کانفیگ ${yesNo(app.supportsIndividualConfigs)} | QR ${yesNo(app.supportsQr)}`,
   );
-  return lines.join("\n");
+  // Same message-limit guard as the user page: a fully-populated app would
+  // otherwise overflow Telegram's 4096-char limit and the preview edit/reply
+  // would both fail silently.
+  return clampEscapedText(lines.join("\n"));
 }
 
 export function devGuidePreviewKeyboard(app: ConnectionGuideApp): InlineKeyboard {

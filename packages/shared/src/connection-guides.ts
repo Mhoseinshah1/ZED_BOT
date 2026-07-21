@@ -96,6 +96,20 @@ export const GUIDE_DOWNLOAD_URL_MAX = 512;
  * the view layer clamps the operator body to keep the whole message under this. */
 export const GUIDE_PAGE_TEXT_MAX = 3900;
 
+/** Truncates already-HTML-escaped text to at most `max` UTF-16 code units without
+ * ever splitting an HTML entity (which would break `parse_mode: HTML`), appending
+ * an ellipsis when it had to cut. Used as the last-line guard so a guide/preview
+ * message — including any operator-editable intro/status templates — can never
+ * exceed Telegram's limit and silently fail to send. */
+export function clampEscapedText(escaped: string, max: number = GUIDE_PAGE_TEXT_MAX): string {
+  if (escaped.length <= max) {
+    return escaped;
+  }
+  const ELLIPSIS = " …";
+  const head = escaped.slice(0, Math.max(0, max - ELLIPSIS.length)).replace(/&[^;]{0,9}$/, "");
+  return `${head}${ELLIPSIS}`;
+}
+
 /** Hard cap on how many active apps a single platform may present, so the
  * application-selection keyboard can never grow unbounded. */
 export const GUIDE_MAX_ACTIVE_APPS_PER_PLATFORM = 12;
