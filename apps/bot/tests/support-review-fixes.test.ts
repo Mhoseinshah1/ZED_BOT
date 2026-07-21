@@ -1,4 +1,4 @@
-import type { SupportMessage, SupportTicket, TicketWithMessages, User } from "@zedbot/database";
+import type { SupportMessage, TicketWithMessages, User } from "@zedbot/database";
 import { describe, expect, it } from "vitest";
 
 process.env.APP_SECRET ??= "review-fix-secret-review-fix-secret-1";
