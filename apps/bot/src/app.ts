@@ -71,7 +71,10 @@ import {
   autoRenewalTextHandler,
 } from "./handlers/user-renewal/auto-renewal.handler.js";
 import { userOrdersHandler } from "./handlers/user-orders/orders.handler.js";
-import { servicesHandler } from "./handlers/user-services/services.handler.js";
+import {
+  guideHandoffCancelMiddleware,
+  servicesHandler,
+} from "./handlers/user-services/services.handler.js";
 import {
   supportHandler,
   supportTextHandler,
@@ -379,6 +382,10 @@ export function createBot(token: string): Bot<BotContext> {
   // User area: /menu + user:* / common:* callbacks behind the access gates.
   const userArea = new Composer<BotContext>();
   userArea.use(userAccessMiddleware());
+  // Cancel a pending guide→support handoff on any user callback that isn't the
+  // handoff route itself, so a stale guide keyboard's lifecycle/nav button can't
+  // leave `support:message` armed and turn the user's next message into a ticket.
+  userArea.use(guideHandoffCancelMiddleware());
   userArea.use(menuHandler);
   userArea.use(checkoutHandler);
   userArea.use(paymentHandler);

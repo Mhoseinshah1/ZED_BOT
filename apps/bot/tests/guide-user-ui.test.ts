@@ -6,7 +6,10 @@ process.env.APP_SECRET ??= "guide-user-ui-tests-secret-0123456789";
 
 import { initialSession } from "../src/core/session.js";
 import { guideTemplateText } from "../src/handlers/user-services/guide-views.js";
-import { servicesHandler } from "../src/handlers/user-services/services.handler.js";
+import {
+  guideHandoffCancelMiddleware,
+  servicesHandler,
+} from "../src/handlers/user-services/services.handler.js";
 import {
   createGuideApp,
   invalidateGuideCache,
@@ -96,6 +99,52 @@ function allCallbackData(cap: Captured): string {
 function allText(cap: Captured): string {
   return [...cap.edits, ...cap.replies].map((m) => m.text).join("\n");
 }
+
+describe("guideHandoffCancelMiddleware (pure)", () => {
+  function ctxWith(data: string | undefined) {
+    const session = initialSession();
+    session.currentFlow = "support:message";
+    session.temp.guideSupportContext = { sid: "abcdef12", pcode: "ios", slug: "app" };
+    session.temp.supportDraft = { subject: "s" };
+    const ctx = {
+      session,
+      callbackQuery: data === undefined ? undefined : { data },
+    } as never;
+    return { ctx, session };
+  }
+
+  it("cancels a pending handoff on any non-gsup callback (enable/renew/volume/nav)", async () => {
+    for (const data of [
+      "user:svc:enable:abcdef12",
+      "user:svc:rn:abcdef12",
+      "user:svc:ev:abcdef12",
+      "user:svc:view:abcdef12",
+      "user:svc:guide:abcdef12",
+    ]) {
+      const { ctx, session } = ctxWith(data);
+      let called = false;
+      await guideHandoffCancelMiddleware()(ctx, async () => {
+        called = true;
+      });
+      expect(called).toBe(true);
+      expect(session.currentFlow).toBeNull();
+      expect(session.temp.guideSupportContext).toBeUndefined();
+      expect(session.temp.supportDraft).toBeUndefined();
+    }
+  });
+
+  it("PRESERVES the handoff on the gsup route (which arms it) and on text updates", async () => {
+    const armed = { sid: "abcdef12", pcode: "ios", slug: "app" };
+    const { ctx, session } = ctxWith("user:svc:gsup:abcdef12:ios:app");
+    await guideHandoffCancelMiddleware()(ctx, async () => undefined);
+    expect(session.temp.guideSupportContext).toEqual(armed);
+    // A text update (the actual ticket) carries no callbackQuery → untouched.
+    const { ctx: ctx2, session: s2 } = ctxWith(undefined);
+    await guideHandoffCancelMiddleware()(ctx2, async () => undefined);
+    expect(s2.temp.guideSupportContext).toEqual(armed);
+    expect(s2.currentFlow).toBe("support:message");
+  });
+});
 
 d("user connection-guide callbacks", () => {
   let panel: Panel;

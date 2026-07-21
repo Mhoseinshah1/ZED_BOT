@@ -602,6 +602,30 @@ function clearGuideHandoff(ctx: BotContext): void {
   delete ctx.session.temp.guideSupportContext;
 }
 
+/** Route prefix that OWNS the guide→support handoff (it SETS the ids-only context
+ * and arms `support:message`); it must be the sole callback exempt from the guard. */
+const GUIDE_SUPPORT_HANDOFF_PREFIX = "user:svc:gsup:";
+
+/** grammY middleware (mounted on the user area) that cancels a pending guide→
+ * support handoff on ANY user callback except the handoff route itself. Inline
+ * keyboards on older guide messages stay tappable after the prompt is edited, so
+ * a lifecycle action (enable/renew/extra-volume) — or any other button, now or in
+ * future — could otherwise navigate away while `support:message` stays armed and
+ * silently turn the user's next message into a ticket. Text updates (the actual
+ * ticket) are not callbacks, so they pass through untouched. */
+export function guideHandoffCancelMiddleware(): (
+  ctx: BotContext,
+  next: () => Promise<void>,
+) => Promise<void> {
+  return async (ctx, next) => {
+    const data = ctx.callbackQuery?.data;
+    if (data !== undefined && !data.startsWith(GUIDE_SUPPORT_HANDOFF_PREFIX)) {
+      clearGuideHandoff(ctx);
+    }
+    await next();
+  };
+}
+
 /** Owner-scoped reload + master-switch recheck shared by every guide route.
  * Returns the Service, or null after emitting the correct safe response. */
 async function requireGuideService(ctx: BotContext, sid: string): Promise<Service | null> {
