@@ -113,13 +113,17 @@ export async function getGuidePlatformsForService(
 }
 
 /** Active apps for a platform that are usable for THIS Service (>=1 method backed
- * by a real payload), bounded like {@link getActiveGuideAppsForPlatform}. */
+ * by a real payload), bounded to {@link GUIDE_MAX_ACTIVE_APPS_PER_PLATFORM}.
+ * Compatibility is filtered BEFORE the cap so a usable app is never hidden just
+ * because it sorts after 12 incompatible ones. */
 export async function getCompatibleGuideAppsForPlatform(
   platform: GuidePlatform,
   service: Pick<Service, "subscriptionUrl" | "configLinks">,
 ): Promise<ConnectionGuideApp[]> {
-  const apps = await getActiveGuideAppsForPlatform(platform);
-  return apps.filter((a) => resolveGuideMethods(a, service).anyAvailable);
+  const all = await getActiveGuideApps();
+  return all
+    .filter((a) => a.platform === platform && resolveGuideMethods(a, service).anyAvailable)
+    .slice(0, GUIDE_MAX_ACTIVE_APPS_PER_PLATFORM);
 }
 
 /** A single ACTIVE app by slug (from the cached active set), or null. */

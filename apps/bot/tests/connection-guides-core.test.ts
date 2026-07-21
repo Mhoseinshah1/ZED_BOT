@@ -1,8 +1,6 @@
 import { prisma, type ConnectionGuideApp } from "@zedbot/database";
 import {
-  clampHtmlMessage,
   GUIDE_MAX_ACTIVE_APPS_PER_PLATFORM,
-  GUIDE_PAGE_TEXT_MAX,
   GUIDE_PLATFORM_CODE,
   guidePlatformFromCode,
   isValidGuideSlug,
@@ -20,6 +18,7 @@ import {
   evaluateGuideReadiness,
   getActiveGuideAppsForPlatform,
   getAvailablePlatforms,
+  getCompatibleGuideAppsForPlatform,
   invalidateGuideCache,
   isConnectionGuideEntryVisible,
   isConnectionGuidesEnabled,
@@ -77,37 +76,6 @@ describe("HTTPS download-URL validation (§12) - pure, never fetches", () => {
   it("a rejection reason never echoes the raw URL", () => {
     const r = validateHttpsDownloadUrl("javascript:alert('SECRETTOKEN')");
     expect(JSON.stringify(r)).not.toContain("SECRETTOKEN");
-  });
-});
-
-describe("clampHtmlMessage (§P1) - HTML-aware, tag-balanced truncation", () => {
-  it("returns short, well-formed text unchanged", () => {
-    expect(clampHtmlMessage("<b>hi</b>")).toBe("<b>hi</b>");
-    expect(clampHtmlMessage("plain text")).toBe("plain text");
-  });
-  it("balances a short template's unclosed tag even without truncation", () => {
-    // An operator can save "<b>note" (under the length limit); Telegram would
-    // reject the whole message, so a dangling tag is re-closed here too.
-    expect(clampHtmlMessage("<b>note")).toBe("<b>note</b>");
-    expect(clampHtmlMessage("a <i>b <b>c")).toBe("a <i>b <b>c</b></i>");
-  });
-  it("clamps to the limit and re-closes a tag left open by the cut", () => {
-    const html = `<b>${"a".repeat(5000)}</b>`; // opening tag near the start, close at the very end
-    const out = clampHtmlMessage(html);
-    expect(out.length).toBeLessThanOrEqual(GUIDE_PAGE_TEXT_MAX);
-    // The <b> opened before the cut must be re-closed so Telegram accepts the HTML.
-    expect(out.endsWith("</b>")).toBe(true);
-    // No dangling partial tag or entity at the boundary.
-    expect(/<[^>]*$/.test(out)).toBe(false);
-    expect(/&[^;]{0,9}$/.test(out)).toBe(false);
-  });
-  it("never cuts in the middle of a tag", () => {
-    // Put a long run then a tag right around the budget boundary.
-    const html = `${"x".repeat(GUIDE_PAGE_TEXT_MAX - 3)}<i>tail</i>`;
-    const out = clampHtmlMessage(html);
-    expect(out.length).toBeLessThanOrEqual(GUIDE_PAGE_TEXT_MAX);
-    // Either the <i> is fully present+closed, or it was dropped entirely — never half a tag.
-    expect(/<[^>]*$/.test(out)).toBe(false);
   });
 });
 
@@ -338,6 +306,38 @@ d("guide core service (DB-backed)", () => {
     expect(orders).toEqual([0, 1, 2]);
     // Moving the top app up is a no-op.
     expect(await moveGuideApp(b.id, "up", "admin-test")).toBe(false);
+  });
+
+  it("compatibility is filtered BEFORE the per-platform cap (usable app beyond 12 stays visible)", async () => {
+    await prisma.connectionGuideApp.deleteMany({ where: { platform: "WINDOWS" } });
+    // 12 configs-only apps sort first, then 1 subscription-only app.
+    for (let i = 0; i < GUIDE_MAX_ACTIVE_APPS_PER_PLATFORM; i += 1) {
+      const a = await makeApp({
+        platform: "WINDOWS",
+        displayName: `${tag}-wcfg-${i}`,
+        supportsSubscription: false,
+        supportsQr: false,
+        supportsIndividualConfigs: true,
+        sortOrder: i,
+      });
+      await setGuideAppActive(a.id, true, "admin-test");
+    }
+    const sub = await makeApp({
+      platform: "WINDOWS",
+      displayName: `${tag}-wsub`,
+      supportsSubscription: true,
+      supportsQr: false,
+      supportsIndividualConfigs: false,
+      sortOrder: 99,
+    });
+    await setGuideAppActive(sub.id, true, "admin-test");
+    invalidateGuideCache();
+    // Service has ONLY a subscription payload → only the 13th (sub) app is usable;
+    // filtering before the cap must keep it rather than slicing it away.
+    const svc = { subscriptionUrl: "https://s", configLinks: [] } as never;
+    const apps = await getCompatibleGuideAppsForPlatform("WINDOWS", svc);
+    expect(apps.map((a) => a.id)).toContain(sub.id);
+    expect(apps.every((a) => a.supportsSubscription)).toBe(true);
   });
 
   it("entry visibility requires enabled + active app + a usable payload", async () => {

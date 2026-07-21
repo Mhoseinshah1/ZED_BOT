@@ -91,12 +91,25 @@ responses (always reloading the current Service).
 `FAILED / CREATING / DELETED` services never render a usable-looking guide — they
 show a safe status explanation + support only.
 
-The assembled guide page is bounded to `GUIDE_PAGE_TEXT_MAX` (below Telegram's
-4096-character message limit). A fully populated app (3000 instruction + 2000
-troubleshooting characters) would otherwise overflow and make **both** the edit
-and the reply fallback fail silently, so the operator body is clamped — without
-ever splitting an HTML entity — while the intro, status line and all buttons are
-always kept.
+Every guide page is bounded to `GUIDE_PAGE_TEXT_MAX` (below Telegram's 4096-char
+message limit). A fully populated app (3000 instruction + 2000 troubleshooting
+characters) — or an operator who edits the intro/status/choose/handoff templates
+to extreme lengths — would otherwise overflow and make **both** the edit and the
+reply fallback fail silently, so every rendered guide message is clamped.
+
+Guide template text is rendered as **escaped plain text** (`guideTemplateText`
+escapes the whole rendered string, template + substituted values, once). The
+operator edits templates with no HTML validation but they are sent with
+`parse_mode: HTML`, so treating them as plain text means stray, crossed or
+unclosed markup can never leave a malformed message that Telegram rejects. Only
+the connection method / download / navigation buttons carry structured data.
+
+An app is shown to a user only when it is usable for **that** Service — a supported
+method backed by a real payload (`resolveGuideMethods(...).anyAvailable`). Platform
+and application lists, the post-purchase entry gate and the detail page all apply
+this filter (compatibility is checked **before** the per-platform cap so a usable
+app is never hidden behind incompatible ones), and a stale/direct callback for an
+incompatible app renders the safe unavailable + support variant.
 
 ## Why third-party links are operator-managed
 

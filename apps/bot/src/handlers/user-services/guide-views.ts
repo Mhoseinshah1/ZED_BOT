@@ -1,7 +1,6 @@
 import type { Service, ServiceStatus } from "@zedbot/database";
 import {
   clampEscapedText,
-  clampHtmlMessage,
   GUIDE_PAGE_TEXT_MAX,
   GUIDE_PLATFORM_CODE,
   validateHttpsDownloadUrl,
@@ -75,6 +74,22 @@ interface Page {
   keyboard: InlineKeyboard;
 }
 
+/** Renders an operator-editable guide template as SAFE, bounded plain text.
+ *
+ * The templates are edited by the OWNER with no HTML validation but are sent with
+ * `parse_mode: HTML`, so any stray/crossed/unclosed markup (or an over-length
+ * edit) would make Telegram reject BOTH the edit and the reply fallback. We treat
+ * the whole rendered string — template text AND its substituted values — as plain
+ * text (escape once, pass RAW values) and clamp it under Telegram's limit. Guide
+ * pages therefore never render live operator HTML, which removes the entire class
+ * of malformed-markup / over-length failures. */
+export async function guideTemplateText(
+  key: string,
+  vars?: Record<string, string>,
+): Promise<string> {
+  return clampEscapedText(escapeHtml(await getMessageTemplate(key, undefined, vars)));
+}
+
 function backToServiceRow(kb: InlineKeyboard, sid: string): InlineKeyboard {
   return kb.text("بازگشت به سرویس", svcCb.view(sid)).text("بازگشت به منوی اصلی", CB.USER_MENU);
 }
@@ -89,11 +104,9 @@ export async function guidePlatformPage(
   const label = serviceAccountLabel(service);
   if (platforms.length === 0) {
     const kb = backToServiceRow(new InlineKeyboard(), sid);
-    return { text: await getMessageTemplate("connection_guides_no_apps"), keyboard: kb };
+    return { text: await guideTemplateText("connection_guides_no_apps"), keyboard: kb };
   }
-  const text = await getMessageTemplate("connection_guides_choose_platform", undefined, {
-    service_name: escapeHtml(label),
-  });
+  const text = await guideTemplateText("connection_guides_choose_platform", { service_name: label });
   const kb = new InlineKeyboard();
   for (const p of platforms) {
     kb.text(await platformLabel(p), svcCb.guidePlatform(sid, GUIDE_PLATFORM_CODE[p])).row();
@@ -116,11 +129,11 @@ export async function guideAppPage(
       .text(await getButtonText("guide_back_platforms"), svcCb.guide(sid))
       .row();
     backToServiceRow(kb, sid);
-    return { text: await getMessageTemplate("connection_guides_stale_app"), keyboard: kb };
+    return { text: await guideTemplateText("connection_guides_stale_app"), keyboard: kb };
   }
-  const text = await getMessageTemplate("connection_guides_choose_app", undefined, {
-    service_name: escapeHtml(serviceAccountLabel(service)),
-    device: escapeHtml(device),
+  const text = await guideTemplateText("connection_guides_choose_app", {
+    service_name: serviceAccountLabel(service),
+    device,
   });
   const kb = new InlineKeyboard();
   for (const app of apps) {
@@ -148,9 +161,9 @@ export async function guideAppDetailPage(
   // no working connection action.
   const showFull = guideStatusShowsFullGuide(service.status) && methods.anyAvailable;
 
-  const intro = await getMessageTemplate("connection_guides_app_page_intro", undefined, {
-    app: escapeHtml(app.displayName),
-    service_name: escapeHtml(accountLabel),
+  const intro = await guideTemplateText("connection_guides_app_page_intro", {
+    app: app.displayName,
+    service_name: accountLabel,
   });
   const lines: string[] = [intro];
 
@@ -159,7 +172,7 @@ export async function guideAppDetailPage(
   if (showFull) {
     // Built-in status decision line (§13) — always kept (short, important).
     const statusKey = STATUS_TEMPLATE_KEY[service.status];
-    const statusLine = statusKey !== undefined ? await getMessageTemplate(statusKey) : null;
+    const statusLine = statusKey !== undefined ? await guideTemplateText(statusKey) : null;
 
     // Operator instructions — escaped, rendered verbatim (no placeholder/secret
     // substitution). Troubleshooting appended when present. The whole message
@@ -232,7 +245,7 @@ export async function guideAppDetailPage(
     }
   } else {
     // FAILED / CREATING / DELETED — never present a usable-looking guide.
-    lines.push("", await getMessageTemplate("connection_guides_service_unavailable"));
+    lines.push("", await guideTemplateText("connection_guides_service_unavailable"));
   }
 
   // Support handoff (§14) + navigation.
@@ -240,13 +253,10 @@ export async function guideAppDetailPage(
   kb.text(await getButtonText("guide_back_apps"), svcCb.guidePlatform(sid, pcode)).row();
   backToServiceRow(kb, sid);
 
-  // Final guard: even after the per-body budget, an operator who edited the intro
-  // or a status template to extreme lengths could still push the whole message
-  // past Telegram's limit. The intro/status templates are LIVE HTML (rendered with
-  // `parse_mode: HTML`), so this uses the tag-balancing clamp — it never cuts
-  // inside a tag and re-closes any tag the cut left open, so the send can never
-  // fail (whether from over-length or malformed HTML).
-  return { text: clampHtmlMessage(lines.join("\n"), GUIDE_PAGE_TEXT_MAX), keyboard: kb };
+  // Final guard: every piece above is already escaped plain text (no live tags),
+  // so clamping the assembled message keeps it under Telegram's limit and it can
+  // never be rejected as malformed HTML — both failure modes are removed.
+  return { text: clampEscapedText(lines.join("\n"), GUIDE_PAGE_TEXT_MAX), keyboard: kb };
 }
 
 export { HTML as GUIDE_HTML };

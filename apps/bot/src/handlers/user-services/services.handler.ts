@@ -72,6 +72,7 @@ import {
   guideAppPage,
   guideEntryLabel,
   guidePlatformPage,
+  guideTemplateText,
   platformLabel,
 } from "./guide-views.js";
 import {
@@ -620,7 +621,7 @@ async function requireGuideService(ctx: BotContext, sid: string): Promise<Servic
     const kb = new InlineKeyboard()
       .text("بازگشت به سرویس", svcCb.view(sid))
       .text("بازگشت به منوی اصلی", CB.USER_MENU);
-    await safeEditOrReply(ctx, await getMessageTemplate("connection_guides_disabled"), kb);
+    await safeEditOrReply(ctx, await guideTemplateText("connection_guides_disabled"), kb, GUIDE_HTML);
     return null;
   }
   if (!serviceHasConnectionPayload(service)) {
@@ -632,7 +633,7 @@ async function requireGuideService(ctx: BotContext, sid: string): Promise<Servic
     const kb = new InlineKeyboard()
       .text("بازگشت به سرویس", svcCb.view(sid))
       .text("بازگشت به منوی اصلی", CB.USER_MENU);
-    await safeEditOrReply(ctx, await getMessageTemplate("connection_guides_no_payload"), kb);
+    await safeEditOrReply(ctx, await guideTemplateText("connection_guides_no_payload"), kb, GUIDE_HTML);
     return null;
   }
   return service;
@@ -752,10 +753,13 @@ servicesHandler.callbackQuery(/^user:svc:gsup:([0-9a-f-]+):([a-z0-9]+):([a-z0-9-
   };
   ctx.session.temp.guideSupportContext = { sid, pcode, slug };
   ctx.session.currentFlow = "support:message";
-  const text = await getMessageTemplate("connection_guides_support_handoff", undefined, {
-    service_name: escapeHtml(serviceAccountLabel(service)),
-    device: escapeHtml(await platformLabel(platform)),
-    app: escapeHtml(app.displayName),
+  // Rendered as SAFE bounded plain text (raw values, escaped + clamped once) so an
+  // operator-edited handoff template can't overflow Telegram's limit or ship
+  // malformed HTML and fail the send.
+  const text = await guideTemplateText("connection_guides_support_handoff", {
+    service_name: serviceAccountLabel(service),
+    device: await platformLabel(platform),
+    app: app.displayName,
   });
   const kb = new InlineKeyboard()
     .text("انصراف و بازگشت به راهنما", svcCb.guideApp(sid, pcode, slug))

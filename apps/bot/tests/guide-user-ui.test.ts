@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 process.env.APP_SECRET ??= "guide-user-ui-tests-secret-0123456789";
 
 import { initialSession } from "../src/core/session.js";
+import { guideTemplateText } from "../src/handlers/user-services/guide-views.js";
 import { servicesHandler } from "../src/handlers/user-services/services.handler.js";
 import {
   createGuideApp,
@@ -340,6 +341,19 @@ d("user connection-guide callbacks", () => {
     await prisma.service.update({ where: { id: service.id }, data: { configLinks: [CONFIG_SECRET] } });
     await setGuideAppActive(cfgOnly.id, false, "admin-test");
     invalidateGuideCache();
+  });
+
+  it("guide templates are rendered as escaped plain text — never raw operator HTML", async () => {
+    // Operator-editable templates are sent with parse_mode HTML; treating them as
+    // plain text (escape template + values once) means stray/crossed/unclosed
+    // markup can never make Telegram reject the message.
+    const out = await guideTemplateText("connection_guides_app_page_intro", {
+      app: "<b>x</b>",
+      service_name: "<i>y", // unclosed / crossed on purpose
+    });
+    expect(out).not.toContain("<b>");
+    expect(out).not.toContain("<i>");
+    expect(out).toContain("&lt;");
   });
 
   it("a fully-populated guide page stays within Telegram's message limit (§P1)", async () => {
