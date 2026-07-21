@@ -1,5 +1,5 @@
 import { prisma, type ConnectionGuideApp, type Panel, type Service, type User } from "@zedbot/database";
-import { CONNECTION_GUIDES_ENABLED_KEY, GUIDE_PLATFORM_CODE } from "@zedbot/shared";
+import { CONNECTION_GUIDES_ENABLED_KEY, GUIDE_PAGE_TEXT_MAX, GUIDE_PLATFORM_CODE } from "@zedbot/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 process.env.APP_SECRET ??= "guide-user-ui-tests-secret-0123456789";
@@ -253,5 +253,39 @@ d("user connection-guide callbacks", () => {
     expect(cancel?.data).toBe(`user:svc:guide:${sid()}:${iosCode}:${iosApp.slug}`);
     // No secret in the handoff prompt.
     expect(allText(cap)).not.toContain("SUBSCRIPTIONSECRET");
+  });
+
+  it("returning to the service via «بازگشت به سرویس» CANCELS a pending support handoff", async () => {
+    // Reproduce the exact P2 sequence: enter the handoff, then press the guide
+    // prompt's "بازگشت به سرویس" button (a plain user:svc:view route). Without the
+    // fix the user stays in support:message and their next message becomes a ticket.
+    const session = initialSession();
+    await run(`user:svc:gsup:${sid()}:${iosCode}:${iosApp.slug}`, owner, session);
+    expect(session.currentFlow).toBe("support:message");
+    // Serve stored values so the detail sync never touches the (unreachable) panel.
+    await prisma.service.update({ where: { id: service.id }, data: { lastSubscriptionUpdateAt: new Date() } });
+    await run(`user:svc:view:${sid()}`, owner, session);
+    expect(session.currentFlow).toBeNull();
+    expect(session.temp.guideSupportContext).toBeUndefined();
+    expect(session.temp.supportDraft).toBeUndefined();
+  });
+
+  it("a fully-populated guide page stays within Telegram's message limit (§P1)", async () => {
+    // A valid app may carry 3000 + 2000 chars; with the intro/status that exceeds
+    // Telegram's 4096 limit and BOTH the edit and reply fallback would fail
+    // silently. The body must be clamped and never split an HTML entity.
+    const big = await makeApp({
+      displayName: "BigGuide",
+      instructions: "a<&d ".repeat(600), // 3000 chars incl. HTML-special chars
+      troubleshooting: "x>y&z ".repeat(300), // 1800 chars incl. HTML-special chars
+    });
+    await setGuideAppActive(big.id, true, "admin-test");
+    invalidateGuideCache();
+    const cap = await run(`user:svc:guide:${sid()}:${iosCode}:${big.slug}`, owner);
+    const text = cap.edits.at(-1)?.text ?? "";
+    expect(text.length).toBeLessThanOrEqual(GUIDE_PAGE_TEXT_MAX);
+    // The clamp truncated (…) and left no dangling/partial HTML entity at the end.
+    expect(text).toContain("…");
+    expect(/&[^;]{0,9}$/.test(text)).toBe(false);
   });
 });

@@ -10,7 +10,11 @@ import {
   deviceGuidesHandler,
   deviceGuidesTextHandler,
 } from "../src/handlers/admin-settings/device-guides.handler.js";
-import { DEV_GUIDE_CB, GUIDE_EDIT_FIELDS } from "../src/handlers/admin-settings/device-guides-views.js";
+import {
+  DEV_GUIDE_CB,
+  GUIDE_EDIT_FIELDS,
+  GUIDE_METHOD_CODES,
+} from "../src/handlers/admin-settings/device-guides-views.js";
 import { getBooleanSetting, clearSettingsCache, setSetting } from "../src/services/settings.service.js";
 import * as systemLog from "../src/services/system-log.service.js";
 
@@ -187,6 +191,49 @@ d("device-guide OWNER admin", () => {
     const after = await prisma.connectionGuideApp.findUniqueOrThrow({ where: { id: app.id } });
     expect(after.archivedAt).not.toBeNull(); // retained for audit
     expect(after.isActive).toBe(false);
+  });
+
+  it("the sort-order edit rejects a partially-numeric value like '12abc'", async () => {
+    const cap = makeCap(owner);
+    await createValidApp(cap);
+    const app = await prisma.connectionGuideApp.findFirstOrThrow({ where: { platform: "IOS" } });
+    const short = app.id.slice(0, 8);
+    await cb(cap, DEV_GUIDE_CB.edit(short, GUIDE_EDIT_FIELDS.sort));
+    await text(cap, "12abc"); // Number.parseInt would accept "12" — must be rejected.
+    expect(cap.replies.some((r) => r.includes("نامعتبر"))).toBe(true);
+    const unchanged = await prisma.connectionGuideApp.findUniqueOrThrow({ where: { id: app.id } });
+    expect(unchanged.sortOrder).toBe(app.sortOrder);
+    // A clean integer is accepted.
+    await cb(cap, DEV_GUIDE_CB.edit(short, GUIDE_EDIT_FIELDS.sort));
+    await text(cap, "7");
+    const after = await prisma.connectionGuideApp.findUniqueOrThrow({ where: { id: app.id } });
+    expect(after.sortOrder).toBe(7);
+  });
+
+  it("cannot toggle OFF the last connection method of an ACTIVE app", async () => {
+    const cap = makeCap(owner);
+    await createValidApp(cap); // all three methods on, inactive
+    const app = await prisma.connectionGuideApp.findFirstOrThrow({ where: { platform: "IOS" } });
+    const short = app.id.slice(0, 8);
+    await cb(cap, DEV_GUIDE_CB.toggleConfirm(short, true)); // activate
+    // Turn off two of three — allowed while one remains.
+    await cb(cap, DEV_GUIDE_CB.method(short, GUIDE_METHOD_CODES.subscription));
+    await cb(cap, DEV_GUIDE_CB.method(short, GUIDE_METHOD_CODES.qr));
+    let now = await prisma.connectionGuideApp.findUniqueOrThrow({ where: { id: app.id } });
+    expect(now.supportsSubscription).toBe(false);
+    expect(now.supportsQr).toBe(false);
+    expect(now.supportsIndividualConfigs).toBe(true);
+    // Turning off the LAST method on an active app is blocked (would be NO_METHOD).
+    cap.toasts.length = 0;
+    await cb(cap, DEV_GUIDE_CB.method(short, GUIDE_METHOD_CODES.configs));
+    expect(cap.toasts.some((t) => typeof t === "string" && t.includes("غیرفعال کنید"))).toBe(true);
+    now = await prisma.connectionGuideApp.findUniqueOrThrow({ where: { id: app.id } });
+    expect(now.supportsIndividualConfigs).toBe(true); // unchanged
+    // Once deactivated, reaching zero methods is allowed.
+    await cb(cap, DEV_GUIDE_CB.toggleConfirm(short, false));
+    await cb(cap, DEV_GUIDE_CB.method(short, GUIDE_METHOD_CODES.configs));
+    now = await prisma.connectionGuideApp.findUniqueOrThrow({ where: { id: app.id } });
+    expect(now.supportsIndividualConfigs).toBe(false);
   });
 
   it("audit events carry NO secret or full download URL", async () => {

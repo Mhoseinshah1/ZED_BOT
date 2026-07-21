@@ -91,6 +91,13 @@ responses (always reloading the current Service).
 `FAILED / CREATING / DELETED` services never render a usable-looking guide — they
 show a safe status explanation + support only.
 
+The assembled guide page is bounded to `GUIDE_PAGE_TEXT_MAX` (below Telegram's
+4096-character message limit). A fully populated app (3000 instruction + 2000
+troubleshooting characters) would otherwise overflow and make **both** the edit
+and the reply fallback fail silently, so the operator body is clamped — without
+ever splitting an HTML entity — while the intro, status line and all buttons are
+always kept.
+
 ## Why third-party links are operator-managed
 
 No external application download URL is hardcoded in handlers, views, constants or
@@ -123,6 +130,13 @@ valid platform, a valid display name, a valid HTTPS primary URL, ≥1 supported
 method and bounded valid instructions; no duplicate active slug; no invalid active
 record (`evaluateGuideReadiness`). The readiness report lists counts and safe app
 names only. Disabling is always available and never deletes configuration.
+
+The "≥1 supported method" invariant is also enforced *at edit time*: an **active**
+app's method toggle is rejected if it would remove the last remaining method (the
+OWNER is asked to deactivate the app first), so an active app can never silently
+become a `NO_METHOD` record while the switch is on. Reordering renumbers a
+platform's apps to a gap-free `sortOrder` sequence, so up/down always moves one
+display position even when apps previously shared a `sortOrder`.
 
 ## Caching
 

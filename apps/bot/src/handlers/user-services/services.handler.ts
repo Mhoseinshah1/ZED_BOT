@@ -170,6 +170,11 @@ servicesHandler.callbackQuery(/^user:svc:view:([0-9a-f-]+)$/, async (ctx) => {
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
   }
+  // Returning to the service detail cancels any pending guide→support handoff, so
+  // the "بازگشت به سرویس" button on the support prompt (and any other path back
+  // here) can't leave the user stuck in support:message — their next plain
+  // message would otherwise be consumed into a ticket. No-op when none pending.
+  clearGuideHandoff(ctx);
   await safeAnswerCallback(ctx);
   const display = await syncServiceForDisplay(service, user.id);
   await renderServiceDetail(ctx, display.service, display.notice);

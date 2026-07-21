@@ -78,13 +78,23 @@ export const GUIDE_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 
 export const GUIDE_DISPLAY_NAME_MIN = 2;
 export const GUIDE_DISPLAY_NAME_MAX = 60;
-export const GUIDE_ICON_EMOJI_MAX = 8;
+/** Icon emoji length is counted in UTF-16 code units. A single "perceived" emoji
+ * (ZWJ sequences like 👨‍👩‍👧‍👦, flags, skin-tone/variation selectors) can be 11+
+ * code units, so the cap is generous enough to accept any one complex emoji while
+ * still rejecting a pasted paragraph. */
+export const GUIDE_ICON_EMOJI_MAX = 32;
 export const GUIDE_INSTRUCTIONS_MIN = 5;
 export const GUIDE_INSTRUCTIONS_MAX = 3000;
 export const GUIDE_TROUBLESHOOTING_MAX = 2000;
 export const GUIDE_SORT_ORDER_MIN = 0;
 export const GUIDE_SORT_ORDER_MAX = 9999;
 export const GUIDE_DOWNLOAD_URL_MAX = 512;
+
+/** Hard cap on the assembled (HTML-escaped) guide-page text. A fully populated
+ * app (3000 + 2000 chars) plus intro/status would exceed Telegram's 4096-char
+ * message limit, which makes BOTH the edit and the reply fallback fail silently;
+ * the view layer clamps the operator body to keep the whole message under this. */
+export const GUIDE_PAGE_TEXT_MAX = 3900;
 
 /** Hard cap on how many active apps a single platform may present, so the
  * application-selection keyboard can never grow unbounded. */

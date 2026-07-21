@@ -242,6 +242,28 @@ deviceGuidesHandler.callbackQuery(/^admin:devguide:m:([0-9a-f-]+):([a-z]+)$/, as
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
   }
+  // An ACTIVE app must never be left with zero connection methods: that would keep
+  // it selectable by users while offering no subscription/config/QR action (the
+  // NO_METHOD invalid state the readiness gate rejects). Block the toggle and ask
+  // the OWNER to deactivate first; an INACTIVE app may freely reach zero methods.
+  const next = {
+    supportsSubscription: app.supportsSubscription,
+    supportsQr: app.supportsQr,
+    supportsIndividualConfigs: app.supportsIndividualConfigs,
+    ...fields,
+  };
+  if (
+    app.isActive &&
+    !next.supportsSubscription &&
+    !next.supportsQr &&
+    !next.supportsIndividualConfigs
+  ) {
+    await safeAnswerCallback(
+      ctx,
+      "برای حذف آخرین روش اتصال، ابتدا برنامه را غیرفعال کنید.",
+    );
+    return;
+  }
   await updateGuideAppFields(app.id, fields, ctx.admin?.id ?? "");
   auditGuide(ctx, "method_toggle", { platform: app.platform, appShortId: app.id.slice(0, 8), method: code });
   await safeAnswerCallback(ctx);
@@ -615,7 +637,13 @@ async function applyFieldEdit(
       return { ok: true };
     }
     case GUIDE_EDIT_FIELDS.sort: {
-      const n = Number.parseInt(text, 10);
+      // Require an all-digits string: `Number.parseInt` would otherwise accept
+      // "12abc" as 12 and silently persist a partially-parsed sort order.
+      const raw = text.trim();
+      if (!/^\d+$/.test(raw)) {
+        return { ok: false, message: `عدد ترتیب نامعتبر است (۰ تا ${GUIDE_SORT_ORDER_MAX}).` };
+      }
+      const n = Number.parseInt(raw, 10);
       if (!Number.isInteger(n) || n < GUIDE_SORT_ORDER_MIN || n > GUIDE_SORT_ORDER_MAX) {
         return { ok: false, message: `عدد ترتیب نامعتبر است (۰ تا ${GUIDE_SORT_ORDER_MAX}).` };
       }

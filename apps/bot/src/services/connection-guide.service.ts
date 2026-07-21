@@ -504,7 +504,15 @@ export async function archiveGuideApp(id: string, adminId: string): Promise<Conn
   return app;
 }
 
-/** Swaps sort order with the adjacent app in the same platform (reorder). */
+/** Moves an app one position up/down within its platform's display order.
+ *
+ * The displayed order is `(sortOrder ASC, displayName ASC)`, so a raw
+ * strict-inequality swap on `sortOrder` alone breaks when two apps share a
+ * `sortOrder` (it skips the true neighbor and swaps with one further away, or —
+ * swapping equal values — appears to do nothing). Instead we load the ordered
+ * list, find the app's index, swap it with the adjacent index, then renumber the
+ * whole platform to a gap-free `0..n-1` sequence so the order becomes
+ * deterministic regardless of any prior duplicate/gappy values. */
 export async function moveGuideApp(
   id: string,
   direction: "up" | "down",
@@ -514,28 +522,32 @@ export async function moveGuideApp(
   if (app === null || app.archivedAt !== null || !isGuidePlatform(app.platform)) {
     return false;
   }
-  const neighbor = await prisma.connectionGuideApp.findFirst({
-    where: {
-      platform: app.platform,
-      archivedAt: null,
-      sortOrder: direction === "up" ? { lt: app.sortOrder } : { gt: app.sortOrder },
-      id: { not: app.id },
-    },
-    orderBy: { sortOrder: direction === "up" ? "desc" : "asc" },
+  const list = await prisma.connectionGuideApp.findMany({
+    where: { platform: app.platform, archivedAt: null },
+    // Same primary/secondary keys the admin+user lists use, plus a deterministic
+    // id tiebreak so equal (sortOrder, displayName) pairs still order stably.
+    orderBy: [{ sortOrder: "asc" }, { displayName: "asc" }, { id: "asc" }],
   });
-  if (neighbor === null) {
+  const idx = list.findIndex((a) => a.id === app.id);
+  const target = direction === "up" ? idx - 1 : idx + 1;
+  if (idx === -1 || target < 0 || target >= list.length) {
     return false;
   }
-  await prisma.$transaction([
-    prisma.connectionGuideApp.update({
-      where: { id: app.id },
-      data: { sortOrder: neighbor.sortOrder, updatedByAdminId: adminId },
-    }),
-    prisma.connectionGuideApp.update({
-      where: { id: neighbor.id },
-      data: { sortOrder: app.sortOrder, updatedByAdminId: adminId },
-    }),
-  ]);
+  const reordered = [...list];
+  [reordered[idx], reordered[target]] = [reordered[target], reordered[idx]];
+  const updates = reordered
+    .map((a, i) => ({ a, i }))
+    .filter(({ a, i }) => a.sortOrder !== i)
+    .map(({ a, i }) =>
+      prisma.connectionGuideApp.update({
+        where: { id: a.id },
+        data: { sortOrder: i, updatedByAdminId: adminId },
+      }),
+    );
+  if (updates.length === 0) {
+    return false;
+  }
+  await prisma.$transaction(updates);
   invalidateGuideCache();
   return true;
 }

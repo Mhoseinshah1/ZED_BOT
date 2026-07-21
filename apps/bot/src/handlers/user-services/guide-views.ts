@@ -1,5 +1,6 @@
 import type { Service, ServiceStatus } from "@zedbot/database";
 import {
+  GUIDE_PAGE_TEXT_MAX,
   GUIDE_PLATFORM_CODE,
   validateHttpsDownloadUrl,
   type GuidePlatform,
@@ -76,6 +77,19 @@ function backToServiceRow(kb: InlineKeyboard, sid: string): InlineKeyboard {
   return kb.text("بازگشت به سرویس", svcCb.view(sid)).text("بازگشت به منوی اصلی", CB.USER_MENU);
 }
 
+/** Clamps the already-escaped operator body to `budget` code units without ever
+ * splitting an HTML entity (which would break the `HTML` parse), appending an
+ * ellipsis when truncated. The download/support/action buttons live in the
+ * keyboard, so nothing navigable is lost — only overflowing instruction text. */
+function clampGuideBody(escaped: string, budget: number): string {
+  if (escaped.length <= budget) {
+    return escaped;
+  }
+  const ELLIPSIS = " …";
+  const head = escaped.slice(0, Math.max(0, budget - ELLIPSIS.length)).replace(/&[^;]{0,9}$/, "");
+  return `${head}${ELLIPSIS}`;
+}
+
 /** Platform-selection page — only platforms with >=1 active app are shown. */
 export async function guidePlatformPage(
   service: Service,
@@ -140,26 +154,33 @@ export async function guideAppDetailPage(
   const accountLabel = serviceAccountLabel(service);
   const showFull = guideStatusShowsFullGuide(service.status);
 
-  const lines: string[] = [
-    await getMessageTemplate("connection_guides_app_page_intro", undefined, {
-      app: escapeHtml(app.displayName),
-      service_name: escapeHtml(accountLabel),
-    }),
-  ];
+  const intro = await getMessageTemplate("connection_guides_app_page_intro", undefined, {
+    app: escapeHtml(app.displayName),
+    service_name: escapeHtml(accountLabel),
+  });
+  const lines: string[] = [intro];
 
   const kb = new InlineKeyboard();
 
   if (showFull) {
-    // Operator instructions — escaped, rendered verbatim (no placeholder/secret
-    // substitution). Troubleshooting appended when present.
-    lines.push("", escapeHtml(app.instructions.trim()));
-    if (app.troubleshooting.trim() !== "") {
-      lines.push("", escapeHtml(app.troubleshooting.trim()));
-    }
-    // Built-in status decision line (§13).
+    // Built-in status decision line (§13) — always kept (short, important).
     const statusKey = STATUS_TEMPLATE_KEY[service.status];
-    if (statusKey !== undefined) {
-      lines.push("", await getMessageTemplate(statusKey));
+    const statusLine = statusKey !== undefined ? await getMessageTemplate(statusKey) : null;
+
+    // Operator instructions — escaped, rendered verbatim (no placeholder/secret
+    // substitution). Troubleshooting appended when present. The whole message
+    // must fit Telegram's 4096-char limit or BOTH the edit and the reply fallback
+    // fail silently, so the operator body is clamped to the budget left after the
+    // intro/status/separators.
+    let body = escapeHtml(app.instructions.trim());
+    if (app.troubleshooting.trim() !== "") {
+      body += `\n\n${escapeHtml(app.troubleshooting.trim())}`;
+    }
+    const reserved = intro.length + (statusLine?.length ?? 0) + 8; // separators/newlines
+    body = clampGuideBody(body, Math.max(0, GUIDE_PAGE_TEXT_MAX - reserved));
+    lines.push("", body);
+    if (statusLine !== null) {
+      lines.push("", statusLine);
     }
 
     // Method buttons reuse the EXISTING owner-scoped callbacks (no second path).

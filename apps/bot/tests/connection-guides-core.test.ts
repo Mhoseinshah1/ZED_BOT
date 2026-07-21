@@ -21,6 +21,8 @@ import {
   invalidateGuideCache,
   isConnectionGuideEntryVisible,
   isConnectionGuidesEnabled,
+  listGuideAppsForPlatformAdmin,
+  moveGuideApp,
   resolveGuideMethods,
   setGuideAppActive,
   updateGuideAppFields,
@@ -153,6 +155,13 @@ describe("validateGuideAppInput (§4) - typed errors, no content echo", () => {
       }).ok,
     ).toBe(false);
   });
+  it("accepts a complex multi-code-unit (ZWJ) emoji as the icon", () => {
+    // 👨‍👩‍👧‍👦 is 11 UTF-16 code units — the icon bound must not reject a single emoji.
+    expect("👨‍👩‍👧‍👦".length).toBeGreaterThan(8);
+    expect(validateGuideAppInput({ ...base, iconEmoji: "👨‍👩‍👧‍👦" }).ok).toBe(true);
+    // A pasted paragraph is still rejected.
+    expect(validateGuideAppInput({ ...base, iconEmoji: "x".repeat(64) }).ok).toBe(false);
+  });
 });
 
 d("guide core service (DB-backed)", () => {
@@ -245,6 +254,30 @@ d("guide core service (DB-backed)", () => {
     invalidateGuideCache();
     const apps = await getActiveGuideAppsForPlatform("IOS");
     expect(apps.length).toBeLessThanOrEqual(GUIDE_MAX_ACTIVE_APPS_PER_PLATFORM);
+  });
+
+  it("moveGuideApp reorders correctly even when apps share a duplicate sortOrder", async () => {
+    // Scoped to ANDROID so it leaves the IOS/switch state the other tests rely on
+    // untouched. All three share sortOrder=5 (a duplicate), so display order falls
+    // back to displayName ASC.
+    await prisma.connectionGuideApp.deleteMany({ where: { platform: "ANDROID" } });
+    const a = await makeApp({ platform: "ANDROID", displayName: "AAA", sortOrder: 5 });
+    const b = await makeApp({ platform: "ANDROID", displayName: "BBB", sortOrder: 5 });
+    const c = await makeApp({ platform: "ANDROID", displayName: "CCC", sortOrder: 5 });
+    // Display order with all sortOrder equal falls back to displayName ASC: A,B,C.
+    const before = (await listGuideAppsForPlatformAdmin("ANDROID")).map((x) => x.id);
+    expect(before).toEqual([a.id, b.id, c.id]);
+    // Move the middle app (B) up — a strict-inequality swap would skip A (same
+    // sortOrder) and jump; the index-based move must land B before A: B,A,C.
+    const moved = await moveGuideApp(b.id, "up", "admin-test");
+    expect(moved).toBe(true);
+    const after = (await listGuideAppsForPlatformAdmin("ANDROID")).map((x) => x.id);
+    expect(after).toEqual([b.id, a.id, c.id]);
+    // Order is now gap-free and deterministic (0,1,2).
+    const orders = (await listGuideAppsForPlatformAdmin("ANDROID")).map((x) => x.sortOrder);
+    expect(orders).toEqual([0, 1, 2]);
+    // Moving the top app up is a no-op.
+    expect(await moveGuideApp(b.id, "up", "admin-test")).toBe(false);
   });
 
   it("entry visibility requires enabled + active app + a usable payload", async () => {
