@@ -41,6 +41,21 @@ export const diagnosticsHandler = new Composer<BotContext>();
 const NOT_FOUND = "مورد یافت نشد.";
 const DISABLED_TOAST = "بررسی مشکل سرویس در حال حاضر در دسترس نیست.";
 
+/**
+ * Disarms an armed support handoff (`support:message` + the seeded draft) WITHOUT
+ * touching the snapshot the preview needs. The handoff-cancel middleware exempts
+ * every `user:svc:diag:` callback so the preview/confirm steps keep their
+ * snapshot; in exchange, ONLY `:sup_yes` may leave the flow armed — every other
+ * diagnostic route calls this so a stale keyboard can never turn the user's next
+ * ordinary message into a ticket for a previously-armed service.
+ */
+function disarmDiagnosticFlow(ctx: BotContext): void {
+  if (ctx.session.currentFlow === "support:message") {
+    ctx.session.currentFlow = null;
+  }
+  delete ctx.session.temp.supportDraft;
+}
+
 /** Owner-scoped reload + master-switch recheck shared by every diagnostics route.
  * Returns the Service, or null after emitting the correct safe response. */
 async function requireDiagnosableService(
@@ -70,15 +85,9 @@ async function handleDiagRun(ctx: BotContext, sid: string): Promise<void> {
   if (service === null || user === null) {
     return;
   }
-  // A fresh run/retry DISARMS any pending support handoff. The handoff-cancel
-  // middleware exempts all `user:svc:diag:` callbacks (so the preview/confirm
-  // steps keep their snapshot), which would otherwise let a re-run inherit an
-  // armed `support:message` flow and turn the user's next ordinary message into a
-  // ticket. The snapshot is replaced below; here we only clear the ARMED state.
-  if (ctx.session.currentFlow === "support:message") {
-    ctx.session.currentFlow = null;
-    delete ctx.session.temp.supportDraft;
-  }
+  // A fresh run/retry DISARMS any pending support handoff (the snapshot is
+  // replaced below); this clears only the ARMED state.
+  disarmDiagnosticFlow(ctx);
   // Answer immediately (§7 step 4) so the client stops the loading spinner.
   await safeAnswerCallback(ctx);
 
@@ -128,8 +137,14 @@ diagnosticsHandler.callbackQuery(/^user:svc:diag:([0-9a-f-]+):support$/, async (
     return;
   }
   await safeAnswerCallback(ctx);
+  // Opening a preview DISARMS any handoff armed for a DIFFERENT service (a stale
+  // keyboard from an older message): only `:sup_yes` may leave a flow armed, so
+  // the user's next ordinary message can never be captured into a ticket for the
+  // previously-armed service.
+  disarmDiagnosticFlow(ctx);
   const pending = ctx.session.temp.diagnosticSupportContext;
   if (pending === undefined || pending.sid !== sid || pending.serviceId !== service.id) {
+    delete ctx.session.temp.diagnosticSupportContext;
     const page = await renderDiagnosticNotice(sid, "service_diagnostics_stale");
     await safeEditOrReply(ctx, page.text, page.keyboard, DIAG_HTML);
     return;
@@ -150,6 +165,10 @@ diagnosticsHandler.callbackQuery(/^user:svc:diag:([0-9a-f-]+):sup_yes$/, async (
   }
   const pending = ctx.session.temp.diagnosticSupportContext;
   if (pending === undefined || pending.sid !== sid || pending.serviceId !== service.id) {
+    // A stale/mismatched confirm must never keep a previously-armed handoff
+    // alive — disarm and drop the snapshot before showing the stale page.
+    disarmDiagnosticFlow(ctx);
+    delete ctx.session.temp.diagnosticSupportContext;
     await safeAnswerCallback(ctx);
     const page = await renderDiagnosticNotice(sid, "service_diagnostics_stale");
     await safeEditOrReply(ctx, page.text, page.keyboard, DIAG_HTML);

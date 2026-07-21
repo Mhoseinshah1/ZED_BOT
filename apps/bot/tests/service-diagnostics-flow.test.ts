@@ -124,8 +124,7 @@ function flatButtons(markup: unknown): Btn[] {
   if (!Array.isArray(kb)) return [];
   return kb.flat().map((b) => ({ text: b.text, data: b.callback_data, url: b.url }));
 }
-function fakeCtx(data: string, user: User | null) {
-  const session = initialSession();
+function fakeCtx(data: string, user: User | null, session = initialSession()) {
   const cap = { edits: [] as Array<{ text: string; buttons: Btn[] }>, toasts: [] as Array<string | undefined> };
   const callbackQuery = { id: "c", data, message: { message_id: 5, chat: { id: 1, type: "private" } } };
   const ctx = {
@@ -147,8 +146,12 @@ function fakeCtx(data: string, user: User | null) {
   };
   return { ctx: ctx as never, cap, session };
 }
-async function runHandler(data: string, user: User | null): Promise<{ edits: Array<{ text: string; buttons: Btn[] }>; toasts: Array<string | undefined> }> {
-  const { ctx, cap } = fakeCtx(data, user);
+async function runHandler(
+  data: string,
+  user: User | null,
+  session = initialSession(),
+): Promise<{ edits: Array<{ text: string; buttons: Btn[] }>; toasts: Array<string | undefined> }> {
+  const { ctx, cap } = fakeCtx(data, user, session);
   await diagnosticsHandler.middleware()(ctx, async () => undefined);
   return cap;
 }
@@ -275,6 +278,34 @@ d("service-diagnostics: safe support snapshot", () => {
   it("a stale/foreign service is not owner-consistent, so the guard drops the attachment", async () => {
     expect(await getOwnedServiceById(service.id, foreigner.id)).toBeNull();
     expect(await getOwnedServiceById(service.id, owner.id)).not.toBeNull();
+  });
+});
+
+d("service-diagnostics: handoff safety", () => {
+  it("opening a preview disarms a handoff armed for a DIFFERENT service (stale keyboard)", async () => {
+    await setSetting(SERVICE_DIAGNOSTICS_ENABLED_KEY, "true", "BOOLEAN");
+    clearSettingsCache();
+    const session = initialSession();
+    // A handoff previously armed for ANOTHER service (via an older `:sup_yes`).
+    session.currentFlow = "support:message";
+    session.temp.supportDraft = { subject: "armed for another service" };
+    session.temp.diagnosticSupportContext = {
+      sid: "deadbeef",
+      serviceId: "00000000-0000-0000-0000-000000000000",
+      snapshot: {
+        version: 1,
+        overall: "HEALTHY",
+        evidenceSource: "STORED_ONLY",
+        checkedAt: new Date().toISOString(),
+        checks: [],
+      },
+    };
+    // Tapping THIS service's stale «support» button (mismatched snapshot) must
+    // disarm the previously-armed flow so the next message is NOT a ticket.
+    await runHandler(`user:svc:diag:${sid()}:support`, owner, session);
+    expect(session.currentFlow).toBeNull();
+    expect(session.temp.supportDraft).toBeUndefined();
+    expect(session.temp.diagnosticSupportContext).toBeUndefined();
   });
 });
 
