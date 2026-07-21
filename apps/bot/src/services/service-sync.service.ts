@@ -53,6 +53,47 @@ export type SyncFailureKind =
   | "not-found"
   | "other";
 
+/**
+ * Rich, classified outcome of the ONE authenticated panel account read that a
+ * sync (or an explicit diagnosis) performs. This is the shared "read-and-sync"
+ * primitive contract: syncServiceFromPanel projects it to SyncServiceResult
+ * (unchanged public shape), and the diagnostics service consumes it directly so
+ * a diagnosis performs AT MOST ONE panel account read and never a second one.
+ *
+ *   - read-ok        : the panel account was read; the Service row was updated.
+ *   - not-found      : POSITIVE absence (panel reported no such account).
+ *   - auth-failed    : the panel rejected our credentials (NOT absence).
+ *   - unreachable    : transport failure / timeout (NOT absence) - see code.
+ *   - panel-inactive : the panel is not ACTIVE; no read was attempted.
+ *   - service-missing: owner-scoped lookup failed (unknown/foreign/deleted).
+ *   - read-error     : the panel answered unusably (malformed/other).
+ *
+ * `service` is the freshest row available (updated on read-ok, the stored row
+ * otherwise, null only on service-missing). `account` is the normalized panel
+ * result when a read was attempted. A failed read NEVER overwrites the row.
+ */
+export type PanelReadKind =
+  | "read-ok"
+  | "not-found"
+  | "auth-failed"
+  | "unreachable"
+  | "panel-inactive"
+  | "service-missing"
+  | "read-error";
+
+export interface PanelReadOutcome {
+  kind: PanelReadKind;
+  service: Service | null;
+  /** Panel id for ops logs; null on service-missing / lock failure. */
+  panelId: string | null;
+  /** Panel type snapshot (marzban/xui) for safe logs; null on service-missing. */
+  panelType: string | null;
+  /** Normalized panel result when a read was attempted; null otherwise. */
+  account: GetServiceAccountResult | null;
+  /** Sanitized diagnostic code when the read failed with one; null otherwise. */
+  diagnosticCode: string | null;
+}
+
 export type SyncServiceResult =
   | { ok: true; service: Service; message: string }
   | {
@@ -131,6 +172,54 @@ function buildUpdateData(service: Service, result: GetServiceAccountResult): Pri
 }
 
 /**
+ * The SAME field-mapping as buildUpdateData, but applied to an IN-MEMORY copy of
+ * the row instead of persisting it. Used by the read-only (persist: false) path
+ * so a preview reasons over the freshly-read live state — keeping the evaluated
+ * status/history/quota consistent with LIVE_PANEL evidence — while the stored row
+ * is never written. Only fields the panel actually reported are applied.
+ */
+function projectServiceFromAccount(service: Service, result: GetServiceAccountResult): Service {
+  const projected: Service = { ...service, lastSubscriptionUpdateAt: new Date() };
+  const mappedStatus =
+    result.status !== undefined ? STATUS_TO_SERVICE_STATUS[result.status] : undefined;
+  if (mappedStatus !== undefined) {
+    projected.status = mappedStatus;
+  }
+  if (result.usedBytes !== undefined) {
+    projected.usedBytes = result.usedBytes;
+  }
+  if (result.totalBytes !== undefined) {
+    projected.volumeBytes = result.totalBytes ?? 0n;
+    if (result.remainingBytes !== undefined) {
+      projected.remainingBytes = result.remainingBytes ?? 0n;
+    }
+  }
+  if (result.expiresAt !== undefined) {
+    projected.expiresAt = result.expiresAt;
+  }
+  if (result.subscriptionUrl !== undefined && result.subscriptionUrl !== "") {
+    projected.subscriptionUrl = result.subscriptionUrl;
+  }
+  if (result.configLinks !== undefined && result.configLinks.length > 0) {
+    projected.configLinks = result.configLinks;
+  }
+  if (
+    result.firstConnectedAt !== undefined &&
+    result.firstConnectedAt !== null &&
+    service.firstConnectedAt === null
+  ) {
+    projected.firstConnectedAt = result.firstConnectedAt;
+  }
+  if (result.lastConnectedAt !== undefined && result.lastConnectedAt !== null) {
+    projected.lastConnectedAt = result.lastConnectedAt;
+    if (service.firstConnectedAt === null && projected.firstConnectedAt === null) {
+      projected.firstConnectedAt = result.lastConnectedAt;
+    }
+  }
+  return projected;
+}
+
+/**
  * Refreshes one service from its panel, scoped to the owner. Read-only from
  * the panel's perspective; the Service row is only updated on a successful
  * read. All error strings are internal-safe; safeUserMessage is what the
@@ -164,10 +253,19 @@ export async function syncServiceFromPanel(
   }
 }
 
-async function syncServiceFromPanelUnlocked(
+/**
+ * The shared "read-and-sync" primitive (LOCK-FREE - the caller holds the
+ * per-service lock). Performs AT MOST ONE authenticated panel account read and,
+ * on success ONLY, updates the Service row. Returns the rich classified
+ * PanelReadOutcome; it never throws and never mutates the panel. Both
+ * syncServiceFromPanel and the diagnostics service build on this single read so
+ * a run can never issue a second panel request.
+ */
+async function readServiceAccountAndSyncUnlocked(
   serviceId: string,
   userId: string,
-): Promise<SyncServiceResult> {
+  persist = true,
+): Promise<PanelReadOutcome> {
   const service = await prisma.service.findFirst({
     where: {
       id: serviceId,
@@ -179,22 +277,24 @@ async function syncServiceFromPanelUnlocked(
   });
   if (service === null) {
     return {
-      ok: false,
+      kind: "service-missing",
       service: null,
-      error: "service not found",
-      safeUserMessage: "مورد یافت نشد.",
-      failureKind: "other",
+      panelId: null,
+      panelType: null,
+      account: null,
+      diagnosticCode: null,
     };
   }
   const { panel, ...serviceRow } = service;
 
   if (panel.status !== "ACTIVE") {
     return {
-      ok: false,
+      kind: "panel-inactive",
       service: serviceRow,
-      error: `panel status is ${panel.status}`,
-      safeUserMessage: SYNC_FAILED_USER_TEXT,
-      failureKind: "panel-inactive",
+      panelId: panel.id,
+      panelType: panel.type,
+      account: null,
+      diagnosticCode: null,
     };
   }
 
@@ -216,43 +316,44 @@ async function syncServiceFromPanelUnlocked(
   }
 
   if (!result.ok) {
+    const code = result.diagnostic?.code ?? null;
     logger.warn("service sync failed", {
       serviceId: service.id,
       panelId: panel.id,
       notFound: result.notFound === true,
       error: result.errorMessage ?? "unknown",
     });
-    // Transport/auth-level diagnostics = the PANEL was unreachable (the
-    // display path renders a dedicated line for that); everything else is a
-    // generic sync failure. notFound = positive absence.
-    const code = result.diagnostic?.code;
-    const failureKind: SyncFailureKind =
+    const kind: PanelReadKind =
       result.notFound === true
         ? "not-found"
-        : code === "unreachable" || code === "timeout" || code === "auth-failed"
-          ? "panel-unreachable"
-          : "other";
-    if (failureKind === "panel-unreachable") {
-      // Ops log (PANEL topic) - THE central panel-connection-failure signal.
-      // Ids + safe diagnostic code only; never URLs, credentials or raw errors.
-      void writeSystemLog({
-        level: "WARN",
-        eventType: OPS_EVENTS.PANEL_CONNECTION_FAILED,
-        message: "panel connection failed during service sync",
-        metadata: { panelId: panel.id, panelType: panel.type, code: code ?? "unknown" },
-        topicKey: "PANEL",
-        serviceId: service.id,
-      });
-    }
+        : code === "auth-failed"
+          ? "auth-failed"
+          : code === "unreachable" || code === "timeout"
+            ? "unreachable"
+            : "read-error";
     return {
-      ok: false,
+      kind,
       service: serviceRow,
-      error: result.errorMessage ?? "unknown",
-      // Positive absence (full inventory readable, no client) gets its own
-      // message; "could not check" stays a generic retryable failure. The
-      // stored row is untouched either way - sync never guesses.
-      safeUserMessage: result.notFound === true ? SYNC_NOT_FOUND_TEXT : SYNC_FAILED_USER_TEXT,
-      failureKind,
+      panelId: panel.id,
+      panelType: panel.type,
+      account: result,
+      diagnosticCode: code,
+    };
+  }
+
+  // Read-only mode (the OWNER preview): the account was read live, but the row
+  // is NOT written — the preview promises to change nothing. The returned
+  // `service` is an IN-MEMORY projection of the live read so the report reasons
+  // over the fresh state (consistent with LIVE_PANEL evidence) without any DB
+  // write; `account` also carries the live result.
+  if (!persist) {
+    return {
+      kind: "read-ok",
+      service: projectServiceFromAccount(serviceRow, result),
+      panelId: panel.id,
+      panelType: panel.type,
+      account: result,
+      diagnosticCode: null,
     };
   }
 
@@ -261,7 +362,108 @@ async function syncServiceFromPanelUnlocked(
     data: buildUpdateData(serviceRow, result),
   });
   logger.info("service sync succeeded", { serviceId: service.id, panelId: panel.id });
-  return { ok: true, service: updated, message: SYNC_OK_TEXT };
+  return {
+    kind: "read-ok",
+    service: updated,
+    panelId: panel.id,
+    panelType: panel.type,
+    account: result,
+    diagnosticCode: null,
+  };
+}
+
+/** Projects the rich PanelReadOutcome to the (unchanged) SyncServiceResult and
+ * emits the sync-path ops log on a panel-connection failure. */
+async function syncServiceFromPanelUnlocked(
+  serviceId: string,
+  userId: string,
+): Promise<SyncServiceResult> {
+  const outcome = await readServiceAccountAndSyncUnlocked(serviceId, userId);
+  switch (outcome.kind) {
+    case "read-ok":
+      // outcome.service is the updated row on read-ok.
+      return { ok: true, service: outcome.service as Service, message: SYNC_OK_TEXT };
+    case "service-missing":
+      return {
+        ok: false,
+        service: null,
+        error: "service not found",
+        safeUserMessage: "مورد یافت نشد.",
+        failureKind: "other",
+      };
+    case "panel-inactive":
+      return {
+        ok: false,
+        service: outcome.service,
+        error: "panel status is not ACTIVE",
+        safeUserMessage: SYNC_FAILED_USER_TEXT,
+        failureKind: "panel-inactive",
+      };
+    default: {
+      // not-found | auth-failed | unreachable | read-error
+      const failureKind: SyncFailureKind =
+        outcome.kind === "not-found"
+          ? "not-found"
+          : outcome.kind === "auth-failed" || outcome.kind === "unreachable"
+            ? "panel-unreachable"
+            : "other";
+      if (failureKind === "panel-unreachable") {
+        // Ops log (PANEL topic) - THE central panel-connection-failure signal.
+        // Ids + safe diagnostic code only; never URLs, credentials or raw errors.
+        void writeSystemLog({
+          level: "WARN",
+          eventType: OPS_EVENTS.PANEL_CONNECTION_FAILED,
+          message: "panel connection failed during service sync",
+          metadata: {
+            panelId: outcome.panelId ?? "unknown",
+            panelType: outcome.panelType ?? "unknown",
+            code: outcome.diagnosticCode ?? "unknown",
+          },
+          topicKey: "PANEL",
+          serviceId,
+        });
+      }
+      return {
+        ok: false,
+        service: outcome.service,
+        error: outcome.account?.errorMessage ?? "unknown",
+        safeUserMessage:
+          outcome.kind === "not-found" ? SYNC_NOT_FOUND_TEXT : SYNC_FAILED_USER_TEXT,
+        failureKind,
+      };
+    }
+  }
+}
+
+/**
+ * Diagnostics entry point: takes the SAME per-service lock as sync and runs the
+ * SAME single read-and-sync primitive, returning the rich PanelReadOutcome. Lock
+ * contention returns a synthetic `read-error` outcome carrying a `locked`
+ * diagnosticCode (the diagnostics service maps this to a retryable report - never
+ * an exception). Never throws. The Service row is updated ONLY on read-ok, and
+ * the primitive issues AT MOST ONE authenticated panel account read.
+ */
+export async function readServiceForDiagnostics(
+  serviceId: string,
+  userId: string,
+  opts: { persist?: boolean } = {},
+): Promise<PanelReadOutcome> {
+  const acquisition = await acquireServiceLock(serviceOperationLockKey(serviceId));
+  if (!acquisition.ok) {
+    return {
+      kind: "read-error",
+      service: null,
+      panelId: null,
+      panelType: null,
+      account: null,
+      diagnosticCode: acquisition.reason === "contended" ? "locked" : "lock-unavailable",
+    };
+  }
+  try {
+    return await readServiceAccountAndSyncUnlocked(serviceId, userId, opts.persist ?? true);
+  } finally {
+    await acquisition.lock.release();
+  }
 }
 
 // --- automatic display sync (service-live-sync phase) ------------------------------------

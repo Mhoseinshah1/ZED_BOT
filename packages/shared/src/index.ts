@@ -12,5 +12,6 @@ export * from "./attribution.js";
 export * from "./auto-renewal.js";
 export * from "./referral.js";
 export * from "./connection-guides.js";
+export * from "./service-diagnostics.js";
 export * from "./stars-subscription.js";
 export * from "./template.js";

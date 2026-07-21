@@ -157,3 +157,16 @@ Callback data is `ntf:<shortId>:<code>`; the label is never authorization. The c
 | `guide_support` | هنوز وصل نمی‌شود؟ پشتیبانی 🛠 | Support handoff. |
 | `guide_back_platforms` | بازگشت به انتخاب دستگاه | |
 | `guide_back_apps` | بازگشت به برنامه‌ها | |
+
+## Service self-diagnostics (feat/service-self-diagnostics)
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `service_diagnostics` | بررسی مشکل سرویس 🛠 | Service-detail entry (when `service_diagnostics_enabled`). |
+| `diagnostics_retry` | بررسی دوباره 🔄 | Re-run (respects cooldown). |
+| `diagnostics_send_support` | ارسال گزارش به پشتیبانی 🎫 | Safe snapshot handoff. |
+| `diagnostics_open_guide` | آموزش اتصال 📱 | Reuses the guide route. |
+| `diagnostics_refresh` | بروزرسانی اطلاعات ♻️ | Reuses the refresh route. |
+| `diagnostics_back_service` | بازگشت به سرویس | Back to the service detail. |
+
+_Labels only — callback routing never depends on an editable label._

@@ -1332,6 +1332,9 @@ model Service {
   freeTrialClaims        FreeTrialClaim[]
   // Notification/retention engine: optional per-service notification prefs.
   notificationPreference ServiceNotificationPreference?
+  // Service self-diagnostics: tickets opened from a diagnostic run on this
+  // service (owner-scoped link; snapshot lives on the ticket).
+  supportTickets         SupportTicket[]                @relation("ServiceSupportTickets")
 
   @@index([userId])
   @@index([panelId])
@@ -1828,12 +1831,27 @@ model SupportTicket {
   closedByAdminId String?
   closedByAdmin   Admin?              @relation("SupportTicketClosedBy", fields: [closedByAdminId], references: [id])
 
+  // Service self-diagnostics (feat/service-self-diagnostics): a ticket the user
+  // opened FROM a diagnostic run keeps an OWNER-scoped link to the Service plus a
+  // STRICT, bounded, secret-free snapshot of that run (version/overall/evidence/
+  // checkedAt + stable check codes/statuses + selected primary recommendation).
+  // The snapshot NEVER holds a subscription URL, config, token, remote client id,
+  // panel credential, raw panel body or any free-form text (validated before
+  // persistence in @zedbot/shared validateDiagnosticSnapshot). Both fields are
+  // additive + nullable: every existing ticket keeps serviceId = null and
+  // diagnosticSnapshot = null. SetNull keeps a ticket auditable if its Service is
+  // ever removed.
+  serviceId          String?
+  service            Service? @relation("ServiceSupportTickets", fields: [serviceId], references: [id], onDelete: SetNull)
+  diagnosticSnapshot Json?
+
   messages SupportMessage[]
 
   @@index([userId])
   @@index([status])
   @@index([userId, updatedAt])
   @@index([status, updatedAt])
+  @@index([serviceId])
 }
 
 model SupportMessage {

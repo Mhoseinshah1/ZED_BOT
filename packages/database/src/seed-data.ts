@@ -721,6 +721,119 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     defaultContent: "این سرویس در حال حاضر قابل استفاده نیست؛ لطفاً با پشتیبانی در تماس باشید.",
     allowedVariables: [],
   },
+  // Service self-diagnostics (feat/service-self-diagnostics). Operator-editable
+  // wrapper copy only; the per-check lines + machine codes are code constants
+  // (behaviour never depends on an editable label). Rendered as escaped plain
+  // text and clamped under Telegram's limit.
+  {
+    key: "service_diagnostics_disabled",
+    title: "عیب‌یابی سرویس - غیرفعال",
+    category: "diagnostics",
+    defaultContent: "بررسی مشکل سرویس در حال حاضر در دسترس نیست.",
+    allowedVariables: [],
+  },
+  {
+    key: "service_diagnostics_running",
+    title: "عیب‌یابی سرویس - در حال بررسی",
+    category: "diagnostics",
+    defaultContent: "در حال بررسی سرویس... لطفاً چند لحظه صبر کنید ⏳",
+    allowedVariables: [],
+  },
+  {
+    key: "service_diagnostics_stale",
+    title: "عیب‌یابی سرویس - گزارش منقضی",
+    category: "diagnostics",
+    defaultContent: "این گزارش دیگر معتبر نیست؛ لطفاً دوباره «بررسی مشکل سرویس 🛠» را بزنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "service_diagnostics_report_intro",
+    title: "عیب‌یابی سرویس - سربرگ گزارش",
+    category: "diagnostics",
+    defaultContent: "بررسی خودکار سرویس 🛠\nنام سرویس: {service_name}",
+    allowedVariables: ["service_name"],
+  },
+  {
+    key: "service_diagnostics_healthy",
+    title: "عیب‌یابی سرویس - نتیجه سالم",
+    category: "diagnostics",
+    defaultContent: "نتیجه کلی: سرویس سالم است ✅",
+    allowedVariables: [],
+  },
+  {
+    key: "service_diagnostics_action_required",
+    title: "عیب‌یابی سرویس - نیازمند اقدام",
+    category: "diagnostics",
+    defaultContent: "نتیجه کلی: برای رفع مشکل نیاز به یک اقدام است 🔧",
+    allowedVariables: [],
+  },
+  {
+    key: "service_diagnostics_degraded",
+    title: "عیب‌یابی سرویس - وضعیت ناقص",
+    category: "diagnostics",
+    defaultContent: "نتیجه کلی: سرویس فعال است اما نکاتی برای بررسی وجود دارد ⚠️",
+    allowedVariables: [],
+  },
+  {
+    key: "service_diagnostics_unavailable",
+    title: "عیب‌یابی سرویس - عدم دسترسی",
+    category: "diagnostics",
+    defaultContent:
+      "نتیجه کلی: امکان بررسی لحظه‌ای سرویس فراهم نشد ⚠️ لطفاً کمی بعد دوباره تلاش کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "service_diagnostics_needs_support",
+    title: "عیب‌یابی سرویس - نیازمند پشتیبانی",
+    category: "diagnostics",
+    defaultContent: "نتیجه کلی: برای بررسی بیشتر لطفاً با پشتیبانی در تماس باشید 🎫",
+    allowedVariables: [],
+  },
+  {
+    key: "service_diagnostics_live_evidence",
+    title: "عیب‌یابی سرویس - بررسی لحظه‌ای",
+    category: "diagnostics",
+    defaultContent: "اطلاعات بررسی: بررسی لحظه‌ای انجام شد | زمان بررسی: {checked_at}",
+    allowedVariables: ["checked_at"],
+  },
+  {
+    key: "service_diagnostics_stored_evidence",
+    title: "عیب‌یابی سرویس - اطلاعات ذخیره‌شده",
+    category: "diagnostics",
+    defaultContent:
+      "اطلاعات بررسی: آخرین اطلاعات ذخیره‌شده نمایش داده می‌شود | زمان بررسی: {checked_at}",
+    allowedVariables: ["checked_at"],
+  },
+  {
+    key: "service_diagnostics_cooldown",
+    title: "عیب‌یابی سرویس - محدودیت زمانی",
+    category: "diagnostics",
+    defaultContent: "به‌تازگی بررسی انجام شده است. لطفاً {seconds} ثانیه دیگر دوباره تلاش کنید.",
+    allowedVariables: ["seconds"],
+  },
+  {
+    key: "service_diagnostics_support_preview",
+    title: "عیب‌یابی سرویس - پیش‌نمایش پشتیبانی",
+    category: "diagnostics",
+    defaultContent:
+      "گزارش زیر به‌همراه پیام شما برای پشتیبانی ارسال می‌شود (بدون هیچ اطلاعات محرمانه‌ای):",
+    allowedVariables: [],
+  },
+  {
+    key: "service_diagnostics_support_prompt",
+    title: "عیب‌یابی سرویس - درخواست پیام پشتیبانی",
+    category: "diagnostics",
+    defaultContent: "لطفاً توضیح مشکل خود را بنویسید تا به‌همراه این گزارش برای پشتیبانی ارسال شود.",
+    allowedVariables: [],
+  },
+  {
+    key: "service_diagnostics_limitations",
+    title: "عیب‌یابی سرویس - محدودیت‌های بررسی",
+    category: "diagnostics",
+    defaultContent:
+      "این بررسی فقط وضعیت سمت سرور را می‌سنجد و نمی‌تواند تنظیمات گوشی، اینترنت، فیلترینگ یا برنامهٔ شما را بررسی کند.",
+    allowedVariables: [],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -848,4 +961,12 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "guide_support", title: "راهنما: پشتیبانی", text: "هنوز وصل نمی‌شود؟ پشتیبانی 🛠" },
   { key: "guide_back_platforms", title: "راهنما: بازگشت به دستگاه‌ها", text: "بازگشت به انتخاب دستگاه" },
   { key: "guide_back_apps", title: "راهنما: بازگشت به برنامه‌ها", text: "بازگشت به برنامه‌ها" },
+  // Service self-diagnostics (feat/service-self-diagnostics). Editable LABELS
+  // only — callback routing never depends on an editable label.
+  { key: "service_diagnostics", title: "عیب‌یابی سرویس", text: "بررسی مشکل سرویس 🛠" },
+  { key: "diagnostics_retry", title: "عیب‌یابی: بررسی دوباره", text: "بررسی دوباره 🔄" },
+  { key: "diagnostics_send_support", title: "عیب‌یابی: ارسال به پشتیبانی", text: "ارسال گزارش به پشتیبانی 🎫" },
+  { key: "diagnostics_open_guide", title: "عیب‌یابی: راهنمای اتصال", text: "آموزش اتصال 📱" },
+  { key: "diagnostics_refresh", title: "عیب‌یابی: بروزرسانی سرویس", text: "بروزرسانی اطلاعات ♻️" },
+  { key: "diagnostics_back_service", title: "عیب‌یابی: بازگشت به سرویس", text: "بازگشت به سرویس" },
 ];

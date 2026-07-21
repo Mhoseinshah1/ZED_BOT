@@ -8,6 +8,7 @@ import type {
   ServiceLocation,
   TrafficResetCycle,
 } from "@zedbot/database";
+import type { DiagnosticSnapshot, ServiceDiagnosticAction } from "@zedbot/shared";
 
 /** In-progress "add panel" wizard state. */
 export interface PanelAddState {
@@ -301,6 +302,18 @@ export interface SessionData {
     // page. Ids only (service short id, compact platform code, app slug) - never
     // a subscription URL, config or credential. Cleared with supportDraft.
     guideSupportContext?: { sid: string; pcode: string; slug: string };
+    // Service self-diagnostics (feat/service-self-diagnostics). The last rendered
+    // report's SAFE, secret-free snapshot (+ owner-scoped serviceId + short id +
+    // primary recommendation), so the support preview and the confirm step can
+    // reuse it WITHOUT a second panel read. The snapshot is validated before it
+    // is persisted and never holds a URL/config/token/credential. Cleared when a
+    // support handoff is cancelled or a diagnostic ticket is created.
+    diagnosticSupportContext?: {
+      sid: string;
+      serviceId: string;
+      snapshot: DiagnosticSnapshot;
+      primary?: ServiceDiagnosticAction;
+    };
     adminSupportReplyTicketId?: string;
     // Admin broadcast draft (Phase 33).
     adminBroadcastDraft?: { text?: string };

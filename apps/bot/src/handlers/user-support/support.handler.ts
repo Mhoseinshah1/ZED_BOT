@@ -1,8 +1,9 @@
+import { validateDiagnosticSnapshot } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
-import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
+import { logDiagnosticSnapshotAttached } from "../../services/service-diagnostics.service.js";
 import {
   addUserTicketReply,
   createSupportTicket,
@@ -10,6 +11,7 @@ import {
   listUserTickets,
   notifyAdminsAboutNewTicket,
   notifyAdminsAboutUserReply,
+  type SupportTicketAttachment,
   TICKET_CLOSED_TEXT,
   TICKET_MESSAGE_MAX,
   TICKET_STATUS_ICON,
@@ -19,6 +21,8 @@ import {
   ticketMessagePreview,
   type TicketWithMessages,
 } from "../../services/support-ticket.service.js";
+import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
+import { getOwnedServiceById } from "../../services/user-services.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 
@@ -57,8 +61,10 @@ export function clearSupportState(ctx: BotContext): void {
     ctx.session.currentFlow = null;
   }
   delete ctx.session.temp.supportDraft;
-  // Connection-guide handoff context never outlives the support flow.
+  // Connection-guide + service-diagnostics handoff contexts never outlive the
+  // support flow.
   delete ctx.session.temp.guideSupportContext;
+  delete ctx.session.temp.diagnosticSupportContext;
 }
 
 /** Fix D landing rows - exported for tests (labels are ButtonText-backed). */
@@ -318,12 +324,31 @@ supportTextHandler.on("message:text", async (ctx, next) => {
       await safeReply(ctx, DRAFT_EXPIRED_TEXT);
       return;
     }
-    const outcome = await createSupportTicket(user.id, draft.subject, text);
+    // Service self-diagnostics handoff: re-resolve the Service OWNER-scoped and
+    // re-validate the SAFE snapshot before attaching. A stale/foreign context
+    // (service no longer owned, or a snapshot that fails the strict validator)
+    // silently drops the attachment — a normal ticket is still created, but it
+    // can NEVER carry another Service/user's report.
+    const diagContext = ctx.session.temp.diagnosticSupportContext;
+    let attachedServiceId: string | null = null;
+    let attachment: SupportTicketAttachment | undefined;
+    if (diagContext !== undefined) {
+      const owned = await getOwnedServiceById(diagContext.serviceId, user.id);
+      const safeSnapshot = validateDiagnosticSnapshot(diagContext.snapshot);
+      if (owned !== null && safeSnapshot !== null) {
+        attachedServiceId = owned.id;
+        attachment = { serviceId: owned.id, diagnosticSnapshot: safeSnapshot };
+      }
+    }
+    const outcome = await createSupportTicket(user.id, draft.subject, text, attachment);
     if (!outcome.ok) {
       await safeReply(ctx, outcome.safeMessage, cancelKb);
       return;
     }
     clearSupportState(ctx);
+    if (attachedServiceId !== null) {
+      void logDiagnosticSnapshotAttached(user.id, attachedServiceId);
+    }
     await notifyAdminsAboutNewTicket(ctx.api, outcome.ticket.id);
     await safeReply(ctx, await getMessageTemplate("support_ticket_created_text"));
     const ticket = await getUserTicketDetail(user.id, outcome.ticket.id.slice(0, 8));

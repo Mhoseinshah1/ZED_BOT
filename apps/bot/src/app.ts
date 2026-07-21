@@ -71,6 +71,7 @@ import {
   autoRenewalTextHandler,
 } from "./handlers/user-renewal/auto-renewal.handler.js";
 import { userOrdersHandler } from "./handlers/user-orders/orders.handler.js";
+import { diagnosticsHandler } from "./handlers/user-services/diagnostics.handler.js";
 import {
   guideHandoffCancelMiddleware,
   servicesHandler,
@@ -100,6 +101,10 @@ import {
   autoRenewalAdminTextHandler,
 } from "./handlers/admin-settings/auto-renewal-admin.handler.js";
 import { referralAdminHandler } from "./handlers/admin-settings/referral-admin.handler.js";
+import {
+  diagnosticsAdminHandler,
+  diagnosticsAdminTextHandler,
+} from "./handlers/admin-settings/diagnostics-admin.handler.js";
 import {
   deviceGuidesHandler,
   deviceGuidesTextHandler,
@@ -244,6 +249,7 @@ export function createBot(token: string): Bot<BotContext> {
   // purchase-only, minimum order, totals. Never moves money or creates a commission.
   adminArea.use(referralAdminHandler);
   adminArea.use(deviceGuidesHandler);
+  adminArea.use(diagnosticsAdminHandler);
   // Telegram Stars subscriptions (Phase 2): OWNER-only «اشتراک‌های ماهانه Stars ⭐»
   // admin page (admin:starsub:*) — master switch + activation gate + counts.
   adminArea.use(starsSubscriptionAdminHandler);
@@ -292,6 +298,9 @@ export function createBot(token: string): Bot<BotContext> {
   // gates on currentFlow.
   adminFlowText.use(analyticsTextHandler);
   adminFlowText.use(deviceGuidesTextHandler);
+  // Service self-diagnostics: OWNER preview short-id input ("admin_diag:preview").
+  // Self-gates on currentFlow, so it passes through for every other admin flow.
+  adminFlowText.use(diagnosticsAdminTextHandler);
   // Phase 2.1: Stars product subscription price input ("admin_starsprod:price").
   // Self-gates on currentFlow, so it passes through for every other admin flow.
   adminFlowText.use(starsProductPriceTextHandler);
@@ -390,6 +399,7 @@ export function createBot(token: string): Bot<BotContext> {
   userArea.use(checkoutHandler);
   userArea.use(paymentHandler);
   userArea.use(servicesHandler);
+  userArea.use(diagnosticsHandler);
   userArea.use(renewalHandler);
   // Wallet auto-renewal (Phase 1): consent flow, per-service status, my-renewals
   // (user:arn:*). Registered before the placeholder handler so its routes win.

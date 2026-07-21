@@ -47,6 +47,14 @@ export const svcCb = {
   guideApp: (sid: string, p: string, slug: string): string => `user:svc:guide:${sid}:${p}:${slug}`,
   guideSupport: (sid: string, p: string, slug: string): string =>
     `user:svc:gsup:${sid}:${p}:${slug}`,
+  // Service self-diagnostics (feat/service-self-diagnostics). All three routes
+  // emit the single prefix `user:svc:diag:` (the nav-integrity scan stops at the
+  // first `${`), so one registered handler group covers them and the worst-case
+  // callback (`user:svc:diag:<8hex>:support`) stays well under 64 bytes.
+  diag: (sid: string): string => `user:svc:diag:${sid}`,
+  diagRetry: (sid: string): string => `user:svc:diag:${sid}:retry`,
+  diagSupport: (sid: string): string => `user:svc:diag:${sid}:support`,
+  diagSupportYes: (sid: string): string => `user:svc:diag:${sid}:sup_yes`,
 } as const;
 
 const STATUS_LABELS: Record<ServiceStatus, string> = {
@@ -262,6 +270,7 @@ export function serviceDetailKeyboard(
   service: Service,
   actions: ServiceDetailActions = NO_DETAIL_ACTIONS,
   guide: { label: string } | null = null,
+  diagnostics: { label: string } | null = null,
 ): InlineKeyboard {
   const sid = serviceShortId(service);
   // Row 1: refresh.
@@ -287,6 +296,14 @@ export function serviceDetailKeyboard(
   // `guide` is null otherwise. The route re-validates everything on click.
   if (guide !== null) {
     kb.text(guide.label, svcCb.guide(sid)).row();
+  }
+  // Row 4c: service self-diagnostics (feat/service-self-diagnostics). Rendered
+  // AFTER the guide row and BEFORE the financial/lifecycle actions, ONLY when the
+  // master switch is enabled (`diagnostics` is null otherwise). The route
+  // re-checks the master switch + ownership on click, so a stale button fails
+  // closed.
+  if (diagnostics !== null) {
+    kb.text(diagnostics.label, svcCb.diag(sid)).row();
   }
   // Row 5: renewal + extra volume - both routes re-validate on click.
   if (actions.canRenew) {

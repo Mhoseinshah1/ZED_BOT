@@ -1,7 +1,13 @@
+import { validateDiagnosticSnapshot } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
+import {
+  diagnosticCheckMessage,
+  diagnosticEvidenceLabel,
+  diagnosticOverallLabel,
+} from "../../services/service-diagnostics.service.js";
 import {
   addAdminTicketReply,
   closeSupportTicket,
@@ -19,6 +25,7 @@ import {
 } from "../../services/support-ticket.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
+import { statusLabel as serviceStatusLabel } from "../user-services/service-views.js";
 
 // =============================================================================
 // «تیکت‌های پشتیبانی 🎫» (Phase 32) - the admin side: counters landing,
@@ -87,6 +94,48 @@ export async function renderLanding(ctx: BotContext): Promise<void> {
   );
 }
 
+const DIAG_STATUS_ICON: Record<string, string> = {
+  PASS: "✅",
+  INFO: "ℹ️",
+  WARNING: "⚠️",
+  FAIL: "❌",
+  UNKNOWN: "❔",
+};
+
+/**
+ * The SAFE diagnostic-summary section for a ticket opened from a diagnostic run
+ * (§16). Renders the linked Service label + status, the report time, the
+ * evidence source and every stable check CODE translated to Persian — and NEVER
+ * a subscription URL, config, token, credential or raw panel body. Returns [] for
+ * an ordinary ticket or a snapshot that fails the strict validator.
+ */
+function diagnosticSummaryLines(ticket: TicketWithMessages): string[] {
+  if (ticket.diagnosticSnapshot === null || ticket.diagnosticSnapshot === undefined) {
+    return [];
+  }
+  const snapshot = validateDiagnosticSnapshot(ticket.diagnosticSnapshot);
+  if (snapshot === null) {
+    return [];
+  }
+  const lines = ["", "گزارش عیب‌یابی 🛠"];
+  if (ticket.service !== null && ticket.service !== undefined) {
+    lines.push(
+      `سرویس: ${escapeHtml(ticket.service.username)} | وضعیت: ${serviceStatusLabel(ticket.service.status)}`,
+    );
+  }
+  lines.push(
+    `نتیجه: ${diagnosticOverallLabel(snapshot.overall)}`,
+    `منبع: ${diagnosticEvidenceLabel(snapshot.evidenceSource)}`,
+    `زمان بررسی: ${escapeHtml(snapshot.checkedAt.slice(0, 16).replace("T", " "))} UTC`,
+    "بررسی‌ها:",
+  );
+  for (const check of snapshot.checks) {
+    const icon = DIAG_STATUS_ICON[check.status] ?? "•";
+    lines.push(`${icon} ${escapeHtml(diagnosticCheckMessage(check.code))}`);
+  }
+  return lines;
+}
+
 function detailText(ticket: TicketWithMessages): string {
   const lines = [
     `تیکت 🎫 <code>${ticket.id.slice(0, 8)}</code>`,
@@ -107,6 +156,7 @@ function detailText(ticket: TicketWithMessages): string {
       }`,
     );
   }
+  lines.push(...diagnosticSummaryLines(ticket));
   lines.push("", "پیام‌ها:");
   for (const message of ticket.messages) {
     const label =
@@ -121,6 +171,12 @@ async function renderDetail(ctx: BotContext, ticket: TicketWithMessages): Promis
   const kb = new InlineKeyboard();
   if (ticket.status !== "CLOSED") {
     kb.text("پاسخ دادن ✍️", ASUP_CB.reply(sid)).text("بستن تیکت ✅", ASUP_CB.close(sid)).row();
+  }
+  // Service self-diagnostics: an admin/owner-scoped jump to the user's existing
+  // services list (which surfaces the linked service). Reuses the existing admin
+  // surface — no Service administration is duplicated in the ticket page.
+  if (ticket.serviceId !== null && ticket.serviceId !== undefined) {
+    kb.text("سرویس‌های کاربر 🛍", `admin:users:svc:${ticket.userId.slice(0, 8)}:1`).row();
   }
   kb.text("در انتظار ادمین ⏳", ASUP_CB.list("waiting_admin", 1))
     .row()
