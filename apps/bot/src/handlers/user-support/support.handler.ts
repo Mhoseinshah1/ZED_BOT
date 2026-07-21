@@ -351,18 +351,28 @@ supportTextHandler.on("message:text", async (ctx, next) => {
     // attachment — a normal ticket is still created, but it can NEVER carry
     // another Service/user's report or a mismatched serviceId/snapshot pair.
     let attachedServiceId: string | null = null;
-    let attachment: SupportTicketAttachment | undefined;
-    if (diagContext !== undefined) {
-      const owned = await getOwnedServiceById(diagContext.serviceId, user.id);
-      const safeSnapshot = validateDiagnosticSnapshot(diagContext.snapshot);
-      // owned.id is resolved FROM diagContext.serviceId, so the attached
-      // serviceId + snapshot are always a consistent, owner-scoped pair.
-      if (owned !== null && safeSnapshot !== null && owned.id === diagContext.serviceId) {
-        attachedServiceId = owned.id;
-        attachment = { serviceId: owned.id, diagnosticSnapshot: safeSnapshot };
+    let outcome: Awaited<ReturnType<typeof createSupportTicket>>;
+    try {
+      let attachment: SupportTicketAttachment | undefined;
+      if (diagContext !== undefined) {
+        const owned = await getOwnedServiceById(diagContext.serviceId, user.id);
+        const safeSnapshot = validateDiagnosticSnapshot(diagContext.snapshot);
+        // owned.id is resolved FROM diagContext.serviceId, so the attached
+        // serviceId + snapshot are always a consistent, owner-scoped pair.
+        if (owned !== null && safeSnapshot !== null && owned.id === diagContext.serviceId) {
+          attachedServiceId = owned.id;
+          attachment = { serviceId: owned.id, diagnosticSnapshot: safeSnapshot };
+        }
       }
+      outcome = await createSupportTicket(user.id, claimedSubject, text, attachment);
+    } catch (err) {
+      // A THROWN owner-lookup / ticket-creation error (e.g. a transient DB
+      // outage) during the claimed window must restore the WHOLE claim — the
+      // claim was consumed synchronously before this await, so without this the
+      // user would silently lose the armed handoff and its diagnostic snapshot.
+      restoreClaim();
+      throw err;
     }
-    const outcome = await createSupportTicket(user.id, claimedSubject, text, attachment);
     if (!outcome.ok) {
       // Restore the whole claim so a corrected retry still works + attaches.
       restoreClaim();

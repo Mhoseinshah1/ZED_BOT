@@ -568,6 +568,27 @@ d("service-diagnostics: §5 attachment integrity + idempotency", () => {
     const ticket = await latestTicket(owner.id);
     expect(ticket?.serviceId).toBe(service.id);
   });
+
+  it("a THROWN owner-lookup during the claimed window restores the handoff (retryable)", async () => {
+    const session = await armValidHandoff();
+    const before = await prisma.supportTicket.count({ where: { userId: owner.id } });
+    // Simulate a transient DB outage during the owner-scoped re-resolve.
+    const userServices = await import("../src/services/user-services.service.js");
+    const spy = vi
+      .spyOn(userServices, "getOwnedServiceById")
+      .mockRejectedValueOnce(new Error("transient db outage"));
+    await expect(driveText("پیام هنگام خطای موقت دیتابیس", owner, session)).rejects.toThrow();
+    spy.mockRestore();
+    // No ticket was created, and the WHOLE claim is restored for a retry.
+    expect(await prisma.supportTicket.count({ where: { userId: owner.id } })).toBe(before);
+    expect(session.currentFlow).toBe("support:message");
+    expect(session.temp.supportDraft?.subject).toBeDefined();
+    expect(session.temp.diagnosticSupportContext?.serviceId).toBe(service.id);
+    // The retry now succeeds and still carries the diagnostic attachment.
+    await driveText("اتصال برقرار شد، دوباره تلاش می‌کنم", owner, session);
+    expect(await prisma.supportTicket.count({ where: { userId: owner.id } })).toBe(before + 1);
+    expect((await latestTicket(owner.id))?.serviceId).toBe(service.id);
+  });
 });
 
 d("service-diagnostics: Telegram safety", () => {
