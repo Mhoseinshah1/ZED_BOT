@@ -215,14 +215,17 @@ d("service-diagnostics: one panel read + evidence policy", () => {
     expect(after.usedBytes).toBe(before.usedBytes);
   });
 
-  it("the OWNER read-only preview (persist:false) reads live but NEVER writes the row", async () => {
+  it("the OWNER read-only preview (persist:false) reasons over LIVE state but NEVER writes the row", async () => {
     const before = await prisma.service.findUniqueOrThrow({ where: { id: service.id } });
     // A DIFFERENT usage than the stored row, so a persisted write would be visible.
     panelState.account = { ok: true, status: "active", usedBytes: 7n * GIB, totalBytes: 10n * GIB, remainingBytes: 3n * GIB };
     const run = await runServiceDiagnostics(service, owner.id, { persist: false });
     expect(run.report.evidenceSource).toBe("LIVE_PANEL"); // still a live read
+    // The report reasons over the LIVE projection, not the stale stored row...
+    expect(run.service.usedBytes).toBe(7n * GIB);
+    // ...yet the DB row is never written.
     const after = await prisma.service.findUniqueOrThrow({ where: { id: service.id } });
-    expect(after.usedBytes).toBe(before.usedBytes); // row untouched
+    expect(after.usedBytes).toBe(before.usedBytes);
     expect(after.lastSubscriptionUpdateAt?.getTime() ?? 0).toBe(
       before.lastSubscriptionUpdateAt?.getTime() ?? 0,
     );

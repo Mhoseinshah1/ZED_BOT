@@ -172,6 +172,54 @@ function buildUpdateData(service: Service, result: GetServiceAccountResult): Pri
 }
 
 /**
+ * The SAME field-mapping as buildUpdateData, but applied to an IN-MEMORY copy of
+ * the row instead of persisting it. Used by the read-only (persist: false) path
+ * so a preview reasons over the freshly-read live state — keeping the evaluated
+ * status/history/quota consistent with LIVE_PANEL evidence — while the stored row
+ * is never written. Only fields the panel actually reported are applied.
+ */
+function projectServiceFromAccount(service: Service, result: GetServiceAccountResult): Service {
+  const projected: Service = { ...service, lastSubscriptionUpdateAt: new Date() };
+  const mappedStatus =
+    result.status !== undefined ? STATUS_TO_SERVICE_STATUS[result.status] : undefined;
+  if (mappedStatus !== undefined) {
+    projected.status = mappedStatus;
+  }
+  if (result.usedBytes !== undefined) {
+    projected.usedBytes = result.usedBytes;
+  }
+  if (result.totalBytes !== undefined) {
+    projected.volumeBytes = result.totalBytes ?? 0n;
+    if (result.remainingBytes !== undefined) {
+      projected.remainingBytes = result.remainingBytes ?? 0n;
+    }
+  }
+  if (result.expiresAt !== undefined) {
+    projected.expiresAt = result.expiresAt;
+  }
+  if (result.subscriptionUrl !== undefined && result.subscriptionUrl !== "") {
+    projected.subscriptionUrl = result.subscriptionUrl;
+  }
+  if (result.configLinks !== undefined && result.configLinks.length > 0) {
+    projected.configLinks = result.configLinks;
+  }
+  if (
+    result.firstConnectedAt !== undefined &&
+    result.firstConnectedAt !== null &&
+    service.firstConnectedAt === null
+  ) {
+    projected.firstConnectedAt = result.firstConnectedAt;
+  }
+  if (result.lastConnectedAt !== undefined && result.lastConnectedAt !== null) {
+    projected.lastConnectedAt = result.lastConnectedAt;
+    if (service.firstConnectedAt === null && projected.firstConnectedAt === null) {
+      projected.firstConnectedAt = result.lastConnectedAt;
+    }
+  }
+  return projected;
+}
+
+/**
  * Refreshes one service from its panel, scoped to the owner. Read-only from
  * the panel's perspective; the Service row is only updated on a successful
  * read. All error strings are internal-safe; safeUserMessage is what the
@@ -294,12 +342,14 @@ async function readServiceAccountAndSyncUnlocked(
   }
 
   // Read-only mode (the OWNER preview): the account was read live, but the row
-  // is NOT written — the preview promises to change nothing. Callers still get
-  // the live `account` for the report; evidence stays LIVE_PANEL.
+  // is NOT written — the preview promises to change nothing. The returned
+  // `service` is an IN-MEMORY projection of the live read so the report reasons
+  // over the fresh state (consistent with LIVE_PANEL evidence) without any DB
+  // write; `account` also carries the live result.
   if (!persist) {
     return {
       kind: "read-ok",
-      service: serviceRow,
+      service: projectServiceFromAccount(serviceRow, result),
       panelId: panel.id,
       panelType: panel.type,
       account: result,
