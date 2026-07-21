@@ -343,6 +343,23 @@ d("user connection-guide callbacks", () => {
     invalidateGuideCache();
   });
 
+  it("cancels a pending support handoff even on the disabled early-return path", async () => {
+    const session = initialSession();
+    await run(`user:svc:gsup:${sid()}:${iosCode}:${iosApp.slug}`, owner, session);
+    expect(session.currentFlow).toBe("support:message");
+    // Master switch disabled after the prompt was shown; tapping "back to guide"
+    // hits the disabled notice, which early-returns from requireGuideService —
+    // the handoff must still be cancelled.
+    await setSetting(CONNECTION_GUIDES_ENABLED_KEY, "false", "BOOLEAN");
+    clearSettingsCache();
+    await run(`user:svc:guide:${sid()}:${iosCode}:${iosApp.slug}`, owner, session);
+    expect(session.currentFlow).toBeNull();
+    expect(session.temp.guideSupportContext).toBeUndefined();
+    expect(session.temp.supportDraft).toBeUndefined();
+    await setSetting(CONNECTION_GUIDES_ENABLED_KEY, "true", "BOOLEAN");
+    clearSettingsCache();
+  });
+
   it("guide templates are rendered as escaped plain text — never raw operator HTML", async () => {
     // Operator-editable templates are sent with parse_mode HTML; treating them as
     // plain text (escape template + values once) means stray/crossed/unclosed

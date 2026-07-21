@@ -605,6 +605,13 @@ function clearGuideHandoff(ctx: BotContext): void {
 /** Owner-scoped reload + master-switch recheck shared by every guide route.
  * Returns the Service, or null after emitting the correct safe response. */
 async function requireGuideService(ctx: BotContext, sid: string): Promise<Service | null> {
+  // Entering ANY guide route (browse a page, or hit the disabled/no-payload/
+  // not-found notice) is a navigation away from a pending support handoff, so
+  // cancel it up front — otherwise the early-return notice paths below would leave
+  // `support:message` armed and the user's next message would become a ticket.
+  // The support-handoff route reloads via this helper and then sets a FRESH
+  // handoff, so clearing here first is safe. No-op when none is pending.
+  clearGuideHandoff(ctx);
   const user = ctx.dbUser;
   if (user === null) {
     return null;
@@ -664,7 +671,6 @@ servicesHandler.callbackQuery(/^user:svc:guide:([0-9a-f-]+)$/, async (ctx) => {
   if (service === null) {
     return;
   }
-  clearGuideHandoff(ctx);
   await safeAnswerCallback(ctx);
   await renderGuidePlatformSelection(ctx, service);
 });
@@ -677,7 +683,6 @@ servicesHandler.callbackQuery(/^user:svc:guide:([0-9a-f-]+):([a-z0-9]+)$/, async
   if (service === null) {
     return;
   }
-  clearGuideHandoff(ctx);
   await safeAnswerCallback(ctx);
   if (platform === null) {
     await renderGuidePlatformSelection(ctx, service);
@@ -695,7 +700,6 @@ servicesHandler.callbackQuery(/^user:svc:guide:([0-9a-f-]+):([a-z0-9]+):([a-z0-9
   if (service === null) {
     return;
   }
-  clearGuideHandoff(ctx);
   if (platform === null) {
     await safeAnswerCallback(ctx);
     await renderGuidePlatformSelection(ctx, service);
