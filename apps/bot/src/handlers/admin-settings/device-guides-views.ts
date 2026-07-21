@@ -1,5 +1,6 @@
 import type { ConnectionGuideApp } from "@zedbot/database";
 import {
+  clampButtonLabel,
   clampEscapedText,
   GUIDE_DISPLAY_NAME_MAX,
   GUIDE_INSTRUCTIONS_MAX,
@@ -33,7 +34,8 @@ export const DEV_GUIDE_CB = {
   enableYes: "admin:devguide:enable:yes",
   disable: "admin:devguide:disable",
   disableYes: "admin:devguide:disable:yes",
-  platform: (pcode: string): string => `admin:devguide:p:${pcode}`,
+  platform: (pcode: string, page = 0): string =>
+    page > 0 ? `admin:devguide:p:${pcode}:${page}` : `admin:devguide:p:${pcode}`,
   add: (pcode: string): string => `admin:devguide:add:${pcode}`,
   app: (sid: string): string => `admin:devguide:app:${sid}`,
   edit: (sid: string, field: string): string => `admin:devguide:edit:${sid}:${field}`,
@@ -126,33 +128,63 @@ export function devGuideReadinessReport(readiness: GuideReadiness): string {
   return lines.join("\n");
 }
 
+/** How many apps a single admin platform page renders. Keeps the message text
+ * and keyboard well under Telegram's limits no matter how many apps exist. */
+export const GUIDE_ADMIN_PAGE_SIZE = 8;
+
+/** Text for ONE page of a platform's apps. `pageApps` is the already-sliced page;
+ * `total` is the full non-archived count. Clamped as a final guard. */
 export function devGuidePlatformText(
   platform: GuidePlatform,
-  apps: ConnectionGuideApp[],
+  pageApps: ConnectionGuideApp[],
+  page: number,
+  pageCount: number,
+  total: number,
 ): string {
   const lines = [`برنامه‌های ${GUIDE_PLATFORM_NEUTRAL_LABEL[platform]} 📱`, ""];
-  if (apps.length === 0) {
+  if (total === 0) {
     lines.push("هنوز برنامه‌ای برای این پلتفرم ثبت نشده است.");
   } else {
-    for (const a of apps) {
+    for (const a of pageApps) {
       const invalid = guideAppInvalidReasons(a).length > 0;
       lines.push(
         `${a.isActive ? "✅" : "⏸"} ${escapeHtml(a.iconEmoji)} ${escapeHtml(a.displayName)}${invalid ? " ⚠️" : ""}`,
       );
     }
+    if (pageCount > 1) {
+      lines.push("", `صفحه ${page + 1} از ${pageCount} — مجموع ${total} برنامه`);
+    }
   }
-  return lines.join("\n");
+  return clampEscapedText(lines.join("\n"));
 }
 
 export function devGuidePlatformKeyboard(
   platform: GuidePlatform,
-  apps: ConnectionGuideApp[],
+  pageApps: ConnectionGuideApp[],
+  page: number,
+  pageCount: number,
 ): InlineKeyboard {
+  const pcode = GUIDE_PLATFORM_CODE[platform];
   const kb = new InlineKeyboard();
-  for (const a of apps) {
-    kb.text(`${a.iconEmoji} ${a.displayName}`, DEV_GUIDE_CB.app(sid(a))).row();
+  for (const a of pageApps) {
+    // Compose emoji + name, bounded to Telegram's inline-button label limit.
+    kb.text(clampButtonLabel(`${a.iconEmoji} ${a.displayName}`), DEV_GUIDE_CB.app(sid(a))).row();
   }
-  kb.text("افزودن برنامه ➕", DEV_GUIDE_CB.add(GUIDE_PLATFORM_CODE[platform])).row();
+  if (pageCount > 1) {
+    let hasNav = false;
+    if (page > 0) {
+      kb.text("« قبلی", DEV_GUIDE_CB.platform(pcode, page - 1));
+      hasNav = true;
+    }
+    if (page < pageCount - 1) {
+      kb.text("بعدی »", DEV_GUIDE_CB.platform(pcode, page + 1));
+      hasNav = true;
+    }
+    if (hasNav) {
+      kb.row();
+    }
+  }
+  kb.text("افزودن برنامه ➕", DEV_GUIDE_CB.add(pcode)).row();
   kb.text("بازگشت به راهنمای اتصال", DEV_GUIDE_CB.root);
   return kb;
 }

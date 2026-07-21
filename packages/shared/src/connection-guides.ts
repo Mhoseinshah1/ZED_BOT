@@ -96,6 +96,26 @@ export const GUIDE_DOWNLOAD_URL_MAX = 512;
  * the view layer clamps the operator body to keep the whole message under this. */
 export const GUIDE_PAGE_TEXT_MAX = 3900;
 
+/** Telegram inline-button label limit (characters). Composite guide labels
+ * (`iconEmoji` + `displayName`) can otherwise reach ~93 and make Telegram reject
+ * the whole keyboard message. */
+export const GUIDE_BUTTON_LABEL_MAX = 64;
+
+/** Truncates an inline-button label to at most `max` UTF-16 code units, appending
+ * an ellipsis and never orphaning a high surrogate at the cut. Plain text (no HTML
+ * entities) — button labels are not parsed as HTML. */
+export function clampButtonLabel(label: string, max: number = GUIDE_BUTTON_LABEL_MAX): string {
+  if (label.length <= max) {
+    return label;
+  }
+  let end = max - 1; // room for the ellipsis
+  const last = label.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end -= 1; // don't leave a lone high surrogate
+  }
+  return `${label.slice(0, Math.max(0, end))}…`;
+}
+
 /** Truncates already-HTML-escaped text to at most `max` UTF-16 code units without
  * ever splitting an HTML entity (which would break `parse_mode: HTML`), appending
  * an ellipsis when it had to cut. Use for fully-escaped content (no live tags). */

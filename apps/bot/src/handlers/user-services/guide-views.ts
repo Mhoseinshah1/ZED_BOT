@@ -1,5 +1,6 @@
 import type { Service, ServiceStatus } from "@zedbot/database";
 import {
+  clampButtonLabel,
   clampEscapedText,
   GUIDE_PAGE_TEXT_MAX,
   GUIDE_PLATFORM_CODE,
@@ -137,7 +138,7 @@ export async function guideAppPage(
   });
   const kb = new InlineKeyboard();
   for (const app of apps) {
-    kb.text(`${app.iconEmoji} ${app.displayName}`, svcCb.guideApp(sid, pcode, app.slug)).row();
+    kb.text(clampButtonLabel(`${app.iconEmoji} ${app.displayName}`), svcCb.guideApp(sid, pcode, app.slug)).row();
   }
   kb.text(await getButtonText("guide_back_platforms"), svcCb.guide(sid)).row();
   backToServiceRow(kb, sid);

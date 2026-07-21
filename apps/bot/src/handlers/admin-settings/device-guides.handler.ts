@@ -46,6 +46,7 @@ import {
   devGuidePreviewKeyboard,
   devGuidePreviewText,
   devGuideReadinessReport,
+  GUIDE_ADMIN_PAGE_SIZE,
   GUIDE_EDIT_FIELDS,
   GUIDE_FIELD_PROMPT,
   GUIDE_METHOD_CODES,
@@ -131,13 +132,24 @@ deviceGuidesHandler.callbackQuery(DEV_GUIDE_CB.root, async (ctx) => {
   await renderDeviceGuideLanding(ctx);
 });
 
-// --- platform page -----------------------------------------------------------
-async function renderPlatformPage(ctx: BotContext, platform: GuidePlatform): Promise<void> {
+// --- platform page (paginated so an unbounded app count can't overflow) ------
+async function renderPlatformPage(
+  ctx: BotContext,
+  platform: GuidePlatform,
+  page = 0,
+): Promise<void> {
   const apps = await listGuideAppsForPlatformAdmin(platform);
-  await safeEditOrReply(ctx, devGuidePlatformText(platform, apps), devGuidePlatformKeyboard(platform, apps));
+  const pageCount = Math.max(1, Math.ceil(apps.length / GUIDE_ADMIN_PAGE_SIZE));
+  const safePage = Math.min(Math.max(0, page), pageCount - 1);
+  const pageApps = apps.slice(safePage * GUIDE_ADMIN_PAGE_SIZE, (safePage + 1) * GUIDE_ADMIN_PAGE_SIZE);
+  await safeEditOrReply(
+    ctx,
+    devGuidePlatformText(platform, pageApps, safePage, pageCount, apps.length),
+    devGuidePlatformKeyboard(platform, pageApps, safePage, pageCount),
+  );
 }
 
-deviceGuidesHandler.callbackQuery(/^admin:devguide:p:([a-z0-9]+)$/, async (ctx) => {
+deviceGuidesHandler.callbackQuery(/^admin:devguide:p:([a-z0-9]+)(?::(\d+))?$/, async (ctx) => {
   if (!(await ownerGuard(ctx))) {
     return;
   }
@@ -146,9 +158,10 @@ deviceGuidesHandler.callbackQuery(/^admin:devguide:p:([a-z0-9]+)$/, async (ctx) 
     await safeAnswerCallback(ctx, NOT_FOUND);
     return;
   }
+  const page = ctx.match[2] === undefined ? 0 : Number.parseInt(ctx.match[2], 10);
   clearDeviceGuideState(ctx);
   await safeAnswerCallback(ctx);
-  await renderPlatformPage(ctx, platform);
+  await renderPlatformPage(ctx, platform, page);
 });
 
 // --- app editor --------------------------------------------------------------

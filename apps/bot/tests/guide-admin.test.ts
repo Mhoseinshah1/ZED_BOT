@@ -261,6 +261,36 @@ d("device-guide OWNER admin", () => {
     expect(now.supportsIndividualConfigs).toBe(false);
   });
 
+  it("paginates the admin platform list so a large app count can't overflow", async () => {
+    const cap = makeCap(owner);
+    // Create 10 IOS apps (> GUIDE_ADMIN_PAGE_SIZE = 8).
+    for (let i = 0; i < 10; i += 1) {
+      await prisma.connectionGuideApp.create({
+        data: {
+          slug: `pg-${i}-${runTag}`,
+          platform: "IOS",
+          displayName: `App ${i}`,
+          iconEmoji: "📦",
+          primaryDownloadUrl: "https://apps.apple.com/app/x",
+          alternateDownloadUrl: null,
+          supportsSubscription: true,
+          supportsQr: true,
+          supportsIndividualConfigs: true,
+          instructions: "برنامه را نصب کنید و لینک را وارد نمایید.",
+          troubleshooting: "",
+          isActive: false,
+          sortOrder: i,
+        },
+      });
+    }
+    // Page 1 of 2.
+    await cb(cap, DEV_GUIDE_CB.platform(iosCode));
+    expect(cap.edits.at(-1)).toContain("صفحه 1 از 2");
+    // Page 2 of 2.
+    await cb(cap, DEV_GUIDE_CB.platform(iosCode, 1));
+    expect(cap.edits.at(-1)).toContain("صفحه 2 از 2");
+  });
+
   it("audit events carry NO secret or full download URL", async () => {
     const logged: string[] = [];
     const spy = vi

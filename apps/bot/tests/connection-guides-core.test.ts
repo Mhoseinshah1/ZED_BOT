@@ -1,5 +1,7 @@
 import { prisma, type ConnectionGuideApp } from "@zedbot/database";
 import {
+  clampButtonLabel,
+  GUIDE_BUTTON_LABEL_MAX,
   GUIDE_MAX_ACTIVE_APPS_PER_PLATFORM,
   GUIDE_PLATFORM_CODE,
   guidePlatformFromCode,
@@ -76,6 +78,25 @@ describe("HTTPS download-URL validation (§12) - pure, never fetches", () => {
   it("a rejection reason never echoes the raw URL", () => {
     const r = validateHttpsDownloadUrl("javascript:alert('SECRETTOKEN')");
     expect(JSON.stringify(r)).not.toContain("SECRETTOKEN");
+  });
+});
+
+describe("clampButtonLabel (§P2) - bounds composite inline-button labels", () => {
+  it("passes short labels through unchanged", () => {
+    expect(clampButtonLabel("📦 V2Box")).toBe("📦 V2Box");
+  });
+  it("truncates an over-long emoji+name label to the button limit", () => {
+    const label = `${"👨‍👩‍👧‍👦"} ${"a".repeat(60)}`; // ~72 code units, over the 64 limit
+    const out = clampButtonLabel(label);
+    expect(out.length).toBeLessThanOrEqual(GUIDE_BUTTON_LABEL_MAX);
+    expect(out.endsWith("…")).toBe(true);
+  });
+  it("never leaves a lone high surrogate at the cut", () => {
+    // A run of astral emoji (each 2 code units); the cut must not split a pair.
+    const out = clampButtonLabel("😀".repeat(50));
+    expect(out.length).toBeLessThanOrEqual(GUIDE_BUTTON_LABEL_MAX);
+    const last = out.charCodeAt(out.length - 2); // char before the ellipsis
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
   });
 });
 
