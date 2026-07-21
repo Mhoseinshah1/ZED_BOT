@@ -14,8 +14,6 @@ import {
   addUserTicketReply,
   closeSupportTicket,
   createSupportTicket,
-  getAdminTicketDetail,
-  getUserTicketDetail,
   notifyAdminsAboutNewTicket,
   notifyUserAboutAdminReply,
   resolveAdminAttachment,
