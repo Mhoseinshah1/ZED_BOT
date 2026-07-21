@@ -37,12 +37,14 @@ import {
   renderSupportAttachmentRejection,
 } from "../user-support/support-input.js";
 import {
+  hasAttachment,
   sendSupportAttachment,
   supportAttachmentButton,
   supportCategoryLabel,
   supportMessageLine,
   supportOriginLabel,
 } from "../user-support/support-detail.js";
+import { getMessageTemplate } from "../../services/text.service.js";
 
 // =============================================================================
 // «تیکت‌های پشتیبانی 🎫» (Phase 32) - the admin side: counters landing,
@@ -202,10 +204,19 @@ function adminServiceLines(ticket: TicketWithMessages): string[] {
   return lines;
 }
 
-export function detailText(ticket: TicketWithMessages): string {
+/** True when the ticket carries at least one USER-supplied attachment — the
+ * admin must be warned that its MIME/filename are untrusted and the file was
+ * never inspected (§6). Admin-uploaded attachments are trusted and excluded. */
+function ticketHasUntrustedAttachment(ticket: TicketWithMessages): boolean {
+  return ticket.messages.some((m) => m.senderType === "USER" && hasAttachment(m));
+}
+
+export function detailText(ticket: TicketWithMessages, untrustedNotice?: string): string {
   // Header — the ONLY part with live <code> tags (bounded: an 8-char id, the
   // numeric telegram id, a Telegram-bounded username, a ≤100-char subject). It
-  // is never truncated, so a live tag can never be split.
+  // is never truncated, so a live tag can never be split. The untrusted-file
+  // warning lives HERE (not in the clampable body) so it can never be truncated
+  // away when a ticket has many message previews.
   const header = [
     `تیکت 🎫 <code>${ticket.id.slice(0, 8)}</code>`,
     "",
@@ -225,6 +236,13 @@ export function detailText(ticket: TicketWithMessages): string {
         ticket.closedByAdminId === null ? "" : ` | ادمین: ${ticket.closedByAdminId.slice(0, 8)}`
       }`,
     );
+  }
+  if (
+    untrustedNotice !== undefined &&
+    untrustedNotice !== "" &&
+    ticketHasUntrustedAttachment(ticket)
+  ) {
+    header.push("", escapeHtml(untrustedNotice));
   }
   // Body — the potentially unbounded part (the diagnostic summary + up to ten
   // 300-char message previews + a long linked service username). It is FULLY
@@ -265,7 +283,12 @@ async function renderDetail(ctx: BotContext, ticket: TicketWithMessages): Promis
   kb.text("در انتظار ادمین ⏳", ASUP_CB.list("waiting_admin", 1))
     .row()
     .text("بازگشت به تیکت‌ها", ASUP_CB.root);
-  await safeEditOrReply(ctx, detailText(ticket), kb, HTML);
+  // Fetch the operator-editable untrusted-file warning only when the ticket
+  // actually carries a user attachment (§6 admin-facing notice).
+  const untrustedNotice = ticketHasUntrustedAttachment(ticket)
+    ? await getMessageTemplate("support_untrusted_attachment_notice")
+    : undefined;
+  await safeEditOrReply(ctx, detailText(ticket, untrustedNotice), kb, HTML);
 }
 
 async function renderList(

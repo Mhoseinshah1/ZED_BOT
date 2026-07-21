@@ -432,9 +432,21 @@ supportHandler.callbackQuery(/^user:sup:cat:([a-z])$/, async (ctx) => {
   await promptSubject(ctx);
 });
 
+/**
+ * The active NEW-TICKET wizard draft, or undefined. A reply draft carries a
+ * `ticketId`; a service-picker button is only valid inside the new-ticket
+ * wizard, so a stale picker button tapped during an in-progress REPLY (or with
+ * no draft at all) must NOT open the picker or call promptSubject — that would
+ * silently convert the reply into a new-ticket flow.
+ */
+function activeWizardDraft(ctx: BotContext): NonNullable<typeof ctx.session.temp.supportDraft> | undefined {
+  const draft = ctx.session.temp.supportDraft;
+  return draft !== undefined && draft.ticketId === undefined ? draft : undefined;
+}
+
 supportHandler.callbackQuery(/^user:sup:svc:pick:([0-9a-f-]+)$/, async (ctx) => {
   const user = ctx.dbUser;
-  const draft = ctx.session.temp.supportDraft;
+  const draft = activeWizardDraft(ctx);
   if (user === null || draft === undefined) {
     await safeAnswerCallback(ctx);
     return;
@@ -451,10 +463,11 @@ supportHandler.callbackQuery(/^user:sup:svc:pick:([0-9a-f-]+)$/, async (ctx) => 
 });
 
 supportHandler.callbackQuery(SUP_CB.svcNone, async (ctx) => {
-  const draft = ctx.session.temp.supportDraft;
+  const draft = activeWizardDraft(ctx);
   await safeAnswerCallback(ctx);
   if (draft === undefined) {
-    await renderSupportLanding(ctx);
+    // No active wizard (a stale button during a reply / after expiry): never
+    // hijack the current flow — just acknowledge the tap.
     return;
   }
   delete draft.serviceId;
@@ -463,19 +476,19 @@ supportHandler.callbackQuery(SUP_CB.svcNone, async (ctx) => {
 
 supportHandler.callbackQuery(SUP_CB.svcLink, async (ctx) => {
   const user = ctx.dbUser;
-  if (user === null) {
+  await safeAnswerCallback(ctx);
+  if (user === null || activeWizardDraft(ctx) === undefined) {
     return;
   }
-  await safeAnswerCallback(ctx);
   await promptServiceSelection(ctx, user.id, 1);
 });
 
 supportHandler.callbackQuery(/^user:sup:svc:(\d+)$/, async (ctx) => {
   const user = ctx.dbUser;
-  if (user === null) {
+  await safeAnswerCallback(ctx);
+  if (user === null || activeWizardDraft(ctx) === undefined) {
     return;
   }
-  await safeAnswerCallback(ctx);
   await promptServiceSelection(ctx, user.id, Number.parseInt(ctx.match[1], 10));
 });
 

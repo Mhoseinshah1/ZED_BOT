@@ -112,15 +112,16 @@ export async function renderServiceDetail(
   service: Service,
   staleNotice: string | null = null,
 ): Promise<void> {
-  const [actions, guide, diagnostics] = await Promise.all([
+  const [actions, guide, diagnostics, supportLabel] = await Promise.all([
     resolveServiceDetailActions(service),
     buildServiceGuideEntry(service),
     buildServiceDiagnosticsEntry(),
+    getButtonText("support_service_ticket"),
   ]);
   await safeEditOrReply(
     ctx,
     serviceDetailText(service, staleNotice),
-    serviceDetailKeyboard(service, actions, guide, diagnostics),
+    serviceDetailKeyboard(service, actions, guide, diagnostics, { label: supportLabel }),
     HTML,
   );
 }

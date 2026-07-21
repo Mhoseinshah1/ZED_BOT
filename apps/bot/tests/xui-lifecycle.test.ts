@@ -1307,10 +1307,13 @@ describe.runIf(hasDeps)("XUI capability gates, legacy compatibility and menu", (
     const lastRow = rows.at(-1) ?? [];
     expect(lastRow[0]?.text).toBe("بازگشت به لیست");
     expect(lastRow[1]?.text).toBe("بازگشت به منوی اصلی");
-    // Row 7 support entry routes into the existing ticket flow.
-    expect(buttons.some((b) => b.text === "مشکل دارم" && b.callback_data === CB.USER_SUPPORT)).toBe(
-      true,
-    );
+    // Row 7 support entry opens a ticket pre-linked to THIS service (Support
+    // Tickets V2: `user:svc:support:<sid>`), so the user never re-picks it.
+    expect(
+      buttons.some(
+        (b) => b.text === "پشتیبانی این سرویس 🎫" && (b.callback_data ?? "").startsWith("user:svc:support:"),
+      ),
+    ).toBe(true);
   });
 
   it("G4. admin capability page: verified statuses per specification", async () => {
