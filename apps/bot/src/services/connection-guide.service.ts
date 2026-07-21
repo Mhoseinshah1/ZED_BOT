@@ -399,13 +399,15 @@ export async function guideAdminPlatformCounts(): Promise<
   return out;
 }
 
-/** A single non-archived app by 8-char short id (admin), ambiguity-safe. */
+/** A single non-archived app by 8-char short id (admin), ambiguity-safe. Filters
+ * `archivedAt: null` so a stale confirmation/direct callback after archive can
+ * never edit or reactivate an archived (invisible) record. */
 export async function getGuideAppByShortIdAdmin(shortId: string): Promise<ConnectionGuideApp | null> {
   if (!/^[0-9a-f-]{4,36}$/i.test(shortId)) {
     return null;
   }
   const matches = await prisma.connectionGuideApp.findMany({
-    where: { id: { startsWith: shortId } },
+    where: { id: { startsWith: shortId }, archivedAt: null },
     take: 2,
   });
   return matches.length === 1 ? matches[0] : null;

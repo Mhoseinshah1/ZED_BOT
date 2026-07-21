@@ -210,6 +210,12 @@ d("device-guide OWNER admin", () => {
     const after = await prisma.connectionGuideApp.findUniqueOrThrow({ where: { id: app.id } });
     expect(after.archivedAt).not.toBeNull(); // retained for audit
     expect(after.isActive).toBe(false);
+    // A stale activation callback after archive must NOT reactivate the (now
+    // invisible) row — the admin lookup excludes archived records.
+    await cb(cap, DEV_GUIDE_CB.toggleConfirm(app.id.slice(0, 8), true));
+    const stale = await prisma.connectionGuideApp.findUniqueOrThrow({ where: { id: app.id } });
+    expect(stale.isActive).toBe(false);
+    expect(stale.archivedAt).not.toBeNull();
   });
 
   it("the sort-order edit rejects a partially-numeric value like '12abc'", async () => {

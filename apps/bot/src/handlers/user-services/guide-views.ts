@@ -1,6 +1,7 @@
 import type { Service, ServiceStatus } from "@zedbot/database";
 import {
   clampEscapedText,
+  clampHtmlMessage,
   GUIDE_PAGE_TEXT_MAX,
   GUIDE_PLATFORM_CODE,
   validateHttpsDownloadUrl,
@@ -237,8 +238,11 @@ export async function guideAppDetailPage(
 
   // Final guard: even after the per-body budget, an operator who edited the intro
   // or a status template to extreme lengths could still push the whole message
-  // past Telegram's limit; clamp the assembled text so the send can never fail.
-  return { text: clampEscapedText(lines.join("\n"), GUIDE_PAGE_TEXT_MAX), keyboard: kb };
+  // past Telegram's limit. The intro/status templates are LIVE HTML (rendered with
+  // `parse_mode: HTML`), so this uses the tag-balancing clamp — it never cuts
+  // inside a tag and re-closes any tag the cut left open, so the send can never
+  // fail (whether from over-length or malformed HTML).
+  return { text: clampHtmlMessage(lines.join("\n"), GUIDE_PAGE_TEXT_MAX), keyboard: kb };
 }
 
 export { HTML as GUIDE_HTML };

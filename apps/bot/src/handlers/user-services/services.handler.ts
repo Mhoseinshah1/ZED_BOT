@@ -56,6 +56,7 @@ import {
   isConnectionGuideEntryVisible,
   isConnectionGuidesEnabled,
   resolveGuideMethods,
+  serviceHasConnectionPayload,
 } from "../../services/connection-guide.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import {
@@ -613,6 +614,18 @@ async function requireGuideService(ctx: BotContext, sid: string): Promise<Servic
       .text("بازگشت به سرویس", svcCb.view(sid))
       .text("بازگشت به منوی اصلی", CB.USER_MENU);
     await safeEditOrReply(ctx, await getMessageTemplate("connection_guides_disabled"), kb);
+    return null;
+  }
+  if (!serviceHasConnectionPayload(service)) {
+    // The Service lost its connection payload (subscription/config) after the
+    // entry button or a guide page was sent. The entry is normally hidden for
+    // this state, so a stale/direct callback must not lead into a dead-end guide
+    // with no working action — show the safe no-payload notice instead.
+    await safeAnswerCallback(ctx);
+    const kb = new InlineKeyboard()
+      .text("بازگشت به سرویس", svcCb.view(sid))
+      .text("بازگشت به منوی اصلی", CB.USER_MENU);
+    await safeEditOrReply(ctx, await getMessageTemplate("connection_guides_no_payload"), kb);
     return null;
   }
   return service;

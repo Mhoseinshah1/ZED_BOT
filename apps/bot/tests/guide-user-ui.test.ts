@@ -257,6 +257,21 @@ d("user connection-guide callbacks", () => {
     expect(cap.toasts.some((t) => typeof t === "string" && t.includes("در دسترس نیست"))).toBe(true);
   });
 
+  it("fails SAFELY (no-payload notice) when the Service lost its payload after the button was sent", async () => {
+    // Simulate the payload being removed after the guide entry/page was shown.
+    await prisma.service.update({
+      where: { id: service.id },
+      data: { subscriptionUrl: null, configLinks: [] },
+    });
+    const cap = await run(`user:svc:guide:${sid()}:${iosCode}:${iosApp.slug}`, owner);
+    expect(allText(cap)).toContain("اطلاعات اتصالی"); // connection_guides_no_payload notice
+    // Restore for the remaining tests.
+    await prisma.service.update({
+      where: { id: service.id },
+      data: { subscriptionUrl: SUB_SECRET, configLinks: [CONFIG_SECRET] },
+    });
+  });
+
   it("support handoff: seeds a SAFE ticket flow (no secret) and a cancel back to the guide", async () => {
     const session = initialSession();
     const cap = await run(`user:svc:gsup:${sid()}:${iosCode}:${iosApp.slug}`, owner, session);

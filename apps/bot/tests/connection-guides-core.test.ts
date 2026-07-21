@@ -1,6 +1,8 @@
 import { prisma, type ConnectionGuideApp } from "@zedbot/database";
 import {
+  clampHtmlMessage,
   GUIDE_MAX_ACTIVE_APPS_PER_PLATFORM,
+  GUIDE_PAGE_TEXT_MAX,
   GUIDE_PLATFORM_CODE,
   guidePlatformFromCode,
   isValidGuideSlug,
@@ -75,6 +77,30 @@ describe("HTTPS download-URL validation (§12) - pure, never fetches", () => {
   it("a rejection reason never echoes the raw URL", () => {
     const r = validateHttpsDownloadUrl("javascript:alert('SECRETTOKEN')");
     expect(JSON.stringify(r)).not.toContain("SECRETTOKEN");
+  });
+});
+
+describe("clampHtmlMessage (§P1) - HTML-aware, tag-balanced truncation", () => {
+  it("returns short text unchanged", () => {
+    expect(clampHtmlMessage("<b>hi</b>")).toBe("<b>hi</b>");
+  });
+  it("clamps to the limit and re-closes a tag left open by the cut", () => {
+    const html = `<b>${"a".repeat(5000)}</b>`; // opening tag near the start, close at the very end
+    const out = clampHtmlMessage(html);
+    expect(out.length).toBeLessThanOrEqual(GUIDE_PAGE_TEXT_MAX);
+    // The <b> opened before the cut must be re-closed so Telegram accepts the HTML.
+    expect(out.endsWith("</b>")).toBe(true);
+    // No dangling partial tag or entity at the boundary.
+    expect(/<[^>]*$/.test(out)).toBe(false);
+    expect(/&[^;]{0,9}$/.test(out)).toBe(false);
+  });
+  it("never cuts in the middle of a tag", () => {
+    // Put a long run then a tag right around the budget boundary.
+    const html = `${"x".repeat(GUIDE_PAGE_TEXT_MAX - 3)}<i>tail</i>`;
+    const out = clampHtmlMessage(html);
+    expect(out.length).toBeLessThanOrEqual(GUIDE_PAGE_TEXT_MAX);
+    // Either the <i> is fully present+closed, or it was dropped entirely — never half a tag.
+    expect(/<[^>]*$/.test(out)).toBe(false);
   });
 });
 

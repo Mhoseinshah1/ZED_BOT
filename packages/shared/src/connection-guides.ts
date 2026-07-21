@@ -98,9 +98,7 @@ export const GUIDE_PAGE_TEXT_MAX = 3900;
 
 /** Truncates already-HTML-escaped text to at most `max` UTF-16 code units without
  * ever splitting an HTML entity (which would break `parse_mode: HTML`), appending
- * an ellipsis when it had to cut. Used as the last-line guard so a guide/preview
- * message — including any operator-editable intro/status templates — can never
- * exceed Telegram's limit and silently fail to send. */
+ * an ellipsis when it had to cut. Use for fully-escaped content (no live tags). */
 export function clampEscapedText(escaped: string, max: number = GUIDE_PAGE_TEXT_MAX): string {
   if (escaped.length <= max) {
     return escaped;
@@ -108,6 +106,63 @@ export function clampEscapedText(escaped: string, max: number = GUIDE_PAGE_TEXT_
   const ELLIPSIS = " …";
   const head = escaped.slice(0, Math.max(0, max - ELLIPSIS.length)).replace(/&[^;]{0,9}$/, "");
   return `${head}${ELLIPSIS}`;
+}
+
+/** Returns the closing tags needed to balance any still-open tags in `html`
+ * (innermost first), so a truncated fragment stays valid `parse_mode: HTML`. */
+function openTagClosers(html: string): string {
+  const stack: string[] = [];
+  const re = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>/g;
+  let m: RegExpExecArray | null = re.exec(html);
+  while (m !== null) {
+    const name = m[2].toLowerCase();
+    if (m[1] === "/") {
+      for (let i = stack.length - 1; i >= 0; i -= 1) {
+        if (stack[i] === name) {
+          stack.splice(i, 1);
+          break;
+        }
+      }
+    } else {
+      stack.push(name);
+    }
+    m = re.exec(html);
+  }
+  let out = "";
+  for (let i = stack.length - 1; i >= 0; i -= 1) {
+    out += `</${stack[i]}>`;
+  }
+  return out;
+}
+
+/** Truncates a message that may contain LIVE (operator-editable) HTML markup —
+ * the guide intro/status templates are rendered with `parse_mode: HTML` — to at
+ * most `max` UTF-16 code units. Unlike `clampEscapedText` it also never cuts
+ * inside a tag and re-closes any tag left open by the cut, so Telegram cannot
+ * reject the truncated message as malformed HTML (which would fail BOTH the edit
+ * and the reply fallback). Guarantees the returned length is `<= max`. */
+export function clampHtmlMessage(text: string, max: number = GUIDE_PAGE_TEXT_MAX): string {
+  if (text.length <= max) {
+    return text;
+  }
+  const ELLIPSIS = " …";
+  const trim = (s: string): string => {
+    let head = s.replace(/&[^;]{0,9}$/, ""); // no partial entity
+    const lt = head.lastIndexOf("<");
+    const gt = head.lastIndexOf(">");
+    if (lt > gt) {
+      head = head.slice(0, lt); // no partial tag
+    }
+    return head;
+  };
+  let head = trim(text.slice(0, Math.max(0, max - ELLIPSIS.length)));
+  let closers = openTagClosers(head);
+  // Shrink until the ellipsis + balancing closers also fit under `max`.
+  while (head.length > 0 && head.length + ELLIPSIS.length + closers.length > max) {
+    head = trim(head.slice(0, head.length - 1));
+    closers = openTagClosers(head);
+  }
+  return `${head}${ELLIPSIS}${closers}`;
 }
 
 /** Hard cap on how many active apps a single platform may present, so the
