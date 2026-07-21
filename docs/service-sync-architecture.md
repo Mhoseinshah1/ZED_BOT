@@ -178,3 +178,24 @@ are never invented, and the stored value is preserved.
 | `SERVICE_SYNC_DISPLAY_TIMEOUT_MS` | `8000` | max time an open waits for the panel |
 | `SERVICE_LIST_SYNC_ENABLED` | `false` | also live-sync the «سرویس‌های من» list page |
 | `PANEL_HTTP_TIMEOUT_MS` | `10000` | per-request panel HTTP bound (pre-existing) |
+
+## Shared read-and-sync primitive (feat/service-self-diagnostics)
+
+`syncServiceFromPanel` and the new service self-diagnostics share ONE read
+primitive so a diagnosis performs **at most one** authenticated panel account
+read:
+
+- `readServiceAccountAndSyncUnlocked(serviceId, userId)` — the lock-free core:
+  owner-scoped load → panel-active gate → the single `getServiceAccount` read →
+  update the Service row **only on success** → returns a rich, classified
+  `PanelReadOutcome` (`read-ok` / `not-found` / `auth-failed` / `unreachable` /
+  `panel-inactive` / `service-missing` / `read-error`, plus the sanitized
+  diagnostic code).
+- `syncServiceFromPanel` projects the outcome to the unchanged `SyncServiceResult`
+  (backward compatible; the panel-connection-failed ops log still fires).
+- `readServiceForDiagnostics(serviceId, userId)` takes the SAME per-Service lock
+  and returns the rich `PanelReadOutcome` directly. Lock contention returns a
+  synthetic `read-error` (diagnosticCode `locked`) the diagnostics layer maps to a
+  retryable report — never an exception.
+
+A failed read never overwrites the row. See `docs/service-self-diagnostics.md`.

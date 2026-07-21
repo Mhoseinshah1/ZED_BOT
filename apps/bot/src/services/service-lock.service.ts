@@ -117,6 +117,64 @@ export function serviceProvisioningLockKey(panelId: string, username: string): s
   return `zedbot:service-provisioning:${panelId}:${username}`;
 }
 
+/** Per owner+Service cooldown key for explicit service diagnostics runs. */
+export function serviceDiagnosticsCooldownKey(userId: string, serviceId: string): string {
+  return `zedbot:diag-cooldown:${userId}:${serviceId}`;
+}
+
+export type CooldownGate =
+  | { state: "armed" }
+  | { state: "cooling"; remainingMs: number }
+  | { state: "degraded" };
+
+/**
+ * Best-effort per-key cooldown, reusing the SAME Redis client as the lock (no
+ * second client is created for the cooldown feature). Atomically `SET key 1 NX
+ * PX ttl`:
+ *   - "armed"    : the key was set - the caller MAY proceed (window opened);
+ *   - "cooling"  : the key already existed - the caller is inside the window;
+ *                  remainingMs comes from PTTL (0 if it just expired);
+ *   - "degraded" : Redis is unavailable - FAIL OPEN so a cooldown outage never
+ *                  blocks or crashes the bot (the per-service LOCK stays the
+ *                  authoritative concurrency guard). Never throws.
+ */
+export async function checkAndArmCooldown(key: string, ttlMs: number): Promise<CooldownGate> {
+  const redis = getClient();
+  if (redis === null) {
+    return { state: "degraded" };
+  }
+  try {
+    const set = await commandWithTimeout(redis.set(key, "1", "PX", ttlMs, "NX"));
+    if (set === "OK") {
+      return { state: "armed" };
+    }
+    let remainingMs = 0;
+    try {
+      const pttl = await commandWithTimeout(redis.pttl(key));
+      remainingMs = typeof pttl === "number" && pttl > 0 ? pttl : 0;
+    } catch {
+      remainingMs = 0;
+    }
+    return { state: "cooling", remainingMs };
+  } catch (err) {
+    logger.warn("cooldown check failed - failing open", { error: errorText(err) });
+    return { state: "degraded" };
+  }
+}
+
+/** Clears a cooldown key (test hook / explicit reset). Never throws. */
+export async function clearCooldown(key: string): Promise<void> {
+  const redis = getClient();
+  if (redis === null) {
+    return;
+  }
+  try {
+    await commandWithTimeout(redis.del(key));
+  } catch {
+    // Best-effort - the TTL will expire it anyway.
+  }
+}
+
 export interface ServiceLock {
   readonly key: string;
   /** True once a heartbeat found a foreign/expired token. */

@@ -115,6 +115,13 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   // behind the readiness gate. No guide app is ever seeded (third-party download
   // URLs are operator-managed only); the code owns platform labels + page copy.
   { key: "connection_guides_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Service self-diagnostics (feat/service-self-diagnostics). MASTER switch seeds
+  // FALSE — no user ever sees a «بررسی مشکل سرویس 🛠» button, and every direct/stale
+  // diagnostic callback fails closed, until the OWNER explicitly enables the system.
+  // Enabling moves no money and mutates no Service; disabling deletes no data. The
+  // cooldown + recent-connection thresholds are code-defaulted in @zedbot/shared and
+  // clamped to their bounds, so tuning a default never needs a data migration.
+  { key: "service_diagnostics_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are

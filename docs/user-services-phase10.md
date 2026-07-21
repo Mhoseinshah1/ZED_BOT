@@ -96,3 +96,11 @@ refresh button — DB-only in Phase 10 — arrived in Phase 11:
 `docs/service-sync-phase11.md`; the user enable/disable toggle arrived in
 Phase 18: `docs/service-toggle-phase18.md`; subscription link regeneration
 arrived in Phase 19: `docs/service-link-regeneration-phase19.md`.)
+
+## Service self-diagnostics entry (feat/service-self-diagnostics)
+
+When `service_diagnostics_enabled` is on, the service-detail keyboard shows a
+`بررسی مشکل سرویس 🛠` button (`user:svc:diag:<sid>`) after the connection-guide
+row and before the financial/lifecycle actions. The route re-checks the master
+switch + ownership on click, so a stale/direct callback fails closed. Full design:
+`docs/service-self-diagnostics.md`.

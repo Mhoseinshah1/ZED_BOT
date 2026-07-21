@@ -66,6 +66,7 @@ import {
   safeReplyWithPhoto,
 } from "../../utils/safe-reply.js";
 import { GUIDE_PLATFORM_NEUTRAL_LABEL, guidePlatformFromCode } from "@zedbot/shared";
+import { buildServiceDiagnosticsEntry } from "./diagnostics-views.js";
 import {
   GUIDE_HTML,
   guideAppDetailPage,
@@ -111,14 +112,15 @@ export async function renderServiceDetail(
   service: Service,
   staleNotice: string | null = null,
 ): Promise<void> {
-  const [actions, guide] = await Promise.all([
+  const [actions, guide, diagnostics] = await Promise.all([
     resolveServiceDetailActions(service),
     buildServiceGuideEntry(service),
+    buildServiceDiagnosticsEntry(),
   ]);
   await safeEditOrReply(
     ctx,
     serviceDetailText(service, staleNotice),
-    serviceDetailKeyboard(service, actions, guide),
+    serviceDetailKeyboard(service, actions, guide, diagnostics),
     HTML,
   );
 }
@@ -602,14 +604,29 @@ function clearGuideHandoff(ctx: BotContext): void {
   delete ctx.session.temp.guideSupportContext;
 }
 
-/** Route prefix that OWNS the guide→support handoff (it SETS the ids-only context
- * and arms `support:message`); it must be the sole callback exempt from the guard. */
-const GUIDE_SUPPORT_HANDOFF_PREFIX = "user:svc:gsup:";
+/** Clears a pending diagnostics→support handoff (feat/service-self-diagnostics),
+ * mirroring clearGuideHandoff: only when one is actually pending, so returning to
+ * any non-diagnostics route cleanly cancels the armed `support:message` flow. */
+export function clearDiagnosticHandoff(ctx: BotContext): void {
+  if (ctx.session.temp.diagnosticSupportContext === undefined) {
+    return;
+  }
+  if (ctx.session.currentFlow === "support:message") {
+    ctx.session.currentFlow = null;
+  }
+  delete ctx.session.temp.supportDraft;
+  delete ctx.session.temp.diagnosticSupportContext;
+}
 
-/** grammY middleware (mounted on the user area) that cancels a pending guide→
- * support handoff on ANY user callback except the handoff route itself. Inline
- * keyboards on older guide messages stay tappable after the prompt is edited, so
- * a lifecycle action (enable/renew/extra-volume) — or any other button, now or in
+/** Route prefixes that OWN a support handoff (they SET the ids-only context and
+ * arm `support:message`); they are the only callbacks exempt from the guard. */
+const GUIDE_SUPPORT_HANDOFF_PREFIX = "user:svc:gsup:";
+const DIAGNOSTIC_SUPPORT_HANDOFF_PREFIX = "user:svc:diag:";
+
+/** grammY middleware (mounted on the user area) that cancels a pending guide→ or
+ * diagnostics→support handoff on ANY user callback except the owning handoff
+ * routes. Inline keyboards on older guide/diagnostic messages stay tappable after
+ * the prompt is edited, so a lifecycle action — or any other button, now or in
  * future — could otherwise navigate away while `support:message` stays armed and
  * silently turn the user's next message into a ticket. Text updates (the actual
  * ticket) are not callbacks, so they pass through untouched. */
@@ -619,8 +636,13 @@ export function guideHandoffCancelMiddleware(): (
 ) => Promise<void> {
   return async (ctx, next) => {
     const data = ctx.callbackQuery?.data;
-    if (data !== undefined && !data.startsWith(GUIDE_SUPPORT_HANDOFF_PREFIX)) {
-      clearGuideHandoff(ctx);
+    if (data !== undefined) {
+      if (!data.startsWith(GUIDE_SUPPORT_HANDOFF_PREFIX)) {
+        clearGuideHandoff(ctx);
+      }
+      if (!data.startsWith(DIAGNOSTIC_SUPPORT_HANDOFF_PREFIX)) {
+        clearDiagnosticHandoff(ctx);
+      }
     }
     await next();
   };

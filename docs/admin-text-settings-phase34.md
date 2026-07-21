@@ -88,3 +88,12 @@ both kinds; and the cache round-trip (cached `getButtonText`/
 Web panel, mini app, rich template editor, HTML/markdown validation,
 variable evaluation/previews, per-language UI (locale column untouched),
 version history UI, import/export, row creation/deletion, Phase 35+.
+
+## Service self-diagnostics (feat/service-self-diagnostics)
+
+General Settings gains an OWNER-only `عیب‌یابی سرویس 🛠` page (`admin:diag:root`,
+re-checked per callback). It exposes the master switch (atomic CAS), the cooldown
+and recent-connection thresholds (presets + per-setting reset), the live-read
+panel coverage counts, a bounded recent event summary, the safe limitations copy,
+and a read-only preview by service short id (creates no ticket, mutates nothing).
+Full design: `docs/service-self-diagnostics.md`.

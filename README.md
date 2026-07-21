@@ -324,6 +324,20 @@ existing owner-scoped subscription/config text links and QR codes and never
 embeds a Service secret in text, a URL button or a callback. Behind a master
 switch + admin readiness gate — `docs/device-connection-guides.md`.
 
+**Service self-diagnostics** (disabled by default): a `بررسی مشکل سرویس 🛠`
+capability under every eligible Service. It diagnoses only what the bot can
+authoritatively know (the Service row, its Panel, **one** bounded authenticated
+panel account read, quota/expiry/status, payload availability, connection
+timestamps and the current lifecycle actions), maps it to stable machine codes +
+a deterministic overall severity, explains the likely problem in simple Persian
+and routes the user to the correct **existing** action — it never repairs
+anything automatically and never claims to inspect the customer's phone, ISP, DNS
+or app. Positive account absence is distinguished from an inability to check;
+missing panel fields stay `UNKNOWN`, never coerced to zero. An explicit user
+consent attaches a strict, secret-free diagnostic snapshot to a normal support
+ticket. Behind an OWNER master switch, bounded cooldown and the existing
+per-Service lock — `docs/service-self-diagnostics.md`.
+
 **Free-trial VPN accounts** (disabled by default): eligible users can
 claim one real trial account per the operator's policy — an atomic,
 DB-guarded `FreeTrialClaim` entitlement that provisions a real panel

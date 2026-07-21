@@ -109,3 +109,14 @@ fail2ban, IDS/IPS, WAF/CDN/Cloudflare automation, kernel/sysctl tuning,
 automatic OS unattended-upgrades, Docker image signing, secrets-manager
 integration, CSP headers, `read_only`/`cap_drop` for the app containers
 (see above), web panel, mini app, Phase 39+.
+
+## Service self-diagnostics privacy (feat/service-self-diagnostics)
+
+The user-facing diagnostics capability persists **no** per-run history. Aggregate
+SystemLog events carry only overall/evidence codes, check status counts, panel
+type, sanitized diagnostic codes, duration and a non-reversible correlation hash
+(`sha256(userId:serviceId)` truncated) — never a User/Telegram/full-Service ID,
+username, subscription URL, config, token, panel base URL/credentials, raw
+response, remote client id or ticket text. A diagnostic snapshot is persisted only
+after explicit support handoff and is strictly validated to be secret-free. See
+`docs/service-self-diagnostics.md`.

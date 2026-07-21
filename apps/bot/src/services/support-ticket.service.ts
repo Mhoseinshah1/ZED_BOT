@@ -1,5 +1,7 @@
 import {
+  Prisma,
   prisma,
+  type Service,
   type SupportMessage,
   type SupportTicket,
   type SupportTicketStatus,
@@ -65,6 +67,9 @@ export type TicketWithMessages = SupportTicket & {
   user: User;
   /** Last TICKET_MESSAGES_PREVIEW_LIMIT messages in chronological order. */
   messages: SupportMessage[];
+  /** Service self-diagnostics: the linked Service, when this ticket was opened
+   * from a diagnostic run (null for every ordinary ticket). */
+  service?: Service | null;
 };
 
 export interface TicketsPage {
@@ -97,11 +102,23 @@ function chronological(ticket: TicketWithMessages): TicketWithMessages {
 
 // --- user side -------------------------------------------------------------------------------
 
+/**
+ * Optional service self-diagnostics attachment (feat/service-self-diagnostics).
+ * `serviceId` MUST already be owner-scoped by the caller; `diagnosticSnapshot`
+ * MUST already be validated (validateDiagnosticSnapshot) and secret-free. Both
+ * are additive and default to unset — the normal ticket flow is unchanged.
+ */
+export interface SupportTicketAttachment {
+  serviceId?: string | null;
+  diagnosticSnapshot?: unknown;
+}
+
 /** New ticket: WAITING_ADMIN + the first USER message, in one transaction. */
 export async function createSupportTicket(
   userId: string,
   subject: string,
   messageText: string,
+  attachment?: SupportTicketAttachment,
 ): Promise<TicketMutationOutcome> {
   const cleanSubject = subject.trim();
   const cleanText = messageText.trim();
@@ -111,9 +128,20 @@ export async function createSupportTicket(
   if (!validMessage(cleanText)) {
     return { ok: false, safeMessage: INVALID_TICKET_MESSAGE_TEXT };
   }
+  const serviceId = attachment?.serviceId ?? null;
+  const snapshot =
+    attachment?.diagnosticSnapshot === undefined || attachment.diagnosticSnapshot === null
+      ? undefined
+      : (attachment.diagnosticSnapshot as Prisma.InputJsonValue);
   const ticket = await prisma.$transaction(async (tx) => {
     const created = await tx.supportTicket.create({
-      data: { userId, subject: cleanSubject, status: "WAITING_ADMIN" },
+      data: {
+        userId,
+        subject: cleanSubject,
+        status: "WAITING_ADMIN",
+        serviceId,
+        ...(snapshot === undefined ? {} : { diagnosticSnapshot: snapshot }),
+      },
     });
     await tx.supportMessage.create({
       data: { ticketId: created.id, senderType: "USER", senderUserId: userId, text: cleanText },
@@ -259,7 +287,7 @@ export async function getAdminTicketDetail(
   }
   const matches = await prisma.supportTicket.findMany({
     where: { id: { startsWith: ticketShortId } },
-    include: { user: true, messages: MESSAGES_PREVIEW },
+    include: { user: true, messages: MESSAGES_PREVIEW, service: true },
     take: 2,
   });
   return matches.length === 1 ? chronological(matches[0]) : null;

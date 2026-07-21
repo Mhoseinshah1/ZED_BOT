@@ -1,0 +1,368 @@
+// =============================================================================
+// Service self-diagnostics (feat/service-self-diagnostics) — shared contract.
+//
+// Language-neutral, dependency-free contract for the user-facing «بررسی مشکل
+// سرویس 🛠» capability: the master-switch + bounded setting keys, the typed
+// diagnostic vocabulary (check keys / statuses / overall / evidence / actions),
+// the STABLE machine codes, the deterministic overall-severity precedence, and
+// the strict support-snapshot schema + validator.
+//
+// Design rules honoured here:
+//   * Behaviour is driven by these machine codes/enums ONLY — never by comparing
+//     Persian strings. Persian rendering lives in the bot view layer.
+//   * This module imports NOTHING from @zedbot/database or the bot — it is pure
+//     data + pure functions, so the worker/api/tests can consume it too.
+//   * Setting KEYS live here (a shared typed contract), not as scattered string
+//     literals across handlers.
+// =============================================================================
+
+import { clampInt } from "./auto-renewal.js";
+
+// --- master switch + bounded settings ----------------------------------------
+
+/** Master switch. Default FALSE — the whole capability is dormant until the
+ * OWNER explicitly enables it. Disabling deletes no data and mutates nothing. */
+export const SERVICE_DIAGNOSTICS_ENABLED_KEY = "service_diagnostics_enabled";
+
+/** Per owner+Service cooldown between explicit diagnostic runs (seconds). */
+export const SERVICE_DIAGNOSTICS_COOLDOWN_SECONDS_KEY =
+  "service_diagnostics_cooldown_seconds";
+export const SERVICE_DIAGNOSTICS_COOLDOWN_DEFAULT = 30;
+export const SERVICE_DIAGNOSTICS_COOLDOWN_MIN = 5;
+export const SERVICE_DIAGNOSTICS_COOLDOWN_MAX = 600;
+
+/** How recent a `lastConnectedAt` counts as a "recent" connection (hours). */
+export const SERVICE_DIAGNOSTICS_RECENT_CONNECTION_HOURS_KEY =
+  "service_diagnostics_recent_connection_hours";
+export const SERVICE_DIAGNOSTICS_RECENT_CONNECTION_DEFAULT = 72;
+export const SERVICE_DIAGNOSTICS_RECENT_CONNECTION_MIN = 1;
+export const SERVICE_DIAGNOSTICS_RECENT_CONNECTION_MAX = 720;
+
+/** Bounded panel-read budget for one explicit diagnosis (milliseconds). A slow
+ * panel must never hang the Telegram callback; on expiry the report is returned
+ * with the freshest available (cache / stored) evidence and the underlying read
+ * keeps running safely in the background (see docs). Env override is
+ * SERVICE_DIAGNOSTICS_READ_TIMEOUT_MS. */
+export const SERVICE_DIAGNOSTICS_READ_TIMEOUT_DEFAULT_MS = 8_000;
+export const SERVICE_DIAGNOSTICS_READ_TIMEOUT_MIN_MS = 1_000;
+export const SERVICE_DIAGNOSTICS_READ_TIMEOUT_MAX_MS = 30_000;
+
+/** Clamp a raw (string|null) setting value to the cooldown bound. */
+export function resolveDiagnosticsCooldownSeconds(raw: string | null): number {
+  const n = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+  return clampInt(
+    n,
+    SERVICE_DIAGNOSTICS_COOLDOWN_MIN,
+    SERVICE_DIAGNOSTICS_COOLDOWN_MAX,
+    SERVICE_DIAGNOSTICS_COOLDOWN_DEFAULT,
+  );
+}
+
+/** Clamp a raw (string|null) setting value to the recent-connection bound. */
+export function resolveDiagnosticsRecentConnectionHours(raw: string | null): number {
+  const n = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+  return clampInt(
+    n,
+    SERVICE_DIAGNOSTICS_RECENT_CONNECTION_MIN,
+    SERVICE_DIAGNOSTICS_RECENT_CONNECTION_MAX,
+    SERVICE_DIAGNOSTICS_RECENT_CONNECTION_DEFAULT,
+  );
+}
+
+/** Clamp a raw (string|number|undefined) env value to the read-timeout bound. */
+export function resolveDiagnosticsReadTimeoutMs(raw: string | undefined): number {
+  const n = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
+  return clampInt(
+    n,
+    SERVICE_DIAGNOSTICS_READ_TIMEOUT_MIN_MS,
+    SERVICE_DIAGNOSTICS_READ_TIMEOUT_MAX_MS,
+    SERVICE_DIAGNOSTICS_READ_TIMEOUT_DEFAULT_MS,
+  );
+}
+
+// --- typed diagnostic contract -----------------------------------------------
+
+/** The authoritative checks a diagnostic run evaluates (order = display order). */
+export const SERVICE_DIAGNOSTIC_CHECK_KEYS = [
+  "SERVICE_STATE",
+  "PANEL_STATE",
+  "PANEL_ACCOUNT",
+  "QUOTA",
+  "EXPIRY",
+  "CONNECTION_PAYLOAD",
+  "CONNECTION_HISTORY",
+  "DATA_FRESHNESS",
+] as const;
+export type ServiceDiagnosticCheckKey = (typeof SERVICE_DIAGNOSTIC_CHECK_KEYS)[number];
+
+export const SERVICE_DIAGNOSTIC_CHECK_STATUSES = [
+  "PASS",
+  "INFO",
+  "WARNING",
+  "FAIL",
+  "UNKNOWN",
+] as const;
+export type ServiceDiagnosticCheckStatus =
+  (typeof SERVICE_DIAGNOSTIC_CHECK_STATUSES)[number];
+
+export const SERVICE_DIAGNOSTIC_OVERALLS = [
+  "HEALTHY",
+  "ACTION_REQUIRED",
+  "DEGRADED",
+  "UNAVAILABLE",
+  "NEEDS_SUPPORT",
+] as const;
+export type ServiceDiagnosticOverall = (typeof SERVICE_DIAGNOSTIC_OVERALLS)[number];
+
+export const DIAGNOSTIC_EVIDENCE_SOURCES = [
+  "LIVE_PANEL",
+  "FRESH_CACHE",
+  "STORED_ONLY",
+] as const;
+export type DiagnosticEvidenceSource = (typeof DIAGNOSTIC_EVIDENCE_SOURCES)[number];
+
+export const SERVICE_DIAGNOSTIC_ACTIONS = [
+  "RETRY_DIAGNOSTIC",
+  "REFRESH_SERVICE",
+  "OPEN_CONNECTION_GUIDE",
+  "SHOW_SUBSCRIPTION_LINK",
+  "SHOW_SUBSCRIPTION_QR",
+  "SHOW_CONFIGS",
+  "SHOW_CONFIG_QRS",
+  "ENABLE_SERVICE",
+  "RENEW_SERVICE",
+  "BUY_EXTRA_VOLUME",
+  "REGENERATE_LINK",
+  "OPEN_SUPPORT",
+] as const;
+export type ServiceDiagnosticAction = (typeof SERVICE_DIAGNOSTIC_ACTIONS)[number];
+
+export interface ServiceDiagnosticCheck {
+  key: ServiceDiagnosticCheckKey;
+  status: ServiceDiagnosticCheckStatus;
+  /** Stable, screaming-snake machine code (see DIAGNOSTIC_CODES). */
+  code: string;
+  /** Persian, already SAFE-plain-text line for this check (built in the bot). */
+  userMessage: string;
+}
+
+export interface ServiceDiagnosticReport {
+  overall: ServiceDiagnosticOverall;
+  evidenceSource: DiagnosticEvidenceSource;
+  checkedAt: Date;
+  checks: ServiceDiagnosticCheck[];
+  recommendedActions: ServiceDiagnosticAction[];
+}
+
+// --- stable machine codes ----------------------------------------------------
+// Screaming-snake, [A-Z0-9_], immutable wire+log+snapshot contract. Persian
+// rendering maps off these — the codes NEVER change once shipped.
+
+export const DIAGNOSTIC_CODES = {
+  // SERVICE_STATE
+  SERVICE_STATE_ACTIVE: "SERVICE_STATE_ACTIVE",
+  SERVICE_STATE_DISABLED: "SERVICE_STATE_DISABLED",
+  SERVICE_STATE_EXPIRED: "SERVICE_STATE_EXPIRED",
+  SERVICE_STATE_LIMITED: "SERVICE_STATE_LIMITED",
+  SERVICE_STATE_CREATING: "SERVICE_STATE_CREATING",
+  SERVICE_STATE_FAILED: "SERVICE_STATE_FAILED",
+  // PANEL_STATE
+  PANEL_OK: "PANEL_OK",
+  PANEL_MISSING: "PANEL_MISSING",
+  PANEL_INACTIVE: "PANEL_INACTIVE",
+  PANEL_READ_UNSUPPORTED: "PANEL_READ_UNSUPPORTED",
+  PANEL_UNREACHABLE: "PANEL_UNREACHABLE",
+  PANEL_TIMEOUT: "PANEL_TIMEOUT",
+  PANEL_AUTH_FAILED: "PANEL_AUTH_FAILED",
+  PANEL_BUSY: "PANEL_BUSY",
+  // PANEL_ACCOUNT
+  ACCOUNT_PRESENT: "ACCOUNT_PRESENT",
+  ACCOUNT_NOT_FOUND: "ACCOUNT_NOT_FOUND",
+  ACCOUNT_UNVERIFIED: "ACCOUNT_UNVERIFIED",
+  // QUOTA
+  QUOTA_UNLIMITED: "QUOTA_UNLIMITED",
+  QUOTA_OK: "QUOTA_OK",
+  QUOTA_LOW: "QUOTA_LOW",
+  QUOTA_EXHAUSTED: "QUOTA_EXHAUSTED",
+  QUOTA_UNKNOWN: "QUOTA_UNKNOWN",
+  // EXPIRY
+  EXPIRY_NONE: "EXPIRY_NONE",
+  EXPIRY_OK: "EXPIRY_OK",
+  EXPIRY_NEAR: "EXPIRY_NEAR",
+  EXPIRY_EXPIRED: "EXPIRY_EXPIRED",
+  EXPIRY_UNKNOWN: "EXPIRY_UNKNOWN",
+  // CONNECTION_PAYLOAD
+  PAYLOAD_PRESENT: "PAYLOAD_PRESENT",
+  PAYLOAD_MISSING: "PAYLOAD_MISSING",
+  // CONNECTION_HISTORY
+  HISTORY_RECENT: "HISTORY_RECENT",
+  HISTORY_OLD: "HISTORY_OLD",
+  HISTORY_NONE: "HISTORY_NONE",
+  HISTORY_UNKNOWN: "HISTORY_UNKNOWN",
+  // DATA_FRESHNESS
+  FRESHNESS_LIVE: "FRESHNESS_LIVE",
+  FRESHNESS_CACHE: "FRESHNESS_CACHE",
+  FRESHNESS_STORED: "FRESHNESS_STORED",
+} as const;
+export type DiagnosticCode = (typeof DIAGNOSTIC_CODES)[keyof typeof DIAGNOSTIC_CODES];
+
+/** Every known code, as a Set for O(1) snapshot validation. */
+export const KNOWN_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set(
+  Object.values(DIAGNOSTIC_CODES),
+);
+
+// --- overall-severity precedence ---------------------------------------------
+// Deterministic ordering (most severe wins). Precedence (§10):
+//   NEEDS_SUPPORT > UNAVAILABLE > ACTION_REQUIRED > DEGRADED > HEALTHY.
+// A later PASS can never overwrite a more serious condition.
+
+export const OVERALL_SEVERITY: Record<ServiceDiagnosticOverall, number> = {
+  HEALTHY: 0,
+  DEGRADED: 1,
+  ACTION_REQUIRED: 2,
+  UNAVAILABLE: 3,
+  NEEDS_SUPPORT: 4,
+};
+
+/** Returns the more-severe of two overalls. */
+export function worstOverall(
+  a: ServiceDiagnosticOverall,
+  b: ServiceDiagnosticOverall,
+): ServiceDiagnosticOverall {
+  return OVERALL_SEVERITY[a] >= OVERALL_SEVERITY[b] ? a : b;
+}
+
+/** Folds a list of overall candidates to the most severe (HEALTHY when empty). */
+export function worstOverallOf(
+  candidates: readonly ServiceDiagnosticOverall[],
+): ServiceDiagnosticOverall {
+  return candidates.reduce<ServiceDiagnosticOverall>(
+    (acc, next) => worstOverall(acc, next),
+    "HEALTHY",
+  );
+}
+
+// --- support snapshot schema (strict) ----------------------------------------
+// The ONLY diagnostic data that is ever persisted, and only after EXPLICIT
+// support handoff. It carries stable codes/statuses/overall/evidence/checkedAt
+// and the selected primary recommendation — NEVER a subscription URL, config,
+// token, remote client id, panel credential, raw panel message or free-form
+// text. `version` lets the reader evolve the shape safely.
+
+export const DIAGNOSTIC_SNAPSHOT_VERSION = 1;
+/** Hard cap on persisted checks (== number of check keys). */
+export const DIAGNOSTIC_SNAPSHOT_MAX_CHECKS = SERVICE_DIAGNOSTIC_CHECK_KEYS.length;
+
+export interface DiagnosticSnapshotCheck {
+  key: ServiceDiagnosticCheckKey;
+  status: ServiceDiagnosticCheckStatus;
+  code: string;
+}
+
+export interface DiagnosticSnapshot {
+  version: number;
+  overall: ServiceDiagnosticOverall;
+  evidenceSource: DiagnosticEvidenceSource;
+  /** ISO-8601 timestamp string (UTC). */
+  checkedAt: string;
+  checks: DiagnosticSnapshotCheck[];
+  /** The selected primary recommendation, when one applies. */
+  primaryRecommendation?: ServiceDiagnosticAction;
+}
+
+const CHECK_KEY_SET: ReadonlySet<string> = new Set(SERVICE_DIAGNOSTIC_CHECK_KEYS);
+const CHECK_STATUS_SET: ReadonlySet<string> = new Set(SERVICE_DIAGNOSTIC_CHECK_STATUSES);
+const OVERALL_SET: ReadonlySet<string> = new Set(SERVICE_DIAGNOSTIC_OVERALLS);
+const EVIDENCE_SET: ReadonlySet<string> = new Set(DIAGNOSTIC_EVIDENCE_SOURCES);
+const ACTION_SET: ReadonlySet<string> = new Set(SERVICE_DIAGNOSTIC_ACTIONS);
+/** Code shape a persisted snapshot may carry (bounded, no free-form content). */
+const SNAPSHOT_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,47}$/;
+
+/** Builds a strict, bounded snapshot from a finished report + a chosen primary
+ * action. Only the safe fields are copied; nothing free-form is preserved. */
+export function buildDiagnosticSnapshot(
+  report: ServiceDiagnosticReport,
+  primaryRecommendation?: ServiceDiagnosticAction,
+): DiagnosticSnapshot {
+  return {
+    version: DIAGNOSTIC_SNAPSHOT_VERSION,
+    overall: report.overall,
+    evidenceSource: report.evidenceSource,
+    checkedAt: report.checkedAt.toISOString(),
+    checks: report.checks
+      .slice(0, DIAGNOSTIC_SNAPSHOT_MAX_CHECKS)
+      .map((c) => ({ key: c.key, status: c.status, code: c.code })),
+    ...(primaryRecommendation !== undefined ? { primaryRecommendation } : {}),
+  };
+}
+
+/**
+ * Strictly validates an arbitrary JSON value as a DiagnosticSnapshot. Returns
+ * the normalized snapshot on success or null on ANY deviation (unknown keys are
+ * tolerated but dropped; unknown enum members / over-length codes / too many
+ * checks / free-form fields all fail closed). Never throws.
+ */
+export function validateDiagnosticSnapshot(raw: unknown): DiagnosticSnapshot | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+  if (obj.version !== DIAGNOSTIC_SNAPSHOT_VERSION) {
+    return null;
+  }
+  if (typeof obj.overall !== "string" || !OVERALL_SET.has(obj.overall)) {
+    return null;
+  }
+  if (typeof obj.evidenceSource !== "string" || !EVIDENCE_SET.has(obj.evidenceSource)) {
+    return null;
+  }
+  if (typeof obj.checkedAt !== "string") {
+    return null;
+  }
+  const parsedAt = Date.parse(obj.checkedAt);
+  if (Number.isNaN(parsedAt)) {
+    return null;
+  }
+  if (!Array.isArray(obj.checks) || obj.checks.length > DIAGNOSTIC_SNAPSHOT_MAX_CHECKS) {
+    return null;
+  }
+  const checks: DiagnosticSnapshotCheck[] = [];
+  for (const entry of obj.checks) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const c = entry as Record<string, unknown>;
+    if (typeof c.key !== "string" || !CHECK_KEY_SET.has(c.key)) {
+      return null;
+    }
+    if (typeof c.status !== "string" || !CHECK_STATUS_SET.has(c.status)) {
+      return null;
+    }
+    if (typeof c.code !== "string" || !SNAPSHOT_CODE_PATTERN.test(c.code)) {
+      return null;
+    }
+    checks.push({
+      key: c.key as ServiceDiagnosticCheckKey,
+      status: c.status as ServiceDiagnosticCheckStatus,
+      code: c.code,
+    });
+  }
+  let primaryRecommendation: ServiceDiagnosticAction | undefined;
+  if (obj.primaryRecommendation !== undefined) {
+    if (
+      typeof obj.primaryRecommendation !== "string" ||
+      !ACTION_SET.has(obj.primaryRecommendation)
+    ) {
+      return null;
+    }
+    primaryRecommendation = obj.primaryRecommendation as ServiceDiagnosticAction;
+  }
+  return {
+    version: DIAGNOSTIC_SNAPSHOT_VERSION,
+    overall: obj.overall as ServiceDiagnosticOverall,
+    evidenceSource: obj.evidenceSource as DiagnosticEvidenceSource,
+    checkedAt: new Date(parsedAt).toISOString(),
+    checks,
+    ...(primaryRecommendation !== undefined ? { primaryRecommendation } : {}),
+  };
+}

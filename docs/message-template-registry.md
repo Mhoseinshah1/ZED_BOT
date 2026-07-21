@@ -87,3 +87,26 @@ Note: the former at-charge `AUTO_RENEWAL_CHARGING_TEXT` "renewing now" message w
 | `connection_guides_service_expired` | general | — | Status decision: EXPIRED. |
 | `connection_guides_service_limited` | general | — | Status decision: LIMITED. |
 | `connection_guides_service_unavailable` | general | — | FAILED/CREATING/DELETED safe explanation. |
+
+## Service self-diagnostics (feat/service-self-diagnostics)
+
+Operator-editable wrapper copy only; per-check lines + machine codes are code
+constants. Rendered as escaped plain text and clamped under Telegram's limit.
+
+| Key | Category | Variables | Notes |
+| --- | --- | --- | --- |
+| `service_diagnostics_disabled` | diagnostics | — | Feature off notice. |
+| `service_diagnostics_running` | diagnostics | — | Transient "checking..." state. |
+| `service_diagnostics_stale` | diagnostics | — | Expired report; re-run. |
+| `service_diagnostics_report_intro` | diagnostics | `service_name` | Report header. |
+| `service_diagnostics_healthy` | diagnostics | — | Overall: HEALTHY. |
+| `service_diagnostics_action_required` | diagnostics | — | Overall: ACTION_REQUIRED. |
+| `service_diagnostics_degraded` | diagnostics | — | Overall: DEGRADED. |
+| `service_diagnostics_unavailable` | diagnostics | — | Overall: UNAVAILABLE. |
+| `service_diagnostics_needs_support` | diagnostics | — | Overall: NEEDS_SUPPORT. |
+| `service_diagnostics_live_evidence` | diagnostics | `checked_at` | Live evidence line. |
+| `service_diagnostics_stored_evidence` | diagnostics | `checked_at` | Stored/cache evidence line. |
+| `service_diagnostics_cooldown` | diagnostics | `seconds` | Cooldown remaining. |
+| `service_diagnostics_support_preview` | diagnostics | — | Support handoff preview intro. |
+| `service_diagnostics_support_prompt` | diagnostics | — | "Write your message" prompt. |
+| `service_diagnostics_limitations` | diagnostics | — | What the check can/can't inspect. |

@@ -103,3 +103,21 @@ truncation.
 File/photo/voice attachments (`fileId`/media stay unused), departments/
 categories, SLA/priority, per-admin assignment, unread counters, user-side
 close, broadcast, email/Slack, web panel, mini app, Phase 33+.
+
+## Service diagnostics attachment (feat/service-self-diagnostics)
+
+`SupportTicket` gained two additive, nullable fields (migration
+`20260721154237_service_self_diagnostics_support_link`): `serviceId` (owner-scoped
+relation, `ON DELETE SET NULL`, indexed) and `diagnosticSnapshot` (a strict,
+bounded, secret-free JSON snapshot). Every ordinary ticket keeps both `null`.
+
+`createSupportTicket(userId, subject, messageText, attachment?)` takes an optional
+`{ serviceId?, diagnosticSnapshot? }`. The diagnostics handoff seeds the EXISTING
+support MESSAGE flow; when the user sends their message, the support text handler
+re-resolves ownership (`getOwnedServiceById`) and re-validates the snapshot
+(`validateDiagnosticSnapshot`) before attaching — a stale/foreign context is
+silently dropped and a normal ticket is still created. The admin ticket detail
+renders the safe diagnostic summary (overall/evidence/checkedAt + stable codes in
+Persian) and a jump to the user's existing services list; no Service
+administration is duplicated in the ticket page. See
+`docs/service-self-diagnostics.md`.
