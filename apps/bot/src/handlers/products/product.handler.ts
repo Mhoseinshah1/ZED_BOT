@@ -1496,7 +1496,10 @@ productHandler.callbackQuery("admin:prod:f:save", async (ctx) => {
     clearProductFlows(ctx);
     await safeAnswerCallback(ctx, "ذخیره شد ✅");
     await safeReply(ctx, "محصول با موفقیت ذخیره شد ✅");
-    await safeReply(ctx, productDetailText(product), productDetailKeyboard(product), HTML);
+    // Render through the ONE authoritative detail helper so OWNER context (and
+    // the back-list) is always applied — an OWNER sees the representative
+    // eligibility toggle on a freshly created SERVICE_PRODUCT immediately.
+    await showProductDetail(ctx, product);
   } catch (err) {
     logger.error("product creation failed", { error: errorMessage(err) });
     clearProductFlows(ctx);
@@ -1883,7 +1886,7 @@ async function handleProductEditText(ctx: BotContext, text: string): Promise<voi
     clearProductFlows(ctx);
     await safeReply(ctx, "جایگاه بروزرسانی شد ✅");
     if (updated !== null) {
-      await safeReply(ctx, productDetailText(updated), productDetailKeyboard(updated), HTML);
+      await showProductDetail(ctx, updated);
     }
   } else {
     clearProductFlows(ctx);
@@ -1898,5 +1901,9 @@ async function finishProductEdit(
   const updated = await updateProduct(productId, data);
   clearProductFlows(ctx);
   await safeReply(ctx, "بروزرسانی شد ✅");
-  await safeReply(ctx, productDetailText(updated), productDetailKeyboard(updated), HTML);
+  // Single authoritative detail render (OWNER context + back-list applied), so
+  // every field/selector edit — name, price, invoice, duration, volume,
+  // category, panel, groups, location, reset cycle, XUI inbound — returns the
+  // OWNER's representative-eligibility toggle without leaving and reopening.
+  await showProductDetail(ctx, updated);
 }
