@@ -12,6 +12,13 @@ export function clearSettingsCache(): void {
   cache.clear();
 }
 
+/** Drops specific keys from the settings cache (targeted self-healing). */
+export function clearSettingCacheKeys(keys: string[]): void {
+  for (const key of keys) {
+    cache.delete(key);
+  }
+}
+
 /**
  * Reads a Setting value. Falls back (and never throws) when the key is
  * missing or the database is unavailable.

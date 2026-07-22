@@ -327,7 +327,7 @@ n از m», last success, last error):
 | --- | --- | --- |
 | بررسی اتصال 🧪 | `admin:lg:check` | Verifies the binding + the bot's admin rights **without sending anything** into the group (OWNER-gated in code) |
 | ارسال پیام آزمایشی | `admin:lg:test` | Sends the standard test line to the SYSTEM topic («پیام آزمایشی گروه لاگ با موفقیت ارسال شد ✅») |
-| ساخت / تعمیر موضوعات پیش‌فرض | `admin:lg:ensure` | Idempotently **creates or repairs** only the topics that need it — missing, mismatched (old-group) or invalidated keys — in the bound group; valid current-group bindings are preserved and nothing is ever sent to General |
+| ساخت / تعمیر موضوعات پیش‌فرض | `admin:lg:ensure` | Queues a **durable worker repair** (`queueLogGroupRepair` → `LogGroupSetupAttempt`) for the group read **fresh** from the database; the worker creates only the missing/mismatched/invalidated topics, sends the exact SYSTEM test and atomically reasserts the current binding. The callback performs **no** Telegram writes and never touches the previous group; healthy current-group bindings are seeded and never recreated |
 | همگام‌سازی موضوعات | `admin:lg:sync` | Read-only reconciliation report: ready / بدون موضوع (missing) / متصل به گروه دیگر (mismatched) |
 | مدیریت موضوعات | `admin:lg:topics` | Per-topic list: first button toggles delivery (`admin:lg:tt:<KEY>`), «ارسال تست» sends a per-topic test (`admin:lg:tx:<KEY>`) |
 | تغییر گروه لاگ | `admin:lg:connect` | The same connection wizard, prefixed with the replacement warning for the current group |
@@ -440,6 +440,39 @@ OWNER back to the private bot to watch live progress.
   during delivery or a per-topic test, only that exact mapping is invalidated
   (compare-and-swap on id + topicId + chatId); «ساخت / تعمیر موضوعات پیش‌فرض»
   recreates it while every other healthy topic keeps working.
+
+### Post-activation cache & durable repair (hotfix)
+
+- **Database-authoritative binding reads.** `readLogGroupBindingFresh()` reads
+  `log_group_chat_id` + `log_group_title` directly through Prisma in one query
+  and **never** consults the 30s process-local settings cache; `getLogGroupSettings()`
+  delegates to it. A worker-side activation in a separate process is therefore
+  visible to the bot process immediately — no 30-second lag, no cross-process
+  cache-invalidation dependency. A malformed/out-of-range stored chat id becomes
+  an explicit **invalid** binding (never routed to, never a raw `BigInt` throw).
+- **Coherent routing snapshot.** `loadLogGroupRoutingSnapshot()` reads the fresh
+  binding and all `LogTopic` rows in one transaction, so the displayed group,
+  readiness counts, selected destination, exact topic mapping and CAS-expected
+  values all derive from the SAME consistent state — never an old chat id paired
+  with new topic rows.
+- **Durable repair.** «ساخت / تعمیر موضوعات پیش‌فرض» no longer creates topics
+  inline. It reads the current binding fresh, validates it with the shared
+  target policy, seeds a `LogGroupSetupAttempt` with only the healthy
+  current-group mappings and enqueues the SAME durable worker (timeout, 429
+  `retry_after`, setup lock, compare-and-extend lock, per-topic persistence,
+  BullMQ resume, direct SYSTEM test, atomic activation). A repair can never use
+  a cached group id, target the previous group, clear a healthy mapping, recreate
+  a healthy topic, or leave Settings and `LogTopic` rows pointing at different
+  groups.
+- **Self-healing cache invalidation.** When the bot observes a setup/repair
+  attempt become `ACTIVE`, it drops the two log-group Setting cache keys — but
+  correctness never depends on this, because every routing-sensitive read is
+  already uncached.
+- **Exhaustive, actionable errors.** `mapSetupSafeError(code)` maps every worker
+  safe code (`topics-disabled`, `manage-topics-required`, `bot-not-member`,
+  `bot-not-admin`, `topic-closed`, `telegram-timeout`, `telegram-server-error`,
+  …) to an actionable Persian category; a known Telegram/configuration error is
+  never reported as a database error.
 
 ### Rollout
 

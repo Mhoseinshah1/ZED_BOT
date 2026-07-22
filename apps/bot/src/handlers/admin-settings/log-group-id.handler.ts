@@ -9,6 +9,7 @@ import { OPS_LOG_TOPIC_KEYS } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import type { BotContext } from "../../core/context.js";
+import { mapSetupSafeError } from "./log-group-error-map.js";
 import {
   attemptShortId,
   auditLogGroupConnection,
@@ -23,7 +24,7 @@ import {
   SETUP_QUEUE_UNAVAILABLE_TEXT,
   type LogGroupProbeApi,
 } from "../../services/log-group-connection.service.js";
-import { maskChatId } from "../../services/log-group.service.js";
+import { invalidateLogGroupSettingCache, maskChatId } from "../../services/log-group.service.js";
 import { enqueueLogGroupSetup } from "../../services/ops-queue.service.js";
 import { OPS_EVENTS } from "../../services/system-log.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
@@ -254,36 +255,16 @@ function nonTerminalStatusLine(status: LogGroupSetupStatus): string {
 }
 
 /**
- * Safe failure category from the worker's safeErrorCode - never a raw
- * Telegram description. Codes come from apps/worker/src/telegram.ts and the
- * confirm rollback ("redis-unavailable").
+ * Safe, ACTIONABLE failure category from the worker's safeErrorCode (§8) -
+ * exhaustive over every code the Telegram client + setup pipeline can emit, so
+ * a known Telegram/configuration error is never mislabeled as a database error.
+ * The mapping is the shared pure function in log-group-error-map.ts.
  */
 function failureCategory(code: string | null): string {
-  switch (code) {
-    case "chat-not-found":
-      return "گروه در دسترس نیست";
-    case "forbidden":
-    case "bad-request":
-      return "دسترسی مدیریت موضوعات ناقص است";
-    case "topic-missing":
-      return "ساخت تاپیک ناموفق بود";
-    case "rate-limited":
-      return "ارسال آزمایشی ناموفق بود";
-    case "bot-token-missing":
-    case "network-error":
-    case "bad-response":
-      return "Worker در دسترس نیست";
-    case "redis-unavailable":
-      return "Redis در دسترس نیست";
-    default:
-      if (code !== null && code.startsWith("telegram-")) {
-        return "گروه در دسترس نیست";
-      }
-      return "خطای پایگاه داده";
-  }
+  return mapSetupSafeError(code);
 }
 
-async function buildProgressView(
+export async function buildProgressView(
   attempt: LogGroupSetupAttempt,
 ): Promise<{ text: string; keyboard: InlineKeyboard }> {
   const sid = attemptShortId(attempt.id);
@@ -291,6 +272,12 @@ async function buildProgressView(
   const createdLine = `تاپیک‌های ساخته‌شده: ${attempt.createdTopicCount} از ${total}`;
 
   if (attempt.status === LogGroupSetupStatus.ACTIVE) {
+    // Self-healing cache invalidation (§6): the worker activated this group in
+    // another process, so drop the two log-group Setting cache keys the instant
+    // the bot observes ACTIVE - any generic cached read of them stops lagging.
+    // Correctness never depends on this (routing reads are uncached), but it
+    // keeps the root page immediately consistent after returning here.
+    invalidateLogGroupSettingCache();
     const delivery = await readConnectedDeliveryState(attempt.id);
     const lines = [
       "گروه لاگ با موفقیت راه‌اندازی شد ✅",
