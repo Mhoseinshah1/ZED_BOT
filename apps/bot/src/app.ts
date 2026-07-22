@@ -106,6 +106,10 @@ import {
 } from "./handlers/admin-settings/auto-renewal-admin.handler.js";
 import { referralAdminHandler } from "./handlers/admin-settings/referral-admin.handler.js";
 import {
+  adminRepresentativeHandler,
+  adminRepresentativeTextHandler,
+} from "./handlers/admin-representative/admin-representative.handler.js";
+import {
   diagnosticsAdminHandler,
   diagnosticsAdminTextHandler,
 } from "./handlers/admin-settings/diagnostics-admin.handler.js";
@@ -257,6 +261,7 @@ export function createBot(token: string): Bot<BotContext> {
   // admin page (admin:referral:*) — master switch, commission percent, first-
   // purchase-only, minimum order, totals. Never moves money or creates a commission.
   adminArea.use(referralAdminHandler);
+  adminArea.use(adminRepresentativeHandler);
   adminArea.use(deviceGuidesHandler);
   adminArea.use(diagnosticsAdminHandler);
   // Admin Service Operations (feat/admin-service-operations): the per-Service
@@ -322,6 +327,7 @@ export function createBot(token: string): Bot<BotContext> {
   // flow ("admin_svc:input"). Self-gates on currentFlow, so every other admin
   // flow passes through untouched.
   adminFlowText.use(adminServiceOpsTextHandler);
+  adminFlowText.use(adminRepresentativeTextHandler);
   // Phase 2.1: Stars product subscription price input ("admin_starsprod:price").
   // Self-gates on currentFlow, so it passes through for every other admin flow.
   adminFlowText.use(starsProductPriceTextHandler);

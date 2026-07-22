@@ -259,6 +259,22 @@ export interface SessionData {
       experience?: string | null;
       explanation?: string;
     };
+    // Representative Program admin flows (§11-§19): reason/name/price text input.
+    adminRepDraft?: {
+      kind:
+        | "reject"
+        | "suspend"
+        | "terminate"
+        | "tier_name"
+        | "tier_desc"
+        | "price_fixed"
+        | "price_percent";
+      applicationId?: string;
+      representativeId?: string;
+      tierId?: string;
+      productId?: string;
+      nonce: string;
+    };
     // Renewal pre-invoice draft (Phase 12).
     renewalDraft?: RenewalDraft;
     // Wallet top-up draft (Phase 14).

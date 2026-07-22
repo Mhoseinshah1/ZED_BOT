@@ -142,6 +142,10 @@ export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     // (handler re-checks); literal callback avoids importing the admin handler.
     .text("عملیات سرویس (ادمین) ⚙️", "admin:svc:settings")
     .row()
+    // Representative Program (feat/representative-program). OWNER-only (handler
+    // re-checks); literal callback avoids importing the admin handler here.
+    .text("مدیریت نمایندگی 🤝", "admin:rep:root")
+    .row()
     // Support Tickets V2 attachment settings. OWNER-only (handler re-checks);
     // literal callback avoids importing the admin handler here.
     .text("تنظیمات ضمیمه‌ها 📎", "admin:supatt:root")

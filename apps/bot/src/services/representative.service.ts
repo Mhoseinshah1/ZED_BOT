@@ -736,6 +736,119 @@ export async function listRepresentativePurchases(userId: string, take = 10) {
   });
 }
 
+// --- admin read helpers (§11) ------------------------------------------------
+
+export type ApplicationFilter = "pending" | "approved" | "rejected" | "withdrawn" | "all";
+
+const FILTER_STATUS: Record<Exclude<ApplicationFilter, "all">, string[]> = {
+  pending: ["PENDING_REVIEW"],
+  approved: ["APPROVED"],
+  rejected: ["REJECTED"],
+  withdrawn: ["WITHDRAWN"],
+};
+
+/** Paginated application list for the admin review queue. */
+export async function listApplicationsForAdmin(
+  filter: ApplicationFilter,
+  page: number,
+  pageSize = 8,
+): Promise<{ rows: RepresentativeApplication[]; total: number }> {
+  const where = filter === "all" ? {} : { status: { in: FILTER_STATUS[filter] } };
+  const [rows, total] = await Promise.all([
+    prisma.representativeApplication.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip: Math.max(0, (page - 1) * pageSize),
+      take: pageSize,
+    }),
+    prisma.representativeApplication.count({ where }),
+  ]);
+  return { rows, total };
+}
+
+/** Resolves an application by 8-char short id (callback-safe). Ambiguity → null. */
+export async function getApplicationByShortId(
+  shortId: string,
+): Promise<RepresentativeApplication | null> {
+  const matches = await prisma.representativeApplication.findMany({
+    where: { id: { startsWith: shortId } },
+    take: 2,
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+export async function getApplicationById(
+  id: string,
+): Promise<RepresentativeApplication | null> {
+  return prisma.representativeApplication.findUnique({ where: { id } });
+}
+
+/** Safe, aggregate-only context for an application detail (§11). Never returns
+ * secrets — only account age, paid-order count, active-service count and whether
+ * the user has a referrer (informational). */
+export interface AdminApplicationContext {
+  accountAgeDays: number;
+  paidOrderCount: number;
+  activeServiceCount: number;
+  hasReferrer: boolean;
+}
+
+export async function getAdminApplicationContext(
+  userId: string,
+): Promise<AdminApplicationContext> {
+  const [user, paidOrderCount, activeServiceCount, referral] = await Promise.all([
+    prisma.user.findUnique({ where: { id: userId }, select: { createdAt: true } }),
+    prisma.order.count({ where: { userId, status: { in: ["COMPLETED", "PAID"] } } }),
+    prisma.service.count({ where: { userId, status: "ACTIVE" } }),
+    prisma.referral.findUnique({ where: { referredUserId: userId }, select: { id: true } }),
+  ]);
+  const created = user?.createdAt ?? new Date();
+  const accountAgeDays = Math.max(
+    0,
+    Math.floor((Date.now() - created.getTime()) / (24 * 3600 * 1000)),
+  );
+  return {
+    accountAgeDays,
+    paidOrderCount,
+    activeServiceCount,
+    hasReferrer: referral !== null,
+  };
+}
+
+/** Paginated representative list (admin). */
+export async function listRepresentativesForAdmin(
+  page: number,
+  pageSize = 8,
+): Promise<{ rows: RepresentativeWithTier[]; total: number }> {
+  const [rows, total] = await Promise.all([
+    prisma.representative.findMany({
+      include: { tier: true },
+      orderBy: { createdAt: "desc" },
+      skip: Math.max(0, (page - 1) * pageSize),
+      take: pageSize,
+    }),
+    prisma.representative.count(),
+  ]);
+  return { rows, total };
+}
+
+/** Resolves a representative by 8-char short id (callback-safe). */
+export async function getRepresentativeByShortId(
+  shortId: string,
+): Promise<RepresentativeWithTier | null> {
+  const matches = await prisma.representative.findMany({
+    where: { id: { startsWith: shortId } },
+    include: { tier: true },
+    take: 2,
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/** Count of unresolved (PENDING_REVIEW) applications for the admin badge. */
+export async function countPendingApplications(): Promise<number> {
+  return prisma.representativeApplication.count({ where: { status: "PENDING_REVIEW" } });
+}
+
 // --- privacy-safe audit (§24) ------------------------------------------------
 
 async function audit(
