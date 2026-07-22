@@ -129,6 +129,13 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   // per-attachment byte ceiling is code-defaulted in @zedbot/shared and clamped to
   // its bounds, so tuning it never needs a data migration.
   { key: "support_attachments_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Admin Service Operations (feat/admin-service-operations). MASTER switch for
+  // lifecycle MUTATIONS seeds FALSE — read-only Service detail and read-only
+  // Panel refresh stay available, but every mutation button is hidden and every
+  // stale/direct mutation callback fails closed, until the OWNER explicitly
+  // enables it. Enabling moves no money and mutates no Service; disabling deletes
+  // no operation history.
+  { key: "admin_service_mutations_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are

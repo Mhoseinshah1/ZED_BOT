@@ -6,7 +6,7 @@ import {
   type Service,
 } from "@zedbot/database";
 import { type SetServiceStatusResult } from "@zedbot/panel-adapters";
-import { errorMessage } from "@zedbot/shared";
+import { errorMessage, type ServiceOperationActor } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
@@ -38,6 +38,22 @@ export type ToggleAction = "ENABLE" | "DISABLE";
 
 export const SERVICE_DISABLED_EVENT_TYPE = "SERVICE_DISABLED_BY_USER";
 export const SERVICE_ENABLED_EVENT_TYPE = "SERVICE_ENABLED_BY_USER";
+// Admin Service Operations: an ADMIN actor's toggle is audited under a distinct
+// event type so an admin action is never logged as `..._BY_USER`.
+export const SERVICE_DISABLED_BY_ADMIN_EVENT_TYPE = "SERVICE_DISABLED_BY_ADMIN";
+export const SERVICE_ENABLED_BY_ADMIN_EVENT_TYPE = "SERVICE_ENABLED_BY_ADMIN";
+
+/** Selects the ServiceEventLog event type for one toggle by ACTOR (§12): the
+ * USER actor keeps the existing `..._BY_USER` events; the ADMIN actor records
+ * the distinct `..._BY_ADMIN` events. */
+function toggleEventType(action: ToggleAction, actor: ServiceOperationActor): string {
+  if (actor.kind === "ADMIN") {
+    return action === "DISABLE"
+      ? SERVICE_DISABLED_BY_ADMIN_EVENT_TYPE
+      : SERVICE_ENABLED_BY_ADMIN_EVENT_TYPE;
+  }
+  return action === "DISABLE" ? SERVICE_DISABLED_EVENT_TYPE : SERVICE_ENABLED_EVENT_TYPE;
+}
 
 export const TOGGLE_NOT_FOUND_TEXT = "مورد یافت نشد.";
 export const TOGGLE_UNAVAILABLE_TEXT = "امکان تغییر وضعیت این سرویس وجود ندارد.";
@@ -174,7 +190,16 @@ export function buildTogglePreview(service: Service, action: ToggleAction): stri
 
 export type ToggleOutcome =
   | { ok: true; service: Service; action: ToggleAction; alreadyDone: boolean }
-  | { ok: false; error: string; safeUserMessage: string };
+  // `uncertain` is set when the panel outcome was indeterminate, or the panel
+  // definitely succeeded but the local persist failed — the admin executor maps
+  // this to a reconciliation-required operation (a blind retry is never made).
+  // User callers ignore this optional field, so their behaviour is unchanged.
+  | { ok: false; error: string; safeUserMessage: string; uncertain?: boolean };
+
+/** Actor-aware options (§12). Omitting `actor` = the existing USER behaviour. */
+export interface ToggleActorOptions {
+  actor?: ServiceOperationActor;
+}
 
 /** True when the service is already in the state `action` asks for. */
 function isAlreadyInDesiredState(status: ServiceStatus, action: ToggleAction): boolean {
@@ -213,17 +238,32 @@ export async function toggleServiceStatus(
     };
   }
   try {
-    return await toggleServiceStatusUnlocked(userId, serviceId, action);
+    return await toggleServiceStatusUnlocked(userId, serviceId, action, {
+      actor: { kind: "USER", userId },
+    });
   } finally {
     await acquisition.lock.release();
   }
 }
 
-async function toggleServiceStatusUnlocked(
-  userId: string,
+/**
+ * Lock-FREE toggle body (the caller MUST already hold
+ * `serviceOperationLockKey(serviceId)`). `ownerUserId` scopes the Service
+ * lookup/persist to its owner — for a USER actor this is the acting user; for an
+ * ADMIN actor it is the resolved Service owner. The actor (default USER) drives
+ * ONLY the ServiceEventLog event type + metadata; every eligibility / capability
+ * / remote-model gate and the panel-first-then-persist ordering are identical.
+ * Exported so the admin operations executor can reuse it under the lock it
+ * already holds — without re-acquiring the lock or auditing the action as the user.
+ */
+export async function toggleServiceStatusUnlocked(
+  ownerUserId: string,
   serviceId: string,
   action: ToggleAction,
+  options: ToggleActorOptions = {},
 ): Promise<ToggleOutcome> {
+  const userId = ownerUserId;
+  const actor: ServiceOperationActor = options.actor ?? { kind: "USER", userId };
   const found = await prisma.service.findFirst({
     where: {
       id: serviceId,
@@ -297,12 +337,16 @@ async function toggleServiceStatusUnlocked(
       serviceId: service.id,
       panelId: panel.id,
       action,
+      uncertain: panelResult.uncertain === true,
       error: panelResult.errorMessage ?? "unknown",
     });
     return {
       ok: false,
       error: panelResult.errorMessage ?? "unknown adapter error",
       safeUserMessage: TOGGLE_FAILED_TEXT,
+      // An indeterminate panel outcome is surfaced so the admin executor can
+      // reconcile instead of retrying; the user path keeps showing FAILED.
+      uncertain: panelResult.uncertain === true,
     };
   }
 
@@ -366,9 +410,15 @@ async function toggleServiceStatusUnlocked(
           serviceId: service.id,
           userId,
           panelId: panel.id,
-          eventType:
-            action === "DISABLE" ? SERVICE_DISABLED_EVENT_TYPE : SERVICE_ENABLED_EVENT_TYPE,
-          metadata: { action, previousStatus: service.status, newStatus: nextStatus },
+          // ACTOR-aware: an admin toggle is audited under `..._BY_ADMIN` and
+          // correlated to its durable operation id — never as `..._BY_USER`.
+          eventType: toggleEventType(action, actor),
+          metadata: {
+            action,
+            previousStatus: service.status,
+            newStatus: nextStatus,
+            ...(actor.kind === "ADMIN" ? { operationId: actor.operationId } : {}),
+          },
         },
       });
       return true;
@@ -398,6 +448,9 @@ async function toggleServiceStatusUnlocked(
         ok: false,
         error: "toggle persistence failed after panel success",
         safeUserMessage: TOGGLE_FAILED_TEXT,
+        // The panel DEFINITELY switched but the local row did not — the admin
+        // executor must reconcile (never re-issue the panel toggle).
+        uncertain: true,
       };
     }
   }
