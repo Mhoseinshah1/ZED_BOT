@@ -82,6 +82,30 @@ Statuses: `ACTIVE → SUSPENDED ↔ ACTIVE`, and `ACTIVE | SUSPENDED → TERMINA
   touches the user's normal account.
 - No admin permission of any kind is granted to a representative.
 
+### State routing & the terminal page (§9, §12)
+
+The user landing routes over the representative state machine with an
+**exhaustive typed switch** (with a compile-time `never` guard); an unknown
+persisted status FAILS CLOSED to the read-only terminal page, never to the
+apply/buy landing:
+
+- **no representative** → application landing / status flow;
+- **ACTIVE** → active dashboard + reseller checkout;
+- **SUSPENDED** → read-only suspended dashboard (history/support available,
+  reseller checkout blocked);
+- **TERMINATED** → the **terminal page**.
+
+A TERMINATED representative sees a stable read-only page
+(`وضعیت: خاتمه‌یافته ⛔`) with its retained purchase history, the terms and
+support, and a return to the main menu — and only safe facts (termination date,
+previous tier name, retained purchase count / paid value / saved amount), never
+an admin identity, termination reason or financial secret. It never offers
+apply, buy, a tariff-purchase CTA or reactivate. Direct/stale apply and buy
+callbacks all fail closed to this same page (they create no application and no
+CheckoutSession). Ordinary retail checkout remains fully available through the
+normal menu; the user's normal account, wallet and Services are untouched. Only
+the OWNER admin lifecycle can change a representative's status.
+
 ## Tier & price model (§18, §19)
 
 - A **tier** (`RepresentativeTier`) has a stable `slug` (behaviour binds to it,
@@ -95,6 +119,15 @@ Statuses: `ACTIVE → SUSPENDED ↔ ACTIVE`, and `ACTIVE | SUSPENDED → TERMINA
 - Price modes: `FIXED_TOMAN` (≥ 1 and ≤ current retail — a stale fixed price
   above retail fails closed) and `PERCENT_DISCOUNT` (integer 1..95, floored,
   exact integer-Toman arithmetic — never floating point).
+- The tier price page distinguishes, with stable internal machine codes (never
+  Persian-string comparison), whether each opted-in product has an active price,
+  has no active price yet, or is currently unsellable because normal
+  product/panel readiness fails — an opted-in but unsellable product is RETAINED
+  on the page (flagged) rather than silently vanishing, so the OWNER can see
+  why. Changing `representativeEligible` never deletes a
+  `RepresentativeProductPrice`, silently activates a price, recalculates a fixed
+  price, mutates a tier fingerprint or rewrites a CheckoutSession snapshot; a
+  price row survives a product opt-out and is honoured again on re-opt-in.
 
 ## Price precedence (§7)
 
@@ -122,6 +155,66 @@ top-up, renewal, extra-volume/-time, trials and admin grants stay retail.
 product. Only an active, purchasable `SERVICE_PRODUCT` with the flag true is ever
 reseller-priced; inactive/hidden products remain unavailable; panel and
 provisioning eligibility are unchanged.
+
+### OWNER control (how a product is opted in)
+
+The flag is toggled from the **existing product-management flow** — no separate
+product editor. Every `SERVICE_PRODUCT` detail page shows its state
+(`فروش در بخش نمایندگی: فعال ✅` / `غیرفعال ❌`) to any admin, and the **OWNER
+only** sees the toggle button (`فعال‌کردن/غیرفعال‌کردن فروش نمایندگی 🤝`).
+`OTHER_PRODUCT` never exposes this control. Tapping it opens an explicit
+confirmation page carrying a safe warning that eligibility alone is not enough
+(the product must still be active, visible, on a ready panel, and have an active
+tier price).
+
+The single authoritative writer is `setProductRepresentativeEligible` in
+`product.service.ts` — reused by both the product flow and the representative
+admin console (no second writer). It performs **one atomic conditional update**
+guarded by `(id, type = SERVICE_PRODUCT, representativeEligible = expected)`,
+where the confirm callback embeds the expected current state; a stale/duplicate
+confirm therefore converges instead of double-flipping. Callbacks re-validate
+the live OWNER, resolve the product ambiguity-safely by short id, and reject a
+deleted/missing/wrong-type product. A privacy-safe audit event
+(`product.representative_eligibility_changed`) records only action + enabled flag
++ product type + an 8-char correlation id — never the name, price, description or
+panel URL.
+
+Toggling eligibility **only** flips the flag. Disabling blocks the product from
+all NEW representative catalogs/checkouts but never deactivates the retail
+product, deletes `RepresentativeProductPrice` rows, cancels a settled Payment /
+paid Order, revokes a provisioned Service, or mutates any
+CheckoutSession/Wallet/Payment/Order/Referral record. Enabling only MARKS the
+product eligible — it never creates a tier price or copies retail into a tier,
+and the product must still pass every normal catalog/panel/readiness/group check
+to actually be sellable.
+
+The representative admin console also has a **محصولات نمایندگی 🛍** page — a
+bounded, paginated list of every `SERVICE_PRODUCT` with its eligibility +
+sellability state — so a product never disappears from the OWNER's configuration
+surface merely because it is not yet opted in. Each row deep-links into the
+product detail page (the one authoritative toggle). No manual database edit is
+ever required to activate the first eligible product.
+
+## Catalog purchasability (§6, §8, §15)
+
+The reseller buy list AND the tariff list are the SAME authoritative set:
+`listEligibleRepresentativeProducts` filters candidates through
+`isProductVisible(product, user.group)` — the exact predicate the retail catalog
+uses (active product + active category + group visibility + panel
+present/visible/sellable/provisioning-ready + valid XUI inbound selection) —
+**before** resolving reseller prices, applying any cap or paginating. A product
+that could never reach `renderPreInvoice` (hidden from the group, inactive
+category, hidden/unready panel, invalid XUI inbound) is therefore never shown and
+can never seed a checkout the pre-invoice step would immediately reject. There is
+no weaker representative-specific imitation of the predicate; the structural core
+(`isProductStructurallySellable`, group-agnostic) is factored out and reused by
+the admin surfaces that explain why a product cannot yet be sold.
+
+The reseller product callback re-validates the same contract at tap time (the
+product may have gone inactive / hidden / unready / off-eligibility since the
+keyboard was rendered): a stale product clears the draft, moves no money, creates
+no CheckoutSession, shows a safe Persian notice and returns to the refreshed
+catalog. A product is never trusted merely because it came from a rendered list.
 
 ## Checkout reuse & immutable snapshot (§6, §15, §16)
 

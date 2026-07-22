@@ -3,6 +3,7 @@ import { Composer, InlineKeyboard } from "grammy";
 import {
   errorMessage,
   isRepresentativeSalesChannel,
+  isRepresentativeStatus,
   isValidRepExperience,
   isValidRepExplanation,
   isValidRepFullName,
@@ -20,6 +21,7 @@ import {
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
+import { isProductVisible } from "../../services/catalog.service.js";
 import { getProductByShortId } from "../../services/product.service.js";
 import {
   areRepresentativeApplicationsEnabled,
@@ -132,10 +134,37 @@ async function renderLanding(ctx: BotContext): Promise<void> {
   ctx.session.temp.repApplicationDraft = undefined;
   ctx.session.currentFlow = null;
 
+  // Exhaustive, deterministic routing over the representative state machine
+  // (§9). No representative → application flow; otherwise a typed switch decides
+  // ACTIVE / SUSPENDED (dashboard) vs TERMINATED (read-only terminal page). An
+  // unknown persisted status FAILS CLOSED to the terminal page — never the
+  // apply/buy landing (P2@136).
   const rep = await getRepresentativeByUserId(user.id);
-  if (rep !== null && rep.status !== "TERMINATED") {
-    await renderDashboard(ctx);
-    return;
+  if (rep !== null) {
+    if (!isRepresentativeStatus(rep.status)) {
+      logger.error("representative has an unknown status; failing closed to terminal page", {
+        representativeId: rep.id,
+      });
+      await renderTerminated(ctx);
+      return;
+    }
+    switch (rep.status) {
+      case "ACTIVE":
+      case "SUSPENDED":
+        await renderDashboard(ctx);
+        return;
+      case "TERMINATED":
+        await renderTerminated(ctx);
+        return;
+      default: {
+        // Compile-time exhaustiveness guard: adding a status without handling it
+        // here is a type error. At runtime an impossible value fails closed.
+        const _exhaustive: never = rep.status;
+        void _exhaustive;
+        await renderTerminated(ctx);
+        return;
+      }
+    }
   }
 
   const open = await findOpenApplication(user.id);
@@ -203,6 +232,55 @@ async function renderDashboard(ctx: BotContext): Promise<void> {
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
 }
 
+/**
+ * The read-only TERMINAL page for a TERMINATED representative (P2@136). A
+ * terminated account can view its retained purchase history, the terms and
+ * support, but can NEVER apply again, buy at reseller price, see a tariff CTA or
+ * reactivate. No admin identity, no termination reason and no financial secret
+ * is shown (§13/§24). Ordinary retail checkout stays available through the
+ * normal menu — this page only closes the representative surface.
+ */
+async function renderTerminated(ctx: BotContext): Promise<void> {
+  const user = ctx.dbUser;
+  if (user === null) {
+    return;
+  }
+  const stats = await getRepresentativeDashboardStats(user.id);
+  const rep = stats.representative;
+  if (rep === null) {
+    // The row vanished between routing and render → fall back to the landing.
+    await renderLanding(ctx);
+    return;
+  }
+  const lines = [
+    "🤝 <b>نمایندگی من</b>",
+    "",
+    "وضعیت: خاتمه‌یافته ⛔",
+    "",
+    "حساب نمایندگی شما به‌صورت دائم خاتمه یافته است. سوابق خریدهای قبلی حفظ شده‌اند، اما ثبت درخواست جدید و خرید با تعرفهٔ نمایندگی امکان‌پذیر نیست.",
+  ];
+  // Safe, non-secret facts only: date, previous tier name, retained aggregates.
+  if (rep.terminatedAt !== null) {
+    lines.push("", `تاریخ خاتمه: ${rep.terminatedAt.toISOString().slice(0, 10)}`);
+  }
+  if (rep.tier !== null) {
+    lines.push(`تعرفهٔ قبلی: ${escape(rep.tier.name)}`);
+  }
+  lines.push(
+    `تعداد خریدهای نمایندگی: ${stats.completedPurchaseCount.toLocaleString("en-US")}`,
+    `مجموع پرداختی: ${formatToman(stats.totalFinalPaidToman)}`,
+    `مجموع صرفه‌جویی: ${formatToman(stats.totalSavedToman)}`,
+  );
+  const kb = new InlineKeyboard()
+    .text(await getButtonText("representative_purchases", "خریدهای قبلی نمایندگی 🧾"), RC.PURCHASES)
+    .row()
+    .text(await getButtonText("representative_terms", "شرایط نمایندگی 📄"), RC.TERMS)
+    .text(await getButtonText("representative_support", "پشتیبانی نمایندگان 🎫"), RC.REP_SUPPORT)
+    .row()
+    .text("بازگشت به منوی اصلی", CB.USER_MENU);
+  await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
+}
+
 /** Entry used by both the inline callback and the reply-keyboard action. */
 export async function renderRepresentativeLanding(ctx: BotContext): Promise<void> {
   ctx.session.lastMenu = CB.USER_REPRESENTATIVE;
@@ -234,7 +312,15 @@ representativeHandler.callbackQuery(RC.APPLY, async (ctx) => {
     return;
   }
   // Block a second open application / an existing representative up-front.
-  if ((await getRepresentativeByUserId(user.id)) !== null) {
+  const existingRep = await getRepresentativeByUserId(user.id);
+  if (existingRep !== null) {
+    // A TERMINATED (or unknown-status) rep must land on the read-only terminal
+    // page — NEVER the "you are already a representative" → apply loop (P2@136).
+    if (existingRep.status === "TERMINATED" || !isRepresentativeStatus(existingRep.status)) {
+      await safeAnswerCallback(ctx);
+      await renderTerminated(ctx);
+      return;
+    }
     await safeAnswerCallback(ctx, "شما در حال حاضر نماینده هستید.");
     await renderLanding(ctx);
     return;
@@ -709,6 +795,12 @@ representativeHandler.callbackQuery(RC.REP_BUY, async (ctx) => {
   await safeAnswerCallback(ctx);
   // Re-check all gates (never trust the button).
   const rep = await getRepresentativeByUserId(user.id);
+  // A terminated / unknown-status rep that reaches a stale buy button lands on
+  // the read-only terminal page — never a bare toast (P2@136, §8).
+  if (rep !== null && (rep.status === "TERMINATED" || !isRepresentativeStatus(rep.status))) {
+    await renderTerminated(ctx);
+    return;
+  }
   if (
     rep === null ||
     rep.status !== "ACTIVE" ||
@@ -745,13 +837,35 @@ representativeHandler.callbackQuery(new RegExp(`^${RC.PRODUCT}([a-f0-9]{8})$`), 
     await safeAnswerCallback(ctx);
     return;
   }
-  const shortId = ctx.match![1];
-  const product = await getProductByShortId(shortId);
-  if (product === null || product.type !== "SERVICE_PRODUCT") {
-    await safeAnswerCallback(ctx, "محصول یافت نشد.");
+  // Never trust a previously rendered list. A terminated / unknown-status rep
+  // that taps a stale product button lands on the terminal page (P2@136, §8).
+  const rep = await getRepresentativeByUserId(user.id);
+  if (rep !== null && (rep.status === "TERMINATED" || !isRepresentativeStatus(rep.status))) {
+    await safeAnswerCallback(ctx);
+    ctx.session.temp.checkoutDraft = undefined;
+    await renderTerminated(ctx);
     return;
   }
-  // Resolve the reseller price fresh (PREVIEW); reject if not eligible now.
+  const shortId = ctx.match![1];
+  const product = await getProductByShortId(shortId);
+  // Re-validate PURCHASABILITY with the SAME authoritative catalog predicate the
+  // buy list used (§6): the product may have gone inactive / hidden from the
+  // group / onto an unready panel / off-eligibility since the keyboard was
+  // rendered. A stale product clears any draft, moves no money, creates no
+  // checkout, and returns to the refreshed representative surface.
+  if (
+    product === null ||
+    product.type !== "SERVICE_PRODUCT" ||
+    !isProductVisible(product, user.group)
+  ) {
+    ctx.session.temp.checkoutDraft = undefined;
+    await safeAnswerCallback(ctx, "این محصول در حال حاضر قابل خرید نیست.");
+    await renderLanding(ctx);
+    return;
+  }
+  // Resolve the reseller price fresh (PREVIEW); reject if not eligible now. The
+  // resolver additionally re-checks the switches, rep ACTIVE + checkoutEnabled,
+  // active tier and active price row (§6).
   const effective = await resolveEffectiveProductPrice({
     user,
     product,
@@ -759,7 +873,9 @@ representativeHandler.callbackQuery(new RegExp(`^${RC.PRODUCT}([a-f0-9]{8})$`), 
     mode: "PREVIEW",
   });
   if (effective.pricingMode !== "REPRESENTATIVE") {
+    ctx.session.temp.checkoutDraft = undefined;
     await safeAnswerCallback(ctx, "این محصول با قیمت نمایندگی در دسترس نیست.");
+    await renderLanding(ctx);
     return;
   }
   await safeAnswerCallback(ctx);
