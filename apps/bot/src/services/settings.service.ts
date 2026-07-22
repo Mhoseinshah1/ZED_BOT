@@ -45,6 +45,34 @@ export async function getBooleanSetting(key: string, fallback: boolean): Promise
 }
 
 /**
+ * Reads a Setting BYPASSING the 30s process-local cache (and refreshes it).
+ * For emergency master switches that must take effect across all workers the
+ * instant an OWNER flips them — the local cache is per-process, so a stale
+ * `true` on another instance would otherwise keep accepting actions for up to
+ * the TTL. Never throws; falls back on a DB error.
+ */
+export async function getSettingFresh(key: string, fallback = ""): Promise<string> {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key } });
+    const value = row?.value ?? null;
+    cache.set(key, { value, at: Date.now() });
+    return value ?? fallback;
+  } catch (err) {
+    logger.warn("fresh setting lookup failed, using fallback", { key, error: errorMessage(err) });
+    return fallback;
+  }
+}
+
+/** Uncached boolean read (see getSettingFresh) for emergency master switches. */
+export async function getBooleanSettingFresh(key: string, fallback: boolean): Promise<boolean> {
+  const raw = (await getSettingFresh(key, "")).toLowerCase();
+  if (raw === "") {
+    return fallback;
+  }
+  return raw === "true" || raw === "1" || raw === "yes";
+}
+
+/**
  * Writes (upserts) a Setting and refreshes the cache entry so the new value
  * is visible immediately (no 30s TTL lag for the writer's own reads).
  */

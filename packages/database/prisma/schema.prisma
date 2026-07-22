@@ -432,6 +432,8 @@ model Admin {
   permissions          AdminPermission[]
   supportMessages      SupportMessage[]
   closedSupportTickets SupportTicket[]   @relation("SupportTicketClosedBy")
+  // Admin Service Operations: lifecycle/note audit rows this admin performed.
+  serviceOperations    AdminServiceOperation[] @relation("AdminServiceOperationActor")
   createdAt            DateTime          @default(now())
   updatedAt            DateTime          @updatedAt
 
@@ -580,6 +582,8 @@ model User {
   serviceRatings              ServiceRating[]
   serviceEventLogs            ServiceEventLog[]
   otherProductOrders          OtherProductOrder[]
+  // Admin Service Operations: admin lifecycle/note audit rows targeting this user.
+  adminServiceOperations      AdminServiceOperation[] @relation("AdminServiceOperationTargetUser")
   // Notification/retention engine (feat/notification-retention-engine).
   automatedNotifications      AutomatedNotification[]
   notificationInteractions    NotificationInteraction[]
@@ -1335,6 +1339,8 @@ model Service {
   // Service self-diagnostics: tickets opened from a diagnostic run on this
   // service (owner-scoped link; snapshot lives on the ticket).
   supportTickets         SupportTicket[]                @relation("ServiceSupportTickets")
+  // Admin Service Operations: durable admin lifecycle/note audit rows.
+  adminOperations        AdminServiceOperation[]
 
   @@index([userId])
   @@index([panelId])
@@ -1378,6 +1384,57 @@ model ServiceEventLog {
   @@index([panelId])
   @@index([eventType])
   @@index([createdAt])
+}
+
+// Admin Service Operations (feat/admin-service-operations). The DURABLE audit +
+// reconciliation authority for every per-Service admin lifecycle action and
+// internal note. SystemLog is supplemental. Relations are nullable with
+// onDelete: SetNull so the audit row survives Service/User/Admin removal (the id
+// nulls, the operation history stays). Snapshots are the SAFE shape from
+// @zedbot/shared (AdminServiceStateSnapshot) — NO secret (subscription URL,
+// config link, Panel URL/credentials, token, remote client id, raw response) is
+// ever persisted here; `reason` is bounded plain internal text; idempotencyKey
+// is derived only from non-secret identifiers; sourceUpdateId is the inbound
+// Telegram update_id for replay protection. Rows are never physically deleted
+// through the UI.
+model AdminServiceOperation {
+  id           String   @id @default(uuid())
+  serviceId    String?
+  service      Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  targetUserId String?
+  targetUser   User?    @relation("AdminServiceOperationTargetUser", fields: [targetUserId], references: [id], onDelete: SetNull)
+  adminId      String?
+  admin        Admin?   @relation("AdminServiceOperationActor", fields: [adminId], references: [id], onDelete: SetNull)
+
+  type   String // AdminServiceOperationType code (@zedbot/shared)
+  status String // AdminServiceOperationStatus code (@zedbot/shared)
+  reason String // bounded plain internal text (mutation reason / note body)
+
+  requestedValue BigInt? // GiB→bytes or day count (typed by requestedUnit)
+  requestedUnit  String? // "GIB" | "DAY"
+  notifyUser     Boolean @default(true)
+
+  idempotencyKey        String  @unique // non-secret derived key; converges double-clicks
+  sourceUpdateId        BigInt? @unique // inbound Telegram update_id; replay protection
+  confirmationNonceHash String? // hash of the one-shot confirmation nonce
+
+  beforeSnapshot Json // AdminServiceStateSnapshot (safe fields only)
+  afterSnapshot  Json? // AdminServiceStateSnapshot after a definite success
+  safeErrorCode  String? // AdminServiceErrorCode (never a raw error)
+
+  startedAt          DateTime?
+  completedAt        DateTime?
+  userNotifiedAt     DateTime?
+  reconciledAt       DateTime?
+  reconciledByAdminId String? // soft admin reference (audit survives admin change)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([serviceId, createdAt])
+  @@index([adminId, createdAt])
+  @@index([status, createdAt])
+  @@index([type, createdAt])
 }
 
 // =============================================================================

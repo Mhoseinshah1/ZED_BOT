@@ -358,20 +358,28 @@ adminUsersHandler.callbackQuery(/^admin:users:svc:([0-9a-f-]+):(\d+)$/, async (c
   const sid = userShortId(user);
   const pageData = await listUserServicesForAdmin(user.id, Number.parseInt(ctx.match[2], 10));
   await safeAnswerCallback(ctx);
-  const lines = [`سرویس‌های کاربر 🛍 (${pageData.total})`, ""];
-  for (const service of pageData.rows) {
-    const expiry = service.expiresAt === null ? "نامحدود" : service.expiresAt.toISOString().slice(0, 10);
-    lines.push(
-      `• ${escapeHtml(service.productNameSnapshot ?? service.username)} | ${serviceStatusLabel(service.status)} | ${escapeHtml(service.panelNameSnapshot ?? "-")} | انقضا: ${expiry}`,
-    );
-  }
-  if (pageData.rows.length === 0) {
-    lines.push("سرویسی ثبت نشده است.");
-  }
+  const lines = [
+    `سرویس‌های کاربر 🛍 (${pageData.total})`,
+    "",
+    pageData.rows.length === 0
+      ? "سرویسی ثبت نشده است."
+      : "برای مدیریت هر سرویس روی آن بزنید:",
+  ];
+  // Admin Service Operations (§7): each Service is a clickable row opening the
+  // per-Service admin console. The callback carries only the 8-char short id —
+  // no full id/secret and ≤64 bytes.
+  const rows = pageData.rows.map((service) => {
+    const expiry =
+      service.expiresAt === null ? "نامحدود" : service.expiresAt.toISOString().slice(0, 10);
+    return {
+      label: `${serviceStatusLabel(service.status)} | ${service.productNameSnapshot ?? service.username} | ${expiry}`,
+      callback: `admin:svc:view:${service.id.slice(0, 8)}`,
+    };
+  });
   await safeEditOrReply(
     ctx,
     lines.join("\n"),
-    subListKeyboard(sid, (p) => AU_CB.services(sid, p), pageData),
+    subListKeyboard(sid, (p) => AU_CB.services(sid, p), pageData, rows),
     HTML,
   );
 });

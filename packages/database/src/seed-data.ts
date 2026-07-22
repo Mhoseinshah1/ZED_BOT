@@ -933,6 +933,23 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
       "این بررسی فقط وضعیت سمت سرور را می‌سنجد و نمی‌تواند تنظیمات گوشی، اینترنت، فیلترینگ یا برنامهٔ شما را بررسی کند.",
     allowedVariables: [],
   },
+  // --- admin service operations (feat/admin-service-operations, §23) ----------
+  {
+    key: "admin_service_note_warning",
+    title: "عملیات سرویس - راهنمای یادداشت",
+    category: "admin_service_ops",
+    defaultContent:
+      "متن یادداشت داخلی را وارد کنید.\n" +
+      "⚠️ اطلاعات کانفیگ، لینک اشتراک، رمز یا توکن را در یادداشت وارد نکنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "admin_service_user_notification",
+    title: "عملیات سرویس - اعلان به کاربر",
+    category: "admin_service_ops",
+    defaultContent: "سرویس شما توسط پشتیبانی بروزرسانی شد ✅\nبرای مشاهده جزئیات روی دکمه زیر بزنید.",
+    allowedVariables: [],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [

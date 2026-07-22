@@ -14,5 +14,6 @@ export * from "./referral.js";
 export * from "./connection-guides.js";
 export * from "./service-diagnostics.js";
 export * from "./support-tickets-v2.js";
+export * from "./admin-service-operations.js";
 export * from "./stars-subscription.js";
 export * from "./template.js";

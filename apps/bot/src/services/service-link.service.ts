@@ -6,7 +6,7 @@ import {
   type Service,
 } from "@zedbot/database";
 import { type RegenerateSubscriptionResult } from "@zedbot/panel-adapters";
-import { errorMessage } from "@zedbot/shared";
+import { errorMessage, type ServiceOperationActor } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
@@ -22,6 +22,7 @@ import {
   SERVICE_LOCK_BUSY_TEXT,
   SERVICE_LOCK_UNAVAILABLE_TEXT,
   serviceOperationLockKey,
+  type ServiceLock,
 } from "./service-lock.service.js";
 
 // =============================================================================
@@ -36,6 +37,10 @@ import {
 // =============================================================================
 
 export const SERVICE_SUBSCRIPTION_REGENERATED_EVENT_TYPE = "SERVICE_SUBSCRIPTION_REGENERATED";
+// Admin Service Operations: an ADMIN actor's regeneration is audited under a
+// distinct event type (§12) — never as the user's `SERVICE_SUBSCRIPTION_REGENERATED`.
+export const SERVICE_SUBSCRIPTION_REGENERATED_BY_ADMIN_EVENT_TYPE =
+  "SERVICE_SUBSCRIPTION_REGENERATED_BY_ADMIN";
 
 export const REGEN_NOT_FOUND_TEXT = "مورد یافت نشد.";
 export const REGEN_UNAVAILABLE_TEXT = "امکان تغییر لینک اشتراک این سرویس وجود ندارد.";
@@ -145,7 +150,19 @@ export function buildLinkRegenerationPreview(service: Service): string {
 
 export type RegenerateLinkOutcome =
   | { ok: true; service: Service }
-  | { ok: false; error: string; safeUserMessage: string };
+  // `uncertain` is set when the panel outcome was indeterminate, or the panel
+  // definitely re-keyed but the local persist failed — the admin executor maps
+  // this to a reconciliation-required operation. User callers ignore it.
+  | { ok: false; error: string; safeUserMessage: string; uncertain?: boolean };
+
+/** Actor-aware options (§12). Omitting `actor` = the existing USER behaviour.
+ * `lock` (when provided) is checked for ownership loss right before persistence
+ * so a regeneration that outran a lost lock defers instead of overwriting a
+ * newer operation's state. */
+export interface RegenActorOptions {
+  actor?: ServiceOperationActor;
+  lock?: ServiceLock;
+}
 
 /** Panel status -> ServiceStatus; anything else keeps the stored status. */
 const STATUS_TO_SERVICE_STATUS: Partial<Record<string, ServiceStatus>> = {
@@ -186,16 +203,32 @@ export async function regenerateServiceSubscription(
     };
   }
   try {
-    return await regenerateServiceSubscriptionUnlocked(userId, serviceId);
+    return await regenerateServiceSubscriptionUnlocked(userId, serviceId, {
+      actor: { kind: "USER", userId },
+      lock: acquisition.lock,
+    });
   } finally {
     await acquisition.lock.release();
   }
 }
 
-async function regenerateServiceSubscriptionUnlocked(
-  userId: string,
+/**
+ * Lock-FREE regeneration body (the caller MUST already hold
+ * `serviceOperationLockKey(serviceId)`). `ownerUserId` scopes the Service
+ * lookup/persist to its owner. The actor (default USER) drives ONLY the
+ * ServiceEventLog event type + metadata; every capability / remote-model /
+ * eligibility gate and the validate-before-persist ordering are identical, and
+ * NO old/new link or token is ever logged. Exported so the admin operations
+ * executor can reuse it under the lock it already holds — without auditing the
+ * regeneration as the user or exposing the new link to the admin surface.
+ */
+export async function regenerateServiceSubscriptionUnlocked(
+  ownerUserId: string,
   serviceId: string,
+  options: RegenActorOptions = {},
 ): Promise<RegenerateLinkOutcome> {
+  const userId = ownerUserId;
+  const actor: ServiceOperationActor = options.actor ?? { kind: "USER", userId };
   const found = await prisma.service.findFirst({
     where: {
       id: serviceId,
@@ -269,6 +302,7 @@ async function regenerateServiceSubscriptionUnlocked(
       ok: false,
       error: panelResult.errorMessage ?? "unknown adapter error",
       safeUserMessage: REGEN_FAILED_TEXT,
+      uncertain: panelResult.uncertain === true,
     };
   }
 
@@ -348,6 +382,24 @@ async function regenerateServiceSubscriptionUnlocked(
   }
   const newHasSubscriptionUrl = newUrl !== undefined ? true : previousHadSubscriptionUrl;
 
+  // Lock-loss guard: the panel DEFINITELY re-keyed, but if the per-service lock
+  // was lost during the call, persisting could overwrite a newer operation's
+  // status/usage/expiry (this persist is not pre-state-guarded). Defer to
+  // reconciliation instead of writing. Only enforced when a lock was passed
+  // (the actor-aware admin/user callers); other callers keep prior behaviour.
+  if (options.lock?.isLost() === true) {
+    logger.warn("subscription regeneration: lock lost before persist - deferring", {
+      serviceId: service.id,
+      panelId: panel.id,
+    });
+    return {
+      ok: false,
+      error: "service lock lost before regeneration persist",
+      safeUserMessage: REGEN_FAILED_TEXT,
+      uncertain: true,
+    };
+  }
+
   try {
     await prisma.$transaction(async (tx) => {
       const updated = await tx.service.updateMany({
@@ -362,12 +414,18 @@ async function regenerateServiceSubscriptionUnlocked(
           serviceId: service.id,
           userId,
           panelId: panel.id,
-          eventType: SERVICE_SUBSCRIPTION_REGENERATED_EVENT_TYPE,
+          // ACTOR-aware (§12): an admin regeneration is audited distinctly and
+          // correlated to its operation id — never as the user's event type.
+          eventType:
+            actor.kind === "ADMIN"
+              ? SERVICE_SUBSCRIPTION_REGENERATED_BY_ADMIN_EVENT_TYPE
+              : SERVICE_SUBSCRIPTION_REGENERATED_EVENT_TYPE,
           // NEVER store old/new links or tokens here - booleans only.
           metadata: {
             action: "REGENERATE_SUBSCRIPTION",
             previousHadSubscriptionUrl,
             newHasSubscriptionUrl,
+            ...(actor.kind === "ADMIN" ? { operationId: actor.operationId } : {}),
           },
         },
       });
@@ -382,6 +440,9 @@ async function regenerateServiceSubscriptionUnlocked(
       ok: false,
       error: "regeneration persistence failed after panel success",
       safeUserMessage: REGEN_FAILED_TEXT,
+      // The panel DEFINITELY re-keyed but the local row did not — the admin
+      // executor must reconcile (never re-issue the panel regeneration).
+      uncertain: true,
     };
   }
 

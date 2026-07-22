@@ -105,6 +105,10 @@ import {
   diagnosticsAdminHandler,
   diagnosticsAdminTextHandler,
 } from "./handlers/admin-settings/diagnostics-admin.handler.js";
+import {
+  adminServiceOpsHandler,
+  adminServiceOpsTextHandler,
+} from "./handlers/admin-service-ops/admin-service-ops.handler.js";
 import { supportAttachmentsAdminHandler } from "./handlers/admin-settings/support-attachments-admin.handler.js";
 import {
   deviceGuidesHandler,
@@ -251,6 +255,11 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(referralAdminHandler);
   adminArea.use(deviceGuidesHandler);
   adminArea.use(diagnosticsAdminHandler);
+  // Admin Service Operations (feat/admin-service-operations): the per-Service
+  // admin console (admin:svc:*). Read-only detail + refresh for any admin;
+  // lifecycle mutations + the master switch OWNER-only and re-validated inside
+  // the executor. Never shows a subscription URL / config / token.
+  adminArea.use(adminServiceOpsHandler);
   // Support Tickets V2: OWNER-only «تنظیمات ضمیمه‌ها 📎» attachment-settings page
   // (admin:supatt:*) — master switch, size presets, reset, 24h counters, synthetic
   // preview. Never downloads a file, moves money, or mutates a Service.
@@ -305,6 +314,10 @@ export function createBot(token: string): Bot<BotContext> {
   // Service self-diagnostics: OWNER preview short-id input ("admin_diag:preview").
   // Self-gates on currentFlow, so it passes through for every other admin flow.
   adminFlowText.use(diagnosticsAdminTextHandler);
+  // Admin Service Operations: the reason / note / custom volume-time input
+  // flow ("admin_svc:input"). Self-gates on currentFlow, so every other admin
+  // flow passes through untouched.
+  adminFlowText.use(adminServiceOpsTextHandler);
   // Phase 2.1: Stars product subscription price input ("admin_starsprod:price").
   // Self-gates on currentFlow, so it passes through for every other admin flow.
   adminFlowText.use(starsProductPriceTextHandler);
