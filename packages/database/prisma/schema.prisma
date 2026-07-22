@@ -419,23 +419,23 @@ enum SettingType {
 // =============================================================================
 
 model Admin {
-  id                   String            @id @default(uuid())
-  telegramId           BigInt            @unique
+  id                   String                  @id @default(uuid())
+  telegramId           BigInt                  @unique
   username             String?
   firstName            String?
   lastName             String?
   role                 AdminRole
-  isActive             Boolean           @default(true)
+  isActive             Boolean                 @default(true)
   addedByAdminId       String?
-  addedByAdmin         Admin?            @relation("AdminAddedBy", fields: [addedByAdminId], references: [id])
-  addedAdmins          Admin[]           @relation("AdminAddedBy")
+  addedByAdmin         Admin?                  @relation("AdminAddedBy", fields: [addedByAdminId], references: [id])
+  addedAdmins          Admin[]                 @relation("AdminAddedBy")
   permissions          AdminPermission[]
   supportMessages      SupportMessage[]
-  closedSupportTickets SupportTicket[]   @relation("SupportTicketClosedBy")
+  closedSupportTickets SupportTicket[]         @relation("SupportTicketClosedBy")
   // Admin Service Operations: lifecycle/note audit rows this admin performed.
   serviceOperations    AdminServiceOperation[] @relation("AdminServiceOperationActor")
-  createdAt            DateTime          @default(now())
-  updatedAt            DateTime          @updatedAt
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
 
   @@index([role])
 }
@@ -583,13 +583,19 @@ model User {
   serviceEventLogs            ServiceEventLog[]
   otherProductOrders          OtherProductOrder[]
   // Admin Service Operations: admin lifecycle/note audit rows targeting this user.
-  adminServiceOperations      AdminServiceOperation[] @relation("AdminServiceOperationTargetUser")
+  adminServiceOperations      AdminServiceOperation[]      @relation("AdminServiceOperationTargetUser")
   // Notification/retention engine (feat/notification-retention-engine).
   automatedNotifications      AutomatedNotification[]
   notificationInteractions    NotificationInteraction[]
   notificationPreference      NotificationPreference?
   // Customer win-back (feat/customer-winback-automation, Phase 3).
   customerRetentionPreference CustomerRetentionPreference?
+  // Representative Program (feat/representative-program): the reseller-price
+  // program's application history + at most one Representative record + the
+  // reseller-priced purchases the user made for their OWN account.
+  representative              Representative?              @relation("UserRepresentative")
+  representativeApplications  RepresentativeApplication[]
+  representativePurchases     RepresentativePurchase[]
 
   @@index([status])
   @@index([group])
@@ -845,14 +851,24 @@ model Product {
   telegramStarsSubscriptionPrice   Int?
   telegramStarsSubscriptionVersion Int     @default(1)
 
+  // Representative Program (feat/representative-program): opt-in per Product.
+  // Only an active SERVICE_PRODUCT with this flag true may be sold at a
+  // representative tier price. Default false, so no existing product is
+  // reseller-priced without an explicit OWNER action.
+  representativeEligible Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  orders             Order[]
-  checkoutSessions   CheckoutSession[]
-  services           Service[]
-  otherProductOrders OtherProductOrder[]
-  stockItems         OtherProductStockItem[]
+  orders                      Order[]
+  checkoutSessions            CheckoutSession[]
+  services                    Service[]
+  otherProductOrders          OtherProductOrder[]
+  stockItems                  OtherProductStockItem[]
+  // Representative Program (feat/representative-program): per-tier reseller
+  // prices set for this product + reseller-priced purchases of it.
+  representativeProductPrices RepresentativeProductPrice[]
+  representativePurchases     RepresentativePurchase[]
 
   @@index([categoryId])
   @@index([panelId])
@@ -865,21 +881,26 @@ model Product {
 // =============================================================================
 
 model DiscountCode {
-  id                String            @id @default(uuid())
-  code              String            @unique
-  type              DiscountType
-  value             Int
-  totalUsageLimit   Int?
-  totalUsedCount    Int               @default(0)
-  perUserUsageLimit Int?
-  allowedGroups     Json? // array of UserGroup values
-  appliesTo         DiscountAppliesTo @default(BOTH)
-  startsAt          DateTime?
-  expiresAt         DateTime?
-  isActive          Boolean           @default(true)
-  createdByAdminId  String?
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
+  id                          String            @id @default(uuid())
+  code                        String            @unique
+  type                        DiscountType
+  value                       Int
+  totalUsageLimit             Int?
+  totalUsedCount              Int               @default(0)
+  perUserUsageLimit           Int?
+  allowedGroups               Json? // array of UserGroup values
+  appliesTo                   DiscountAppliesTo @default(BOTH)
+  startsAt                    DateTime?
+  expiresAt                   DateTime?
+  isActive                    Boolean           @default(true)
+  // Representative Program (feat/representative-program): by default a discount
+  // code is NOT stackable on top of a representative tier price (reseller
+  // pricing already applies). Only a code with this flag true may combine with
+  // representative pricing (§7). Retail behaviour is unchanged.
+  allowRepresentativeStacking Boolean           @default(false)
+  createdByAdminId            String?
+  createdAt                   DateTime          @default(now())
+  updatedAt                   DateTime          @updatedAt
 
   usages           DiscountCodeUsage[]
   orders           Order[]
@@ -1422,10 +1443,10 @@ model AdminServiceOperation {
   afterSnapshot  Json? // AdminServiceStateSnapshot after a definite success
   safeErrorCode  String? // AdminServiceErrorCode (never a raw error)
 
-  startedAt          DateTime?
-  completedAt        DateTime?
-  userNotifiedAt     DateTime?
-  reconciledAt       DateTime?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  userNotifiedAt      DateTime?
+  reconciledAt        DateTime?
   reconciledByAdminId String? // soft admin reference (audit survives admin change)
 
   createdAt DateTime @default(now())
@@ -1586,20 +1607,20 @@ model Referral {
 }
 
 model ReferralCommission {
-  id                  String                   @id @default(uuid())
-  referralId          String
-  referral            Referral                 @relation(fields: [referralId], references: [id])
-  referrerUserId      String
-  referrer            User                     @relation("CommissionReferrer", fields: [referrerUserId], references: [id])
-  referredUserId      String
-  referred            User                     @relation("CommissionReferred", fields: [referredUserId], references: [id])
-  orderId             String
-  order               Order                    @relation(fields: [orderId], references: [id])
-  amountToman         Int
-  percent             Int
-  status              ReferralCommissionStatus @default(PENDING)
-  walletTransactionId String?
-  walletTransaction   WalletTransaction?       @relation(fields: [walletTransactionId], references: [id])
+  id                          String                   @id @default(uuid())
+  referralId                  String
+  referral                    Referral                 @relation(fields: [referralId], references: [id])
+  referrerUserId              String
+  referrer                    User                     @relation("CommissionReferrer", fields: [referrerUserId], references: [id])
+  referredUserId              String
+  referred                    User                     @relation("CommissionReferred", fields: [referredUserId], references: [id])
+  orderId                     String
+  order                       Order                    @relation(fields: [orderId], references: [id])
+  amountToman                 Int
+  percent                     Int
+  status                      ReferralCommissionStatus @default(PENDING)
+  walletTransactionId         String?
+  walletTransaction           WalletTransaction?       @relation(fields: [walletTransactionId], references: [id])
   // Set to the FIRST clawback debit when a reversal begins. The full recovery
   // audit trail is the WalletTransaction rows (type SYSTEM_ADJUSTMENT, source
   // REFERRAL, relatedOrderId) — a single FK cannot hold multiple partial debits.
@@ -1610,13 +1631,13 @@ model ReferralCommission {
   // While REVERSAL_PENDING the outstanding is collected as the referrer's wallet
   // gains funds; when it reaches 0 the commission becomes REVERSED. A CHECK keeps
   // 0 <= recovered <= amount so a debt can never be over-collected.
-  recoveredToman           Int       @default(0)
-  recoveryOutstandingToman Int       @default(0)
+  recoveredToman              Int                      @default(0)
+  recoveryOutstandingToman    Int                      @default(0)
   // When the reversal was first detected/initiated (a refunded source order).
-  reversalRequestedAt DateTime?
-  createdAt           DateTime                 @default(now())
-  paidAt              DateTime?
-  reversedAt          DateTime?
+  reversalRequestedAt         DateTime?
+  createdAt                   DateTime                 @default(now())
+  paidAt                      DateTime?
+  reversedAt                  DateTime?
 
   // Idempotency: at most ONE commission row per source order, so a re-fired
   // order-completion hook / concurrent settlement can never pay twice.
@@ -1948,7 +1969,7 @@ model SupportMessage {
   // The inbound Telegram update_id, for idempotent processing: a duplicate
   // delivery (same update_id) can never create a second ticket/message. Nullable
   // (older rows + internally-generated SYSTEM messages carry null) and UNIQUE.
-  sourceUpdateId  BigInt?  @unique
+  sourceUpdateId  BigInt? @unique
   // The inbound Telegram message_id (operational audit only; not an idempotency key).
   sourceMessageId Int?
 
@@ -2895,7 +2916,7 @@ model ServiceAutoRenewalMandate {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  attempts     ServiceAutoRenewalAttempt[]
+  attempts          ServiceAutoRenewalAttempt[]
   starsSubscription TelegramStarsServiceSubscription?
 
   @@index([status, nextEvaluationAt])
@@ -3020,7 +3041,7 @@ model TelegramStarsServiceSubscription {
   subscriptionUpdateAt        DateTime?
   // When the worker marked this subscription PAST_DUE (period+grace elapsed with no
   // recurring charge). Cleared when a delayed charge recovers it to ACTIVE.
-  pastDueMarkedAt DateTime?
+  pastDueMarkedAt             DateTime?
 
   lastChargeAt          DateTime?
   lastSuccessfulOrderId String?
@@ -3062,10 +3083,10 @@ model TelegramStarsSubscriptionCharge {
   checkoutSessionId String? @unique
   orderId           String? @unique
 
-  receivedAt          DateTime  @default(now())
-  settlementStartedAt DateTime?
+  receivedAt           DateTime  @default(now())
+  settlementStartedAt  DateTime?
   fulfillmentStartedAt DateTime?
-  completedAt         DateTime?
+  completedAt          DateTime?
 
   refundRequestedAt DateTime?
   refundedAt        DateTime?
@@ -3115,4 +3136,209 @@ model TelegramStarsReconciliationCursor {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// =============================================================================
+// Representative Program (feat/representative-program)
+//
+// A controlled reseller-price program: a user APPLIES to become a
+// representative, the OWNER approves and assigns a pricing TIER, and the
+// representative may then buy eligible SERVICE_PRODUCT items at reseller prices
+// for their OWN account through the existing checkout/payment/provisioning
+// stack. These five tables are PURELY ADDITIVE. They store NO money, NO wallet
+// balance, NO commission, NO debt and NO second ledger — representative pricing
+// only changes the FINAL product price of a normal checkout (§6). Statuses and
+// modes are stored as text columns validated by the @zedbot/shared contract
+// (never a Persian label), matching the AdminServiceOperation precedent.
+// Records are never hard-deleted; tiers and product prices are archived/disabled
+// instead of removed when audit history exists.
+// =============================================================================
+
+// One reseller-program application by one user. At most ONE OPEN application
+// (DRAFT or PENDING_REVIEW) per user is enforced by a partial unique index in
+// the migration; terminal applications (APPROVED/REJECTED/WITHDRAWN) are kept
+// for history. Applicant free-text (explanation/experience) and contact fields
+// (phone/city) are stored here but NEVER logged (§24).
+model RepresentativeApplication {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  // REPRESENTATIVE_APPLICATION_STATUSES code (@zedbot/shared).
+  status String @default("DRAFT")
+
+  // Applicant-provided profile (bounded plain text).
+  fullName                 String
+  phone                    String // normalized 09XXXXXXXXX
+  province                 String
+  city                     String
+  salesChannel             String // REPRESENTATIVE_SALES_CHANNELS code
+  expectedMonthlyCustomers Int
+  experience               String? // optional; empty allowed
+  explanation              String // motivation; never logged
+
+  // OWNER review outcome. decisionReason is MANDATORY on rejection and shown to
+  // the applicant; stored, never logged (§13, §24).
+  reviewedByAdminId String? // soft admin reference (audit survives admin change)
+  decisionReason    String?
+  submittedAt       DateTime? // DRAFT -> PENDING_REVIEW
+  decidedAt         DateTime? // -> APPROVED / REJECTED
+
+  // Telegram replay convergence: the inbound update that submitted the app.
+  sourceUpdateId BigInt? @unique
+
+  // The Representative created when this application is approved (1:1).
+  approvedRepresentative Representative? @relation("RepresentativeApprovedApplication")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+}
+
+// At most ONE Representative per user (userId @unique). TERMINATED is
+// irreversible; the row is retained (never hard-deleted — §20).
+model Representative {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation("UserRepresentative", fields: [userId], references: [id])
+
+  // The approved application that created this representative (1:1). SetNull so
+  // history survives even if an application row is ever removed.
+  approvedApplicationId String?                    @unique
+  approvedApplication   RepresentativeApplication? @relation("RepresentativeApprovedApplication", fields: [approvedApplicationId], references: [id], onDelete: SetNull)
+
+  // REPRESENTATIVE_STATUSES code: ACTIVE / SUSPENDED / TERMINATED.
+  status String @default("ACTIVE")
+
+  // Assigned pricing tier. SetNull so archiving/removing a tier never deletes
+  // the representative; with no active tier the representative buys at retail.
+  tierId String?
+  tier   RepresentativeTier? @relation(fields: [tierId], references: [id], onDelete: SetNull)
+
+  // Per-representative reseller-checkout permission (§13), independent of the
+  // global representative_checkout_enabled switch. Turning it off never cancels
+  // a settled Payment or paid Order (§3, §16).
+  checkoutEnabled Boolean @default(true)
+
+  approvedByAdminId   String? // soft admin references (audit survives admin change)
+  suspendedByAdminId  String?
+  terminatedByAdminId String?
+  statusReason        String? // last lifecycle reason (suspend/terminate); never logged
+  approvedAt          DateTime?
+  suspendedAt         DateTime?
+  terminatedAt        DateTime?
+
+  purchases RepresentativePurchase[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([tierId])
+}
+
+// A named pricing tier. Behaviour binds to the stable `slug`, not the
+// operator-facing `name`. Archived tiers are hidden from new assignment but
+// retained; a tier is NEVER hard-deleted while representatives or prices
+// reference it (§18) — it is archived (isActive=false) instead.
+model RepresentativeTier {
+  id          String  @id @default(uuid())
+  slug        String  @unique // stable machine code (representativeTierSlug)
+  name        String // operator-facing label
+  description String?
+
+  isActive   Boolean   @default(true)
+  archivedAt DateTime?
+
+  sortOrder Int @default(0) // deterministic ordering in the admin list
+
+  createdByAdminId String? // soft admin reference
+
+  representatives Representative[]
+  productPrices   RepresentativeProductPrice[]
+  purchases       RepresentativePurchase[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+}
+
+// The reseller price for one product within one tier. Exactly ONE definition
+// per (tier, product) — editing updates this row in place; archiving flips
+// isActive (never hard-deleted when audit history exists — §19). FIXED_TOMAN
+// stores an exact Toman amount (>=1, <= retail at activation); PERCENT_DISCOUNT
+// stores an integer percent in [1,95] and the resolved Toman price is computed
+// (floored) from the LIVE retail at checkout time.
+model RepresentativeProductPrice {
+  id        String             @id @default(uuid())
+  tierId    String
+  tier      RepresentativeTier @relation(fields: [tierId], references: [id])
+  productId String
+  product   Product            @relation(fields: [productId], references: [id])
+
+  priceMode       String // REPRESENTATIVE_PRICE_MODES code
+  fixedPriceToman Int?
+  percentValue    Int?
+
+  isActive   Boolean   @default(true)
+  archivedAt DateTime?
+
+  createdByAdminId String? // soft admin reference
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tierId, productId])
+  @@index([productId])
+}
+
+// A NON-financial link/marker between a representative-priced checkout and the
+// REUSED CheckoutSession/Payment/Order. It holds NO money and never gates
+// settlement. The financial rows are linked by unique text columns WITHOUT a
+// Prisma relation, so the financial tables stay fully isolated — this marker
+// can never block or cascade a CheckoutSession/Payment/Order (§6). Uniqueness
+// on each link gives idempotency: one purchase row per checkout/payment/order
+// (§25). The immutable pricing snapshot + fingerprints let the settlement
+// boundary reject a STALE tier/product price before money moves (§16).
+model RepresentativePurchase {
+  id String @id @default(uuid())
+
+  representativeId String
+  representative   Representative      @relation(fields: [representativeId], references: [id])
+  userId           String
+  user             User                @relation(fields: [userId], references: [id])
+  tierId           String?
+  tier             RepresentativeTier? @relation(fields: [tierId], references: [id], onDelete: SetNull)
+  productId        String
+  product          Product             @relation(fields: [productId], references: [id])
+
+  // Loose, unique links to the reused financial rows (no FK relation).
+  checkoutSessionId String  @unique
+  paymentId         String? @unique
+  orderId           String? @unique
+
+  // REPRESENTATIVE_PURCHASE_STATUSES code (non-financial marker).
+  status String @default("PENDING")
+
+  // Immutable pricing snapshot frozen at reseller-checkout creation (§16).
+  pricingMode         String @default("REPRESENTATIVE") // REPRESENTATIVE_PRICING_MODE
+  priceMode           String // REPRESENTATIVE_PRICE_MODES code at purchase time
+  retailPriceToman    Int // live Product.priceToman at creation
+  basePriceToman      Int // resolved reseller price (before any stackable discount)
+  discountAmountToman Int    @default(0)
+  finalPriceToman     Int
+  tierFingerprint     String // hash of tier identity/version at creation
+  priceFingerprint    String // hash of the resolved price inputs at creation
+
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([representativeId, createdAt])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
 }
