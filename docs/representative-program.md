@@ -133,11 +133,30 @@ Nothing is duplicated.
 
 The checkout snapshot freezes `pricingMode: "REPRESENTATIVE"` plus the
 representative/tier ids, retail/base/discount/final prices and **tier + price
-fingerprints**. At the settlement boundary the price is re-resolved from live
-data (the reseller-checkout switch is read **uncached**) and a stale
-tier/price fingerprint **fails closed before money moves**. Once a Payment is
-settled the paid Order is authoritative: a later suspension never invalidates
-it, and provisioning continues under the immutable paid snapshot.
+fingerprints**. The price is re-resolved and the tier/price fingerprint is
+re-checked at **two** boundaries, and the behaviour at each follows where the
+money actually moves:
+
+- **«ادامه» / CONTINUE** (before any payment method is chosen): the price is
+  re-resolved and a stale tier/price fingerprint **fails closed** — the draft is
+  rejected and the user is sent back to «خرید نمایندگی». No money has moved.
+- **Wallet settlement**: wallet money moves **at** settlement, so the reseller
+  switch is read **uncached** and a stale fingerprint **fails closed before the
+  balance is deducted** — nothing is stranded.
+- **Card-to-card / online gateway settlement**: the payer has **already** moved
+  their money (card transfer / gateway charge) against the price frozen at
+  CONTINUE, and settlement additionally enforces an **exact amount-match**
+  (payment == frozen final). Re-validating and failing closed here would strand
+  funds the user already paid, so these paths **honour the frozen snapshot** and
+  provision the paid Order — the same SETTLE-time resolver check still **runs**,
+  but its outcome is **observational**: a drifted fingerprint (or a since-flipped
+  reseller switch) records a privacy-safe `representative.settled_stale_pricing`
+  WARN audit marker for the OWNER and never blocks settlement. A card-to-card
+  receipt is also gated by the human reviewer, who may reject-and-refund instead.
+
+Once a Payment is settled the paid Order is authoritative: a later suspension
+never invalidates it, and provisioning continues under the immutable paid
+snapshot (§3 "existing checkouts settle").
 
 ## Financial isolation (§6)
 

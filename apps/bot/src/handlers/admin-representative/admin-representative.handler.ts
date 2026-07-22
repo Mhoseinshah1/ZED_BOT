@@ -67,6 +67,21 @@ const REP_FLOW = "admin_rep:input";
 export const adminRepresentativeHandler = new Composer<BotContext>();
 export const adminRepresentativeTextHandler = new Composer<BotContext>();
 
+// Any admin:rep:* button press means the operator navigated away from a
+// half-entered text step, so a stale reject/suspend/terminate/tier/price input
+// flow must be dropped BEFORE the specific handler runs — otherwise a later
+// «انصراف» leaves currentFlow=admin_rep:input and the operator's next ordinary
+// message is silently consumed as (e.g.) the rejection reason. The
+// input-initiating handlers re-arm the flow AFTER this middleware, so they are
+// unaffected. Registered first so it runs first.
+adminRepresentativeHandler.callbackQuery(/^admin:rep:/, async (ctx, next) => {
+  if (ctx.session.currentFlow === REP_FLOW) {
+    ctx.session.currentFlow = null;
+    delete ctx.session.temp.adminRepDraft;
+  }
+  await next();
+});
+
 const AC = {
   ROOT: "admin:rep:root",
   LIST: "admin:rep:list:", // + filter:page

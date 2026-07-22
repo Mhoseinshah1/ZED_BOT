@@ -303,6 +303,20 @@ representativeHandler.callbackQuery(RC.CONFIRM, async (ctx) => {
     await safeAnswerCallback(ctx, "اطلاعات ناقص است.");
     return;
   }
+  // §3 stale-safe: a preview can sit open while the OWNER disables the program or
+  // closes new applications. Re-check BOTH gates at the submit boundary so a stale
+  // «تأیید» button cannot create an application after the door is shut. Fail closed:
+  // clear the wizard and drop the user back to the (now-closed) landing.
+  if (
+    !(await isRepresentativeProgramEnabled()) ||
+    !(await areRepresentativeApplicationsEnabled())
+  ) {
+    ctx.session.temp.repApplicationDraft = undefined;
+    ctx.session.currentFlow = null;
+    await safeAnswerCallback(ctx, APPLICATIONS_OFF_TEXT);
+    await renderLanding(ctx);
+    return;
+  }
   const sourceUpdateId =
     ctx.update.update_id !== undefined ? BigInt(ctx.update.update_id) : null;
   try {

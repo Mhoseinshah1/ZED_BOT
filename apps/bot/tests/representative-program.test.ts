@@ -43,7 +43,9 @@ async function withReferralEnabled<T>(fn: () => Promise<T>): Promise<T> {
     clearSettingsCache();
   }
 }
+import { createCheckoutSession } from "../src/services/checkout.service.js";
 import {
+  auditRepresentativeSettlementPricing,
   isRepresentativePricedCheckout,
   resolveEffectiveProductPrice,
 } from "../src/services/representative-pricing.service.js";
@@ -67,6 +69,7 @@ import {
   upsertRepresentativeProductPrice,
 } from "../src/services/representative-tier.service.js";
 import { clearSettingsCache } from "../src/services/settings.service.js";
+import { OPS_EVENTS } from "../src/services/system-log.service.js";
 import { payPurchaseDraftWithWallet } from "../src/services/wallet-payment.service.js";
 
 // =============================================================================
@@ -613,6 +616,160 @@ describe.skipIf(!hasDb)("reseller checkout + financial isolation", () => {
     const order = await prisma.order.findUniqueOrThrow({ where: { id: result.order.id } });
     expect(["PAID", "COMPLETED"]).toContain(order.status);
     expect(order.paymentId).toBe(result.payment.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe.skipIf(!hasDb)("settlement-boundary staleness audit (§16, P1@451)", () => {
+  const STALE_EVENT = OPS_EVENTS.REPRESENTATIVE_STALE_SETTLEMENT;
+
+  async function countStaleLogs(userId: string): Promise<number> {
+    return prisma.systemLog.count({ where: { userId, eventType: STALE_EVENT } });
+  }
+
+  it("does NOT flag a card/gateway settlement whose frozen fingerprints still match live pricing", async () => {
+    const user = await createUser(1_000_000);
+    const tierId = await makeTierWithPrice("FIXED_TOMAN", 60_000);
+    await makeActiveRep(user, tierId);
+    const product = await prisma.product.findUniqueOrThrow({ where: { id: serviceProductId } });
+    const effective = await resolveEffectiveProductPrice({
+      user,
+      product,
+      checkoutPurpose: "PURCHASE",
+      mode: "PREVIEW",
+    });
+    if (effective.pricingMode !== "REPRESENTATIVE") throw new Error("expected representative");
+    const before = await countStaleLogs(user.id);
+    await auditRepresentativeSettlementPricing({
+      userId: user.id,
+      productId: serviceProductId,
+      productSnapshot: {
+        pricingMode: "REPRESENTATIVE",
+        tierFingerprint: effective.tierFingerprint,
+        priceFingerprint: effective.priceFingerprint,
+      },
+    });
+    expect(await countStaleLogs(user.id)).toBe(before);
+  });
+
+  it("flags (but never blocks) a settlement whose tier/price fingerprint drifted after payment", async () => {
+    const user = await createUser(1_000_000);
+    const tierId = await makeTierWithPrice("FIXED_TOMAN", 60_000);
+    await makeActiveRep(user, tierId);
+    const before = await countStaleLogs(user.id);
+    // Frozen snapshot still resolves to REPRESENTATIVE live, but the frozen
+    // fingerprints no longer match → observational WARN, order still honored.
+    await auditRepresentativeSettlementPricing({
+      userId: user.id,
+      productId: serviceProductId,
+      productSnapshot: {
+        pricingMode: "REPRESENTATIVE",
+        tierFingerprint: "stale-tier",
+        priceFingerprint: "stale-price",
+      },
+    });
+    expect(await countStaleLogs(user.id)).toBe(before + 1);
+    const log = await prisma.systemLog.findFirst({
+      where: { userId: user.id, eventType: STALE_EVENT },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(log?.level).toBe("WARN");
+    const meta = (log?.metadata ?? {}) as Record<string, unknown>;
+    expect(meta.stillRepresentative).toBe(true);
+    expect(meta.priceFingerprintChanged).toBe(true);
+  });
+
+  it("flags a settlement whose payer is no longer an eligible representative", async () => {
+    // A user who is NOT a representative, but the frozen snapshot claims one:
+    // live pricing resolves to RETAIL → fully stale, order still honored.
+    const user = await createUser(1_000_000);
+    const before = await countStaleLogs(user.id);
+    await auditRepresentativeSettlementPricing({
+      userId: user.id,
+      productId: serviceProductId,
+      productSnapshot: {
+        pricingMode: "REPRESENTATIVE",
+        tierFingerprint: "x",
+        priceFingerprint: "y",
+      },
+    });
+    expect(await countStaleLogs(user.id)).toBe(before + 1);
+    const log = await prisma.systemLog.findFirst({
+      where: { userId: user.id, eventType: STALE_EVENT },
+      orderBy: { createdAt: "desc" },
+    });
+    const meta = (log?.metadata ?? {}) as Record<string, unknown>;
+    expect(meta.stillRepresentative).toBe(false);
+  });
+
+  it("never touches a retail settlement (no rep snapshot → no audit)", async () => {
+    const user = await createUser(1_000_000);
+    const before = await countStaleLogs(user.id);
+    await auditRepresentativeSettlementPricing({
+      userId: user.id,
+      productId: serviceProductId,
+      productSnapshot: { productId: serviceProductId, productName: "retail" },
+    });
+    expect(await countStaleLogs(user.id)).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe.skipIf(!hasDb)("superseded reseller checkouts cancel their markers (P2@128)", () => {
+  it("a re-created reseller checkout flips the prior PENDING RepresentativePurchase to CANCELLED", async () => {
+    const user = await createUser(1_000_000);
+    const tierId = await makeTierWithPrice("FIXED_TOMAN", 60_000);
+    await makeActiveRep(user, tierId);
+    const product = await prisma.product.findUniqueOrThrow({
+      where: { id: serviceProductId },
+      include: { category: true, panel: true },
+    });
+    const effective = await resolveEffectiveProductPrice({
+      user,
+      product,
+      checkoutPurpose: "PURCHASE",
+      mode: "PREVIEW",
+    });
+    if (effective.pricingMode !== "REPRESENTATIVE") throw new Error("expected representative");
+    const draft = (): CheckoutDraft => ({
+      productId: serviceProductId,
+      categoryId,
+      panelId,
+      flowType: "SERVICE_PRODUCT",
+      originalPriceToman: effective.basePriceToman,
+      discountAmountToman: 0,
+      finalPriceToman: effective.finalPriceToman,
+      draftNonce: randomUUID(),
+      representative: {
+        representativeId: effective.representativeId,
+        tierId: effective.tierId,
+        tierSlug: effective.tierSlug,
+        priceMode: effective.priceMode,
+        retailPriceToman: effective.retailPriceToman,
+        basePriceToman: effective.basePriceToman,
+        tierFingerprint: effective.tierFingerprint,
+        priceFingerprint: effective.priceFingerprint,
+      },
+    });
+    const first = await createCheckoutSession(user, product, draft());
+    const firstMarker = await prisma.representativePurchase.findUniqueOrThrow({
+      where: { checkoutSessionId: first.id },
+    });
+    expect(firstMarker.status).toBe("PENDING");
+
+    // Clicking "continue" again supersedes the first checkout.
+    const second = await createCheckoutSession(user, product, draft());
+    expect(second.id).not.toBe(first.id);
+
+    const firstAfter = await prisma.representativePurchase.findUniqueOrThrow({
+      where: { checkoutSessionId: first.id },
+    });
+    const secondMarker = await prisma.representativePurchase.findUniqueOrThrow({
+      where: { checkoutSessionId: second.id },
+    });
+    // The superseded marker is cancelled; the live one stays pending.
+    expect(firstAfter.status).toBe("CANCELLED");
+    expect(secondMarker.status).toBe("PENDING");
   });
 });
 

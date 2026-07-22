@@ -37,6 +37,7 @@ import {
 import { dispatchPaidOrderFulfillment } from "./order-fulfillment.service.js";
 import { type DeliverySendApi } from "./other-product-delivery.service.js";
 import { resolveOrderType } from "./receipt-review.service.js";
+import { auditRepresentativeSettlementPricing } from "./representative-pricing.service.js";
 import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 import { getMessageTemplate } from "./text.service.js";
 import { WALLET_TOPUP_REASON } from "./wallet-topup.service.js";
@@ -876,6 +877,15 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
 
       return order;
     });
+
+    // §16 settlement-boundary audit (gateway): the user was already charged
+    // against the frozen reseller price and the amount-match above is exact, so
+    // the paid Order is authoritative and honored as-is; this only records a
+    // WARN marker if live reseller pricing drifted. Order payments only; never
+    // blocks/mutates/throws.
+    if (payment.purpose === PaymentPurpose.ORDER_PAYMENT) {
+      void auditRepresentativeSettlementPricing(checkout);
+    }
 
     const settled = await prisma.payment.findUnique({ where: { id: payment.id } });
     // Audit trail: this payment claimed and settled the checkout.

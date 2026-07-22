@@ -1,4 +1,10 @@
-import { prisma, type DiscountCode, type Product, type User } from "@zedbot/database";
+import {
+  prisma,
+  type CheckoutSession,
+  type DiscountCode,
+  type Product,
+  type User,
+} from "@zedbot/database";
 import {
   buildRepresentativePriceFingerprint,
   buildRepresentativeTierFingerprint,
@@ -12,7 +18,10 @@ import { calculateDiscountAmount, type DiscountPurpose } from "./discount.servic
 import {
   isRepresentativeCheckoutEnabled,
   isRepresentativeCheckoutEnabledFresh,
+  isRepresentativeProgramEnabled,
+  isRepresentativeProgramEnabledFresh,
 } from "./representative-settings.service.js";
+import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 
 // =============================================================================
 // Representative Program — the ONE authoritative effective-price resolver (§7).
@@ -116,12 +125,22 @@ async function resolveRepresentativeBase(
     return null;
   }
 
-  // §3 global reseller-checkout switch — uncached at the settlement boundary.
-  const enabled =
+  // §3 switches — reseller pricing requires BOTH the program master switch AND
+  // the reseller-checkout switch. Read uncached at the settlement boundary so an
+  // OWNER emergency-disable of EITHER switch takes effect immediately (a stale
+  // product button can otherwise still seed/settle a reseller draft while the
+  // master switch is off).
+  const [programOn, checkoutOn] =
     input.mode === "SETTLE"
-      ? await isRepresentativeCheckoutEnabledFresh()
-      : await isRepresentativeCheckoutEnabled();
-  if (!enabled) {
+      ? await Promise.all([
+          isRepresentativeProgramEnabledFresh(),
+          isRepresentativeCheckoutEnabledFresh(),
+        ])
+      : await Promise.all([
+          isRepresentativeProgramEnabled(),
+          isRepresentativeCheckoutEnabled(),
+        ]);
+  if (!programOn || !checkoutOn) {
     return null;
   }
 
@@ -305,4 +324,96 @@ export async function isRepresentativePricedCheckout(
     return (snapshot as Record<string, unknown>).pricingMode === REPRESENTATIVE_PRICING_MODE;
   }
   return false;
+}
+
+/**
+ * Settlement-boundary staleness AUDIT for the card-to-card and gateway paths
+ * (§16). Unlike the wallet path — where money moves AT settlement, so a stale
+ * fingerprint fails closed BEFORE any deduction — a card/gateway payer has
+ * ALREADY moved their money (card-to-card transfer / gateway charge) against the
+ * price frozen at «ادامه»/CONTINUE, and the settlement layer additionally
+ * enforces an EXACT amount-match (payment == frozen final). Re-validating and
+ * failing closed here would therefore strand funds the user already paid and
+ * contradict §3 ("existing checkouts settle") and §16 ("once a Payment is
+ * settled the paid Order is authoritative").
+ *
+ * So this makes the intended SETTLE-time resolver check RUN on every path — but
+ * for card/gateway its outcome is OBSERVATIONAL: when the live tier/price
+ * fingerprint (or the reseller switch, read uncached) has drifted from the
+ * frozen snapshot, it records a privacy-safe WARN audit marker (ids + coarse
+ * flags only, §24) so the OWNER sees the drift. It NEVER blocks settlement,
+ * NEVER mutates the paid Order, and NEVER throws. Retail checkouts short-circuit.
+ */
+export async function auditRepresentativeSettlementPricing(
+  checkout: Pick<CheckoutSession, "userId" | "productId" | "productSnapshot">,
+): Promise<void> {
+  try {
+    if (checkout.productId === null) {
+      return;
+    }
+    const snapshot = checkout.productSnapshot;
+    if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+      return; // retail / no snapshot — nothing to audit, no DB read.
+    }
+    const snap = snapshot as Record<string, unknown>;
+    if (snap.pricingMode !== REPRESENTATIVE_PRICING_MODE) {
+      return; // retail — nothing to audit.
+    }
+    const product = await prisma.product.findUnique({
+      where: { id: checkout.productId },
+      select: { id: true, type: true, priceToman: true, representativeEligible: true },
+    });
+    if (product === null) {
+      return;
+    }
+    const effective = await resolveEffectiveProductPrice({
+      user: { id: checkout.userId },
+      product,
+      checkoutPurpose: "PURCHASE",
+      discountCode: null,
+      mode: "SETTLE",
+    });
+    const frozenTierFp = typeof snap.tierFingerprint === "string" ? snap.tierFingerprint : null;
+    const frozenPriceFp = typeof snap.priceFingerprint === "string" ? snap.priceFingerprint : null;
+
+    // Privacy-safe (§24): relational id + coarse boolean flags only; never the
+    // fingerprints, prices, tier name or any explanation body.
+    if (effective.pricingMode !== REPRESENTATIVE_PRICING_MODE) {
+      // Live pricing no longer resolves to reseller at all (switch off, rep
+      // suspended/terminated, tier/price archived, product de-listed): fully stale.
+      await writeSystemLog({
+        level: "WARN",
+        eventType: OPS_EVENTS.REPRESENTATIVE_STALE_SETTLEMENT,
+        message: "representative checkout settled with stale reseller pricing (order honored)",
+        metadata: {
+          stillRepresentative: false,
+          tierFingerprintChanged: true,
+          priceFingerprintChanged: true,
+        },
+        topicKey: "PAYMENT",
+        userId: checkout.userId,
+      });
+      return;
+    }
+    // `effective` is narrowed to the REPRESENTATIVE variant here.
+    const tierFingerprintChanged = effective.tierFingerprint !== frozenTierFp;
+    const priceFingerprintChanged = effective.priceFingerprint !== frozenPriceFp;
+    if (!tierFingerprintChanged && !priceFingerprintChanged) {
+      return; // live pricing still matches the frozen agreement — nothing to flag.
+    }
+    await writeSystemLog({
+      level: "WARN",
+      eventType: OPS_EVENTS.REPRESENTATIVE_STALE_SETTLEMENT,
+      message: "representative checkout settled with stale reseller pricing (order honored)",
+      metadata: {
+        stillRepresentative: true,
+        tierFingerprintChanged,
+        priceFingerprintChanged,
+      },
+      topicKey: "PAYMENT",
+      userId: checkout.userId,
+    });
+  } catch {
+    // Observational audit only — a failure here must never affect settlement.
+  }
 }

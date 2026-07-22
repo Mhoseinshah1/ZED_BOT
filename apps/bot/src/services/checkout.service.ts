@@ -122,10 +122,28 @@ export async function createCheckoutSession(
   // without its non-financial marker. The retail path takes no transaction and
   // is byte-identical to before.
   return prisma.$transaction(async (tx) => {
+    // Capture the superseded PENDING checkout ids BEFORE cancelling them, so any
+    // reseller-purchase markers hanging off those checkouts can be cancelled in
+    // the same breath. Otherwise a repeated "continue" leaves an orphaned PENDING
+    // RepresentativePurchase that never resolves (§25 idempotency invariant: a
+    // marker's lifecycle tracks its checkout's).
+    const superseded = await tx.checkoutSession.findMany({
+      where: { userId: user.id, productId: product.id, status: CheckoutStatus.PENDING },
+      select: { id: true },
+    });
     await tx.checkoutSession.updateMany({
       where: { userId: user.id, productId: product.id, status: CheckoutStatus.PENDING },
       data: { status: CheckoutStatus.CANCELLED },
     });
+    if (superseded.length > 0) {
+      await tx.representativePurchase.updateMany({
+        where: {
+          checkoutSessionId: { in: superseded.map((c) => c.id) },
+          status: "PENDING",
+        },
+        data: { status: "CANCELLED" },
+      });
+    }
 
     const checkout = await tx.checkoutSession.create({
       data: {
