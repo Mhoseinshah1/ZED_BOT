@@ -14,6 +14,7 @@ import {
 } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
+import { isRepresentativePricedCheckout } from "./representative-pricing.service.js";
 import {
   getReferralConfig,
   getReferralPayoutWindows,
@@ -67,7 +68,8 @@ export type ReferralCreditResult =
         | "not-completed"
         | "no-referrer"
         | "not-eligible"
-        | "self-referral";
+        | "self-referral"
+        | "representative-excluded";
     };
 
 /**
@@ -119,7 +121,14 @@ export async function creditReferralCommissionForOrder(
   }
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { id: true, userId: true, status: true, completedAt: true, finalPriceToman: true },
+    select: {
+      id: true,
+      userId: true,
+      status: true,
+      completedAt: true,
+      finalPriceToman: true,
+      checkoutSessionId: true,
+    },
   });
   if (order === null) {
     return { status: "order-missing" };
@@ -145,6 +154,16 @@ export async function creditReferralCommissionForOrder(
     // marker so the durable scan stops re-selecting it (convergence).
     await recordNoCommissionMarker(referral.id, referral.referrerUserId, order.userId, order.id, 0, 0);
     return { status: "self-referral" };
+  }
+
+  // Representative-program financial isolation (§6, §17): a reseller-priced
+  // order (its checkout's immutable pricingMode is REPRESENTATIVE) NEVER earns a
+  // referral commission — the representative price is the ONLY benefit and it
+  // does not stack with affiliate credit. Record a terminal marker so the
+  // durable catch-all scan converges, exactly like the not-eligible path.
+  if (await isRepresentativePricedCheckout(order.checkoutSessionId)) {
+    await recordNoCommissionMarker(referral.id, referral.referrerUserId, order.userId, order.id, 0, 0);
+    return { status: "representative-excluded" };
   }
 
   const config = await getReferralConfig();

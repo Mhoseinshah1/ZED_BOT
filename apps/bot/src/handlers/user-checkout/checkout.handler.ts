@@ -26,6 +26,7 @@ import {
   getCheckoutByShortId,
 } from "../../services/checkout.service.js";
 import { validateDiscountCode } from "../../services/discount.service.js";
+import { resolveEffectiveProductPrice } from "../../services/representative-pricing.service.js";
 import { getPendingReviewPayment } from "../../services/payment-method.service.js";
 import { getProductByShortId, type ProductWithRelations } from "../../services/product.service.js";
 import {
@@ -73,7 +74,7 @@ function backKeyboard(backCb: string): InlineKeyboard {
   return new InlineKeyboard().text("بازگشت", backCb);
 }
 
-async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {
+export async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {
   const draft = ctx.session.temp.checkoutDraft;
   const user = ctx.dbUser;
   if (draft === undefined || user === null) {
@@ -439,24 +440,50 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
   }
 
   // Re-validate pricing + discount at click time (price/code may have changed).
-  draft.originalPriceToman = product.priceToman;
-  if (draft.discountCode !== undefined) {
-    const validation = await validateDiscountCode(draft.discountCode, user, product.priceToman);
-    if (validation.ok) {
-      draft.discountCodeId = validation.discountCode.id;
-      draft.discountAmountToman = validation.discountAmountToman;
-      draft.finalPriceToman = validation.finalPriceToman;
-    } else {
-      draft.discountCode = undefined;
-      draft.discountCodeId = undefined;
-      draft.discountAmountToman = 0;
-      draft.finalPriceToman = product.priceToman;
-      await safeAnswerCallback(ctx, "کد تخفیف دیگر معتبر نیست و حذف شد.");
-      await renderPreInvoice(ctx, true);
+  if (draft.representative !== undefined) {
+    // Representative purchase (§16): re-resolve the reseller price from live data
+    // and fail closed if the tier/price fingerprint changed since the agreement.
+    const effective = await resolveEffectiveProductPrice({
+      user,
+      product,
+      checkoutPurpose: "PURCHASE",
+      discountCode: null,
+      mode: "PREVIEW",
+    });
+    if (
+      effective.pricingMode !== "REPRESENTATIVE" ||
+      effective.priceFingerprint !== draft.representative.priceFingerprint ||
+      effective.tierFingerprint !== draft.representative.tierFingerprint
+    ) {
+      clearCheckoutState(ctx);
+      await safeAnswerCallback(ctx, "قیمت نمایندگی تغییر کرده است. لطفاً دوباره اقدام کنید.");
+      await safeEditOrReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard("user:rep:buy"));
       return;
     }
+    draft.originalPriceToman = effective.basePriceToman;
+    draft.discountAmountToman = effective.discountAmountToman;
+    draft.discountCodeId = effective.discountCodeId ?? undefined;
+    draft.finalPriceToman = effective.finalPriceToman;
   } else {
-    draft.finalPriceToman = product.priceToman;
+    draft.originalPriceToman = product.priceToman;
+    if (draft.discountCode !== undefined) {
+      const validation = await validateDiscountCode(draft.discountCode, user, product.priceToman);
+      if (validation.ok) {
+        draft.discountCodeId = validation.discountCode.id;
+        draft.discountAmountToman = validation.discountAmountToman;
+        draft.finalPriceToman = validation.finalPriceToman;
+      } else {
+        draft.discountCode = undefined;
+        draft.discountCodeId = undefined;
+        draft.discountAmountToman = 0;
+        draft.finalPriceToman = product.priceToman;
+        await safeAnswerCallback(ctx, "کد تخفیف دیگر معتبر نیست و حذف شد.");
+        await renderPreInvoice(ctx, true);
+        return;
+      }
+    } else {
+      draft.finalPriceToman = product.priceToman;
+    }
   }
 
   // Naming phase gate: a strategy whose required config is missing blocks

@@ -10,6 +10,7 @@ import { openOtherProductsSection, startBuyFlow } from "./user-checkout/checkout
 import { openFreeTrialSection } from "./user-free-trial/free-trial.handler.js";
 import { renderOrdersHub } from "./user-orders/orders.handler.js";
 import { renderReferralPage } from "./user-referral/referral.handler.js";
+import { renderRepresentativeLanding } from "./user-representative/representative.handler.js";
 import { renderRenewableList } from "./user-renewal/renewal.handler.js";
 import { renderServicesList } from "./user-services/services.handler.js";
 import { renderSupportLanding } from "./user-support/support.handler.js";
@@ -41,6 +42,7 @@ const ACTION_HANDLERS: Record<UserMainMenuAction, (ctx: BotContext) => Promise<v
   SUPPORT: (ctx) => renderSupportLanding(ctx),
   FREE_TRIAL: openFreeTrialSection,
   REFERRAL: (ctx) => renderReferralPage(ctx),
+  REPRESENTATIVE: (ctx) => renderRepresentativeLanding(ctx),
 };
 
 /** Opens one main-menu section - the same entry the inline callback uses. */

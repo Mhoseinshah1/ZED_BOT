@@ -17,6 +17,7 @@ import {
 } from "@zedbot/database";
 
 import { claimDiscountUsage } from "./discount.service.js";
+import { auditRepresentativeSettlementPricing } from "./representative-pricing.service.js";
 import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 import { WALLET_TOPUP_REASON } from "./wallet-topup.service.js";
 
@@ -363,6 +364,11 @@ export async function approveReceiptPayment(
 
       return order;
     });
+
+    // §16 settlement-boundary audit (card-to-card): the paid Order is already
+    // authoritative and is honored as frozen; this only records a WARN marker if
+    // live reseller pricing drifted after the user paid. Never blocks/mutates.
+    void auditRepresentativeSettlementPricing(checkout);
 
     // Ops log (PAYMENT topic) - ids/amounts only, never the receipt itself.
     void writeSystemLog({

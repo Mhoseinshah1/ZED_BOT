@@ -390,6 +390,23 @@ fails closed while the program is off. Referral *attribution* (the `/start`
 linker, now one atomic claim) is unchanged and always on. See
 `docs/referral-affiliate-system.md`.
 
+**Representative program (managed reseller pricing)**: a controlled program
+where a user applies («نمایندگی 🤝»), the OWNER approves and assigns a pricing
+**tier**, and the active representative may then buy eligible `SERVICE_PRODUCT`
+items at the configured reseller price **for their own account** through the
+existing checkout / payment / provisioning stack. It is not a second referral,
+affiliate, MLM or wallet system: reseller pricing changes only the checkout's
+final product price (`resolveEffectiveProductPrice`), a reseller-priced order
+never earns a referral commission, and the immutable checkout snapshot +
+tier/price fingerprints reject a stale price before money moves. Three
+OWNER-managed switches (program / applications / checkout), all default off, gate
+the menu row, the application intake and reseller checkout respectively;
+disabling never cancels a settled Payment / paid Order or revokes a provisioned
+Service. The OWNER reviews applications, manages tiers and per-product prices and
+runs the representative lifecycle (approve/reject/suspend/reactivate/terminate)
+from «تنظیمات عمومی ⚙️ → مدیریت نمایندگی 🤝». See
+`docs/representative-program.md`.
+
 **Configurable user main-menu keyboard**: admins choose («تنظیمات عمومی ⚙️
 → نوع نمایش منوی کاربر») whether the user main menu renders as inline
 glass buttons inside the message (default) or as a persistent reply

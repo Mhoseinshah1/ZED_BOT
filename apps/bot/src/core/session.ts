@@ -97,6 +97,29 @@ export interface CheckoutDraft {
   finalPriceToman: number;
   /** Unique per pre-invoice; wallet-payment idempotency key (Phase 15). */
   draftNonce?: string;
+  /**
+   * Representative Program (feat/representative-program, §16): present ONLY for
+   * a reseller-priced purchase started from «خرید نمایندگی». When absent (every
+   * normal retail checkout) the flow behaves byte-identically to before. Carries
+   * the immutable pricing agreement (retail/base + tier identity + stale-price
+   * fingerprints) that the settlement boundary re-validates before money moves.
+   */
+  representative?: RepresentativeDraftContext;
+}
+
+/** The frozen reseller-pricing agreement carried on a representative checkout
+ * draft. Behaviour binds to these codes/ids, never a Persian label. */
+export interface RepresentativeDraftContext {
+  representativeId: string;
+  tierId: string;
+  tierSlug: string;
+  /** REPRESENTATIVE_PRICE_MODES code at agreement time. */
+  priceMode: string;
+  retailPriceToman: number;
+  /** Resolved reseller base price (before any stackable discount). */
+  basePriceToman: number;
+  tierFingerprint: string;
+  priceFingerprint: string;
 }
 
 /** Renewal pre-invoice draft (Phase 12). No DB rows until "continue". */
@@ -213,6 +236,45 @@ export interface SessionData {
     editingProductField?: string;
     // User checkout draft (pre-invoice).
     checkoutDraft?: CheckoutDraft;
+    // Representative Program (feat/representative-program, §9,§10): the
+    // application-wizard draft. Held in session ONLY — no DB row until the
+    // applicant confirms. Free-text is never persisted anywhere until submit.
+    repApplicationDraft?: {
+      step:
+        | "fullName"
+        | "phone"
+        | "province"
+        | "city"
+        | "salesChannel"
+        | "expected"
+        | "experience"
+        | "explanation"
+        | "preview";
+      fullName?: string;
+      phone?: string;
+      province?: string;
+      city?: string;
+      salesChannel?: string;
+      expectedMonthlyCustomers?: number;
+      experience?: string | null;
+      explanation?: string;
+    };
+    // Representative Program admin flows (§11-§19): reason/name/price text input.
+    adminRepDraft?: {
+      kind:
+        | "reject"
+        | "suspend"
+        | "terminate"
+        | "tier_name"
+        | "tier_desc"
+        | "price_fixed"
+        | "price_percent";
+      applicationId?: string;
+      representativeId?: string;
+      tierId?: string;
+      productId?: string;
+      nonce: string;
+    };
     // Renewal pre-invoice draft (Phase 12).
     renewalDraft?: RenewalDraft;
     // Wallet top-up draft (Phase 14).

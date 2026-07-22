@@ -71,6 +71,10 @@ import {
   autoRenewalTextHandler,
 } from "./handlers/user-renewal/auto-renewal.handler.js";
 import { userOrdersHandler } from "./handlers/user-orders/orders.handler.js";
+import {
+  representativeHandler,
+  representativeInputHandler,
+} from "./handlers/user-representative/representative.handler.js";
 import { diagnosticsHandler } from "./handlers/user-services/diagnostics.handler.js";
 import {
   guideHandoffCancelMiddleware,
@@ -101,6 +105,10 @@ import {
   autoRenewalAdminTextHandler,
 } from "./handlers/admin-settings/auto-renewal-admin.handler.js";
 import { referralAdminHandler } from "./handlers/admin-settings/referral-admin.handler.js";
+import {
+  adminRepresentativeHandler,
+  adminRepresentativeTextHandler,
+} from "./handlers/admin-representative/admin-representative.handler.js";
 import {
   diagnosticsAdminHandler,
   diagnosticsAdminTextHandler,
@@ -253,6 +261,7 @@ export function createBot(token: string): Bot<BotContext> {
   // admin page (admin:referral:*) — master switch, commission percent, first-
   // purchase-only, minimum order, totals. Never moves money or creates a commission.
   adminArea.use(referralAdminHandler);
+  adminArea.use(adminRepresentativeHandler);
   adminArea.use(deviceGuidesHandler);
   adminArea.use(diagnosticsAdminHandler);
   // Admin Service Operations (feat/admin-service-operations): the per-Service
@@ -318,6 +327,7 @@ export function createBot(token: string): Bot<BotContext> {
   // flow ("admin_svc:input"). Self-gates on currentFlow, so every other admin
   // flow passes through untouched.
   adminFlowText.use(adminServiceOpsTextHandler);
+  adminFlowText.use(adminRepresentativeTextHandler);
   // Phase 2.1: Stars product subscription price input ("admin_starsprod:price").
   // Self-gates on currentFlow, so it passes through for every other admin flow.
   adminFlowText.use(starsProductPriceTextHandler);
@@ -358,6 +368,11 @@ export function createBot(token: string): Bot<BotContext> {
     }
     if (flow === "checkout:discount") {
       await checkoutTextHandler.middleware()(ctx, next);
+      return;
+    }
+    // Representative Program application wizard (one flow, step in the draft).
+    if (flow === "rep:apply") {
+      await representativeInputHandler.middleware()(ctx, next);
       return;
     }
     if (flow === "renew:discount") {
@@ -454,6 +469,7 @@ export function createBot(token: string): Bot<BotContext> {
   // Referral affiliate phase: the real referral page - must run before the
   // placeholder handler, which used to own CB.USER_REFERRAL.
   userArea.use(userReferralHandler);
+  userArea.use(representativeHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());

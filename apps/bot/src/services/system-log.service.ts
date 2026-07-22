@@ -50,6 +50,11 @@ export const OPS_EVENTS = {
   // a group is activated - it proves SystemLog persistence, SystemLogDelivery
   // creation, the worker queue, topic routing and Telegram delivery all work.
   LOG_GROUP_CONNECTED: "log_group.connected",
+  // Representative program: a reseller-priced checkout settled (card / gateway)
+  // while its live tier/price fingerprint no longer matched the frozen snapshot.
+  // Observational only - the paid Order is authoritative and is NOT invalidated
+  // (§16); the OWNER gets visibility that live pricing drifted after payment.
+  REPRESENTATIVE_STALE_SETTLEMENT: "representative.settled_stale_pricing",
 } as const;
 export type OpsEventType = (typeof OPS_EVENTS)[keyof typeof OPS_EVENTS];
 

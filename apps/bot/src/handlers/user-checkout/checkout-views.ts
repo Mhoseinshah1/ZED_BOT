@@ -124,7 +124,15 @@ export function preInvoiceText(
   }
 
   lines.push("");
-  if (draft.discountCode !== undefined) {
+  if (draft.representative !== undefined) {
+    // Reseller pricing (§16): retail, the representative price and the saving.
+    const saved = Math.max(0, draft.representative.retailPriceToman - draft.finalPriceToman);
+    lines.push(
+      `🏷 قیمت عادی: <s>${formatToman(draft.representative.retailPriceToman)}</s>`,
+      `🤝 قیمت نمایندگی: <b>${formatToman(draft.finalPriceToman)}</b>`,
+      `💰 صرفه‌جویی شما: ${formatToman(saved)}`,
+    );
+  } else if (draft.discountCode !== undefined) {
     lines.push(
       `💵 قیمت اصلی: ${formatToman(draft.originalPriceToman)}`,
       `🎟 تخفیف: ${formatToman(draft.discountAmountToman)}`,
@@ -173,17 +181,24 @@ export function preInvoiceKeyboard(
   if (walletPaymentEnabled && walletPayAvailable(user, draft.finalPriceToman)) {
     kb.text("پرداخت با کیف پول 🏦", CO_CB.WALLET).row();
   }
-  if (draft.discountCode === undefined) {
-    kb.text("ثبت کد تخفیف 🎟", CO_CB.DISCOUNT).row();
-  } else {
-    kb.text("حذف کد تخفیف ❌", CO_CB.DISCOUNT_CLEAR).row();
+  // Representative Program (§16): the reseller price is already applied; the
+  // user-facing rep pre-invoice does NOT offer a discount-code entry (retail
+  // checkouts are unchanged), and «بازگشت» returns to the rep product list.
+  if (draft.representative === undefined) {
+    if (draft.discountCode === undefined) {
+      kb.text("ثبت کد تخفیف 🎟", CO_CB.DISCOUNT).row();
+    } else {
+      kb.text("حذف کد تخفیف ❌", CO_CB.DISCOUNT_CLEAR).row();
+    }
   }
   const backCb =
-    draft.flowType === "SERVICE_PRODUCT"
-      ? draft.panelId !== undefined
-        ? ccb.buyCategory(draft.panelId.slice(0, 8), draft.categoryId.slice(0, 8))
-        : CO_CB.BUY
-      : ccb.otherCategory(draft.categoryId.slice(0, 8));
+    draft.representative !== undefined
+      ? "user:rep:buy"
+      : draft.flowType === "SERVICE_PRODUCT"
+        ? draft.panelId !== undefined
+          ? ccb.buyCategory(draft.panelId.slice(0, 8), draft.categoryId.slice(0, 8))
+          : CO_CB.BUY
+        : ccb.otherCategory(draft.categoryId.slice(0, 8));
   kb.text("بازگشت", backCb).text("منوی اصلی", CB.USER_MENU);
   return kb;
 }

@@ -950,6 +950,63 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     defaultContent: "سرویس شما توسط پشتیبانی بروزرسانی شد ✅\nبرای مشاهده جزئیات روی دکمه زیر بزنید.",
     allowedVariables: [],
   },
+  // --- Representative Program (feat/representative-program, §22) --------------
+  // Editable operator copy for the reseller-price program. Dynamic values are
+  // escaped by the caller; no secret-shaped variables are exposed.
+  {
+    key: "representative_landing",
+    title: "نمایندگی - معرفی برنامه",
+    category: "representative",
+    defaultContent:
+      "🤝 <b>برنامه نمایندگی</b>\n\n" +
+      "با عضویت در برنامه نمایندگی می‌توانید سرویس‌های واجد شرایط را با قیمت ویژهٔ نمایندگی برای حساب خودتان خریداری کنید.\n\n" +
+      "برای شروع، درخواست خود را ثبت کنید تا پس از بررسی، تعرفهٔ نمایندگی برای شما فعال شود.",
+    allowedVariables: [],
+  },
+  {
+    key: "representative_application_received",
+    title: "نمایندگی - ثبت درخواست",
+    category: "representative",
+    defaultContent:
+      "درخواست نمایندگی شما با موفقیت ثبت شد و در انتظار بررسی است. نتیجه از همین ربات به شما اطلاع داده می‌شود. 🙏",
+    allowedVariables: [],
+  },
+  {
+    key: "representative_application_approved",
+    title: "نمایندگی - تأیید درخواست",
+    category: "representative",
+    defaultContent:
+      "تبریک! 🎉 درخواست نمایندگی شما تأیید شد.\nتعرفهٔ شما: {tier}\nاز بخش «نمایندگی من» می‌توانید خریدهای نمایندگی خود را انجام دهید.",
+    allowedVariables: ["tier"],
+  },
+  {
+    key: "representative_application_rejected",
+    title: "نمایندگی - رد درخواست",
+    category: "representative",
+    defaultContent:
+      "متأسفانه درخواست نمایندگی شما در این مرحله تأیید نشد.\nدلیل: {reason}",
+    allowedVariables: ["reason"],
+  },
+  {
+    key: "representative_suspended",
+    title: "نمایندگی - تعلیق",
+    category: "representative",
+    defaultContent:
+      "حساب نمایندگی شما موقتاً تعلیق شده است. خرید با قیمت نمایندگی تا رفع تعلیق غیرفعال است.",
+    allowedVariables: [],
+  },
+  {
+    key: "representative_terms",
+    title: "نمایندگی - شرایط و قوانین",
+    category: "representative",
+    defaultContent:
+      "📄 <b>شرایط برنامهٔ نمایندگی</b>\n\n" +
+      "• قیمت نمایندگی فقط برای خرید سرویس‌های واجد شرایط برای حساب خودتان است.\n" +
+      "• فروش به شخص ثالث یا انتقال سرویس در این برنامه پشتیبانی نمی‌شود.\n" +
+      "• قیمت‌ها و تعرفه‌ها ممکن است توسط مدیریت تغییر کند.\n" +
+      "• رعایت قوانین استفاده الزامی است؛ در صورت تخلف، نمایندگی تعلیق یا لغو می‌شود.",
+    allowedVariables: [],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -972,6 +1029,23 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "my_orders", title: "سفارش‌های من", text: "سفارش‌های من 🧾" },
   { key: "pricing", title: "تعرفه اشتراک‌ها", text: "تعرفه اشتراک‌ها 💵" },
   { key: "representative_request", title: "درخواست نمایندگی", text: "درخواست نمایندگی 👨‍💼" },
+  // Representative Program (feat/representative-program, §22). The main-menu row
+  // label + the reseller dashboard/section buttons. Editable labels never drive
+  // callbacks (behaviour binds to the callback contract, not these texts).
+  { key: "representative", title: "منوی نمایندگی", text: "نمایندگی 🤝" },
+  { key: "representative_apply", title: "ثبت درخواست نمایندگی", text: "ثبت درخواست نمایندگی 🤝" },
+  { key: "representative_terms", title: "شرایط نمایندگی", text: "شرایط و قوانین 📄" },
+  { key: "representative_buy", title: "خرید نمایندگی", text: "خرید نمایندگی 🛒" },
+  { key: "representative_tariff", title: "تعرفه نمایندگی", text: "تعرفه من 💠" },
+  { key: "representative_purchases", title: "خریدهای نمایندگی", text: "خریدهای من 🧾" },
+  { key: "representative_support", title: "پشتیبانی نمایندگان", text: "پشتیبانی نمایندگان 🎫" },
+  {
+    key: "admin_representative_applications",
+    title: "ادمین: درخواست‌های نمایندگی",
+    text: "درخواست‌های نمایندگی 🤝",
+  },
+  { key: "admin_representative_tiers", title: "ادمین: سطح‌های نمایندگی", text: "سطح‌های نمایندگی 💠" },
+  { key: "admin_representative_prices", title: "ادمین: قیمت‌های نمایندگی", text: "قیمت‌های نمایندگی 💵" },
   { key: "lucky_wheel", title: "گردونه شانس", text: "گردونه شانس 🎲" },
   { key: "back", title: "بازگشت", text: "بازگشت" },
   { key: "back_to_list", title: "بازگشت به لیست", text: "بازگشت به لیست" },

@@ -16,6 +16,7 @@ import {
   type QrPhotoSender,
 } from "./qr-delivery.service.js";
 import { enqueueAttributionReconcile, enqueueReferralCredit } from "./ops-queue.service.js";
+import { completeRepresentativePurchaseForOrder } from "./representative.service.js";
 import { getBooleanSetting } from "./settings.service.js";
 import { TRIAL_CONVERTED_USER_TEXT } from "./trial-conversion.service.js";
 import {
@@ -377,7 +378,26 @@ export async function dispatchPaidOrderFulfillment(
   // periodic credit scan is the catch-all for a Redis flush / missed enqueue. The
   // credit itself is gated (master switch + horizon) and idempotent per order.
   void maybeEnqueueReferralCredit(orderId, result);
+  // Representative Program (§16): link + complete the NON-financial reseller
+  // purchase marker for this paid order. After-commit, orderId only, fail-soft
+  // and idempotent (a re-fired dispatch never double-completes; a
+  // non-representative order matches nothing). A later suspension never
+  // un-completes a settled purchase.
+  void maybeCompleteRepresentativePurchase(orderId, result);
   return result;
+}
+
+/** Completes the reseller purchase marker for a dispatch that (re)completed a
+ * real paid Order. Never throws — the money already moved and the Order is
+ * authoritative, so a missed marker completion is cosmetic. */
+async function maybeCompleteRepresentativePurchase(
+  orderId: string,
+  result: DispatchResult,
+): Promise<void> {
+  if (result.kind === "NONE") {
+    return;
+  }
+  await completeRepresentativePurchaseForOrder(orderId);
 }
 
 /** Enqueues the durable referral credit for a dispatch that (re)completed a real
