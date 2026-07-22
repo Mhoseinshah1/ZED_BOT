@@ -25,10 +25,11 @@ export const PLACEHOLDER_TEXT = "این بخش هنوز فعال نشده است
 const USER_SECTIONS: Array<{ callback: string; buttonKey: string }> = [
   // CB.USER_REFERRAL left this list in the referral affiliate phase — the real
   // referral page (handlers/user-referral) owns it now.
+  // CB.USER_REPRESENTATIVE left this list in the representative-program phase —
+  // the real representative page (handlers/user-representative) owns it now.
   { callback: CB.USER_WHEEL, buttonKey: "lucky_wheel" },
   { callback: CB.USER_TUTORIALS, buttonKey: "tutorials" },
   { callback: CB.USER_PRICING, buttonKey: "pricing" },
-  { callback: CB.USER_REPRESENTATIVE, buttonKey: "representative_request" },
 ];
 
 /** Every user menu button opens a placeholder page in this phase. */

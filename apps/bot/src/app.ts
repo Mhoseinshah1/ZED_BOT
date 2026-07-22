@@ -71,6 +71,10 @@ import {
   autoRenewalTextHandler,
 } from "./handlers/user-renewal/auto-renewal.handler.js";
 import { userOrdersHandler } from "./handlers/user-orders/orders.handler.js";
+import {
+  representativeHandler,
+  representativeInputHandler,
+} from "./handlers/user-representative/representative.handler.js";
 import { diagnosticsHandler } from "./handlers/user-services/diagnostics.handler.js";
 import {
   guideHandoffCancelMiddleware,
@@ -360,6 +364,11 @@ export function createBot(token: string): Bot<BotContext> {
       await checkoutTextHandler.middleware()(ctx, next);
       return;
     }
+    // Representative Program application wizard (one flow, step in the draft).
+    if (flow === "rep:apply") {
+      await representativeInputHandler.middleware()(ctx, next);
+      return;
+    }
     if (flow === "renew:discount") {
       await renewalTextHandler.middleware()(ctx, next);
       return;
@@ -454,6 +463,7 @@ export function createBot(token: string): Bot<BotContext> {
   // Referral affiliate phase: the real referral page - must run before the
   // placeholder handler, which used to own CB.USER_REFERRAL.
   userArea.use(userReferralHandler);
+  userArea.use(representativeHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());

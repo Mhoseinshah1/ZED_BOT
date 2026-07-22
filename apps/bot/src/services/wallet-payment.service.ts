@@ -9,6 +9,7 @@ import {
   WalletTransactionSource,
   WalletTransactionType,
   type CheckoutSession,
+  type DiscountCode,
   type Order,
   type Payment,
   type Service,
@@ -16,13 +17,18 @@ import {
   type WalletTransaction,
 } from "@zedbot/database";
 
-import { resolveAutoRenewalCharge } from "@zedbot/shared";
+import { REPRESENTATIVE_PRICING_MODE, resolveAutoRenewalCharge } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import type { CheckoutDraft, ExtraTimeDraft, ExtraVolumeDraft, RenewalDraft } from "../core/session.js";
 import { isProductVisible } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
 import { claimDiscountUsage, validateDiscountCode } from "./discount.service.js";
+import { resolveEffectiveProductPrice } from "./representative-pricing.service.js";
+import {
+  recordRepresentativePurchase,
+  type RepresentativePurchaseSnapshot,
+} from "./representative.service.js";
 import {
   isWalletPaymentEnabled,
   WALLET_PAYMENT_DISABLED_TEXT,
@@ -72,6 +78,12 @@ export const WALLET_PAYMENT_DONE_TEXT = "پرداخت از کیف پول با م
 export const INSUFFICIENT_BALANCE_TEXT = "موجودی کیف پول شما کافی نیست.";
 const DRAFT_STALE_TEXT = "پیش‌فاکتور در دسترس نیست؛ لطفاً دوباره شروع کنید.";
 const DISCOUNT_CHANGED_TEXT = "کد تخفیف دیگر معتبر نیست. لطفاً دوباره پیش‌فاکتور را بررسی کنید.";
+// Representative Program (§16): reseller pricing changed or is no longer
+// available at the settlement boundary — fail closed BEFORE money moves.
+const REP_PRICE_STALE_TEXT =
+  "قیمت نمایندگی این محصول تغییر کرده است. لطفاً دوباره از «خرید نمایندگی» اقدام کنید.";
+const REP_CHECKOUT_UNAVAILABLE_TEXT =
+  "خرید با قیمت نمایندگی در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید.";
 
 export type WalletPaymentResult =
   | {
@@ -389,17 +401,70 @@ export async function payPurchaseDraftWithWallet(
     return { ok: false, error: DRAFT_STALE_TEXT };
   }
 
-  // Never trust the session price: recompute from the product + discount.
-  const originalPriceToman = product.priceToman;
+  // Never trust the session price: recompute from the product + discount. For a
+  // representative purchase the price comes from the authoritative resolver at
+  // the SETTLE boundary (uncached switch) and a stale reseller price/fingerprint
+  // fails closed BEFORE any money moves (§16). The retail branch is unchanged.
+  let originalPriceToman: number;
   let discountAmountToman = 0;
   let discountCodeId: string | null = null;
-  if (draft.discountCode !== undefined) {
-    const validation = await validateDiscountCode(draft.discountCode, user, originalPriceToman);
-    if (!validation.ok) {
-      return { ok: false, error: DISCOUNT_CHANGED_TEXT };
+  let repSnapshot: RepresentativePurchaseSnapshot | null = null;
+
+  if (draft.representative !== undefined) {
+    // Validate the code (window/limits/group) first for a clear UX error; the
+    // resolver then applies the reseller stacking rule (§7).
+    let validatedCode: DiscountCode | null = null;
+    if (draft.discountCode !== undefined) {
+      const v = await validateDiscountCode(
+        draft.discountCode,
+        user,
+        draft.representative.basePriceToman,
+      );
+      if (!v.ok) {
+        return { ok: false, error: DISCOUNT_CHANGED_TEXT };
+      }
+      validatedCode = v.discountCode;
     }
-    discountAmountToman = validation.discountAmountToman;
-    discountCodeId = validation.discountCode.id;
+    const effective = await resolveEffectiveProductPrice({
+      user,
+      product,
+      checkoutPurpose: "PURCHASE",
+      discountCode: validatedCode,
+      mode: "SETTLE",
+    });
+    if (effective.pricingMode !== REPRESENTATIVE_PRICING_MODE) {
+      return { ok: false, error: REP_CHECKOUT_UNAVAILABLE_TEXT };
+    }
+    if (
+      effective.priceFingerprint !== draft.representative.priceFingerprint ||
+      effective.tierFingerprint !== draft.representative.tierFingerprint
+    ) {
+      return { ok: false, error: REP_PRICE_STALE_TEXT };
+    }
+    originalPriceToman = effective.basePriceToman;
+    discountAmountToman = effective.discountAmountToman;
+    discountCodeId = effective.discountCodeId;
+    repSnapshot = {
+      representativeId: effective.representativeId,
+      tierId: effective.tierId,
+      priceMode: effective.priceMode,
+      retailPriceToman: effective.retailPriceToman,
+      basePriceToman: effective.basePriceToman,
+      discountAmountToman: effective.discountAmountToman,
+      finalPriceToman: effective.finalPriceToman,
+      tierFingerprint: effective.tierFingerprint,
+      priceFingerprint: effective.priceFingerprint,
+    };
+  } else {
+    originalPriceToman = product.priceToman;
+    if (draft.discountCode !== undefined) {
+      const validation = await validateDiscountCode(draft.discountCode, user, originalPriceToman);
+      if (!validation.ok) {
+        return { ok: false, error: DISCOUNT_CHANGED_TEXT };
+      }
+      discountAmountToman = validation.discountAmountToman;
+      discountCodeId = validation.discountCode.id;
+    }
   }
   const finalPriceToman = Math.max(0, originalPriceToman - discountAmountToman);
   if (finalPriceToman <= 0) {
@@ -415,7 +480,7 @@ export async function payPurchaseDraftWithWallet(
     discountAmountToman,
     finalPriceToman,
   });
-  return executeWalletOrderPayment(user, {
+  const result = await executeWalletOrderPayment(user, {
     orderType:
       product.type === "OTHER_PRODUCT" ? OrderType.OTHER_PRODUCT : OrderType.SERVICE_PURCHASE,
     product,
@@ -427,6 +492,24 @@ export async function payPurchaseDraftWithWallet(
     discountCodeId,
     idempotencyKey: `wallet:${user.id}:${draft.draftNonce}`,
   });
+
+  // Record the reseller purchase marker as COMPLETED once the wallet settled
+  // (the wallet path creates its own checkout inside executeWalletOrderPayment,
+  // so there is no prior PENDING marker to complete). Best-effort: the money
+  // already committed and the Order is authoritative; keyed by the unique
+  // checkoutSessionId, so a replay converges (§25).
+  if (result.ok && repSnapshot !== null) {
+    await recordRepresentativePurchase(prisma, {
+      checkoutSessionId: result.checkout.id,
+      userId: user.id,
+      productId: product.id,
+      status: "COMPLETED",
+      paymentId: result.payment.id,
+      orderId: result.order.id,
+      snapshot: repSnapshot,
+    });
+  }
+  return result;
 }
 
 /** Wallet payment for a renewal pre-invoice draft (Phase 12 semantics). */

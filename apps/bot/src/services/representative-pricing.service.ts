@@ -240,6 +240,49 @@ export async function resolveEffectiveProductPrice(
   };
 }
 
+/** One eligible product with its resolved reseller price, for the «خرید
+ * نمایندگی» product list. */
+export interface EligibleRepresentativeProduct {
+  productId: string;
+  name: string;
+  retailPriceToman: number;
+  finalPriceToman: number;
+}
+
+/**
+ * Lists the SERVICE_PRODUCTs this user (as an active representative) may buy at a
+ * reseller price right now: eligible + active products for which the resolver
+ * returns REPRESENTATIVE pricing. Returns [] when the user is not an eligible
+ * representative or the program/checkout switch is off. Read-only.
+ */
+export async function listEligibleRepresentativeProducts(
+  user: Pick<User, "id">,
+): Promise<EligibleRepresentativeProduct[]> {
+  const products = await prisma.product.findMany({
+    where: { type: "SERVICE_PRODUCT", isActive: true, representativeEligible: true },
+    select: { id: true, name: true, type: true, priceToman: true, representativeEligible: true },
+    orderBy: { priceToman: "asc" },
+  });
+  const eligible: EligibleRepresentativeProduct[] = [];
+  for (const product of products) {
+    const effective = await resolveEffectiveProductPrice({
+      user,
+      product,
+      checkoutPurpose: "PURCHASE",
+      mode: "PREVIEW",
+    });
+    if (effective.pricingMode === REPRESENTATIVE_PRICING_MODE) {
+      eligible.push({
+        productId: product.id,
+        name: product.name,
+        retailPriceToman: effective.retailPriceToman,
+        finalPriceToman: effective.finalPriceToman,
+      });
+    }
+  }
+  return eligible;
+}
+
 /**
  * Financial-isolation predicate (§6, §17): was this checkout priced at reseller
  * rates? Reads the IMMUTABLE checkout snapshot's pricingMode, which is frozen at

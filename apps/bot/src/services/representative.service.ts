@@ -23,7 +23,6 @@ import {
 
 import { logger } from "../core/logger.js";
 import { writeSystemLog } from "./system-log.service.js";
-import type { EffectiveProductPrice } from "./representative-pricing.service.js";
 
 // =============================================================================
 // Representative Program — core service (§9, §12, §13, §16, §20, §25).
@@ -572,13 +571,27 @@ export async function getRepresentativeById(
   });
 }
 
+/** The immutable pricing agreement written into a RepresentativePurchase (§16),
+ * derived from the checkout draft's representative context + agreed prices. */
+export interface RepresentativePurchaseSnapshot {
+  representativeId: string;
+  tierId: string;
+  /** REPRESENTATIVE_PRICE_MODES code at purchase time. */
+  priceMode: string;
+  retailPriceToman: number;
+  basePriceToman: number;
+  discountAmountToman: number;
+  finalPriceToman: number;
+  tierFingerprint: string;
+  priceFingerprint: string;
+}
+
 /**
  * Records the NON-financial RepresentativePurchase marker for a reseller-priced
  * checkout, keyed by the (unique) checkoutSessionId — one marker per checkout
  * (§25). Accepts an optional transaction client so it can be created atomically
  * with the checkout/settlement. A P2002 (marker already exists for this
- * checkout) converges to the existing row. Requires a REPRESENTATIVE-priced
- * result; a RETAIL result is a programming error and throws.
+ * checkout) converges to the existing row.
  */
 export async function recordRepresentativePurchase(
   client: Prisma.TransactionClient | typeof prisma,
@@ -586,32 +599,32 @@ export async function recordRepresentativePurchase(
     checkoutSessionId: string;
     userId: string;
     productId: string;
-    price: Extract<EffectiveProductPrice, { pricingMode: typeof REPRESENTATIVE_PRICING_MODE }>;
+    snapshot: RepresentativePurchaseSnapshot;
     status?: "PENDING" | "COMPLETED";
     paymentId?: string | null;
     orderId?: string | null;
   },
 ): Promise<void> {
-  const { price } = args;
+  const { snapshot } = args;
   try {
     await client.representativePurchase.create({
       data: {
-        representativeId: price.representativeId,
+        representativeId: snapshot.representativeId,
         userId: args.userId,
-        tierId: price.tierId,
+        tierId: snapshot.tierId,
         productId: args.productId,
         checkoutSessionId: args.checkoutSessionId,
         paymentId: args.paymentId ?? null,
         orderId: args.orderId ?? null,
         status: args.status ?? "PENDING",
         pricingMode: REPRESENTATIVE_PRICING_MODE,
-        priceMode: price.priceMode,
-        retailPriceToman: price.retailPriceToman,
-        basePriceToman: price.basePriceToman,
-        discountAmountToman: price.discountAmountToman,
-        finalPriceToman: price.finalPriceToman,
-        tierFingerprint: price.tierFingerprint,
-        priceFingerprint: price.priceFingerprint,
+        priceMode: snapshot.priceMode,
+        retailPriceToman: snapshot.retailPriceToman,
+        basePriceToman: snapshot.basePriceToman,
+        discountAmountToman: snapshot.discountAmountToman,
+        finalPriceToman: snapshot.finalPriceToman,
+        tierFingerprint: snapshot.tierFingerprint,
+        priceFingerprint: snapshot.priceFingerprint,
         ...(args.status === "COMPLETED" ? { completedAt: new Date() } : {}),
       },
     });

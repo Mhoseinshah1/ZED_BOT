@@ -5,9 +5,11 @@ import {
   type Prisma,
   type User,
 } from "@zedbot/database";
+import { REPRESENTATIVE_PRICING_MODE } from "@zedbot/shared";
 
 import type { CheckoutDraft } from "../core/session.js";
 import { buildFulfillmentSnapshot } from "./other-product-profile.service.js";
+import { recordRepresentativePurchase } from "./representative.service.js";
 import { getSetting } from "./settings.service.js";
 import { resolveProductInboundIds } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
@@ -68,6 +70,23 @@ export function buildProductSnapshot(
     // selection or the materialized panel allowlist). The paid order's
     // entitlement is this set - later product/panel edits never change it.
     inboundIds: resolveSoldInboundIds(product),
+    // Representative Program (§16): the IMMUTABLE reseller-pricing marker.
+    // pricingMode === "REPRESENTATIVE" is the authoritative financial-isolation
+    // signal read by the referral engine (§17). Absent on every retail checkout,
+    // so a normal snapshot is byte-identical to before.
+    ...(draft.representative !== undefined
+      ? {
+          pricingMode: REPRESENTATIVE_PRICING_MODE,
+          representativeId: draft.representative.representativeId,
+          representativeTierId: draft.representative.tierId,
+          representativeTierSlug: draft.representative.tierSlug,
+          representativePriceMode: draft.representative.priceMode,
+          representativeRetailPriceToman: draft.representative.retailPriceToman,
+          representativeBasePriceToman: draft.representative.basePriceToman,
+          representativeTierFingerprint: draft.representative.tierFingerprint,
+          representativePriceFingerprint: draft.representative.priceFingerprint,
+        }
+      : {}),
   };
 }
 
@@ -91,38 +110,68 @@ export async function createCheckoutSession(
   draft: CheckoutDraft,
 ): Promise<CheckoutSession> {
   const minutes = await checkoutExpiryMinutes();
+  const expiresAt = new Date(Date.now() + minutes * 60_000);
+  const snapshot = buildProductSnapshot(product, draft);
+  const fulfillmentSnapshot =
+    product.type === "OTHER_PRODUCT"
+      ? (buildFulfillmentSnapshot(product) as unknown as Prisma.InputJsonObject)
+      : null;
 
-  await prisma.checkoutSession.updateMany({
-    where: { userId: user.id, productId: product.id, status: CheckoutStatus.PENDING },
-    data: { status: CheckoutStatus.CANCELLED },
-  });
+  // The representative purchase marker (§16, §25) is created in the SAME
+  // transaction as the checkout so a reseller-priced checkout can never exist
+  // without its non-financial marker. The retail path takes no transaction and
+  // is byte-identical to before.
+  return prisma.$transaction(async (tx) => {
+    await tx.checkoutSession.updateMany({
+      where: { userId: user.id, productId: product.id, status: CheckoutStatus.PENDING },
+      data: { status: CheckoutStatus.CANCELLED },
+    });
 
-  return prisma.checkoutSession.create({
-    data: {
-      userId: user.id,
-      purpose: "ORDER_PAYMENT",
-      productId: product.id,
-      orderType: product.type === "SERVICE_PRODUCT" ? "SERVICE_PURCHASE" : "OTHER_PRODUCT",
-      productSnapshot: buildProductSnapshot(product, draft),
-      // Specialized-workflows phase: OTHER_PRODUCT checkouts freeze the
-      // fulfillment behavior NOW (kind/profile/parser/info schema) - the
-      // paid order fulfills from this capture, never from the mutable
-      // Product row. Throws for a misconfigured specialized product, so an
-      // unresolvable product fails BEFORE any payment.
-      ...(product.type === "OTHER_PRODUCT"
-        ? {
-            otherProductFulfillmentSnapshot: buildFulfillmentSnapshot(
-              product,
-            ) as unknown as Prisma.InputJsonObject,
-          }
-        : {}),
-      originalPriceToman: draft.originalPriceToman,
-      discountAmountToman: draft.discountAmountToman,
-      finalPriceToman: draft.finalPriceToman,
-      discountCodeId: draft.discountCodeId ?? null,
-      status: CheckoutStatus.PENDING,
-      expiresAt: new Date(Date.now() + minutes * 60_000),
-    },
+    const checkout = await tx.checkoutSession.create({
+      data: {
+        userId: user.id,
+        purpose: "ORDER_PAYMENT",
+        productId: product.id,
+        orderType: product.type === "SERVICE_PRODUCT" ? "SERVICE_PURCHASE" : "OTHER_PRODUCT",
+        productSnapshot: snapshot,
+        // Specialized-workflows phase: OTHER_PRODUCT checkouts freeze the
+        // fulfillment behavior NOW (kind/profile/parser/info schema) - the
+        // paid order fulfills from this capture, never from the mutable
+        // Product row. Throws for a misconfigured specialized product, so an
+        // unresolvable product fails BEFORE any payment.
+        ...(fulfillmentSnapshot !== null
+          ? { otherProductFulfillmentSnapshot: fulfillmentSnapshot }
+          : {}),
+        originalPriceToman: draft.originalPriceToman,
+        discountAmountToman: draft.discountAmountToman,
+        finalPriceToman: draft.finalPriceToman,
+        discountCodeId: draft.discountCodeId ?? null,
+        status: CheckoutStatus.PENDING,
+        expiresAt,
+      },
+    });
+
+    if (draft.representative !== undefined) {
+      await recordRepresentativePurchase(tx, {
+        checkoutSessionId: checkout.id,
+        userId: user.id,
+        productId: product.id,
+        status: "PENDING",
+        snapshot: {
+          representativeId: draft.representative.representativeId,
+          tierId: draft.representative.tierId,
+          priceMode: draft.representative.priceMode,
+          retailPriceToman: draft.representative.retailPriceToman,
+          basePriceToman: draft.representative.basePriceToman,
+          discountAmountToman: draft.discountAmountToman,
+          finalPriceToman: draft.finalPriceToman,
+          tierFingerprint: draft.representative.tierFingerprint,
+          priceFingerprint: draft.representative.priceFingerprint,
+        },
+      });
+    }
+
+    return checkout;
   });
 }
 

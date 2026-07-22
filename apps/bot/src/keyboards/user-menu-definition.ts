@@ -3,6 +3,7 @@ import { Keyboard } from "grammy";
 import { CB } from "../core/callbacks.js";
 import { isFreeTrialVisible } from "../services/free-trial.service.js";
 import { isReferralSystemEnabled } from "../services/referral.service.js";
+import { isRepresentativeProgramEnabled } from "../services/representative-settings.service.js";
 import { getButtonText } from "../services/text.service.js";
 
 // =============================================================================
@@ -25,6 +26,7 @@ export type UserMainMenuAction =
   | "SUPPORT"
   | "FREE_TRIAL"
   | "REFERRAL"
+  | "REPRESENTATIVE"
   | "ADMIN_PANEL";
 
 export interface UserMainMenuButton {
@@ -53,6 +55,9 @@ export const MAIN_MENU_ACTION_WIRING: Record<
   // Referral affiliate phase: opens the real referral page. Visible only when the
   // OWNER has enabled the referral program (like FREE_TRIAL) — hidden by default.
   REFERRAL: { buttonKey: "referral", callback: CB.USER_REFERRAL },
+  // Representative Program: opens the real representative page. Visible only when
+  // the OWNER has enabled the program master switch (§3) — hidden by default.
+  REPRESENTATIVE: { buttonKey: "representative", callback: CB.USER_REPRESENTATIVE },
   // Admin-entry phase: opens the EXISTING admin panel (same callback the
   // /admin menu uses). Visible only to active admins via the viewer-aware
   // definition below; the label is display-only and never authorization.
@@ -75,6 +80,7 @@ const APPROVED_ROWS: UserMainMenuAction[][] = [
   ["OTHER_PRODUCTS", "MY_ORDERS"],
   ["FREE_TRIAL"],
   ["REFERRAL"],
+  ["REPRESENTATIVE"],
   ["SUPPORT"],
   ["ADMIN_PANEL"],
 ];
@@ -98,9 +104,10 @@ const HIDDEN_VIEWER: UserMainMenuViewer = { isActiveAdmin: false };
 export async function buildUserMainMenuDefinition(
   viewer: UserMainMenuViewer = HIDDEN_VIEWER,
 ): Promise<UserMainMenuButton[][]> {
-  const [trialVisible, referralVisible] = await Promise.all([
+  const [trialVisible, referralVisible, representativeVisible] = await Promise.all([
     isFreeTrialVisible(),
     isReferralSystemEnabled(),
+    isRepresentativeProgramEnabled(),
   ]);
   const rows: UserMainMenuButton[][] = [];
   for (const rowActions of APPROVED_ROWS) {
@@ -111,6 +118,9 @@ export async function buildUserMainMenuDefinition(
       }
       if (action === "REFERRAL" && !referralVisible) {
         continue; // Hidden until the OWNER enables the referral program.
+      }
+      if (action === "REPRESENTATIVE" && !representativeVisible) {
+        continue; // Hidden until the OWNER enables the representative program (§3).
       }
       if (action === "ADMIN_PANEL" && !viewer.isActiveAdmin) {
         continue; // Fail closed: the default viewer never sees the admin row.
