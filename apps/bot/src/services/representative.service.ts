@@ -463,7 +463,11 @@ async function transition(args: {
   }
   const updated = await prisma.representative.updateMany({
     where: { id: rep.id, status: { in: args.from } },
-    data: { ...args.stamp, ...(args.reason !== null ? { statusReason: args.reason } : {}) },
+    data: {
+      status: args.to,
+      ...args.stamp,
+      ...(args.reason !== null ? { statusReason: args.reason } : {}),
+    },
   });
   if (updated.count === 0) {
     return err("INELIGIBLE_STATUS");
