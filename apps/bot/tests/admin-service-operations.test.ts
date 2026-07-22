@@ -19,6 +19,7 @@ import {
   ADMIN_SERVICE_NOTE_EVENT_TYPE,
   executeAdminServiceOperation,
   getAdminServiceDetail,
+  markAdminServiceOperationReviewed,
   reconcileAdminServiceOperation,
   refreshAdminServiceReadOnly,
   type AdminServiceMutationType,
@@ -625,6 +626,59 @@ describe.runIf(hasDeps)("admin service operations", () => {
     }
     const synced = await prisma.service.findUniqueOrThrow({ where: { id: service.id } });
     expect(synced.volumeBytes).toBe(15n * GIB); // local now matches panel truth
+    expect(await countUnresolvedAdminOperations(service.id)).toBe(0);
+  });
+
+  // --- P2: a time grant persists LIVE usage/remaining, not stale DB values ----
+  it("persists live traffic and derives status from it after a time grant", async () => {
+    const user = await createUser();
+    // DB shows remaining quota, but the panel is exhausted out-of-band.
+    const service = await createService(user, { volumeGib: 10, usedGib: 2, days: 10 });
+    panelUsers.get(service.username)!.used_traffic = Number(10n * GIB); // fully used remotely
+    const result = await run(service, "ADD_TIME", { requestedCount: 5 });
+    expect(result.outcome).toBe("succeeded");
+    const updated = await prisma.service.findUniqueOrThrow({ where: { id: service.id } });
+    expect(updated.usedBytes).toBe(10n * GIB);
+    expect(updated.remainingBytes).toBe(0n);
+    // Exhausted finite volume → LIMITED, derived from the LIVE remaining.
+    expect(updated.status).toBe("LIMITED");
+  });
+
+  // --- P2: OWNER manual review is a terminal resolution for a blocked op ------
+  it("lets the OWNER manually resolve an unverifiable blocking operation", async () => {
+    const user = await createUser();
+    const service = await createService(user, { volumeGib: 10, usedGib: 1, days: 20 });
+    const detail = await getAdminServiceDetail(service.id.slice(0, 8));
+    // Simulate an uncertain regeneration that reconciliation can't classify.
+    await prisma.adminServiceOperation.create({
+      data: {
+        serviceId: service.id,
+        targetUserId: user.id,
+        adminId: owner.id,
+        type: "REGENERATE_LINK",
+        status: "RECONCILIATION_REQUIRED",
+        reason: "uncertain regen",
+        idempotencyKey: `test-review-${runTag}-${service.id.slice(0, 8)}`,
+        beforeSnapshot: buildAdminServiceSnapshot(detail!.service, detail!.panel) as never,
+        startedAt: new Date(),
+        completedAt: new Date(),
+        safeErrorCode: "PANEL_UNCERTAIN",
+      },
+    });
+    expect(await countUnresolvedAdminOperations(service.id)).toBe(1);
+    // Reconciliation stays inconclusive for a regeneration; the op remains blocking.
+    const op = await prisma.adminServiceOperation.findFirstOrThrow({
+      where: { serviceId: service.id, type: "REGENERATE_LINK" },
+    });
+    const recon = await reconcileAdminServiceOperation(op.id, owner.id);
+    expect(recon.kind).toBe("still-uncertain");
+    expect(await countUnresolvedAdminOperations(service.id)).toBe(1);
+    // The OWNER manually marks it reviewed → terminal RECONCILED, unblocking.
+    const reviewed = await markAdminServiceOperationReviewed(op.id, owner.id);
+    expect(reviewed.kind).toBe("resolved");
+    const resolved = await prisma.adminServiceOperation.findUniqueOrThrow({ where: { id: op.id } });
+    expect(resolved.status).toBe("RECONCILED");
+    expect(resolved.reconciledByAdminId).toBe(owner.id);
     expect(await countUnresolvedAdminOperations(service.id)).toBe(0);
   });
 

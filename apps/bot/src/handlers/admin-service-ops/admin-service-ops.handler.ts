@@ -30,6 +30,7 @@ import {
   listAdminServiceOperations,
   listReconciliationOperations,
   markAdminOperationUserNotified,
+  markAdminServiceOperationReviewed,
   reconcileAdminServiceOperation,
   refreshAdminServiceReadOnly,
   type AdminServiceMutationType,
@@ -551,10 +552,6 @@ async function notifyUserOfOperation(
   sid: string,
   operationId: string,
 ): Promise<void> {
-  const first = await markAdminOperationUserNotified(operationId);
-  if (!first) {
-    return;
-  }
   const user = await getUserById(ownerUserId);
   if (user === null) {
     return;
@@ -567,13 +564,17 @@ async function notifyUserOfOperation(
       reply_markup: kb,
     });
   } catch (err) {
-    // The user may have blocked the bot — never let a notification failure
-    // break the admin flow.
+    // The user may have blocked the bot, or Telegram may be transiently down.
+    // Do NOT mark the operation notified on failure, so a later attempt can
+    // still deliver it — never let a notification failure break the admin flow.
     logger.warn("admin service user notification failed", {
       operationId,
       error: err instanceof Error ? err.message.slice(0, 120) : "unknown",
     });
+    return;
   }
+  // Record the notification ONLY after Telegram accepted it (CAS ensures once).
+  await markAdminOperationUserNotified(operationId);
 }
 
 // --- OWNER reconciliation dashboard (§18) ------------------------------------
@@ -626,8 +627,44 @@ adminServiceOpsHandler.callbackQuery(/^admin:svc:recrun:([0-9a-f-]{4,36})$/, asy
   const refreshed = await getAdminServiceOperationById(op.id);
   const detailText =
     refreshed === null ? notice : `${notice}\n\n${adminOperationDetailText(refreshed)}`;
-  const kb = new InlineKeyboard().text("بازگشت به لیست بررسی", ASO_CB.recon(1));
+  const kb = new InlineKeyboard();
+  // If the op is still blocking (e.g. an unverifiable regeneration that stays
+  // inconclusive), offer the OWNER a terminal manual resolution so the service
+  // is never permanently blocked.
+  if (
+    refreshed !== null &&
+    (refreshed.status === "UNCERTAIN" || refreshed.status === "RECONCILIATION_REQUIRED")
+  ) {
+    kb.text("علامت‌گذاری به‌عنوان بررسی‌شده ✅", ASO_CB.reconReview(ctx.match[1])).row();
+  }
+  kb.text("بازگشت به لیست بررسی", ASO_CB.recon(1));
   await safeEditOrReply(ctx, detailText, kb, HTML);
+});
+
+adminServiceOpsHandler.callbackQuery(/^admin:svc:recrev:([0-9a-f-]{4,36})$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  if (!(await ownerGuard(ctx))) {
+    return;
+  }
+  const op = await getAdminServiceOperationByShortId(ctx.match[1]);
+  if (op === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  const outcome = await markAdminServiceOperationReviewed(op.id, ctx.admin.id);
+  await safeAnswerCallback(
+    ctx,
+    outcome.kind === "resolved" ? "به‌عنوان بررسی‌شده ثبت شد ✅" : "این عملیات قابل بررسی نیست.",
+  );
+  const page = await listReconciliationOperations(1);
+  await safeEditOrReply(
+    ctx,
+    adminReconDashboardText(page.operations, page.total),
+    adminReconDashboardKeyboard(page.page, page.pages, page.operations),
+    HTML,
+  );
 });
 
 // --- OWNER settings: the mutation master switch (§3) -------------------------

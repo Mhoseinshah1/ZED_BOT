@@ -85,6 +85,13 @@ sequence, for every mutation:
 mutations and is resolved only by the read-only reconciliation page. This is
 mandatory for `ADD_VOLUME`/`ADD_TIME` to prevent a double-grant.
 
+The grant appliers additionally check the per-service lock's `isLost()` before
+persisting: if the heartbeat found a foreign token during a long panel call, the
+op is left `RECONCILIATION_REQUIRED` rather than overwriting a newer operation's
+state (mirroring the paid-operation paths). Time grants persist the **live**
+usage/remaining from the fresh read + mutation result and derive the status from
+them, so the displayed traffic is never stale after an extension.
+
 ### Verify-after-write for grants (§11)
 
 Some adapters (Marzban's `addServiceTime`/renew) do not flag an ambiguous
@@ -157,8 +164,10 @@ one fresh read, classifies the operation against its stored target, and — only
 with positive evidence — marks it `RECONCILED` (syncing the local row from panel
 truth) or `FAILED`. It never repeats the remote mutation and never writes
 anything the read did not establish; an inconclusive read leaves the operation
-for a later attempt. A link regeneration cannot be verified by a read and always
-stays for manual review.
+for a later attempt. A link regeneration cannot be verified by a read, so the
+dashboard also offers the OWNER a **terminal manual resolution** («علامت‌گذاری
+به‌عنوان بررسی‌شده») that marks the operation `RECONCILED` — so an unverifiable
+regeneration can never permanently block the service from later mutations.
 
 ## Notifications (§19)
 

@@ -46,6 +46,7 @@ import {
   acquireServiceLock,
   serviceOperationLockKey,
   SERVICE_LOCK_WAIT_MS,
+  type ServiceLock,
 } from "./service-lock.service.js";
 import { regenerateServiceSubscriptionUnlocked } from "./service-link.service.js";
 import { readServiceForDiagnostics } from "./service-sync.service.js";
@@ -488,6 +489,7 @@ export async function executeAdminServiceOperation(
       operation.id,
       input.adminId,
       requestedCount,
+      acquisition.lock,
     );
 
     // 14. Persist the operation status from the classification.
@@ -650,18 +652,34 @@ async function runApplier(
   operationId: string,
   adminId: string,
   requestedCount: number | null,
+  lock: ServiceLock,
 ): Promise<ApplierResult> {
   switch (type) {
     case "ENABLE":
     case "DISABLE":
+      // The toggle's persist is a status-guarded updateMany (filtered on the
+      // allowed previous statuses), so a concurrent status change can never be
+      // stale-overwritten — no lock-loss abort is needed here.
       return applyAdminToggle(service, panel, type, operationId, adminId);
     case "REGENERATE_LINK":
       return applyAdminRegen(service, panel, operationId, adminId);
     case "ADD_VOLUME":
-      return applyAdminVolumeGrant(service, panel, operationId, requestedCount ?? 0);
+      return applyAdminVolumeGrant(service, panel, operationId, requestedCount ?? 0, lock);
     case "ADD_TIME":
-      return applyAdminTimeGrant(service, panel, operationId, requestedCount ?? 0);
+      return applyAdminTimeGrant(service, panel, operationId, requestedCount ?? 0, lock);
   }
+}
+
+/** Shared lock-loss abort (§ concurrency): if the heartbeat found a foreign
+ * token during a long panel op, persisting our quota/expiry could overwrite a
+ * newer operation's state. Leave the op for reconciliation instead of writing. */
+function lockLostResult(projectedAfter: AdminServiceStateSnapshot): ApplierResult {
+  return {
+    kind: "uncertain",
+    status: "RECONCILIATION_REQUIRED",
+    projectedAfter,
+    errorCode: "INCONSISTENT_REMOTE_STATE",
+  };
 }
 
 /** ENABLE/DISABLE reuse the actor-aware unlocked toggle primitive (§12). */
@@ -739,6 +757,7 @@ async function applyAdminVolumeGrant(
   panel: Panel,
   operationId: string,
   grantGib: number,
+  lock: ServiceLock,
 ): Promise<ApplierResult> {
   const adapter = buildAdapterForPanel(panel);
   const subscriptionBaseUrl = normalizeSubscriptionBase(panel);
@@ -822,6 +841,13 @@ async function applyAdminVolumeGrant(
       }
       return read.totalBytes <= currentTotal ? "not-applied" : "inconclusive";
     });
+  }
+
+  // Lock-loss guard (P1): the panel DEFINITELY set the new total, but if the
+  // per-service lock was lost during the call, persisting could overwrite a
+  // newer operation's state. Defer to reconciliation instead of writing.
+  if (lock.isLost()) {
+    return lockLostResult(projectedAfter);
   }
 
   const now = new Date();
@@ -919,6 +945,7 @@ async function applyAdminTimeGrant(
   panel: Panel,
   operationId: string,
   grantDays: number,
+  lock: ServiceLock,
 ): Promise<ApplierResult> {
   const adapter = buildAdapterForPanel(panel);
   const subscriptionBaseUrl = normalizeSubscriptionBase(panel);
@@ -1000,21 +1027,42 @@ async function applyAdminTimeGrant(
     });
   }
 
+  // Lock-loss guard (P1): the panel DEFINITELY set the new expiry — defer to
+  // reconciliation rather than overwrite a newer operation's state.
+  if (lock.isLost()) {
+    return lockLostResult(projectedAfter);
+  }
+
   const finalExpiry =
     res.expiresAt !== undefined && res.expiresAt !== null ? res.expiresAt : newExpiry;
+  // Persist the LIVE usage/remaining from the fresh read + mutation result (P2)
+  // rather than deriving status from a possibly-stale stored value. quotaForSet
+  // is the unchanged current quota (null = unlimited → 0n convention).
+  const finalTotal = quotaForSet ?? 0n;
+  const finalUsed = res.usedBytes ?? read.usedBytes ?? service.usedBytes;
+  const finalRemaining =
+    res.remainingBytes !== undefined && res.remainingBytes !== null
+      ? res.remainingBytes
+      : read.remainingBytes !== undefined && read.remainingBytes !== null
+        ? read.remainingBytes
+        : finalTotal > 0n
+          ? finalTotal - finalUsed > 0n
+            ? finalTotal - finalUsed
+            : 0n
+          : service.remainingBytes;
   // DISABLED services are ineligible for time grants; extending time revives an
   // EXPIRED service. Exhausted finite traffic stays LIMITED (time never resets
-  // usage), otherwise ACTIVE.
+  // usage), otherwise ACTIVE — derived from the LIVE remaining.
   const nextStatus =
-    service.volumeBytes > 0n && service.remainingBytes <= 0n
-      ? ServiceStatus.LIMITED
-      : ServiceStatus.ACTIVE;
+    finalTotal > 0n && finalRemaining <= 0n ? ServiceStatus.LIMITED : ServiceStatus.ACTIVE;
 
   const persist = (): Promise<void> =>
     prisma.$transaction(async (tx) => {
       const data: Prisma.ServiceUpdateManyMutationInput = {
         expiresAt: finalExpiry,
         status: nextStatus,
+        usedBytes: finalUsed,
+        remainingBytes: finalRemaining,
         lastSubscriptionUpdateAt: now,
       };
       const updated = await tx.service.updateMany({
@@ -1066,9 +1114,9 @@ async function applyAdminTimeGrant(
       status: nextStatus,
       panelStatus: panel.status,
       panelType: panel.type,
-      volumeBytes: (quotaForSet ?? 0n).toString(),
-      usedBytes: (res.usedBytes ?? read.usedBytes ?? service.usedBytes).toString(),
-      remainingBytes: service.remainingBytes.toString(),
+      volumeBytes: finalTotal.toString(),
+      usedBytes: finalUsed.toString(),
+      remainingBytes: finalRemaining.toString(),
       expiresAt: finalExpiry.toISOString(),
       lastSubscriptionUpdateAt: now.toISOString(),
     },
@@ -1282,6 +1330,41 @@ export async function reconcileAdminServiceOperation(
       : null,
   );
   return { kind: "reconciled", operationId: op.id, newStatus };
+}
+
+export type AdminReviewOutcome =
+  | { kind: "resolved" }
+  | { kind: "not-found" }
+  | { kind: "not-reconcilable" };
+
+/**
+ * OWNER-controlled terminal resolution (§18) for a blocking operation an
+ * automatic reconcile cannot classify — notably an uncertain REGENERATE_LINK,
+ * whose link change is not read-verifiable. The OWNER, having reviewed it (e.g.
+ * confirmed with the user or safely re-run the idempotent regeneration), marks
+ * it RECONCILED so the service is no longer blocked from later mutations. This
+ * never touches the panel and writes no service state.
+ */
+export async function markAdminServiceOperationReviewed(
+  operationId: string,
+  reviewedByAdminId: string,
+): Promise<AdminReviewOutcome> {
+  const op = await prisma.adminServiceOperation.findUnique({ where: { id: operationId } });
+  if (op === null) {
+    return { kind: "not-found" };
+  }
+  if (!(ADMIN_SERVICE_RECONCILE_STATUSES as readonly string[]).includes(op.status)) {
+    return { kind: "not-reconcilable" };
+  }
+  const updated = await prisma.adminServiceOperation.updateMany({
+    where: { id: op.id, status: op.status },
+    data: { status: "RECONCILED", reconciledAt: new Date(), reconciledByAdminId: reviewedByAdminId },
+  });
+  if (updated.count !== 1) {
+    return { kind: "not-reconcilable" };
+  }
+  await safeLog(op, "RECONCILED", null, null);
+  return { kind: "resolved" };
 }
 
 function classifyReconciliation(

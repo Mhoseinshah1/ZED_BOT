@@ -44,6 +44,8 @@ export const ASO_CB = {
   // OWNER reconciliation dashboard + a single reconcile run.
   recon: (page: number): string => `admin:svc:recon:${page}`,
   reconRun: (opSid: string): string => `admin:svc:recrun:${opSid}`,
+  // Terminal manual resolution for an op an automatic reconcile can't classify.
+  reconReview: (opSid: string): string => `admin:svc:recrev:${opSid}`,
   // OWNER settings (the mutation master switch).
   settings: "admin:svc:settings",
   settingsToggle: "admin:svc:swtoggle",
