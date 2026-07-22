@@ -14,6 +14,9 @@ import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
 import { errorMessage } from "@zedbot/shared";
 import { prisma } from "@zedbot/database";
+import { isProductStructurallySellable } from "../../services/catalog.service.js";
+import { listProducts } from "../../services/product.service.js";
+import { pcb } from "../products/product-cb.js";
 import {
   approveRepresentativeApplication,
   assignRepresentativeTier,
@@ -108,6 +111,7 @@ const AC = {
   PRICE_PCT: "admin:rep:pp:", // + tierSid:productSid
   PRICE_OFF: "admin:rep:po:", // + tierSid:productSid
   PRICE_ON: "admin:rep:pn:", // + tierSid:productSid
+  ELIG: "admin:rep:elig:", // + page (product-eligibility management list)
   SW_PROG: "admin:rep:swp",
   SW_APP: "admin:rep:swa",
   SW_CHK: "admin:rep:swc",
@@ -176,6 +180,8 @@ async function renderRoot(ctx: BotContext): Promise<void> {
     .row()
     .text("نمایندگان", `${AC.REPS}1`)
     .text("سطح‌های نمایندگی 💠", AC.TIERS)
+    .row()
+    .text("محصولات نمایندگی 🛍", `${AC.ELIG}1`)
     .row()
     .text("بازگشت", "admin:general_settings");
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
@@ -760,17 +766,39 @@ async function renderPrices(ctx: BotContext, tierSid: string): Promise<void> {
   const kb = new InlineKeyboard();
   const lines = [`💵 <b>قیمت‌های ${esc(tier.name)}</b>`, ""];
   if (rows.length === 0) {
-    lines.push("محصول واجد شرایطی وجود ندارد. ابتدا محصول را «قابل نمایندگی» کنید.");
+    lines.push(
+      "هیچ محصولی برای فروش نمایندگی فعال نشده است.",
+      "ابتدا از «محصولات نمایندگی 🛍» یک محصول سرویس را «قابل نمایندگی» کنید.",
+    );
   } else {
     for (const row of rows) {
       const psid = representativeShortId(row.product.id);
+      const hasActivePrice = row.price !== null && row.price.isActive;
+      // Stable machine state → Persian label (never compare Persian strings, §11):
+      //   UNSELLABLE       → opted-in but product/panel readiness fails.
+      //   NO_ACTIVE_PRICE  → opted-in & sellable but no active tier price yet.
+      //   HAS_PRICE        → opted-in & sellable with an active tier price.
+      const state: "UNSELLABLE" | "NO_ACTIVE_PRICE" | "HAS_PRICE" =
+        !row.product.isActive || !row.sellable
+          ? "UNSELLABLE"
+          : hasActivePrice
+            ? "HAS_PRICE"
+            : "NO_ACTIVE_PRICE";
       const priceLabel =
         row.price === null || !row.price.isActive
           ? "بدون قیمت"
           : row.price.priceMode === "FIXED_TOMAN"
             ? formatToman(row.price.fixedPriceToman ?? 0)
             : `${row.price.percentValue ?? 0}٪`;
-      lines.push(`• ${esc(row.product.name)} — عادی ${formatToman(row.product.priceToman)} — ${priceLabel}`);
+      const stateLabel =
+        state === "UNSELLABLE"
+          ? "⚠️ فعلاً غیرقابل‌فروش"
+          : state === "NO_ACTIVE_PRICE"
+            ? "بدون قیمت فعال"
+            : "دارای قیمت فعال ✅";
+      lines.push(
+        `• ${esc(row.product.name)} — عادی ${formatToman(row.product.priceToman)} — ${priceLabel} — ${stateLabel}`,
+      );
       kb.text(`مبلغ ثابت: ${esc(row.product.name)}`, `${AC.PRICE_FIXED}${tierSid}:${psid}`)
         .text("درصد", `${AC.PRICE_PCT}${tierSid}:${psid}`)
         .row();
@@ -782,9 +810,74 @@ async function renderPrices(ctx: BotContext, tierSid: string): Promise<void> {
       }
     }
   }
-  kb.text("بازگشت", `${AC.TIER_VIEW}${tierSid}`);
+  kb.text("محصولات نمایندگی 🛍", `${AC.ELIG}1`)
+    .row()
+    .text("بازگشت", `${AC.TIER_VIEW}${tierSid}`);
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
 }
+
+/**
+ * OWNER product-eligibility management list (§12). Shows EVERY SERVICE_PRODUCT —
+ * opted-in and not — in a bounded, paginated list with its current
+ * representative-eligibility + structural-sellability state, so a product never
+ * disappears from the config surface merely because it is not yet opted in. Each
+ * row deep-links to the existing product detail page, where the OWNER opts it in
+ * / out through the ONE authoritative product mutation (no second writer here).
+ */
+async function renderEligibility(ctx: BotContext, page: number): Promise<void> {
+  const result = await listProducts("S", page);
+  const lines = [
+    "🛍 <b>محصولات نمایندگی</b>",
+    "",
+    "وضعیت «فروش نمایندگی» همهٔ محصولات سرویس. برای فعال/غیرفعال‌کردن، وارد جزئیات محصول شوید.",
+    "",
+  ];
+  const kb = new InlineKeyboard();
+  if (result.products.length === 0) {
+    lines.push("هیچ محصول سرویسی تعریف نشده است.");
+  } else {
+    for (const product of result.products) {
+      const psid = representativeShortId(product.id);
+      // Stable machine state (never Persian-string comparison, §11):
+      //   NOT_ELIGIBLE / ELIGIBLE_SELLABLE / ELIGIBLE_UNSELLABLE.
+      const state: "NOT_ELIGIBLE" | "ELIGIBLE_SELLABLE" | "ELIGIBLE_UNSELLABLE" =
+        !product.representativeEligible
+          ? "NOT_ELIGIBLE"
+          : isProductStructurallySellable(product)
+            ? "ELIGIBLE_SELLABLE"
+            : "ELIGIBLE_UNSELLABLE";
+      const stateLabel =
+        state === "NOT_ELIGIBLE"
+          ? "خارج از نمایندگی ❌"
+          : state === "ELIGIBLE_SELLABLE"
+            ? "نمایندگی فعال ✅"
+            : "نمایندگی فعال، غیرقابل‌فروش ⚠️";
+      lines.push(`• ${esc(product.name)} — عادی ${formatToman(product.priceToman)} — ${stateLabel}`);
+      kb.text(`تنظیم: ${esc(product.name)}`, pcb.view(psid)).row();
+    }
+  }
+  if (result.pages > 1) {
+    if (result.page > 1) {
+      kb.text("« قبلی", `${AC.ELIG}${result.page - 1}`);
+    }
+    if (result.page < result.pages) {
+      kb.text("بعدی »", `${AC.ELIG}${result.page + 1}`);
+    }
+    kb.row();
+    lines.push("", `صفحهٔ ${result.page} از ${result.pages}`);
+  }
+  kb.text("بازگشت", AC.ROOT);
+  await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
+}
+
+adminRepresentativeHandler.callbackQuery(new RegExp(`^${AC.ELIG}(\\d+)$`), async (ctx) => {
+  if (!(await ownerGuard(ctx))) {
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const page = Math.max(1, Number.parseInt(ctx.match![1], 10) || 1);
+  await renderEligibility(ctx, page);
+});
 
 adminRepresentativeHandler.callbackQuery(new RegExp(`^${AC.PRICES}([a-f0-9]{8})$`), async (ctx) => {
   if (!(await ownerGuard(ctx))) {

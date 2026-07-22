@@ -107,6 +107,24 @@ trafficResetCycle**; location; reset cycle; delivery), toggles (active,
 required-user-info) and soft delete («محصول غیرفعال شد و حذف فیزیکی انجام
 نشد.»).
 
+### Representative-sale opt-in (SERVICE_PRODUCT, OWNER only)
+
+Every `SERVICE_PRODUCT` detail page shows its representative-sale state
+(`فروش در بخش نمایندگی: فعال ✅ / غیرفعال ❌`) to any admin. The **OWNER only**
+sees the toggle button `فعال‌کردن/غیرفعال‌کردن فروش نمایندگی 🤝`
+(`admin:prod:repel:<sid>`); regular admins can view the state but never mutate
+it, and `OTHER_PRODUCT` never exposes the control. The button opens an explicit
+confirmation page carrying a safe warning that eligibility alone does not make a
+product sellable, then flips `Product.representativeEligible` via the ONE
+authoritative writer `setProductRepresentativeEligible` — a single atomic
+conditional update guarded by the expected current state (embedded in the confirm
+callback), so a stale/duplicate confirm converges instead of double-flipping.
+Each change writes a privacy-safe audit event
+(`product.representative_eligibility_changed`). This is the same writer the
+representative admin console reuses (no second eligibility mutator). No schema
+change and no manual database edit are needed. Full behaviour, financial
+isolation and catalog implications live in `docs/representative-program.md` §8.
+
 ## Ordering behavior
 
 `setCategoryDisplayOrder` / `setProductDisplayOrder`: position N inserts at
@@ -131,6 +149,8 @@ the flow and behave normally; the cancel button returns to the product menu.
 ## Intentionally NOT implemented
 
 User-facing product browsing/purchase, checkout sessions, payments, wallet,
-orders, provisioning, Marzban/XUI API calls, stock-item delivery, role-based
-admin restrictions, multi-select display groups (single pick per spec). All
-other admin sections stay placeholders; panel management is untouched.
+orders, provisioning, Marzban/XUI API calls, stock-item delivery, general
+role-based admin restrictions (the sole OWNER-only control is the
+representative-sale opt-in above), multi-select display groups (single pick per
+spec). All other admin sections stay placeholders; panel management is
+untouched.

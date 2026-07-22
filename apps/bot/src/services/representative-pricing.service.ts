@@ -14,6 +14,7 @@ import {
   type RepresentativePriceMode,
 } from "@zedbot/shared";
 
+import { isProductVisible } from "./catalog.service.js";
 import { calculateDiscountAmount, type DiscountPurpose } from "./discount.service.js";
 import {
   isRepresentativeCheckoutEnabled,
@@ -270,20 +271,43 @@ export interface EligibleRepresentativeProduct {
 
 /**
  * Lists the SERVICE_PRODUCTs this user (as an active representative) may buy at a
- * reseller price right now: eligible + active products for which the resolver
- * returns REPRESENTATIVE pricing. Returns [] when the user is not an eligible
- * representative or the program/checkout switch is off. Read-only.
+ * reseller price right now. A product is included ONLY when it is both:
+ *   1. actually purchasable for THIS user — the same authoritative catalog
+ *      predicate the retail flow uses (`isProductVisible`): active product +
+ *      active category + group visibility + panel present/visible/sellable
+ *      (provisioning-ready) + valid XUI inbound selection; AND
+ *   2. reseller-priced right now — the authoritative resolver returns
+ *      REPRESENTATIVE pricing (eligible product, active rep/tier/price, switches
+ *      on).
+ * Purchasability is evaluated BEFORE pricing, so a product that could never
+ * reach pre-invoice (hidden from the group, inactive category, hidden/unready
+ * panel, invalid XUI inbound) is never shown in the buy OR tariff list and can
+ * never seed a checkout that `renderPreInvoice` would immediately reject
+ * (P2@282). Returns [] when the user is not an eligible representative or the
+ * program/checkout switch is off. Read-only, deterministic order.
  */
 export async function listEligibleRepresentativeProducts(
-  user: Pick<User, "id">,
+  user: Pick<User, "id" | "group">,
 ): Promise<EligibleRepresentativeProduct[]> {
+  // Load candidates with the SAME relations the retail catalog uses (category +
+  // panel) in ONE bounded query — the visibility predicate then needs no extra
+  // per-product panel/category lookup (no N+1). Deterministic order matches the
+  // normal catalog: category displayOrder, product displayOrder, price, created.
   const products = await prisma.product.findMany({
-    where: { type: "SERVICE_PRODUCT", isActive: true, representativeEligible: true },
-    select: { id: true, name: true, type: true, priceToman: true, representativeEligible: true },
-    orderBy: { priceToman: "asc" },
+    where: { type: "SERVICE_PRODUCT", representativeEligible: true },
+    include: { category: true, panel: true },
+    orderBy: [
+      { category: { displayOrder: "asc" } },
+      { displayOrder: "asc" },
+      { priceToman: "asc" },
+      { createdAt: "asc" },
+    ],
   });
   const eligible: EligibleRepresentativeProduct[] = [];
   for (const product of products) {
+    if (!isProductVisible(product, user.group)) {
+      continue;
+    }
     const effective = await resolveEffectiveProductPrice({
       user,
       product,

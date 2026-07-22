@@ -2,6 +2,7 @@ import {
   PanelStatus,
   Prisma,
   prisma,
+  type Admin,
   type OtherProductDeliveryType,
   type OtherProductFulfillmentProfile,
   type OtherProductKind,
@@ -51,6 +52,7 @@ import {
   productShortId,
   productTypeOf,
   setProductDisplayOrder,
+  setProductRepresentativeEligible,
   softDeleteProduct,
   updateProduct,
   type ProductWithRelations,
@@ -80,12 +82,15 @@ import {
   productListMenuKeyboard,
   productMenuText,
   productMenuKeyboard,
+  representativeEligibilityConfirmView,
   resetCycleKeyboard,
   STOCK_PARSER_BY_CODE,
   stockParserKeyboard,
 } from "./product-views.js";
 
 const HTML = { parseMode: "HTML" as const };
+const OWNER_ONLY_TEXT = "این عملیات فقط برای مالک ربات مجاز است.";
+const SERVICE_ONLY_REP_TEXT = "فروش نمایندگی فقط برای محصولات سرویس است.";
 const STOCK_WARNING = "استوک فعلاً فقط در دیتابیس آماده است و تحویل خودکار بعداً پیاده می‌شود.";
 const INVALID_OPTION_TEXT = "گزینه نامعتبر است.";
 const PRODUCT_NOT_FOUND_TEXT = "محصول پیدا نشد.";
@@ -110,6 +115,24 @@ function cancelKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("لغو ❌", PROD_CB.CANCEL);
 }
 
+/** True only for the active bot OWNER — the representative-eligibility control
+ * is OWNER-only; regular admins may view the state but never mutate it. */
+function isOwner(ctx: BotContext): boolean {
+  return ctx.admin !== null && ctx.admin.role === "OWNER";
+}
+
+/** OWNER gate for the eligibility routes — answers the toast itself and returns
+ * null when the caller is not the OWNER (callers early-return); otherwise returns
+ * the live OWNER admin (narrowed, so `.id` is available for the audit). Every
+ * eligibility callback re-invokes this so a stale button can never mutate. */
+async function requireOwner(ctx: BotContext): Promise<Admin | null> {
+  if (ctx.admin !== null && ctx.admin.role === "OWNER") {
+    return ctx.admin;
+  }
+  await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
+  return null;
+}
+
 export async function showProductMenu(ctx: BotContext): Promise<void> {
   await safeEditOrReply(ctx, productMenuText(), productMenuKeyboard());
 }
@@ -124,7 +147,7 @@ async function showProductDetail(ctx: BotContext, product: ProductWithRelations)
   await safeEditOrReply(
     ctx,
     productDetailText(product),
-    productDetailKeyboard(product, backList),
+    productDetailKeyboard(product, backList, isOwner(ctx)),
     HTML,
   );
 }
@@ -361,6 +384,70 @@ productHandler.callbackQuery(/^admin:prod:tgl:(.+)$/, async (ctx) => {
   const updated = await updateProduct(product.id, { isActive: !product.isActive });
   await safeAnswerCallback(ctx, updated.isActive ? "فعال شد 🟢" : "غیرفعال شد ⚪️");
   await showProductDetail(ctx, updated);
+});
+
+// --- representative-eligibility opt-in (OWNER only, SERVICE_PRODUCT only) ------
+// Two-step: «...:repel:<sid>» opens the confirmation page; «...:repel:<sid>:<0|1>»
+// atomically flips the flag, where the trailing digit is the EXPECTED current
+// state so a stale/duplicate confirm converges instead of double-flipping (§8,§12).
+
+productHandler.callbackQuery(/^admin:prod:repel:([^:]+)$/, async (ctx) => {
+  if ((await requireOwner(ctx)) === null) {
+    return;
+  }
+  const product = await resolveProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  if (product.type !== "SERVICE_PRODUCT") {
+    await safeAnswerCallback(ctx, SERVICE_ONLY_REP_TEXT);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const view = representativeEligibilityConfirmView(product);
+  await safeEditOrReply(ctx, view.text, view.keyboard, HTML);
+});
+
+productHandler.callbackQuery(/^admin:prod:repel:([^:]+):([01])$/, async (ctx) => {
+  const admin = await requireOwner(ctx);
+  if (admin === null) {
+    return;
+  }
+  const product = await resolveProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  if (product.type !== "SERVICE_PRODUCT") {
+    await safeAnswerCallback(ctx, SERVICE_ONLY_REP_TEXT);
+    return;
+  }
+  const expectedCurrent = ctx.match[2] === "1";
+  const result = await setProductRepresentativeEligible({
+    productId: product.id,
+    expectedCurrent,
+    adminId: admin.id,
+  });
+  if (!result.ok) {
+    await safeAnswerCallback(
+      ctx,
+      result.reason === "WRONG_TYPE" ? SERVICE_ONLY_REP_TEXT : PRODUCT_NOT_FOUND_TEXT,
+    );
+    // Re-render from the freshest known state so the page never lies.
+    const fresh = await getProductByShortId(ctx.match[1]);
+    if (fresh !== null) {
+      await showProductDetail(ctx, fresh);
+    }
+    return;
+  }
+  await safeAnswerCallback(
+    ctx,
+    result.changed
+      ? result.product.representativeEligible
+        ? "فروش نمایندگی فعال شد ✅"
+        : "فروش نمایندگی غیرفعال شد ❌"
+      : "وضعیت تغییری نکرد (به‌روز است).",
+  );
+  await showProductDetail(ctx, result.product);
 });
 
 productHandler.callbackQuery(/^admin:prod:del:([^:]+)$/, async (ctx) => {

@@ -32,6 +32,12 @@ export const pcb = {
   toggle: (sid: string): string => `admin:prod:tgl:${sid}`,
   deleteAsk: (sid: string): string => `admin:prod:del:${sid}`,
   deleteConfirm: (sid: string): string => `admin:prod:del:${sid}:yes`,
+  // Representative-eligibility opt-in (OWNER-only, SERVICE_PRODUCT-only). The
+  // confirm carries the EXPECTED current state ("1"=eligible / "0"=not) so a
+  // stale/duplicate confirm converges instead of blindly double-flipping.
+  repEligibleAsk: (sid: string): string => `admin:prod:repel:${sid}`,
+  repEligibleConfirm: (sid: string, expected: "0" | "1"): string =>
+    `admin:prod:repel:${sid}:${expected}`,
   fieldEdit: (sid: string, key: string): string => `admin:prod:fe:${sid}:${key}`,
   pickCategory: (sid: string): string => `admin:prod:cats:${sid}`,
   setCategory: (sid: string, catSid: string): string => `admin:prod:setcat:${sid}:${catSid}`,

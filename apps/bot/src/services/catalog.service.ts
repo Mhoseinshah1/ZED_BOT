@@ -100,14 +100,16 @@ export function categoriesOf(products: ProductWithRelations[]): ProductCategory[
 }
 
 /**
- * Re-checks that one specific product is still visible/purchasable for the
- * user (used when resolving callbacks and before checkout creation).
+ * Structural sellability of a product, INDEPENDENT of any user group: the
+ * product is active, its category is active, and (for a SERVICE_PRODUCT) its
+ * panel exists, is visible, is sellable (provisioning-ready), and its XUI
+ * inbound selection is valid. This is the group-agnostic core of
+ * `isProductVisible` — reused by admin surfaces that need to explain WHY a
+ * product cannot currently reach checkout (readiness), where the per-audience
+ * group filter is not meaningful. There is exactly ONE copy of these checks.
  */
-export function isProductVisible(product: ProductWithRelations, group: UserGroup): boolean {
+export function isProductStructurallySellable(product: ProductWithRelations): boolean {
   if (!product.isActive || !product.category.isActive) {
-    return false;
-  }
-  if (!groupMatches(product.displayGroups, group)) {
     return false;
   }
   if (product.type === "SERVICE_PRODUCT") {
@@ -131,4 +133,17 @@ export function isProductVisible(product: ProductWithRelations, group: UserGroup
     }
   }
   return true;
+}
+
+/**
+ * Re-checks that one specific product is still visible/purchasable for the
+ * user (used when resolving callbacks and before checkout creation). This is
+ * the SINGLE authoritative catalog predicate: group visibility on top of the
+ * structural sellability core above.
+ */
+export function isProductVisible(product: ProductWithRelations, group: UserGroup): boolean {
+  if (!groupMatches(product.displayGroups, group)) {
+    return false;
+  }
+  return isProductStructurallySellable(product);
 }

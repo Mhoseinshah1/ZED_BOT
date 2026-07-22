@@ -243,6 +243,9 @@ export function productDetailText(product: ProductWithRelations): string {
       `پنل: ${product.panel === null ? "-" : `${escapeHtml(product.panel.name)} (${product.panel.type})`}`,
       `موقعیت: ${product.allLocations ? "همه موقعیت‌ها" : (LOCATION_LABEL[product.serviceLocation ?? ""] ?? "-")}`,
       `حجم: ${product.volumeGb === 0 ? "نامحدود" : `${product.volumeGb ?? "-"} گیگ`}`,
+      // Representative-program opt-in state (§8). Shown to every admin (read-only
+      // for non-OWNER); only the OWNER sees the toggle button (see keyboard).
+      `فروش در بخش نمایندگی: ${product.representativeEligible ? "فعال ✅" : "غیرفعال ❌"}`,
     );
     if (product.panel?.type === "MARZBAN") {
       lines.push(
@@ -296,6 +299,7 @@ export function productDetailText(product: ProductWithRelations): string {
 export function productDetailKeyboard(
   product: ProductWithRelations,
   backList?: { filter: ProductListFilterKey; page: number },
+  isOwner = false,
 ): InlineKeyboard {
   const sid = productShortId(product);
   const kb = new InlineKeyboard()
@@ -323,6 +327,17 @@ export function productDetailKeyboard(
       kb.text("انتخاب اینباند XUI", pcb.fieldEdit(sid, "inb"));
     }
     kb.row();
+    // Representative-eligibility opt-in — OWNER-only, SERVICE_PRODUCT-only (§8).
+    // Regular admins see the state line in the text but never this button; the
+    // callback re-validates the OWNER server-side regardless.
+    if (isOwner) {
+      kb.text(
+        product.representativeEligible
+          ? "غیرفعال‌کردن فروش نمایندگی 🤝"
+          : "فعال‌کردن فروش نمایندگی 🤝",
+        pcb.repEligibleAsk(sid),
+      ).row();
+    }
   } else {
     // Specialized-workflows phase: kind selector + per-profile controls.
     kb.text("نوع محصول", pcb.pickKind(sid));
@@ -369,6 +384,42 @@ export function productDetailKeyboard(
     .row()
     .text("بازگشت به مدیریت محصولات", PROD_CB.MENU);
   return kb;
+}
+
+/**
+ * OWNER confirmation page for flipping `representativeEligible`. The confirm
+ * button carries the EXPECTED current state ("1"/"0") so a stale/duplicate tap
+ * converges atomically instead of double-flipping. The «انصراف» button returns
+ * to the exact product detail page. Shows the safe warning that eligibility
+ * alone does not make a product sellable.
+ */
+export function representativeEligibilityConfirmView(product: ProductWithRelations): {
+  text: string;
+  keyboard: InlineKeyboard;
+} {
+  const sid = productShortId(product);
+  const enabling = !product.representativeEligible;
+  const expected: "0" | "1" = product.representativeEligible ? "1" : "0";
+  const text = [
+    "🤝 <b>فروش نمایندگی</b>",
+    "",
+    `محصول: <b>${escapeHtml(product.name)}</b>`,
+    `وضعیت فعلی: ${product.representativeEligible ? "فعال ✅" : "غیرفعال ❌"}`,
+    "",
+    enabling
+      ? "می‌خواهید فروش نمایندگی این محصول را «فعال» کنید؟"
+      : "می‌خواهید فروش نمایندگی این محصول را «غیرفعال» کنید؟",
+    "",
+    "⚠️ فعال‌بودن فروش نمایندگی به‌تنهایی کافی نیست؛ محصول باید فعال، قابل‌نمایش، دارای پنل آماده و دارای قیمت فعال در سطح نمایندگی باشد.",
+  ].join("\n");
+  const keyboard = new InlineKeyboard()
+    .text(
+      enabling ? "بله، فعال کن ✅" : "بله، غیرفعال کن ❌",
+      pcb.repEligibleConfirm(sid, expected),
+    )
+    .row()
+    .text("انصراف", pcb.view(sid));
+  return { text, keyboard };
 }
 
 // --- Pickers ------------------------------------------------------------------

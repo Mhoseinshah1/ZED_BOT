@@ -15,6 +15,7 @@ import {
   type RepresentativePriceMode,
 } from "@zedbot/shared";
 
+import { isProductStructurallySellable } from "./catalog.service.js";
 import { writeSystemLog } from "./system-log.service.js";
 
 // =============================================================================
@@ -176,28 +177,44 @@ export async function setRepresentativeTierActive(args: {
 // --- per-tier product prices (§19) -------------------------------------------
 
 export type PricedProductRow = {
-  product: Pick<Product, "id" | "name" | "priceToman">;
+  product: Pick<Product, "id" | "name" | "priceToman" | "isActive">;
+  /** Structural sellability (active + category active + panel ready + valid XUI
+   * inbound), group-agnostic — an opted-in product can still be unsellable, and
+   * the OWNER needs to SEE that on the price page rather than have it silently
+   * vanish (§11). Uses the ONE shared catalog predicate, not an imitation. */
+  sellable: boolean;
   price: RepresentativeProductPrice | null;
 };
 
 /** All representative-eligible SERVICE_PRODUCTs + their price row for this tier
- * (null when unset). Read-only. */
+ * (null when unset). Opted-in but inactive/unready products are RETAINED here,
+ * flagged `sellable: false`, so the OWNER can see why they cannot yet be sold
+ * (§11). Deterministic catalog order. Read-only. */
 export async function listTierProductPrices(tierId: string): Promise<PricedProductRow[]> {
   const [products, prices] = await Promise.all([
     prisma.product.findMany({
       where: { type: "SERVICE_PRODUCT", representativeEligible: true },
-      select: { id: true, name: true, priceToman: true, isActive: true },
-      orderBy: { priceToman: "asc" },
+      include: { category: true, panel: true },
+      orderBy: [
+        { category: { displayOrder: "asc" } },
+        { displayOrder: "asc" },
+        { priceToman: "asc" },
+        { createdAt: "asc" },
+      ],
     }),
     prisma.representativeProductPrice.findMany({ where: { tierId } }),
   ]);
   const byProduct = new Map(prices.map((p) => [p.productId, p]));
-  return products
-    .filter((p) => p.isActive)
-    .map((product) => ({
-      product: { id: product.id, name: product.name, priceToman: product.priceToman },
-      price: byProduct.get(product.id) ?? null,
-    }));
+  return products.map((product) => ({
+    product: {
+      id: product.id,
+      name: product.name,
+      priceToman: product.priceToman,
+      isActive: product.isActive,
+    },
+    sellable: isProductStructurallySellable(product),
+    price: byProduct.get(product.id) ?? null,
+  }));
 }
 
 export type PriceResult = Ok<{ price: RepresentativeProductPrice }> | Err;

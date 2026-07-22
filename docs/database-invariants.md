@@ -264,3 +264,28 @@ state is fabricated by the migration**.
   SCHEDULED/READY upcoming notice and its uncommitted (SCHEDULED/CLAIMED) attempts —
   never a COMPLETED attempt (a settled renewal is never reversed).
 - A cancelled/suppressed/expired notice never mutates the mandate.
+
+## Representative program — product eligibility & catalog (PR #121 follow-up)
+
+- `Product.representativeEligible` (default false, no new migration) is flipped
+  ONLY by `setProductRepresentativeEligible` — a single **atomic conditional
+  update** guarded by `(id, type = SERVICE_PRODUCT, representativeEligible =
+  expected)`, so a stale/duplicate confirm converges instead of double-flipping.
+  It is OWNER-only and rejects a non-`SERVICE_PRODUCT`.
+- Flipping the flag NEVER changes `Product.isActive`, deletes a
+  `RepresentativeProductPrice`, activates/recalculates a price, mutates a tier
+  fingerprint, rewrites a `CheckoutSession` snapshot, or touches any
+  Payment/Order/WalletTransaction/ReferralCommission — turning it off blocks only
+  NEW reseller catalogs/checkouts; a settled Payment, paid Order and provisioned
+  Service stay authoritative (§16), and an exact-match externally-paid checkout is
+  honoured to fulfillment regardless of a later opt-out.
+- The reseller buy AND tariff catalogs are the same authoritative set,
+  filtered by `isProductVisible(product, user.group)` (the retail predicate)
+  BEFORE pricing — a product hidden from the group / in an inactive category / on
+  a hidden/inactive/unready panel / with an invalid XUI inbound never appears and
+  never seeds a checkout.
+- A TERMINATED representative row is terminal and read-only: it is never
+  re-applied to (`submitRepresentativeApplication` returns `TERMINATED`), never
+  seeds a reseller checkout, and its retained purchase history survives; only the
+  OWNER lifecycle can change a representative's status. An unknown persisted
+  status fails closed to the terminal page.

@@ -55,6 +55,10 @@ export const OPS_EVENTS = {
   // Observational only - the paid Order is authoritative and is NOT invalidated
   // (§16); the OWNER gets visibility that live pricing drifted after payment.
   REPRESENTATIVE_STALE_SETTLEMENT: "representative.settled_stale_pricing",
+  // Representative program: the OWNER opted a SERVICE_PRODUCT into / out of
+  // reseller sale (Product.representativeEligible). Privacy-safe: action +
+  // enabled flag + product TYPE + short correlation id only (§8, §13, §24).
+  PRODUCT_REP_ELIGIBILITY_CHANGED: "product.representative_eligibility_changed",
 } as const;
 export type OpsEventType = (typeof OPS_EVENTS)[keyof typeof OPS_EVENTS];
 
