@@ -16,6 +16,7 @@ import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
 import {
   addAdminServiceNote,
+  adminOperationIsManuallyReviewable,
   adminServiceEligibleMutations,
   adminServiceSnapshotFingerprint,
   buildAdminServiceSnapshot,
@@ -633,7 +634,8 @@ adminServiceOpsHandler.callbackQuery(/^admin:svc:recrun:([0-9a-f-]{4,36})$/, asy
   // is never permanently blocked.
   if (
     refreshed !== null &&
-    (refreshed.status === "UNCERTAIN" || refreshed.status === "RECONCILIATION_REQUIRED")
+    (refreshed.status === "UNCERTAIN" || refreshed.status === "RECONCILIATION_REQUIRED") &&
+    adminOperationIsManuallyReviewable(refreshed.type)
   ) {
     kb.text("علامت‌گذاری به‌عنوان بررسی‌شده ✅", ASO_CB.reconReview(ctx.match[1])).row();
   }

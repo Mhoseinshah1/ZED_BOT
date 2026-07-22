@@ -22,6 +22,7 @@ import {
   SERVICE_LOCK_BUSY_TEXT,
   SERVICE_LOCK_UNAVAILABLE_TEXT,
   serviceOperationLockKey,
+  type ServiceLock,
 } from "./service-lock.service.js";
 
 // =============================================================================
@@ -154,9 +155,13 @@ export type RegenerateLinkOutcome =
   // this to a reconciliation-required operation. User callers ignore it.
   | { ok: false; error: string; safeUserMessage: string; uncertain?: boolean };
 
-/** Actor-aware options (§12). Omitting `actor` = the existing USER behaviour. */
+/** Actor-aware options (§12). Omitting `actor` = the existing USER behaviour.
+ * `lock` (when provided) is checked for ownership loss right before persistence
+ * so a regeneration that outran a lost lock defers instead of overwriting a
+ * newer operation's state. */
 export interface RegenActorOptions {
   actor?: ServiceOperationActor;
+  lock?: ServiceLock;
 }
 
 /** Panel status -> ServiceStatus; anything else keeps the stored status. */
@@ -200,6 +205,7 @@ export async function regenerateServiceSubscription(
   try {
     return await regenerateServiceSubscriptionUnlocked(userId, serviceId, {
       actor: { kind: "USER", userId },
+      lock: acquisition.lock,
     });
   } finally {
     await acquisition.lock.release();
@@ -375,6 +381,24 @@ export async function regenerateServiceSubscriptionUnlocked(
     data.status = mappedStatus;
   }
   const newHasSubscriptionUrl = newUrl !== undefined ? true : previousHadSubscriptionUrl;
+
+  // Lock-loss guard: the panel DEFINITELY re-keyed, but if the per-service lock
+  // was lost during the call, persisting could overwrite a newer operation's
+  // status/usage/expiry (this persist is not pre-state-guarded). Defer to
+  // reconciliation instead of writing. Only enforced when a lock was passed
+  // (the actor-aware admin/user callers); other callers keep prior behaviour.
+  if (options.lock?.isLost() === true) {
+    logger.warn("subscription regeneration: lock lost before persist - deferring", {
+      serviceId: service.id,
+      panelId: panel.id,
+    });
+    return {
+      ok: false,
+      error: "service lock lost before regeneration persist",
+      safeUserMessage: REGEN_FAILED_TEXT,
+      uncertain: true,
+    };
+  }
 
   try {
     await prisma.$transaction(async (tx) => {

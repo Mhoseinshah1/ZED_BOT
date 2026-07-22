@@ -35,7 +35,7 @@ import {
 
 import { logger } from "../core/logger.js";
 import { logAdminServiceOperation } from "./admin-service-operation-log.service.js";
-import { areAdminServiceMutationsEnabled } from "./admin-service-settings.service.js";
+import { areAdminServiceMutationsEnabledFresh } from "./admin-service-settings.service.js";
 import { calculateExtraTime } from "./extra-time.service.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import {
@@ -345,8 +345,10 @@ export async function executeAdminServiceOperation(
     return { outcome: "rejected", errorCode: "NOT_OWNER" };
   }
 
-  // 2. Recheck the mutation master switch (a stale/direct callback fails closed).
-  if (!(await areAdminServiceMutationsEnabled())) {
+  // 2. Recheck the mutation master switch UNCACHED (an OWNER emergency-disable
+  //    must take effect across all workers immediately; a stale/direct callback
+  //    fails closed).
+  if (!(await areAdminServiceMutationsEnabledFresh())) {
     return { outcome: "rejected", errorCode: "MUTATIONS_DISABLED" };
   }
 
@@ -662,7 +664,7 @@ async function runApplier(
       // stale-overwritten — no lock-loss abort is needed here.
       return applyAdminToggle(service, panel, type, operationId, adminId);
     case "REGENERATE_LINK":
-      return applyAdminRegen(service, panel, operationId, adminId);
+      return applyAdminRegen(service, panel, operationId, adminId, lock);
     case "ADD_VOLUME":
       return applyAdminVolumeGrant(service, panel, operationId, requestedCount ?? 0, lock);
     case "ADD_TIME":
@@ -718,9 +720,11 @@ async function applyAdminRegen(
   panel: Panel,
   operationId: string,
   adminId: string,
+  lock: ServiceLock,
 ): Promise<ApplierResult> {
   const outcome = await regenerateServiceSubscriptionUnlocked(service.userId, service.id, {
     actor: { kind: "ADMIN", adminId, operationId },
+    lock,
   });
   if (outcome.ok) {
     return {
@@ -1335,15 +1339,25 @@ export async function reconcileAdminServiceOperation(
 export type AdminReviewOutcome =
   | { kind: "resolved" }
   | { kind: "not-found" }
+  | { kind: "not-reviewable" }
   | { kind: "not-reconcilable" };
 
+/** Only an operation whose remote effect is INHERENTLY not read-verifiable may
+ * be resolved by a blind OWNER review. That is REGENERATE_LINK alone (the link
+ * change cannot be read back, and re-running it is idempotent). A grant / toggle
+ * MUST be resolved by the evidence-based reconcile — blindly resolving an
+ * uncertain grant would drop the conflict block and risk a double-grant. */
+export function adminOperationIsManuallyReviewable(type: string): boolean {
+  return type === "REGENERATE_LINK";
+}
+
 /**
- * OWNER-controlled terminal resolution (§18) for a blocking operation an
- * automatic reconcile cannot classify — notably an uncertain REGENERATE_LINK,
+ * OWNER-controlled terminal resolution (§18) for a blocking REGENERATE_LINK
  * whose link change is not read-verifiable. The OWNER, having reviewed it (e.g.
  * confirmed with the user or safely re-run the idempotent regeneration), marks
  * it RECONCILED so the service is no longer blocked from later mutations. This
- * never touches the panel and writes no service state.
+ * never touches the panel and writes no service state. Grants/toggles are
+ * REJECTED here — they must go through the evidence-based reconcile.
  */
 export async function markAdminServiceOperationReviewed(
   operationId: string,
@@ -1355,6 +1369,10 @@ export async function markAdminServiceOperationReviewed(
   }
   if (!(ADMIN_SERVICE_RECONCILE_STATUSES as readonly string[]).includes(op.status)) {
     return { kind: "not-reconcilable" };
+  }
+  if (!adminOperationIsManuallyReviewable(op.type)) {
+    // A grant/toggle must not be blind-resolved (double-grant risk).
+    return { kind: "not-reviewable" };
   }
   const updated = await prisma.adminServiceOperation.updateMany({
     where: { id: op.id, status: op.status },

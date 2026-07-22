@@ -85,12 +85,16 @@ sequence, for every mutation:
 mutations and is resolved only by the read-only reconciliation page. This is
 mandatory for `ADD_VOLUME`/`ADD_TIME` to prevent a double-grant.
 
-The grant appliers additionally check the per-service lock's `isLost()` before
-persisting: if the heartbeat found a foreign token during a long panel call, the
-op is left `RECONCILIATION_REQUIRED` rather than overwriting a newer operation's
-state (mirroring the paid-operation paths). Time grants persist the **live**
+The grant AND regeneration appliers check the per-service lock's `isLost()`
+before persisting: if the heartbeat found a foreign token during a long panel
+call, the op is left `RECONCILIATION_REQUIRED`/uncertain rather than overwriting
+a newer operation's state (mirroring the paid-operation paths; the toggle path
+is already safe via its status-guarded write). Time grants persist the **live**
 usage/remaining from the fresh read + mutation result and derive the status from
-them, so the displayed traffic is never stale after an extension.
+them, so the displayed traffic is never stale after an extension. The master
+switch recheck at step 2 reads the setting **uncached**, so an OWNER
+emergency-disable takes effect across all workers immediately (the 30s
+process-local cache can otherwise lag on other instances).
 
 ### Verify-after-write for grants (§11)
 
@@ -167,7 +171,10 @@ anything the read did not establish; an inconclusive read leaves the operation
 for a later attempt. A link regeneration cannot be verified by a read, so the
 dashboard also offers the OWNER a **terminal manual resolution** («علامت‌گذاری
 به‌عنوان بررسی‌شده») that marks the operation `RECONCILED` — so an unverifiable
-regeneration can never permanently block the service from later mutations.
+regeneration can never permanently block the service from later mutations. This
+manual review is **restricted to `REGENERATE_LINK`**: a grant or toggle is never
+blind-resolved (that would drop the conflict block and risk a double-grant) and
+must go through the evidence-based reconcile instead.
 
 ## Notifications (§19)
 

@@ -682,6 +682,34 @@ describe.runIf(hasDeps)("admin service operations", () => {
     expect(await countUnresolvedAdminOperations(service.id)).toBe(0);
   });
 
+  it("refuses to blindly review an uncertain grant (double-grant safety)", async () => {
+    const user = await createUser();
+    const service = await createService(user, { volumeGib: 10, usedGib: 1, days: 20 });
+    const detail = await getAdminServiceDetail(service.id.slice(0, 8));
+    const grantOp = await prisma.adminServiceOperation.create({
+      data: {
+        serviceId: service.id,
+        targetUserId: user.id,
+        adminId: owner.id,
+        type: "ADD_VOLUME",
+        status: "UNCERTAIN",
+        reason: "uncertain grant",
+        requestedValue: 5n,
+        requestedUnit: "GIB",
+        idempotencyKey: `test-grant-review-${runTag}-${service.id.slice(0, 8)}`,
+        beforeSnapshot: buildAdminServiceSnapshot(detail!.service, detail!.panel) as never,
+        startedAt: new Date(),
+        completedAt: new Date(),
+        safeErrorCode: "PANEL_UNCERTAIN",
+      },
+    });
+    // A grant must go through the evidence-based reconcile, never a blind review.
+    const outcome = await markAdminServiceOperationReviewed(grantOp.id, owner.id);
+    expect(outcome.kind).toBe("not-reviewable");
+    const still = await prisma.adminServiceOperation.findUniqueOrThrow({ where: { id: grantOp.id } });
+    expect(still.status).toBe("UNCERTAIN"); // untouched — still blocking
+  });
+
   it("classifies a definite modify failure as FAILED with no local change", async () => {
     const user = await createUser();
     const service = await createService(user, { volumeGib: 10, usedGib: 2, days: 20 });
