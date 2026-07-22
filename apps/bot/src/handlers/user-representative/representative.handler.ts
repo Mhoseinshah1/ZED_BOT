@@ -69,10 +69,10 @@ const RC = {
   WITHDRAW_YES: "user:rep:wd:yes",
   TARIFF: "user:rep:tariff",
   PURCHASES: "user:rep:buys",
-  BUY: "user:rep:buy",
+  REP_BUY: "user:rep:buy",
   PRODUCT: "user:rep:p:", // + product short id
   TERMS: "user:rep:terms",
-  SUPPORT: "user:rep:support",
+  REP_SUPPORT: "user:rep:support",
   MENU: "user:rep:menu",
 } as const;
 
@@ -191,13 +191,13 @@ async function renderDashboard(ctx: BotContext): Promise<void> {
   const checkoutOpen = rep.status === "ACTIVE" && rep.checkoutEnabled && (await isRepresentativeCheckoutEnabled());
   const kb = new InlineKeyboard();
   if (checkoutOpen) {
-    kb.text(await getButtonText("representative_buy", "خرید نمایندگی 🛒"), RC.BUY).row();
+    kb.text(await getButtonText("representative_buy", "خرید نمایندگی 🛒"), RC.REP_BUY).row();
   }
   kb.text(await getButtonText("representative_tariff", "تعرفه من 💠"), RC.TARIFF)
     .text(await getButtonText("representative_purchases", "خریدهای من 🧾"), RC.PURCHASES)
     .row();
   kb.text(await getButtonText("representative_terms", "شرایط 📄"), RC.TERMS)
-    .text(await getButtonText("representative_support", "پشتیبانی نمایندگان 🎫"), RC.SUPPORT)
+    .text(await getButtonText("representative_support", "پشتیبانی نمایندگان 🎫"), RC.REP_SUPPORT)
     .row();
   kb.text("بازگشت", CB.USER_MENU);
   await safeEditOrReply(ctx, lines.join("\n"), kb, HTML);
@@ -669,7 +669,7 @@ representativeHandler.callbackQuery(RC.TERMS, async (ctx) => {
   await safeEditOrReply(ctx, body, backTo(CB.USER_REPRESENTATIVE, "بازگشت"), HTML);
 });
 
-representativeHandler.callbackQuery(RC.SUPPORT, async (ctx) => {
+representativeHandler.callbackQuery(RC.REP_SUPPORT, async (ctx) => {
   // §21: reuse Support Tickets V2 — route the user into the existing support
   // section (the ticket system owns CB.USER_SUPPORT).
   await safeAnswerCallback(ctx);
@@ -686,7 +686,7 @@ representativeHandler.callbackQuery(RC.SUPPORT, async (ctx) => {
 
 // --- buy flow (§15, §16) -----------------------------------------------------
 
-representativeHandler.callbackQuery(RC.BUY, async (ctx) => {
+representativeHandler.callbackQuery(RC.REP_BUY, async (ctx) => {
   const user = ctx.dbUser;
   if (user === null) {
     await safeAnswerCallback(ctx);
