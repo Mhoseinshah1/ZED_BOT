@@ -1,12 +1,17 @@
-import { prisma, type Admin } from "@zedbot/database";
-import { OPS_LOG_TOPIC_KEYS, REDACTED_VALUE } from "@zedbot/shared";
+import { LogGroupSetupStatus, prisma, type Admin } from "@zedbot/database";
+import {
+  getRedisOptions,
+  LOG_GROUP_SETUP_QUEUE_NAME,
+  OPS_LOG_TOPIC_KEYS,
+  REDACTED_VALUE,
+} from "@zedbot/shared";
+import { Queue } from "bullmq";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 process.env.APP_SECRET ??= "log-group-compat-tests-secret-01";
 
 import { initialSession } from "../src/core/session.js";
 import {
-  GROUP_SAVED_TEXT,
   LGSET_CB,
   logGroupSetupHandler,
   SETUP_CONFIRM_TEXT,
@@ -100,9 +105,27 @@ interface CtxOptions {
 function base(chat: Record<string, unknown>, options: CtxOptions) {
   const sent: SentMessage[] = [];
   const toasts: Array<string | undefined> = [];
-  const api = options.api ?? makeApi();
+  const baseApi = options.api ?? makeApi();
   const me = { id: BOT_ID, is_bot: true, first_name: "ZedBot", username: BOT_USERNAME };
   const from = { id: Number(options.admin?.telegramId ?? 999n), is_bot: false, first_name: "S" };
+  // The group-side confirm drives the unified durable pipeline, which probes
+  // via ctx.api.getChat + ctx.api.getChatMember(chatId, userId).
+  const api = Object.assign(baseApi, {
+    async getChat(_chatId: number | string) {
+      return {
+        type: chat.type as string,
+        is_forum: chat.is_forum as boolean | undefined,
+        title: chat.title as string | undefined,
+        username: chat.username as string | undefined,
+      };
+    },
+    async getChatMember(_chatId: number | string, userId: number) {
+      if (userId === me.id) {
+        return options.botMember ?? { status: "administrator", can_manage_topics: true };
+      }
+      return options.presserMember ?? { status: "member" };
+    },
+  });
   return {
     shared: {
       chat,
@@ -177,6 +200,19 @@ async function boundChatId(): Promise<string | null> {
   return (await getLogGroupSettings()).chatId;
 }
 
+/** Empties the durable setup queue so a prior test's job never lingers. */
+async function obliterateSetupQueue(): Promise<void> {
+  const options = getRedisOptions();
+  if (options === null) {
+    return;
+  }
+  const queue = new Queue(LOG_GROUP_SETUP_QUEUE_NAME, {
+    connection: { ...options, maxRetriesPerRequest: null },
+  });
+  await queue.obliterate({ force: true }).catch(() => undefined);
+  await queue.close();
+}
+
 function bindingsFor(base: number): Record<string, number> {
   const out: Record<string, number> = {};
   OPS_LOG_TOPIC_KEYS.forEach((key, i) => {
@@ -204,6 +240,8 @@ describe.runIf(hasDb && hasRedis)("existing behavior compatibility - scenarios 6
     await deleteSetting("log_group_title");
     clearSettingsCache();
     await resetOpsTopicBindings();
+    await prisma.logGroupSetupAttempt.deleteMany({ where: { requestedByAdminId: owner.id } });
+    await obliterateSetupQueue();
   });
 
   afterAll(async () => {
@@ -224,31 +262,44 @@ describe.runIf(hasDb && hasRedis)("existing behavior compatibility - scenarios 6
       },
     });
     await prisma.auditLog.deleteMany({
-      where: { action: "log_group_connected", actorTelegramId: owner.telegramId },
+      where: { entityType: "LogGroupSetupAttempt", actorTelegramId: owner.telegramId },
     });
+    await prisma.logGroupSetupAttempt.deleteMany({ where: { requestedByAdminId: owner.id } });
     await prisma.admin.deleteMany({ where: { id: owner.id } });
     await deleteSetting(LOG_GROUP_CHAT_ID_KEY);
     await deleteSetting("log_group_title");
     clearSettingsCache();
     await resetOpsTopicBindings();
+    await obliterateSetupQueue();
     await resetOpsQueueForTests();
     await prisma.$disconnect();
   });
 
-  it("65. /setloggroup still binds end-to-end and creates the 11 default topics", async () => {
+  it("65. /setloggroup still reaches the durable setup via the unified pipeline", async () => {
     const prompt = groupCommand("/setloggroup", GROUP_A, { admin: owner });
     await dispatchSetup(prompt.ctx);
     expect(prompt.sent[0].text).toContain(SETUP_CONFIRM_TEXT);
 
     const press = groupCallback(LGSET_CB.yes, GROUP_A, { admin: owner });
     await dispatchSetup(press.ctx);
-    expect(press.sent[0].text).toContain(GROUP_SAVED_TEXT);
-    expect(await boundChatId()).toBe(String(GROUP_A.id));
-    expect(press.api.createForumTopicCalls).toHaveLength(OPS_LOG_TOPIC_KEYS.length);
-    const log = await prisma.systemLog.findFirst({
-      where: { eventType: OPS_EVENTS.LOG_GROUP_CHANGED, createdAt: { gte: suiteStartedAt } },
+    // §2: the group-side confirm STARTS the durable worker flow - it does NOT
+    // saveLogGroup / create topics / send a test inline.
+    expect(press.sent[0].text).toContain("راه‌اندازی گروه لاگ آغاز شد");
+    expect(press.api.createForumTopicCalls).toHaveLength(0);
+    expect(press.api.sendMessageCalls).toHaveLength(0);
+    expect(await boundChatId()).toBeNull();
+    const attempt = await prisma.logGroupSetupAttempt.findFirst({
+      where: { chatId: BigInt(GROUP_A.id), requestedByAdminId: owner.id },
+      orderBy: { createdAt: "desc" },
     });
-    expect(log).not.toBeNull();
+    expect(attempt).not.toBeNull();
+    expect(
+      [
+        LogGroupSetupStatus.QUEUED,
+        LogGroupSetupStatus.PROVISIONING,
+        LogGroupSetupStatus.TESTING,
+      ] as LogGroupSetupStatus[],
+    ).toContain(attempt?.status);
   });
 
   it("66. the start-group wizard ('/start zedlog') still reaches the prompt in-group only", async () => {

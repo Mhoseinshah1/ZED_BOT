@@ -204,6 +204,33 @@ export function createLogDeliveryProcessor(
       finalAttempt,
     });
 
+    // Topic deleted/closed inside Telegram: invalidate ONLY this exact stale
+    // mapping (CAS on id + observed topicId + observed chat id) so
+    // ensureDefaultTopics can recreate it and every other healthy topic keeps
+    // working. One topic's failure never invalidates the others. The delivery
+    // itself is left to its normal DEAD_LETTER fate below - it is never blindly
+    // resent (the message may already have been delivered before the topic
+    // was removed).
+    if (
+      (result.safeErrorCode === "topic-missing" || result.safeErrorCode === "topic-closed") &&
+      topic.topicId !== null
+    ) {
+      try {
+        const invalidated = await prisma.logTopic.updateMany({
+          where: { id: topic.id, topicId: topic.topicId, telegramChatId: topic.telegramChatId },
+          data: { topicId: null },
+        });
+        if (invalidated.count > 0) {
+          logger.warn("log topic invalidated (deleted/closed in Telegram)", {
+            topicKey: topic.key,
+            safeErrorCode: result.safeErrorCode,
+          });
+        }
+      } catch (err) {
+        logger.warn("log topic invalidation failed", { error: errorMessage(err) });
+      }
+    }
+
     if (result.safeErrorCode === "rate-limited" && !finalAttempt) {
       // 429: pause the whole (limiter-enabled) queue for retry_after and put
       // the job back WITHOUT consuming one of its attempts.

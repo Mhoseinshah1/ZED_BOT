@@ -259,7 +259,9 @@ describe.runIf(hasDb && hasRedis)("provisioning + worker processor - scenarios 3
     const fresh = await prisma.logGroupSetupAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
     expect(fresh.status).toBe(LogGroupSetupStatus.FAILED);
     expect(fresh.activeSlot).toBeNull(); // slot freed for the next setup
-    expect(fresh.safeErrorCode).toBe("forbidden"); // a safe code, not a raw description
+    // Operation-aware 403 classification (§6): "bot is not a member" is a safe
+    // bot-not-member code, never a raw description.
+    expect(fresh.safeErrorCode).toBe("bot-not-member");
     // The group was never activated.
     expect(await activeChatIdSetting()).toBeNull();
     const bound = await prisma.logTopic.count({

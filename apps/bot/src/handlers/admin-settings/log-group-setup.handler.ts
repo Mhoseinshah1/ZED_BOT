@@ -1,21 +1,24 @@
-import { prisma } from "@zedbot/database";
-import { errorMessage, LOG_GROUP_STARTGROUP_PAYLOAD } from "@zedbot/shared";
+import { LOG_GROUP_STARTGROUP_PAYLOAD } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import type { BotContext } from "../../core/context.js";
-import { logger } from "../../core/logger.js";
+import {
+  auditLogGroupConnection,
+  confirmLogGroupConnection,
+  createLogGroupSetupAttempt,
+  prepareLogGroupConnection,
+  SETUP_ALREADY_RUNNING_TEXT,
+  SETUP_QUEUE_UNAVAILABLE_TEXT,
+  type LogGroupProbeApi,
+} from "../../services/log-group-connection.service.js";
 import {
   BOT_NOT_ADMIN_TEXT,
   BOT_RIGHTS_INCOMPLETE_TEXT,
-  ensureDefaultTopics,
   getLogGroupSettings,
   maskChatId,
   NOT_FORUM_TEXT,
   NOT_IN_GROUP_TEXT,
-  saveLogGroup,
-  testLogGroup,
 } from "../../services/log-group.service.js";
-import { OPS_EVENTS, writeSystemLog } from "../../services/system-log.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { getStartPayload } from "../../utils/telegram.js";
 
@@ -35,7 +38,17 @@ import { getStartPayload } from "../../utils/telegram.js";
 // =============================================================================
 
 const OWNER_ONLY_TEXT = "این عملیات فقط برای مدیر اصلی (OWNER) مجاز است.";
-export const GROUP_SAVED_TEXT = "این گروه به‌عنوان گروه لاگ ربات ثبت شد ✅";
+/**
+ * Group-side confirmation only STARTS the durable setup - topics + the direct
+ * test run in the worker, so the group message tells the OWNER to watch live
+ * progress in the private bot and never claims the group is already active.
+ */
+export const SETUP_STARTED_TEXT = [
+  "راه‌اندازی گروه لاگ آغاز شد ⏳",
+  "",
+  "ساخت تاپیک‌های پیش‌فرض و ارسال پیام آزمایشی در پس‌زمینه انجام می‌شود.",
+  "برای مشاهده وضعیت زنده، در ربات به «تنظیمات گروه لاگ» بروید.",
+].join("\n");
 export const SETUP_CONFIRM_TEXT = "این گروه به‌عنوان گروه لاگ ربات ثبت شود؟";
 export const SETUP_CANCELLED_TEXT = "اتصال گروه لاگ لغو شد.";
 const NOT_GROUP_MEMBER_TEXT = "برای تایید اتصال باید عضو همین گروه باشید.";
@@ -56,6 +69,19 @@ function isOwner(ctx: BotContext): boolean {
  */
 function backToBotKeyboard(ctx: BotContext): InlineKeyboard {
   return new InlineKeyboard().url("بازگشت به ربات", `https://t.me/${ctx.me.username}`);
+}
+
+/**
+ * Adapts the group context's grammY api into the shared probe surface (with
+ * the bot id) so the group-side confirmation drives the EXACT same durable
+ * validation + attempt lifecycle as the numeric-ID flow.
+ */
+function buildGroupProbeApi(ctx: BotContext): LogGroupProbeApi {
+  return {
+    getChat: (chatId) => ctx.api.getChat(chatId),
+    getChatMember: (chatId, userId) => ctx.api.getChatMember(chatId, userId),
+    me: { id: ctx.me.id },
+  };
 }
 
 /**
@@ -154,10 +180,15 @@ logGroupSetupHandler.command("start", async (ctx, next) => {
 
 // Confirmation press INSIDE the candidate group. The prompt may be stale or
 // forwarded, so EVERYTHING is re-verified: the presser must be an active
-// OWNER admin AND still a member of this group, and the chat environment
-// must still validate. The whole action is idempotent - a repeated press
-// re-binds the same group, ensureDefaultTopics creates zero new topics and
-// the success message is simply shown again.
+// OWNER admin AND still a member of this group, and the chat environment must
+// still validate. The confirm then creates + confirms the SAME durable
+// LogGroupSetupAttempt the numeric-ID flow uses - it does NOT bind the group,
+// create topics or send a test inline. Topic provisioning + the direct SYSTEM
+// test run in the worker, and the active group is only switched atomically
+// once they succeed, so a failed group-side setup leaves the previously active
+// group + topic mappings completely unchanged. The callback performs only a
+// couple of read-only probe calls (never eleven Bot API writes) and never
+// shows the full chat id.
 logGroupSetupHandler.callbackQuery(LGSET_CB.yes, async (ctx) => {
   const admin = ctx.admin;
   if (admin === null || !isOwner(ctx)) {
@@ -184,55 +215,62 @@ logGroupSetupHandler.callbackQuery(LGSET_CB.yes, async (ctx) => {
     await safeAnswerCallback(ctx, NOT_GROUP_MEMBER_TEXT);
     return;
   }
-  await safeAnswerCallback(ctx);
 
-  const existing = await getLogGroupSettings();
-  const replaced = existing.chatId !== null && existing.chatId !== String(chat.id);
-  const title = "title" in chat && typeof chat.title === "string" ? chat.title : "بدون نام";
-  await saveLogGroup(String(chat.id), title);
-  const ensured = await ensureDefaultTopics(ctx.api);
-  const test = await testLogGroup(ctx.api);
-
-  await writeSystemLog({
-    level: "WARN",
-    eventType: OPS_EVENTS.LOG_GROUP_CHANGED,
-    message: "operational log group was (re)configured",
-    metadata: {
-      replaced,
-      topicCreated: ensured.createdCount,
-      topicFailed: ensured.failedCount,
-    },
-    topicKey: "SECURITY",
+  // Validate the target against the ONE shared policy and stage a durable
+  // attempt - identical to the numeric-ID path (prepare -> create -> confirm).
+  const api = buildGroupProbeApi(ctx);
+  const prepared = await prepareLogGroupConnection(api, String(chat.id), Number(admin.telegramId));
+  if (!prepared.ok) {
+    await safeAnswerCallback(ctx);
+    await safeEditOrReply(ctx, prepared.safeMessage, backToBotKeyboard(ctx));
+    return;
+  }
+  const created = await createLogGroupSetupAttempt({
+    chatId: prepared.chatId,
+    title: prepared.title,
     adminId: admin.id,
+    previous: prepared.previous,
   });
-  try {
-    await prisma.auditLog.create({
-      data: {
-        actorTelegramId: admin.telegramId,
-        actorType: "ADMIN",
-        action: "log_group_connected",
-        entityType: "Setting",
-        entityId: null,
-        metadata: { replaced, adminId: admin.id },
-      },
-    });
-  } catch (err) {
-    logger.warn("log group connect audit log failed", { error: errorMessage(err) });
+  if (!created.ok) {
+    await safeAnswerCallback(ctx);
+    await safeEditOrReply(
+      ctx,
+      created.reason === "active-exists" ? SETUP_ALREADY_RUNNING_TEXT : SETUP_CANCELLED_TEXT,
+      backToBotKeyboard(ctx),
+    );
+    return;
   }
-  logger.info("log group configured", { adminId: admin.id, replaced });
+  await auditLogGroupConnection("log_group.validated", {
+    adminId: admin.id,
+    adminTelegramId: admin.telegramId,
+    attemptId: created.attempt.id,
+    chatId: created.attempt.chatId,
+    extra: { source: "group-side", isPublic: prepared.isPublic },
+  });
 
-  const lines = [GROUP_SAVED_TEXT];
-  if (ensured.createdCount > 0) {
-    lines.push(`موضوعات ساخته‌شده: ${ensured.createdCount}`);
+  const confirmed = await confirmLogGroupConnection(
+    api,
+    created.attempt.id,
+    Number(admin.telegramId),
+  );
+  if (!confirmed.ok) {
+    await safeAnswerCallback(ctx);
+    await safeEditOrReply(
+      ctx,
+      confirmed.safeMessage ?? SETUP_QUEUE_UNAVAILABLE_TEXT,
+      backToBotKeyboard(ctx),
+    );
+    return;
   }
-  if (ensured.existingCount > 0) {
-    lines.push(`موضوعات موجود: ${ensured.existingCount}`);
-  }
-  if (ensured.failedCount > 0 && ensured.safeMessage !== null) {
-    lines.push(`⚠️ ${ensured.failedCount} موضوع ساخته نشد: ${ensured.safeMessage}`);
-  }
-  lines.push(test.ok ? "پیام آزمایشی ارسال شد ✅" : `پیام آزمایشی: ${test.safeMessage}`);
-  await safeEditOrReply(ctx, lines.join("\n"), backToBotKeyboard(ctx));
+  await auditLogGroupConnection("log_group.setup_queued", {
+    adminId: admin.id,
+    adminTelegramId: admin.telegramId,
+    attemptId: created.attempt.id,
+    chatId: created.attempt.chatId,
+    extra: { source: "group-side" },
+  });
+  await safeAnswerCallback(ctx, "راه‌اندازی گروه لاگ آغاز شد ⏳");
+  await safeEditOrReply(ctx, SETUP_STARTED_TEXT, backToBotKeyboard(ctx));
 });
 
 logGroupSetupHandler.callbackQuery(LGSET_CB.no, async (ctx) => {

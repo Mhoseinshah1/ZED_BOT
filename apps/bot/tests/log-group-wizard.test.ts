@@ -1,7 +1,8 @@
-import { prisma, type Admin } from "@zedbot/database";
+import { LogGroupSetupStatus, prisma, type Admin } from "@zedbot/database";
 import {
   getRedisOptions,
   LOG_DELIVERY_QUEUE_NAME,
+  LOG_GROUP_SETUP_QUEUE_NAME,
   LOG_GROUP_STARTGROUP_PAYLOAD,
   OPS_LOG_TOPIC_KEYS,
 } from "@zedbot/shared";
@@ -13,13 +14,13 @@ process.env.APP_SECRET ??= "log-group-wizard-tests-secret-001";
 import { CB } from "../src/core/callbacks.js";
 import { initialSession } from "../src/core/session.js";
 import {
-  GROUP_SAVED_TEXT,
   LGSET_CB,
   logGroupSetupHandler,
   SETUP_CANCELLED_TEXT,
   SETUP_CONFIRM_TEXT,
 } from "../src/handlers/admin-settings/log-group-setup.handler.js";
 import { LG_CB, logGroupHandler } from "../src/handlers/admin-settings/log-group.handler.js";
+import { SETUP_ALREADY_RUNNING_TEXT } from "../src/services/log-group-connection.service.js";
 import {
   buildAdminMainKeyboard,
 } from "../src/keyboards/admin-main.keyboard.js";
@@ -32,9 +33,7 @@ import {
 import {
   BOT_NOT_ADMIN_TEXT,
   BOT_RIGHTS_INCOMPLETE_TEXT,
-  ensureDefaultTopics,
   getLogGroupSettings,
-  LOG_GROUP_TEST_OK_TEXT,
   LOG_GROUP_TITLE_KEY,
   maskChatId,
   NOT_FORUM_TEXT,
@@ -141,13 +140,36 @@ interface CtxOptions {
 function buildBase(chat: Record<string, unknown>, options: CtxOptions) {
   const sent: SentMessage[] = [];
   const toasts: Array<string | undefined> = [];
-  const api = options.api ?? makeApi();
+  const baseApi = options.api ?? makeApi();
   const me = {
     id: BOT_ID,
     is_bot: true,
     first_name: "ZedBot",
     username: options.botUsername ?? BOT_USERNAME,
   };
+  // The durable connection pipeline probes via ctx.api.getChat +
+  // ctx.api.getChatMember(chatId, userId) (the SAME shared policy the
+  // numeric-ID flow uses); augment the recording FakeApi with those reads so
+  // the group-side confirm drives the unified flow.
+  const api = Object.assign(baseApi, {
+    async getChat(_chatId: number | string) {
+      return {
+        type: chat.type as string,
+        is_forum: chat.is_forum as boolean | undefined,
+        title: chat.title as string | undefined,
+        username: chat.username as string | undefined,
+      };
+    },
+    async getChatMember(_chatId: number | string, userId: number) {
+      if (options.memberLookupFails === true) {
+        throw new Error("Bad Request: chat not found");
+      }
+      if (userId === me.id) {
+        return options.botMember ?? { status: "administrator", can_manage_topics: true };
+      }
+      return options.presserMember ?? { status: "member" };
+    },
+  });
   const from = {
     id: Number(options.admin?.telegramId ?? 999_999_001n),
     is_bot: false,
@@ -250,6 +272,45 @@ async function resetOpsTopicBindings(): Promise<void> {
   });
 }
 
+/** Directly binds every ops topic to `chatId` (arrange helper - no Telegram). */
+async function bindOpsTopicsTo(chatId: string): Promise<void> {
+  let thread = 7000;
+  for (const key of OPS_LOG_TOPIC_KEYS) {
+    thread += 1;
+    await prisma.logTopic.update({
+      where: { key },
+      data: { topicId: thread, telegramChatId: BigInt(chatId) },
+    });
+  }
+}
+
+/** Empties the durable setup queue so a prior test's job never lingers. */
+async function obliterateSetupQueue(): Promise<void> {
+  const options = getRedisOptions();
+  if (options === null) {
+    return;
+  }
+  const queue = new Queue(LOG_GROUP_SETUP_QUEUE_NAME, {
+    connection: { ...options, maxRetriesPerRequest: null },
+  });
+  await queue.obliterate({ force: true }).catch(() => undefined);
+  await queue.close();
+}
+
+const RUNNING_SETUP_STATUSES = [
+  LogGroupSetupStatus.QUEUED,
+  LogGroupSetupStatus.PROVISIONING,
+  LogGroupSetupStatus.TESTING,
+];
+
+/** The newest durable setup attempt staged for a given chat id. */
+async function latestAttemptFor(chatId: string) {
+  return prisma.logGroupSetupAttempt.findFirst({
+    where: { chatId: BigInt(chatId) },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
 describe.runIf(hasDb)("log-group setup wizard", () => {
   let owner: Admin;
   let support: Admin;
@@ -268,11 +329,16 @@ describe.runIf(hasDb)("log-group setup wizard", () => {
   });
 
   beforeEach(async () => {
-    // Deterministic start: unconfigured binding, unbound seeded topics.
+    // Deterministic start: unconfigured binding, unbound seeded topics, no
+    // durable setup attempt occupying the single active slot, empty setup queue.
     await deleteSetting(LOG_GROUP_CHAT_ID_KEY);
     await deleteSetting(LOG_GROUP_TITLE_KEY);
     clearSettingsCache();
     await resetOpsTopicBindings();
+    await prisma.logGroupSetupAttempt.deleteMany({
+      where: { requestedByAdminId: { in: [owner.id, support.id] } },
+    });
+    await obliterateSetupQueue();
   });
 
   afterAll(async () => {
@@ -296,12 +362,15 @@ describe.runIf(hasDb)("log-group setup wizard", () => {
     });
     await prisma.auditLog.deleteMany({
       where: {
-        action: "log_group_connected",
+        entityType: "LogGroupSetupAttempt",
         actorTelegramId: { in: [owner.telegramId, support.telegramId] },
       },
     });
+    await prisma.logGroupSetupAttempt.deleteMany({
+      where: { requestedByAdminId: { in: [owner.id, support.id] } },
+    });
     await prisma.admin.deleteMany({ where: { id: { in: [owner.id, support.id] } } });
-    // Remove the log-delivery jobs the SECURITY ops log enqueued.
+    // Remove the log-delivery jobs the SECURITY ops log enqueued + any setup jobs.
     const options = getRedisOptions();
     if (options !== null) {
       const queue = new Queue(LOG_DELIVERY_QUEUE_NAME, {
@@ -310,6 +379,7 @@ describe.runIf(hasDb)("log-group setup wizard", () => {
       await queue.obliterate({ force: true }).catch(() => undefined);
       await queue.close();
     }
+    await obliterateSetupQueue();
     await resetOpsQueueForTests();
     await prisma.$disconnect();
   });
@@ -360,7 +430,7 @@ describe.runIf(hasDb)("log-group setup wizard", () => {
     ).toEqual([
       [{ text: "بررسی اتصال 🧪", callback: LG_CB.check }],
       [{ text: "ارسال پیام آزمایشی", callback: LG_CB.test }],
-      [{ text: "ساخت موضوعات پیش‌فرض", callback: LG_CB.ensure }],
+      [{ text: "ساخت / تعمیر موضوعات پیش‌فرض", callback: LG_CB.ensure }],
       [{ text: "همگام‌سازی موضوعات", callback: LG_CB.sync }],
       [{ text: "مدیریت موضوعات", callback: LG_CB.topics }],
       [{ text: "تغییر گروه با آیدی عددی 🔄", callback: LG_CB.id }],
@@ -534,8 +604,7 @@ describe.runIf(hasDb)("log-group setup wizard", () => {
 
   // --- the happy path (items 18 + 19) ------------------------------------------------------------
 
-  it("18-19. a valid group binds end-to-end and creates all 11 default topics once", async () => {
-    const testStart = new Date();
+  it("18-19. a valid group-side confirm STARTS the durable setup without binding inline", async () => {
     // Prompt first (the real flow), then confirm.
     const prompt = commandCtx("/setloggroup", chatA, { admin: owner });
     await dispatchSetup(prompt.ctx);
@@ -545,80 +614,66 @@ describe.runIf(hasDb)("log-group setup wizard", () => {
 
     const press = await bindGroup(chatA);
 
-    // Binding persisted (chat id + safe title Settings).
-    expect(await boundChatId()).toBe(String(chatA.id));
-    const title = await prisma.setting.findUnique({ where: { key: LOG_GROUP_TITLE_KEY } });
-    expect(title?.value).toBe(chatA.title);
+    // §2: the confirm NEVER binds inline. It creates + confirms the same
+    // durable attempt the numeric-ID flow uses; topics + the test send run in
+    // the worker. No inline topic creation or test send from the bot.
+    expect(press.api.createForumTopicCalls).toHaveLength(0);
+    expect(press.api.sendMessageCalls).toHaveLength(0);
+    // The active group is NOT switched yet (the worker has not activated it).
+    expect(await boundChatId()).toBeNull();
 
-    // All 11 stable ops topics were created in THIS chat, exactly once each.
-    expect(press.api.createForumTopicCalls).toHaveLength(OPS_LOG_TOPIC_KEYS.length);
-    expect(press.api.createForumTopicCalls.every((c) => c.chatId === String(chatA.id))).toBe(true);
-    const rows = await opsTopicRows();
-    expect(rows).toHaveLength(OPS_LOG_TOPIC_KEYS.length);
-    for (const row of rows) {
-      expect(row.topicId, row.key).not.toBeNull();
-      expect(row.telegramChatId?.toString(), row.key).toBe(String(chatA.id));
-    }
+    // A durable attempt for THIS chat is queued and occupies the active slot.
+    const attempt = await latestAttemptFor(String(chatA.id));
+    expect(attempt).not.toBeNull();
+    expect(RUNNING_SETUP_STATUSES).toContain(attempt?.status);
+    expect(attempt?.activeSlot).toBe(1);
+    expect(attempt?.safeTitle).toBe(chatA.title);
 
-    // The test message went to the SYSTEM topic of the bound chat.
-    const systemRow = rows.find((r) => r.key === "SYSTEM");
-    expect(press.api.sendMessageCalls).toHaveLength(1);
-    expect(press.api.sendMessageCalls[0].chatId).toBe(String(chatA.id));
-    expect(press.api.sendMessageCalls[0].text).toBe(LOG_GROUP_TEST_OK_TEXT);
-    expect(press.api.sendMessageCalls[0].threadId).toBe(systemRow?.topicId ?? -1);
-
-    // Success page: saved + created count + test confirmation, back-to-bot URL.
+    // The group message shows "setup started" + a URL button back to the bot,
+    // never a "saved/active" claim and never the raw chat id.
     expect(press.sent).toHaveLength(1);
-    expect(press.sent[0].text).toContain(GROUP_SAVED_TEXT);
-    expect(press.sent[0].text).toContain(`موضوعات ساخته‌شده: ${OPS_LOG_TOPIC_KEYS.length}`);
-    expect(press.sent[0].text).toContain("پیام آزمایشی ارسال شد ✅");
+    expect(press.sent[0].text).toContain("راه‌اندازی گروه لاگ آغاز شد");
+    expect(press.sent[0].text).not.toContain(String(chatA.id));
     const backButton = flatButtons(press.sent[0])[0];
     expect(backButton.url).toBe(`https://t.me/${BOT_USERNAME}`);
 
-    // Ops log + audit trail exist for the (re)configuration.
-    const opsLog = await prisma.systemLog.findFirst({
-      where: { eventType: OPS_EVENTS.LOG_GROUP_CHANGED, createdAt: { gte: testStart } },
-    });
-    expect(opsLog).not.toBeNull();
+    // Audit trail records the queued setup against the attempt.
     const audit = await prisma.auditLog.findFirst({
-      where: { action: "log_group_connected", actorTelegramId: owner.telegramId },
+      where: {
+        entityType: "LogGroupSetupAttempt",
+        action: "log_group.setup_queued",
+        actorTelegramId: owner.telegramId,
+      },
       orderBy: { createdAt: "desc" },
     });
     expect(audit).not.toBeNull();
-    expect((audit?.metadata as { replaced?: boolean }).replaced).toBe(false);
   });
 
   // --- idempotency (item 20) ---------------------------------------------------------------------
 
-  it("20. a repeated confirmation succeeds with ZERO new topics and no duplicate rows", async () => {
+  it("20. a repeated group-side confirm converges on ONE active setup (no duplicate)", async () => {
     const first = await bindGroup(chatA);
-    expect(first.api.createForumTopicCalls).toHaveLength(OPS_LOG_TOPIC_KEYS.length);
-    const before = new Map(
-      (await opsTopicRows()).map((r) => [r.key, r.topicId] as const),
-    );
+    expect(first.sent[0].text).toContain("راه‌اندازی گروه لاگ آغاز شد");
+    const firstAttempt = await latestAttemptFor(String(chatA.id));
+    expect(firstAttempt).not.toBeNull();
 
-    // Second press with a FRESH recording api: full success, zero creations.
+    // Second press while the first is still running: no duplicate attempt - the
+    // OWNER is told a setup is already in progress.
     const second = await bindGroup(chatA);
-    expect(second.sent[0].text).toContain(GROUP_SAVED_TEXT);
-    expect(second.sent[0].text).toContain(`موضوعات موجود: ${OPS_LOG_TOPIC_KEYS.length}`);
-    expect(second.api.createForumTopicCalls).toHaveLength(0);
-
-    // Same rows, same topic ids, still exactly one row per stable key.
-    const after = await opsTopicRows();
-    expect(after).toHaveLength(OPS_LOG_TOPIC_KEYS.length);
-    for (const row of after) {
-      expect(row.topicId, row.key).toBe(before.get(row.key));
-      expect(row.telegramChatId?.toString(), row.key).toBe(String(chatA.id));
-    }
-    expect(await boundChatId()).toBe(String(chatA.id));
+    expect(second.sent[0].text).toContain(SETUP_ALREADY_RUNNING_TEXT);
+    const running = await prisma.logGroupSetupAttempt.count({
+      where: { requestedByAdminId: owner.id, status: { in: RUNNING_SETUP_STATUSES } },
+    });
+    expect(running).toBe(1);
+    expect(await boundChatId()).toBeNull();
   });
 
   // --- replacement (item 21) ---------------------------------------------------------------------
 
-  it("21. replacing a DIFFERENT bound group warns in the prompt and rebinds on confirm", async () => {
-    // Arrange: group A is fully bound.
+  it("21. replacing a DIFFERENT bound group warns and starts a durable replacement, leaving A active", async () => {
+    // Arrange: group A is the fully-bound active group.
     await saveLogGroup(String(chatA.id), chatA.title);
-    await ensureDefaultTopics(makeApi());
+    await bindOpsTopicsTo(String(chatA.id));
 
     // Prompting inside group B carries the explicit replacement warning.
     const promptB = commandCtx("/setloggroup", chatB, { admin: owner });
@@ -634,21 +689,20 @@ describe.runIf(hasDb)("log-group setup wizard", () => {
     await dispatchSetup(promptA.ctx);
     expect(promptA.sent[0].text).not.toContain("جایگزین");
 
-    // Confirming in B rebinds the Settings AND every topic to B.
+    // Confirming in B STARTS a durable replacement but leaves A fully active -
+    // a not-yet-succeeded replacement never switches the group or its topics.
     const press = await bindGroup(chatB);
-    expect(press.sent[0].text).toContain(GROUP_SAVED_TEXT);
-    expect(await boundChatId()).toBe(String(chatB.id));
-    expect(press.api.createForumTopicCalls).toHaveLength(OPS_LOG_TOPIC_KEYS.length);
-    expect(press.api.createForumTopicCalls.every((c) => c.chatId === String(chatB.id))).toBe(true);
+    expect(press.sent[0].text).toContain("راه‌اندازی گروه لاگ آغاز شد");
+    expect(await boundChatId()).toBe(String(chatA.id));
     const rows = await opsTopicRows();
     for (const row of rows) {
-      expect(row.telegramChatId?.toString(), row.key).toBe(String(chatB.id));
+      expect(row.telegramChatId?.toString(), row.key).toBe(String(chatA.id));
     }
-    const audit = await prisma.auditLog.findFirst({
-      where: { action: "log_group_connected", actorTelegramId: owner.telegramId },
-      orderBy: { createdAt: "desc" },
-    });
-    expect((audit?.metadata as { replaced?: boolean }).replaced).toBe(true);
+    // The durable attempt targets B and records the previous (still-active) group.
+    const attempt = await latestAttemptFor(String(chatB.id));
+    expect(attempt).not.toBeNull();
+    expect(attempt?.previousChatId?.toString()).toBe(String(chatA.id));
+    expect(RUNNING_SETUP_STATUSES).toContain(attempt?.status);
   });
 
   // --- cancel path (safety net) ------------------------------------------------------------------

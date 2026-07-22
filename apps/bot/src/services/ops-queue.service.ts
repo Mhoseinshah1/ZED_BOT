@@ -268,37 +268,100 @@ export async function enqueueLogDelivery(deliveryId: string): Promise<boolean> {
   }
 }
 
+// Bot-side producer job options for one setup attempt. Set explicitly on the
+// PRODUCER (never inherited from the worker's defaultJobOptions - the bot's
+// Queue does not share it): bounded attempts + exponential backoff, and BOTH
+// removeOnComplete + removeOnFail so a terminal job can never linger in Redis
+// under the stable jobId and block a future retry/resume from executing.
+const LOG_GROUP_SETUP_JOB_OPTS = {
+  attempts: 3,
+  backoff: { type: "exponential" as const, delay: 15_000 },
+  removeOnComplete: true,
+  removeOnFail: true,
+};
+
 /**
- * Enqueues the PROVISION_LOG_GROUP job for one LogGroupSetupAttempt. jobId =
- * log-group-setup-<attemptId>, so a repeated OWNER confirmation of the same
- * attempt never creates a second provisioning job (BullMQ deduplicates on the
- * id). Attempts/backoff live in the worker's default job options; the DB row
- * is the durable resume point, so completed/failed jobs are removed. Returns
- * false (fail-soft) when Redis is unconfigured or unreachable - the caller
- * shows a safe error and the QUEUED row can be re-enqueued.
+ * The outcome of ensureLogGroupSetupJob. A `true` ok ALWAYS means an
+ * executable job exists (freshly added, re-added after a terminal legacy job,
+ * or an already-running/waiting one) - never merely "BullMQ returned a Job
+ * object". A `false` ok is a typed safe failure the caller rolls the DB slot
+ * back on.
  */
-export async function enqueueLogGroupSetup(attemptId: string): Promise<boolean> {
+export type EnsureSetupJobResult =
+  | { ok: true; state: "added" | "already-queued" | "requeued" }
+  | { ok: false; reason: "queue-unavailable" | "error" };
+
+async function addLogGroupSetupJob(
+  queue: Queue,
+  attemptId: string,
+  jobId: string,
+): Promise<void> {
+  await withTimeout(
+    queue.add(LOG_GROUP_SETUP_JOB_NAME, { attemptId }, { jobId, ...LOG_GROUP_SETUP_JOB_OPTS }),
+  );
+}
+
+/**
+ * Guarantees an EXECUTABLE PROVISION_LOG_GROUP job exists for one attempt,
+ * healing the states a previously deployed version (no removeOnComplete/Fail)
+ * can leave behind:
+ *
+ * - no existing job                     -> add it                    (added)
+ * - waiting / delayed / active job      -> already executable, no dup (already-queued)
+ * - completed / failed job retained     -> remove + add a fresh job   (requeued)
+ * - queue unavailable                   -> typed safe failure         (queue-unavailable)
+ * - a concurrent duplicate enqueue      -> BullMQ jobId dedup converges on one job
+ * - a command timeout / Redis error     -> typed safe failure         (error)
+ *
+ * A completed/failed job under the stable jobId will NEVER run again, so
+ * reusing it would silently drop a Retry - it is removed and replaced. Used by
+ * every enqueue site (initial confirm, failed-attempt retry, startup recovery,
+ * group-side setup) via enqueueLogGroupSetup.
+ */
+export async function ensureLogGroupSetupJob(attemptId: string): Promise<EnsureSetupJobResult> {
   const pair = getQueues();
   if (pair === null) {
-    return false;
+    return { ok: false, reason: "queue-unavailable" };
   }
+  const jobId = logGroupSetupJobId(attemptId);
   try {
-    await withTimeout(
-      pair.logGroupSetup.add(
-        LOG_GROUP_SETUP_JOB_NAME,
-        { attemptId },
-        {
-          jobId: logGroupSetupJobId(attemptId),
-          attempts: 3,
-          backoff: { type: "exponential", delay: 15_000 },
-        },
-      ),
-    );
-    return true;
+    const existing = await withTimeout(pair.logGroupSetup.getJob(jobId));
+    if (existing !== undefined && existing !== null) {
+      const state = await withTimeout(existing.getState());
+      if (state === "completed" || state === "failed") {
+        // A terminal legacy job retained in Redis cannot execute again under
+        // the same jobId - remove it and add a fresh, runnable job so the
+        // Retry / resume actually does work.
+        await withTimeout(existing.remove());
+        await addLogGroupSetupJob(pair.logGroupSetup, attemptId, jobId);
+        return { ok: true, state: "requeued" };
+      }
+      // waiting / waiting-children / delayed / active / prioritized / paused:
+      // an executable job already exists - never duplicate it.
+      return { ok: true, state: "already-queued" };
+    }
+    await addLogGroupSetupJob(pair.logGroupSetup, attemptId, jobId);
+    return { ok: true, state: "added" };
   } catch (err) {
-    logger.warn("log group setup enqueue failed", { attemptId, error: errorText(err) });
-    return false;
+    // A concurrent enqueue that removed/added the same jobId, a command
+    // timeout, or any Redis error: fail safely so the caller rolls back the DB
+    // setup slot. BullMQ's jobId dedup means a surviving concurrent add still
+    // leaves exactly one executable job.
+    logger.warn("ensure log group setup job failed", { attemptId, error: errorText(err) });
+    return { ok: false, reason: "error" };
   }
+}
+
+/**
+ * Enqueues the PROVISION_LOG_GROUP job for one LogGroupSetupAttempt (thin
+ * boolean wrapper over ensureLogGroupSetupJob so every legacy caller keeps its
+ * fail-soft contract while gaining the terminal-job healing). Returns false
+ * when Redis is unconfigured/unreachable or a stale job could not be replaced
+ * - the caller shows a safe error and rolls the QUEUED row back.
+ */
+export async function enqueueLogGroupSetup(attemptId: string): Promise<boolean> {
+  const result = await ensureLogGroupSetupJob(attemptId);
+  return result.ok;
 }
 
 /**

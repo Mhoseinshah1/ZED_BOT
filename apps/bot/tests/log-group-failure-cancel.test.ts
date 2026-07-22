@@ -54,12 +54,20 @@ const SAFE_ERROR_CODES = new Set([
   "forbidden",
   "chat-not-found",
   "rate-limited",
+  "telegram-timeout",
+  "telegram-server-error",
+  "bot-not-member",
+  "bot-not-admin",
+  "manage-topics-required",
+  "topics-disabled",
   "topic-missing",
+  "topic-closed",
   "bad-request",
   "network-error",
   "bad-response",
   "bot-token-missing",
   "redis-unavailable",
+  "setup-error",
 ]);
 
 type Processor = (job: unknown) => Promise<Record<string, unknown>>;
@@ -131,9 +139,12 @@ describe.runIf(hasDb && hasRedis)("failure + cancellation - scenarios 58-64", ()
   });
 
   it("58. a mid-loop retryable failure leaves the attempt PROVISIONING; a re-run resumes", async () => {
-    // Run 1: fail (retryable) on the 5th create -> keys 1-4 persisted, throw.
+    // Run 1: fail (retryable, non-429) on the 5th create -> keys 1-4 persisted,
+    // throw. A 5xx is a generic retryable failure that consumes a BullMQ
+    // attempt (the 429 rate-limit path is covered separately below).
     const run1 = makeFetchMock({
-      createForumTopic: (n) => (n === 5 ? ERR(429, "Too Many Requests", 1) : OK_TOPIC(4000 + n)),
+      createForumTopic: (n) =>
+        n === 5 ? ERR(500, "Internal Server Error") : OK_TOPIC(4000 + n),
     });
     vi.stubGlobal("fetch", run1.fn);
     const attempt = await createAttempt({ chatId: CHAT, adminId: owner.id });
@@ -187,8 +198,9 @@ describe.runIf(hasDb && hasRedis)("failure + cancellation - scenarios 58-64", ()
     const fresh = await prisma.logGroupSetupAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
     expect(fresh.safeErrorCode).not.toBeNull();
     expect(SAFE_ERROR_CODES.has(fresh.safeErrorCode ?? "")).toBe(true);
-    // Never contains the raw description text or spaces.
-    expect(fresh.safeErrorCode).toBe("forbidden");
+    // "bot was kicked" is an operation-aware bot-not-member signal (§6), still
+    // a safe code - never the raw description text or spaces.
+    expect(fresh.safeErrorCode).toBe("bot-not-member");
     expect(fresh.safeErrorCode?.includes(" ")).toBe(false);
     expect(fresh.safeErrorCode?.includes("kicked")).toBe(false);
   });
