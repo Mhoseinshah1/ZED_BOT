@@ -15,6 +15,8 @@
 //     of the application contract.
 // =============================================================================
 
+import { createHash } from "node:crypto";
+
 import { clampInt } from "./auto-renewal.js";
 
 // --- rollout settings --------------------------------------------------------
@@ -309,6 +311,61 @@ export function resolveRepresentativeBasePrice(
     return { ok: true, representativePriceToman: price < 0 ? 0 : price, savedAmountToman: saved };
   }
   return { ok: false, reason: "INVALID_MODE" };
+}
+
+// --- stale-price fingerprints (§16) ------------------------------------------
+// Frozen into the immutable checkout snapshot at reseller-checkout creation and
+// re-computed from LIVE data at every settlement boundary. If either changes,
+// the price the user agreed to is stale and the checkout fails closed BEFORE
+// money moves. Raw ids never enter a Telegram callback — these are internal
+// keys only (32-hex, like the auto-renewal cycle fingerprint).
+
+export interface RepresentativeTierFingerprintInput {
+  tierId: string;
+  tierSlug: string;
+  tierActive: boolean;
+  checkoutEnabled: boolean;
+}
+
+/** Identity+state of the assigned tier at agreement time. Changes if the tier
+ * is archived or the representative's per-account checkout permission flips. */
+export function buildRepresentativeTierFingerprint(
+  input: RepresentativeTierFingerprintInput,
+): string {
+  const material = `${input.tierId}|${input.tierSlug}|${input.tierActive ? 1 : 0}|${
+    input.checkoutEnabled ? 1 : 0
+  }`;
+  return createHash("sha256").update(material).digest("hex").slice(0, 32);
+}
+
+export interface RepresentativePriceFingerprintInput {
+  tierId: string;
+  productId: string;
+  priceMode: RepresentativePriceMode;
+  fixedPriceToman: number | null;
+  percentValue: number | null;
+  /** Live retail at agreement time (a PERCENT price tracks retail). */
+  retailToman: number;
+  /** The resolved reseller base price the user agreed to. */
+  representativePriceToman: number;
+}
+
+/** The exact resolved-price inputs at agreement time. Changes if the tier price
+ * row is edited (mode/fixed/percent) OR the product retail changes OR the
+ * resolved base moves — so a stale preview can never settle at an old price. */
+export function buildRepresentativePriceFingerprint(
+  input: RepresentativePriceFingerprintInput,
+): string {
+  const material = [
+    input.tierId,
+    input.productId,
+    input.priceMode,
+    input.fixedPriceToman ?? "-",
+    input.percentValue ?? "-",
+    input.retailToman,
+    input.representativePriceToman,
+  ].join("|");
+  return createHash("sha256").update(material).digest("hex").slice(0, 32);
 }
 
 // --- tier config bounds ------------------------------------------------------
