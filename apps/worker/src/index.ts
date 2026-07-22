@@ -127,7 +127,10 @@ async function run(options: RedisConnectionOptions): Promise<void> {
   const logGroupSetupWorker = new Worker(
     LOG_GROUP_SETUP_QUEUE_NAME,
     createLogGroupSetupProcessor({ redis, setupQueue: logGroupSetupQueue }),
-    { connection, concurrency: 1 },
+    // A limiter is required for Worker.RateLimitError()/queue.rateLimit() to
+    // pause the queue when Telegram returns 429 during topic provisioning; the
+    // generous ceiling never throttles a normal single-setup run.
+    { connection, concurrency: 1, limiter: { max: 60, duration: 60_000 } },
   );
 
   for (const [name, worker] of [

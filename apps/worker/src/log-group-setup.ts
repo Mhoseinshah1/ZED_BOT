@@ -16,11 +16,11 @@ import {
   errorMessage,
   type OpsLogTopicKey,
 } from "@zedbot/shared";
-import type { Job, Queue } from "bullmq";
+import { Worker, type Job, type Queue } from "bullmq";
 
 import { botToken } from "./config.js";
 import { writeOpsLog } from "./ops-log.js";
-import { acquireLock, releaseLock, type HeldLock, type RawRedis } from "./redis.js";
+import { acquireLock, extendLock, releaseLock, type HeldLock, type RawRedis } from "./redis.js";
 import { createTelegramForumTopic, sendTelegramMessage } from "./telegram.js";
 
 // =============================================================================
@@ -100,10 +100,15 @@ async function failAttempt(attemptId: string, safeErrorCode: string): Promise<vo
  * merged bindings or a safe failure. A retryable Telegram failure throws so
  * BullMQ backs off and the next attempt resumes from the saved bindings.
  */
+type ProvisionResult =
+  | { ok: true; bindings: TopicBindings }
+  | { ok: false; safeErrorCode: string; retryable: boolean; retryAfterMs?: number };
+
 async function provisionStagedTopics(
   attempt: LogGroupSetupAttempt,
   token: string,
-): Promise<{ ok: true; bindings: TopicBindings } | { ok: false; safeErrorCode: string; retryable: boolean }> {
+  refreshLock: () => Promise<void>,
+): Promise<ProvisionResult> {
   const chatId = attempt.chatId.toString();
   const bindings = parseBindings(attempt.topicBindings);
   for (const key of OPS_LOG_TOPIC_KEYS) {
@@ -116,7 +121,15 @@ async function provisionStagedTopics(
       name: OPS_LOG_TOPIC_TITLES[key],
     });
     if (!result.ok) {
-      return { ok: false, safeErrorCode: result.safeErrorCode, retryable: result.retryable };
+      // retryAfterMs is preserved through to the setup worker so a 429 becomes
+      // a queue-level rate-limit (Worker.RateLimitError) that does NOT consume
+      // a normal attempt and resumes from the next missing topic.
+      return {
+        ok: false,
+        safeErrorCode: result.safeErrorCode,
+        retryable: result.retryable,
+        retryAfterMs: result.retryAfterMs,
+      };
     }
     bindings[key] = result.messageThreadId;
     // Durable per-topic persist: write the binding + count IMMEDIATELY after
@@ -130,6 +143,10 @@ async function provisionStagedTopics(
       where: { id: attempt.id },
       data: { topicBindings: bindings, createdTopicCount: Object.keys(bindings).length },
     });
+    // Lock safety (§15): every successful create pushes the owned lock's TTL
+    // out (compare-and-expire by token), so a bounded-but-slow provisioning of
+    // all topics can never let the lock expire under a healthy run.
+    await refreshLock();
     await writeOpsLog({
       level: SystemLogLevel.INFO,
       topicKey: "SECURITY",
@@ -236,6 +253,16 @@ async function handleProvisionJob(
   const token = botToken();
 
   let lock: HeldLock | null = null;
+  // Set when a Telegram 429 turned this run into a queue-level rate-limit
+  // (Worker.RateLimitError). Such a deferral does NOT consume a normal BullMQ
+  // attempt and MUST keep the active-setup slot held so the SAME durable row
+  // resumes - the catch below re-throws without failing the attempt.
+  let deferredByRateLimit = false;
+  const refreshLock = async (): Promise<void> => {
+    if (lock !== null) {
+      await extendLock(deps.redis, lock, SETUP_LOCK_TTL_MS);
+    }
+  };
   try {
     // CAS claim: QUEUED/PROVISIONING/TESTING -> PROVISIONING (re-claim resumes
     // a crashed run). A FAILED row is not re-claimable here (a new attempt is
@@ -276,8 +303,17 @@ async function handleProvisionJob(
     }
 
     // 1. Create/reuse all default topics (durable per-topic persistence).
-    const provisioned = await provisionStagedTopics(attempt, token);
+    const provisioned = await provisionStagedTopics(attempt, token, refreshLock);
     if (!provisioned.ok) {
+      if (provisioned.safeErrorCode === "rate-limited") {
+        // Telegram 429: rate-limit the whole setup queue for the (capped)
+        // retry-after and re-queue WITHOUT consuming an attempt. All topics
+        // created so far are persisted, so the resume starts from the next
+        // missing topic - creation never restarts from zero.
+        await deps.setupQueue.rateLimit(provisioned.retryAfterMs ?? 5_000);
+        deferredByRateLimit = true;
+        throw Worker.RateLimitError();
+      }
       if (provisioned.retryable && !isFinalAttempt(job)) {
         throw new Error(`topic-provision-retryable:${provisioned.safeErrorCode}`);
       }
@@ -307,14 +343,28 @@ async function handleProvisionJob(
     if (toTesting.count === 0) {
       return { skipped: "cancelled-or-not-provisioning" };
     }
+    // Lock safety (§15): refresh the owned lock immediately before the test
+    // send so the final bounded Telegram call can never outlive the TTL.
+    await refreshLock();
     const systemThreadId = provisioned.bindings.SYSTEM;
+    // The staged SYSTEM topic MUST exist before the direct test - a test with
+    // no thread id would land in General and falsely "prove" the group works.
+    if (typeof systemThreadId !== "number") {
+      await failAttempt(attemptId, "topic-missing");
+      return { failed: "direct-test", code: "topic-missing" };
+    }
     const testSend = await sendTelegramMessage({
       token,
       chatId: attempt.chatId.toString(),
       text: "پیام آزمایشی راه‌اندازی گروه لاگ ✅",
-      messageThreadId: typeof systemThreadId === "number" ? systemThreadId : undefined,
+      messageThreadId: systemThreadId,
     });
     if (!testSend.ok) {
+      if (testSend.safeErrorCode === "rate-limited") {
+        await deps.setupQueue.rateLimit(testSend.retryAfterMs ?? 5_000);
+        deferredByRateLimit = true;
+        throw Worker.RateLimitError();
+      }
       if (testSend.retryable && !isFinalAttempt(job)) {
         throw new Error(`direct-test-retryable:${testSend.safeErrorCode}`);
       }
@@ -348,6 +398,12 @@ async function handleProvisionJob(
 
     return { ok: true, activated: true, topicCount: Object.keys(provisioned.bindings).length };
   } catch (err) {
+    // A 429-driven rate-limit deferral does NOT consume an attempt and is not a
+    // failure: keep the slot held so the SAME durable row resumes from its
+    // persisted bindings once the rate-limit window clears.
+    if (deferredByRateLimit) {
+      throw err;
+    }
     // On the FINAL BullMQ attempt, ANY terminal failure after the CAS claim
     // MUST free the unique active-setup slot (activeSlot) so a future setup can
     // start: the lock-contended throw, a transient activation DB error, or any

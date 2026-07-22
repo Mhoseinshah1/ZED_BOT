@@ -15,6 +15,7 @@ import {
   normalizeChatIdInput,
   OPS_LOG_TOPIC_KEYS,
   OPS_LOG_TOPIC_TITLES,
+  type EvaluateLogGroupResult,
   type LogGroupSafeCode,
   type LogGroupTargetProbe,
   type OpsLogTopicKey,
@@ -200,6 +201,29 @@ export async function probeLogGroupTarget(
   return probe;
 }
 
+/**
+ * Read-only health check of the CURRENTLY bound destination against the shared
+ * target policy (§10): chat exists, is a supergroup, forum still enabled, bot
+ * is still a member + administrator, manage-topics still granted, sending not
+ * explicitly restricted. OWNER membership is a SETUP-only requirement and is
+ * treated as satisfied here. Sends NOTHING into the group - a read-only
+ * connection check must never post a message (a send test is a separate,
+ * explicit action). Returns the shared evaluate verdict with its safe message.
+ */
+export async function verifyBoundGroupConnection(
+  api: LogGroupProbeApi,
+  chatId: string,
+): Promise<EvaluateLogGroupResult> {
+  // probeLogGroupTarget needs a user id for the (setup-only) OWNER membership
+  // probe; the bot's own id is always a present member, so reusing it keeps the
+  // check read-only and independent of any specific OWNER while ownerIsMember is
+  // then treated as satisfied regardless.
+  const probeUserId = api.me?.id ?? 0;
+  const probe = await probeLogGroupTarget(api, chatId, probeUserId);
+  probe.ownerIsMember = true;
+  return evaluateLogGroupTarget(probe);
+}
+
 export interface PrepareLogGroupOk {
   ok: true;
   chatId: string;
@@ -321,19 +345,36 @@ export async function getSetupAttemptById(id: string): Promise<LogGroupSetupAtte
   return prisma.logGroupSetupAttempt.findUnique({ where: { id } });
 }
 
-/** Resolves a callback short id (first 8 chars) to the newest matching attempt. */
-export async function getSetupAttemptByShortId(
-  shortId: string,
-): Promise<LogGroupSetupAttempt | null> {
+/**
+ * Ambiguity-safe short-id resolution (§14). A callback short id is only the
+ * first 8 hex chars of a uuid, so two attempts CAN share a prefix. Resolving
+ * to "the newest" would silently act on the wrong attempt, so this never
+ * chooses: zero matches -> not-found, exactly one -> found, two or more ->
+ * ambiguous. Every callback fails closed on not-found/ambiguous.
+ */
+export type ShortIdLookup =
+  | { status: "found"; attempt: LogGroupSetupAttempt }
+  | { status: "not-found" }
+  | { status: "ambiguous" };
+
+export async function getSetupAttemptByShortId(shortId: string): Promise<ShortIdLookup> {
   if (!/^[0-9a-f]{4,12}$/.test(shortId)) {
-    return null;
+    return { status: "not-found" };
   }
+  // take: 2 is enough to distinguish exactly-one from two-or-more without
+  // scanning the whole table.
   const rows = await prisma.logGroupSetupAttempt.findMany({
     where: { id: { startsWith: shortId } },
     orderBy: { createdAt: "desc" },
     take: 2,
   });
-  return rows.length === 1 ? rows[0] : (rows[0] ?? null);
+  if (rows.length === 0) {
+    return { status: "not-found" };
+  }
+  if (rows.length > 1) {
+    return { status: "ambiguous" };
+  }
+  return { status: "found", attempt: rows[0] };
 }
 
 /** The one attempt currently occupying the active-setup slot, if any. */

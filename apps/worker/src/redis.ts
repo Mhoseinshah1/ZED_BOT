@@ -88,6 +88,37 @@ export async function releaseLock(redis: RawRedis, lock: HeldLock): Promise<void
   }
 }
 
+// Compare-and-expire: reset the TTL ONLY when we still own the lock (token
+// match). Never extends a lock a later worker re-acquired - a stale holder
+// whose lock already expired and was retaken must not push the TTL out from
+// under the new owner.
+const EXTEND_LOCK_LUA = `if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("pexpire", KEYS[1], ARGV[2])
+else
+  return 0
+end`;
+
+/**
+ * Extends the TTL of a lock we own (compare-and-expire by token). Returns true
+ * when the lock was still ours and the TTL was reset, false when we no longer
+ * own it (expired + retaken) or on any Redis error. A long provisioning job
+ * calls this after every successful topic creation so a bounded-but-slow run
+ * can never lose its lock mid-flight; a false result tells the caller it is no
+ * longer the owner and must stop touching the shared resource.
+ */
+export async function extendLock(
+  redis: RawRedis,
+  lock: HeldLock,
+  ttlMs: number,
+): Promise<boolean> {
+  try {
+    const result = await redis.eval(EXTEND_LOCK_LUA, 1, lock.key, lock.token, ttlMs);
+    return result === 1;
+  } catch {
+    return false;
+  }
+}
+
 // --- log aggregation counters ------------------------------------------------
 
 export const LOG_AGGREGATION_WINDOW_SECONDS = 300;

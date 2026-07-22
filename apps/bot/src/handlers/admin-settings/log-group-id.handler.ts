@@ -45,6 +45,28 @@ import { LG_CB, renderLogGroupPage } from "./log-group.handler.js";
 
 const OWNER_ONLY_TEXT = "این عملیات فقط برای مدیر اصلی (OWNER) مجاز است.";
 const ATTEMPT_NOT_FOUND_TEXT = "عملیات راه‌اندازی پیدا نشد.";
+const ATTEMPT_AMBIGUOUS_TEXT =
+  "شناسه عملیات مبهم است. لطفاً از صفحه تنظیمات گروه لاگ دوباره تلاش کنید.";
+
+/**
+ * Resolves a callback short id, answering the callback with a safe message and
+ * returning null on BOTH not-found and ambiguous (§14 - never silently act on
+ * one of two prefix-matching attempts).
+ */
+async function resolveAttempt(
+  ctx: BotContext,
+  shortId: string,
+): Promise<LogGroupSetupAttempt | null> {
+  const lookup = await getSetupAttemptByShortId(shortId);
+  if (lookup.status === "found") {
+    return lookup.attempt;
+  }
+  await safeAnswerCallback(
+    ctx,
+    lookup.status === "ambiguous" ? ATTEMPT_AMBIGUOUS_TEXT : ATTEMPT_NOT_FOUND_TEXT,
+  );
+  return null;
+}
 
 /** currentFlow sentinel for the bounded OWNER numeric-ID input flow. */
 export const LOG_GROUP_ID_FLOW = "lg:chat_id";
@@ -164,14 +186,20 @@ function buildPreview(attempt: LogGroupSetupAttempt): { text: string; keyboard: 
 type DeliveryState = "sent" | "pending" | "failed";
 
 /**
- * Reads the newest queued LOG_GROUP_CONNECTED log's delivery status - the
- * normal ops-log path the worker emits right after activation, so a SENT here
- * proves the whole pipeline (persist -> delivery row -> queue -> Telegram).
+ * Reads the LOG_GROUP_CONNECTED delivery status FOR THIS EXACT ATTEMPT (§13).
+ * The worker writes the attempt id into the connected event's metadata, so the
+ * lookup is scoped by `metadata.attemptId` - a previous group's successful
+ * connected event can never make a NEW setup look verified. A SENT here proves
+ * the whole pipeline for THIS attempt (persist -> delivery row -> queue ->
+ * Telegram).
  */
-async function readConnectedDeliveryState(): Promise<DeliveryState> {
+async function readConnectedDeliveryState(attemptId: string): Promise<DeliveryState> {
   try {
     const log = await prisma.systemLog.findFirst({
-      where: { eventType: OPS_EVENTS.LOG_GROUP_CONNECTED },
+      where: {
+        eventType: OPS_EVENTS.LOG_GROUP_CONNECTED,
+        metadata: { path: ["attemptId"], equals: attemptId },
+      },
       orderBy: { createdAt: "desc" },
       select: { id: true },
     });
@@ -263,12 +291,16 @@ async function buildProgressView(
   const createdLine = `تاپیک‌های ساخته‌شده: ${attempt.createdTopicCount} از ${total}`;
 
   if (attempt.status === LogGroupSetupStatus.ACTIVE) {
-    const delivery = await readConnectedDeliveryState();
+    const delivery = await readConnectedDeliveryState(attempt.id);
     const lines = [
       "گروه لاگ با موفقیت راه‌اندازی شد ✅",
       "",
       `${attempt.createdTopicCount} تاپیک پیش‌فرض ساخته یا بازیابی شد و ارسال لاگ فعال است.`,
       "",
+      // §13: distinguish the direct staged SYSTEM test, the atomic activation
+      // and the queued end-to-end delivery as separate milestones.
+      `ارسال مستقیم به تاپیک SYSTEM: ${attempt.directTestOk ? "موفق ✅" : "—"}`,
+      "فعال‌سازی اتصال: موفق ✅",
       deliveryLine(delivery),
     ];
     if (delivery !== "sent") {
@@ -436,9 +468,8 @@ logGroupIdHandler.callbackQuery(/^admin:lg:id_pubok:([0-9a-f]{4,12})$/, async (c
     await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
     return;
   }
-  const attempt = await getSetupAttemptByShortId(ctx.match[1]);
+  const attempt = await resolveAttempt(ctx, ctx.match[1]);
   if (attempt === null) {
-    await safeAnswerCallback(ctx, ATTEMPT_NOT_FOUND_TEXT);
     return;
   }
   await safeAnswerCallback(ctx);
@@ -463,9 +494,8 @@ logGroupIdHandler.callbackQuery(/^admin:lg:id_confirm:([0-9a-f]{4,12})$/, async 
     await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
     return;
   }
-  const attempt = await getSetupAttemptByShortId(ctx.match[1]);
+  const attempt = await resolveAttempt(ctx, ctx.match[1]);
   if (attempt === null) {
-    await safeAnswerCallback(ctx, ATTEMPT_NOT_FOUND_TEXT);
     return;
   }
   const result = await confirmLogGroupConnection(
@@ -511,9 +541,8 @@ logGroupIdHandler.callbackQuery(/^admin:lg:op:([0-9a-f]{4,12})$/, async (ctx) =>
     await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
     return;
   }
-  const attempt = await getSetupAttemptByShortId(ctx.match[1]);
+  const attempt = await resolveAttempt(ctx, ctx.match[1]);
   if (attempt === null) {
-    await safeAnswerCallback(ctx, ATTEMPT_NOT_FOUND_TEXT);
     return;
   }
   await safeAnswerCallback(ctx);
@@ -531,9 +560,8 @@ logGroupIdHandler.callbackQuery(/^admin:lg:id_retry:([0-9a-f]{4,12})$/, async (c
     await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
     return;
   }
-  const attempt = await getSetupAttemptByShortId(ctx.match[1]);
+  const attempt = await resolveAttempt(ctx, ctx.match[1]);
   if (attempt === null) {
-    await safeAnswerCallback(ctx, ATTEMPT_NOT_FOUND_TEXT);
     return;
   }
   const result = await requeueFailedAttempt(attempt.id);
@@ -541,8 +569,8 @@ logGroupIdHandler.callbackQuery(/^admin:lg:id_retry:([0-9a-f]{4,12})$/, async (c
     await safeAnswerCallback(ctx, result.safeMessage ?? ATTEMPT_NOT_FOUND_TEXT);
     // Re-render the (still-failed) op page so the reason stays visible.
     const fresh = await getSetupAttemptByShortId(ctx.match[1]);
-    if (fresh !== null) {
-      const view = await buildProgressView(fresh);
+    if (fresh.status === "found") {
+      const view = await buildProgressView(fresh.attempt);
       await safeEditOrReply(ctx, view.text, view.keyboard);
     }
     return;
@@ -569,9 +597,8 @@ logGroupIdHandler.callbackQuery(/^admin:lg:id_cancel_op:([0-9a-f]{4,12})$/, asyn
     await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
     return;
   }
-  const attempt = await getSetupAttemptByShortId(ctx.match[1]);
+  const attempt = await resolveAttempt(ctx, ctx.match[1]);
   if (attempt === null) {
-    await safeAnswerCallback(ctx, ATTEMPT_NOT_FOUND_TEXT);
     return;
   }
   const cancelled = await cancelSetupAttempt(attempt.id);

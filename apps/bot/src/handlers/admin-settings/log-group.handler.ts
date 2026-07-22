@@ -9,11 +9,12 @@ import { Composer, InlineKeyboard } from "grammy";
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
-import { getActiveSetupAttempt } from "../../services/log-group-connection.service.js";
 import {
-  BOT_NOT_ADMIN_TEXT,
-  BOT_RIGHTS_INCOMPLETE_TEXT,
-  classifyTelegramError,
+  getActiveSetupAttempt,
+  verifyBoundGroupConnection,
+  type LogGroupProbeApi,
+} from "../../services/log-group-connection.service.js";
+import {
   disconnectLogGroup,
   ensureDefaultTopics,
   getLogGroupSettings,
@@ -112,18 +113,25 @@ export async function renderLogGroupPage(ctx: BotContext, toast?: string): Promi
       : status.configured
         ? "متصل ✅"
         : "تنظیم نشده";
-  const pending = queueCounts === null ? "نامشخص" : String(queueCounts.waiting);
+  // §16: richer, secret-free setup-queue depth (waiting/active/delayed/failed).
+  const queueLine =
+    queueCounts === null
+      ? "صف راه‌اندازی: نامشخص"
+      : `صف راه‌اندازی: ${queueCounts.waiting} در انتظار | ${queueCounts.active} فعال | ${queueCounts.delayed} با تاخیر | ${queueCounts.failed} ناموفق`;
   const lines = [
     "تنظیمات گروه لاگ 📝",
     "",
     `وضعیت اتصال: ${connectionState}`,
     `نام گروه: ${status.title ?? "بدون نام"}`,
     `شناسه گروه: ${status.chatId === null ? "-" : maskChatId(status.chatId)}`,
+    // Current-group readiness breakdown (never old-group counts): ready
+    // (enabled + bound), bound, and needing (re)creation.
     `تاپیک‌های آماده: ${status.enabledTopicCount} از ${status.totalTopicCount}`,
+    `متصل به گروه فعلی: ${status.boundTopicCount} | نیازمند ساخت/تعمیر: ${status.invalidatedTopicCount}`,
     // The heartbeat key carries a TTL, so its very presence means "alive
     // recently" - readWorkerHeartbeat returns null when absent/unreachable.
     `Worker: ${heartbeat !== null ? "فعال ✅" : "غیرفعال ❌"}`,
-    `صف ارسال لاگ: ${pending} در انتظار`,
+    queueLine,
     `آخرین ارسال موفق: ${status.lastSuccessAt === null ? "—" : formatTime(status.lastSuccessAt)}`,
     `آخرین خطا: ${status.lastError === null ? "—" : `${status.lastError.code} (${formatTime(status.lastError.at)})`}`,
   ];
@@ -132,6 +140,9 @@ export async function renderLogGroupPage(ctx: BotContext, toast?: string): Promi
       `عملیات راه‌اندازی: ${LG_ATTEMPT_STATUS_LABELS[activeAttempt.status]}`,
       `تاپیک‌های ساخته‌شده: ${activeAttempt.createdTopicCount} از ${status.totalTopicCount}`,
     );
+    if (activeAttempt.safeErrorCode !== null) {
+      lines.push(`آخرین کد خطای راه‌اندازی: ${activeAttempt.safeErrorCode}`);
+    }
   }
   const kb = new InlineKeyboard();
   if (!status.configured) {
@@ -151,7 +162,7 @@ export async function renderLogGroupPage(ctx: BotContext, toast?: string): Promi
       .row()
       .text("ارسال پیام آزمایشی", LG_CB.test)
       .row()
-      .text("ساخت موضوعات پیش‌فرض", LG_CB.ensure)
+      .text("ساخت / تعمیر موضوعات پیش‌فرض", LG_CB.ensure)
       .row()
       .text("همگام‌سازی موضوعات", LG_CB.sync)
       .row()
@@ -248,20 +259,24 @@ logGroupHandler.callbackQuery(LG_CB.guide, async (ctx) => {
   );
 });
 
-/** Verifies the bot's rights in the BOUND group; returns the toast line. */
+/** Probe surface over the live grammY api (supplies the bot id). */
+function buildProbeApi(ctx: BotContext): LogGroupProbeApi {
+  return {
+    getChat: (chatId) => ctx.api.getChat(chatId),
+    getChatMember: (chatId, userId) => ctx.api.getChatMember(chatId, userId),
+    me: { id: ctx.me.id },
+  };
+}
+
+/**
+ * Full read-only health check of the BOUND group against the shared target
+ * policy (§10): chat exists, is a supergroup, forum still on, bot still a
+ * member + admin, manage-topics still granted, sending not restricted. Sends
+ * nothing into the group. Returns the toast line (safe message or OK).
+ */
 async function verifyBoundGroupRights(ctx: BotContext, chatId: string): Promise<string> {
-  try {
-    const me = await ctx.api.getChatMember(chatId, ctx.me.id);
-    if (me.status !== "administrator") {
-      return BOT_NOT_ADMIN_TEXT;
-    }
-    if (me.can_manage_topics !== true) {
-      return BOT_RIGHTS_INCOMPLETE_TEXT;
-    }
-    return CONNECTION_OK_TEXT;
-  } catch (err) {
-    return classifyTelegramError(err);
-  }
+  const verdict = await verifyBoundGroupConnection(buildProbeApi(ctx), chatId);
+  return verdict.ok ? CONNECTION_OK_TEXT : verdict.safeMessage;
 }
 
 // «بررسی مجدد اتصال ♻️» (wizard poll): re-reads the binding state and, when

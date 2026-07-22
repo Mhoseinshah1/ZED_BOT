@@ -97,21 +97,60 @@ export interface LogGroupStatus {
   configured: boolean;
   chatId: string | null;
   title: string | null;
+  /**
+   * READY topics: a stable OPS key row that is enabled, has a topicId AND is
+   * bound to the CURRENTLY configured group. Old-group mappings count as zero
+   * for the current group; no configured group means zero ready.
+   */
   enabledTopicCount: number;
+  /** Total stable OPS keys (the ceiling - always OPS_LOG_TOPIC_KEYS.length). */
   totalTopicCount: number;
+  /** Rows with a topicId bound to the current group (regardless of enabled). */
+  boundTopicCount: number;
+  /**
+   * Rows that need (re)creation for the current group: missing (topicId null)
+   * or bound to a DIFFERENT group. Zero when no group is configured (nothing
+   * is expected of an unconfigured binding).
+   */
+  invalidatedTopicCount: number;
   lastSuccessAt: Date | null;
   lastError: { code: string; at: Date } | null;
 }
 
 export async function getLogGroupStatus(): Promise<LogGroupStatus> {
   const settings = await getLogGroupSettings();
+  const totalTopicCount = OPS_LOG_TOPIC_KEYS.length;
   let enabledTopicCount = 0;
+  let boundTopicCount = 0;
+  let invalidatedTopicCount = 0;
   let lastSuccessAt: Date | null = null;
   let lastError: LogGroupStatus["lastError"] = null;
   try {
-    enabledTopicCount = await prisma.logTopic.count({
-      where: { key: { in: [...OPS_LOG_TOPIC_KEYS] }, isEnabled: true, topicId: { not: null } },
+    // Count in JS over the exact stable-key rows so "bound to the current
+    // group" is an exact chat-id match (BigInt telegramChatId vs the stored
+    // string setting). A corrupted/absent chat-id setting simply matches
+    // nothing -> zero ready, never a throw.
+    const configuredChatId = settings.chatId;
+    const rows = await prisma.logTopic.findMany({
+      where: { key: { in: [...OPS_LOG_TOPIC_KEYS] } },
+      select: { key: true, topicId: true, telegramChatId: true, isEnabled: true },
     });
+    if (configuredChatId !== null) {
+      for (const row of rows) {
+        const boundHere =
+          row.topicId !== null &&
+          row.telegramChatId !== null &&
+          row.telegramChatId.toString() === configuredChatId;
+        if (boundHere) {
+          boundTopicCount += 1;
+          if (row.isEnabled) {
+            enabledTopicCount += 1;
+          }
+        }
+      }
+      // Every stable key not currently bound to this group needs (re)creation.
+      invalidatedTopicCount = totalTopicCount - boundTopicCount;
+    }
     const lastSent = await prisma.systemLogDelivery.findFirst({
       where: { status: "SENT" },
       orderBy: { sentAt: "desc" },
@@ -136,7 +175,9 @@ export async function getLogGroupStatus(): Promise<LogGroupStatus> {
     chatId: settings.chatId,
     title: settings.title,
     enabledTopicCount,
-    totalTopicCount: OPS_LOG_TOPIC_KEYS.length,
+    totalTopicCount,
+    boundTopicCount,
+    invalidatedTopicCount,
     lastSuccessAt,
     lastError,
   };
@@ -145,9 +186,13 @@ export async function getLogGroupStatus(): Promise<LogGroupStatus> {
 // --- topics ---------------------------------------------------------------------------------
 
 export interface OpsTopicEntry {
+  /** LogTopic row id when the row exists (for CAS invalidation); null if not. */
+  id: string | null;
   key: OpsLogTopicKey;
   title: string;
   topicId: number | null;
+  /** The row's stored telegram chat id (for CAS invalidation), or null. */
+  telegramChatId: bigint | null;
   isEnabled: boolean;
   /** True when the stored chat id matches the configured group. */
   boundToCurrentGroup: boolean;
@@ -168,9 +213,11 @@ export async function listOpsTopics(): Promise<OpsTopicEntry[]> {
   return OPS_LOG_TOPIC_KEYS.map((key) => {
     const row = byKey.get(key);
     return {
+      id: row?.id ?? null,
       key,
       title: row?.title ?? OPS_LOG_TOPIC_TITLES[key],
       topicId: row?.topicId ?? null,
+      telegramChatId: row?.telegramChatId ?? null,
       isEnabled: row?.isEnabled ?? true,
       boundToCurrentGroup:
         row?.topicId !== null &&
@@ -302,7 +349,7 @@ export function classifyTelegramError(err: unknown): string {
       description.includes("topic_deleted") ||
       description.includes("topic_closed")
     ) {
-      return "موضوع (تاپیک) موردنظر وجود ندارد یا بسته شده است. «ساخت موضوعات پیش‌فرض» را اجرا کنید.";
+      return "موضوع (تاپیک) موردنظر وجود ندارد یا بسته شده است. «ساخت / تعمیر موضوعات پیش‌فرض» را اجرا کنید.";
     }
     if (description.includes("forum")) {
       return "قابلیت موضوعات (Topics) گروه فعال نیست.";
@@ -314,32 +361,105 @@ export function classifyTelegramError(err: unknown): string {
 
 export interface LogGroupTestResult {
   ok: boolean;
+  safeCode?: string;
   safeMessage: string;
 }
 
-/** Sends the standard test message to ONE topic (SYSTEM by default). */
+/**
+ * Sends the standard test message to ONE topic (SYSTEM by default), and NEVER
+ * falls back to the group's General thread. A test only ever proves the EXACT
+ * configured topic accepted a message, so before sending it requires: a
+ * configured chat id, a LogTopic row that exists, has a topicId, is bound to
+ * the CURRENTLY configured chat, and is enabled. Any missing requirement
+ * returns a typed result (topic-unmapped / topic-disabled) - it does not send
+ * a message that could land in General and falsely report success.
+ */
 export async function testLogGroup(
   api: LogGroupApi,
   key: OpsLogTopicKey = "SYSTEM",
 ): Promise<LogGroupTestResult> {
   const settings = await getLogGroupSettings();
   if (settings.chatId === null) {
-    return { ok: false, safeMessage: LOG_GROUP_NOT_CONFIGURED_TEXT };
+    return { ok: false, safeCode: "log-group-unset", safeMessage: LOG_GROUP_NOT_CONFIGURED_TEXT };
   }
   const topics = await listOpsTopics();
   const topic = topics.find((t) => t.key === key);
+  // The exact topic must be mapped to the CURRENT group - never send without a
+  // proven message_thread_id (that would deliver to General and lie about it).
+  if (topic === undefined || topic.topicId === null || !topic.boundToCurrentGroup) {
+    return {
+      ok: false,
+      safeCode: "topic-unmapped",
+      safeMessage: `تاپیک ${key} به گروه فعلی متصل نیست.`,
+    };
+  }
+  if (!topic.isEnabled) {
+    return {
+      ok: false,
+      safeCode: "topic-disabled",
+      safeMessage: "این تاپیک غیرفعال است؛ ابتدا آن را فعال کنید.",
+    };
+  }
+  const threadId = topic.topicId;
   try {
     await api.sendMessage(
       settings.chatId,
       key === "SYSTEM"
         ? LOG_GROUP_TEST_OK_TEXT
-        : `پیام آزمایشی موضوع «${topic?.title ?? key}» با موفقیت ارسال شد ✅`,
-      topic?.topicId !== null && topic?.topicId !== undefined && topic.boundToCurrentGroup
-        ? { message_thread_id: topic.topicId }
-        : undefined,
+        : `پیام آزمایشی موضوع «${topic.title}» با موفقیت ارسال شد ✅`,
+      { message_thread_id: threadId },
     );
     return { ok: true, safeMessage: LOG_GROUP_TEST_OK_TEXT };
   } catch (err) {
-    return { ok: false, safeMessage: classifyTelegramError(err) };
+    // §11: if Telegram reports the topic itself is gone/closed, invalidate ONLY
+    // this exact mapping (CAS) so «ساخت / تعمیر موضوعات پیش‌فرض» recreates it -
+    // every other healthy topic is untouched.
+    if (isTopicGoneError(err) && topic.id !== null && topic.telegramChatId !== null) {
+      await invalidateStaleTopic({
+        id: topic.id,
+        expectedTopicId: threadId,
+        expectedChatId: topic.telegramChatId,
+      }).catch(() => undefined);
+      return { ok: false, safeCode: "topic-missing", safeMessage: classifyTelegramError(err) };
+    }
+    return { ok: false, safeCode: "send-failed", safeMessage: classifyTelegramError(err) };
   }
+}
+
+/** True when a GrammyError means the specific topic is deleted or closed. */
+function isTopicGoneError(err: unknown): boolean {
+  if (!(err instanceof GrammyError)) {
+    return false;
+  }
+  const d = err.description.toLowerCase();
+  return (
+    d.includes("message thread not found") ||
+    d.includes("thread not found") ||
+    d.includes("topic_deleted") ||
+    d.includes("topic_closed") ||
+    d.includes("topic is closed")
+  );
+}
+
+/**
+ * Compare-and-swap invalidation of ONE stale topic mapping (§11). Clears the
+ * topicId ONLY when the row still matches the exact (id, expected topicId,
+ * expected chat id) the failed delivery/test observed - so a concurrent
+ * repair/reactivation that already rebound the key is never clobbered, and one
+ * topic's failure never invalidates the others. The stable key, title,
+ * isEnabled flag and audit history are all preserved; the row simply becomes
+ * "missing" (topicId null) so ensureDefaultTopics recreates it and the status
+ * page shows it as needing repair. Returns true when this exact mapping was
+ * the one invalidated.
+ */
+export async function invalidateStaleTopic(input: {
+  id: string;
+  expectedTopicId: number;
+  expectedChatId: bigint;
+}): Promise<boolean> {
+  const result = await prisma.logTopic.updateMany({
+    where: { id: input.id, topicId: input.expectedTopicId, telegramChatId: input.expectedChatId },
+    data: { topicId: null },
+  });
+  return result.count > 0;
 }

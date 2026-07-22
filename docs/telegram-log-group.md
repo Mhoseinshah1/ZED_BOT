@@ -327,7 +327,7 @@ n از m», last success, last error):
 | --- | --- | --- |
 | بررسی اتصال 🧪 | `admin:lg:check` | Verifies the binding + the bot's admin rights **without sending anything** into the group (OWNER-gated in code) |
 | ارسال پیام آزمایشی | `admin:lg:test` | Sends the standard test line to the SYSTEM topic («پیام آزمایشی گروه لاگ با موفقیت ارسال شد ✅») |
-| ساخت موضوعات پیش‌فرض | `admin:lg:ensure` | Idempotently ensures every stable key has a `LogTopic` row AND a real forum topic in the bound group (existing bindings skipped, missing/mismatched ones recreated) |
+| ساخت / تعمیر موضوعات پیش‌فرض | `admin:lg:ensure` | Idempotently **creates or repairs** only the topics that need it — missing, mismatched (old-group) or invalidated keys — in the bound group; valid current-group bindings are preserved and nothing is ever sent to General |
 | همگام‌سازی موضوعات | `admin:lg:sync` | Read-only reconciliation report: ready / بدون موضوع (missing) / متصل به گروه دیگر (mismatched) |
 | مدیریت موضوعات | `admin:lg:topics` | Per-topic list: first button toggles delivery (`admin:lg:tt:<KEY>`), «ارسال تست» sends a per-topic test (`admin:lg:tx:<KEY>`) |
 | تغییر گروه لاگ | `admin:lg:connect` | The same connection wizard, prefixed with the replacement warning for the current group |
@@ -385,7 +385,7 @@ Settings (`log_group_chat_id`, `log_group_title`):
 Telegram errors during setup/tests collapse to safe Persian lines
 (`classifyTelegramError`): rate limit 429, «گروه پیدا نشد…», «ربات از گروه
 حذف شده است.», «ربات باید در این گروه مدیر باشد…», «موضوع (تاپیک)
-موردنظر وجود ندارد یا بسته شده است. «ساخت موضوعات پیش‌فرض» را اجرا
+موردنظر وجود ندارد یا بسته شده است. «ساخت / تعمیر موضوعات پیش‌فرض» را اجرا
 کنید.», «قابلیت موضوعات (Topics) گروه فعال نیست.», plus generic
 fallbacks. During real (worker-side) delivery, permanent errors
 (`forbidden`, `chat-not-found`, `topic-missing`) dead-letter immediately —
@@ -401,3 +401,76 @@ after fixing the group, deleted topics are healed with «ساخت موضوعات
 - Per-topic mappings can outlive the global binding: delivery resolves the
   chat from the topic's own `telegramChatId` first, falling back to the
   global `log_group_chat_id` Setting.
+
+## Reliability hardening & production rollout
+
+The connection pipeline is hardened against partial Telegram failures. The
+guarantees below hold for **all three** setup entry points (direct numeric
+chat-id, `/setloggroup`, and the `startgroup=zedlog` wizard), which now all
+run the SAME durable operation — the group-side confirmation no longer binds
+inline; it only stages + confirms a `LogGroupSetupAttempt` and points the
+OWNER back to the private bot to watch live progress.
+
+- **Atomic activation.** The active `log_group_chat_id`, title and every
+  `LogTopic` binding switch together, and only AFTER the worker has created all
+  topics and the direct SYSTEM test send succeeds. A failed setup leaves the
+  previously active group and its topic mappings completely unchanged.
+- **BullMQ lifecycle.** The bot-side producer sets `attempts: 3`, exponential
+  backoff, `removeOnComplete: true` and `removeOnFail: true` explicitly (never
+  inherited from the worker). `ensureLogGroupSetupJob(attemptId)` heals a
+  terminal job left by a previously deployed version: a retained
+  completed/failed job is removed and re-enqueued so a Retry always results in
+  a *real executable* job; a waiting/delayed/active job is never duplicated; a
+  queue outage returns a typed safe failure that rolls the DB slot back.
+- **Bounded Telegram calls.** Every `sendMessage`/`createForumTopic` is bounded
+  by `TELEGRAM_API_TIMEOUT_MS` (default `20000`, clamped `5000..60000`); a
+  timeout returns the safe `telegram-timeout` code. The token, request URL,
+  chat id, topic id and raw Telegram description are never logged — only a
+  fixed safe category.
+- **429 `retry_after`.** A Telegram 429 during provisioning rate-limits the
+  setup queue for the (capped, ≤ 60s) retry-after and re-queues via
+  `Worker.RateLimitError()` **without consuming a normal attempt**; already
+  persisted topic bindings are kept and provisioning resumes from the next
+  missing topic.
+- **Truthful tests & counts.** A topic test never falls back to General — it
+  requires the exact topic to be mapped to the current group and returns a
+  typed `topic-unmapped`/`topic-disabled` otherwise. The status page's
+  “ready” count only counts enabled topics bound to the **current** group.
+- **Self-healing deleted topics.** When Telegram reports a topic deleted/closed
+  during delivery or a per-topic test, only that exact mapping is invalidated
+  (compare-and-swap on id + topicId + chatId); «ساخت / تعمیر موضوعات پیش‌فرض»
+  recreates it while every other healthy topic keeps working.
+
+### Rollout
+
+The new deployment self-heals existing installations (retained
+completed/failed setup jobs, stale `QUEUED`/`PROVISIONING`/`TESTING`
+attempts, old-group or missing topic mappings) — **no manual Redis deletion
+is required** and **no database migration is needed** (no new durable field).
+Startup recovery re-enqueues stale running attempts through the same healing
+helper.
+
+```bash
+docker compose up -d --force-recreate bot worker
+docker compose ps
+docker compose logs --since=30m bot worker
+zedbot doctor
+```
+
+### Safe diagnostics (never print full chat ids or tokens)
+
+```bash
+# Setup attempts by status (no chat ids).
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+  'SELECT status, count(*) FROM "LogGroupSetupAttempt" GROUP BY status ORDER BY status;'
+
+# Topic readiness for the CURRENT group (masked chat id only).
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+  'SELECT key, ("topicId" IS NOT NULL) AS bound, "isEnabled" FROM "LogTopic" ORDER BY key;'
+
+# Setup queue depth (waiting/active/delayed/failed) is on the admin status page;
+# never dump raw queue job data (it can carry ids).
+```
+
+Full chat ids live only in the database (delivery needs them); the admin
+status page, audit rows and logs always use the masked form.
