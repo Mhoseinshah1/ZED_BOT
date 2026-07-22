@@ -10,13 +10,15 @@ import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
 import {
+  attemptShortId,
+  auditLogGroupConnection,
   getActiveSetupAttempt,
+  queueLogGroupRepair,
   verifyBoundGroupConnection,
   type LogGroupProbeApi,
 } from "../../services/log-group-connection.service.js";
 import {
   disconnectLogGroup,
-  ensureDefaultTopics,
   getLogGroupSettings,
   getLogGroupStatus,
   listOpsTopics,
@@ -326,20 +328,52 @@ logGroupHandler.callbackQuery(LG_CB.test, async (ctx) => {
   await renderLogGroupPage(ctx, result.safeMessage);
 });
 
+// «ساخت / تعمیر موضوعات پیش‌فرض»: DURABLE repair (§4). The callback performs
+// NO Telegram writes - it reads the CURRENT binding fresh, validates it, stages
+// a durable repair LogGroupSetupAttempt seeded with the healthy current-group
+// mappings, and enqueues the SAME worker pipeline. It then returns promptly with
+// a link to the shared live progress page (admin:lg:op:<sid>). All topic
+// creation, the SYSTEM test and the atomic reassert happen in the worker, so a
+// repair can never target/restore a previous group.
 logGroupHandler.callbackQuery(LG_CB.ensure, async (ctx) => {
-  if (ctx.admin === null) {
+  const admin = ctx.admin;
+  if (admin === null) {
     return;
   }
   if (!isOwner(ctx)) {
     await safeAnswerCallback(ctx, OWNER_ONLY_TEXT);
     return;
   }
-  const result = await ensureDefaultTopics(ctx.api);
-  const toast =
-    result.safeMessage !== null && !result.ok
-      ? result.safeMessage
-      : `موضوعات آماده شد ✅ (جدید: ${result.createdCount} | موجود: ${result.existingCount})`;
-  await renderLogGroupPage(ctx, toast);
+  const result = await queueLogGroupRepair(buildProbeApi(ctx), {
+    adminId: admin.id,
+    ownerTelegramId: Number(admin.telegramId),
+  });
+  if (!result.ok || result.attempt === undefined) {
+    await renderLogGroupPage(ctx, result.safeMessage ?? LOG_GROUP_NOT_CONFIGURED_TEXT);
+    return;
+  }
+  await auditLogGroupConnection("log_group.repair_queued", {
+    adminId: admin.id,
+    adminTelegramId: admin.telegramId,
+    attemptId: result.attempt.id,
+    chatId: result.attempt.chatId,
+    extra: { repair: true },
+  });
+  await safeAnswerCallback(ctx, "تعمیر موضوعات در صف قرار گرفت ⏳");
+  const sid = attemptShortId(result.attempt.id);
+  await safeEditOrReply(
+    ctx,
+    [
+      "تعمیر موضوعات گروه لاگ آغاز شد ⏳",
+      "",
+      "فقط موضوعات ناقص یا نامرتبط بازسازی می‌شوند؛ موضوعات سالم دست‌نخورده می‌مانند.",
+      "برای مشاهده وضعیت زنده، دکمه زیر را بزنید.",
+    ].join("\n"),
+    new InlineKeyboard()
+      .text("مشاهده وضعیت راه‌اندازی", `admin:lg:op:${sid}`)
+      .row()
+      .text("بازگشت به تنظیمات گروه لاگ", LG_CB.root),
+  );
 });
 
 logGroupHandler.callbackQuery(LG_CB.sync, async (ctx) => {

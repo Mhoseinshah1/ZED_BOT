@@ -23,7 +23,13 @@ import {
 import { GrammyError } from "grammy";
 
 import { logger } from "../core/logger.js";
-import { getLogGroupSettings, maskChatId } from "./log-group.service.js";
+import {
+  getLogGroupSettings,
+  loadLogGroupRoutingSnapshot,
+  LOG_GROUP_NOT_CONFIGURED_TEXT,
+  maskChatId,
+  readLogGroupBindingFresh,
+} from "./log-group.service.js";
 import { enqueueLogGroupSetup } from "./ops-queue.service.js";
 import { clearSettingsCache, setSettingWithClient } from "./settings.service.js";
 
@@ -309,6 +315,13 @@ export async function createLogGroupSetupAttempt(input: {
   title: string;
   adminId: string;
   previous: { chatId: string; title: string | null } | null;
+  /**
+   * REPAIR seed (§4): the healthy topic mappings already bound to `chatId`.
+   * The worker skips these (never recreating a healthy topic) and creates only
+   * the missing/mismatched keys, then atomically reasserts the full map. Only
+   * the stable OPS keys with a numeric thread id are persisted.
+   */
+  seedBindings?: Record<string, number>;
 }): Promise<CreateAttemptResult> {
   const running = await prisma.logGroupSetupAttempt.findFirst({
     where: { status: { in: RUNNING_STATUSES } },
@@ -327,6 +340,13 @@ export async function createLogGroupSetupAttempt(input: {
   // warning) degrades to "no previous recorded" rather than throwing.
   const previousChatIdBig =
     input.previous === null ? null : safeChatIdBigInt(input.previous.chatId);
+  const seed: Record<string, number> = {};
+  for (const [key, value] of Object.entries(input.seedBindings ?? {})) {
+    if ((OPS_LOG_TOPIC_KEYS as readonly string[]).includes(key) && typeof value === "number") {
+      seed[key] = value;
+    }
+  }
+  const seededKeys = Object.keys(seed);
   const attempt = await prisma.logGroupSetupAttempt.create({
     data: {
       chatId: chatIdBig,
@@ -336,6 +356,9 @@ export async function createLogGroupSetupAttempt(input: {
       previousChatId: previousChatIdBig,
       previousTitle: input.previous?.title ?? null,
       idempotencyKey: randomUUID(),
+      ...(seededKeys.length > 0
+        ? { topicBindings: seed as Prisma.InputJsonValue, createdTopicCount: seededKeys.length }
+        : {}),
     },
   });
   return { ok: true, attempt };
@@ -464,6 +487,66 @@ export async function confirmLogGroupConnection(
     return { ok: false, safeMessage: SETUP_QUEUE_UNAVAILABLE_TEXT };
   }
   return { ok: true, attempt: claimed };
+}
+
+/**
+ * DURABLE TOPIC REPAIR (§4). «ساخت / تعمیر موضوعات پیش‌فرض» runs through the
+ * SAME durable worker pipeline as a numeric-ID connection - it performs NO
+ * Telegram writes in the bot callback. The steps:
+ *   1. read the CURRENT binding fresh (database-authoritative, never cached);
+ *   2. validate that current group with the shared target policy;
+ *   3. from ONE coherent snapshot, seed only the healthy current-group topic
+ *      mappings (so the worker never recreates a healthy topic);
+ *   4. create a durable repair LogGroupSetupAttempt for the CURRENT group
+ *      (rejected when a setup/repair already occupies the single active slot);
+ *   5. claim the slot + enqueue via confirmLogGroupConnection ->
+ *      ensureLogGroupSetupJob.
+ * The worker then creates only the missing/mismatched topics, sends the exact
+ * SYSTEM test and atomically reasserts the full map - so a repair can never
+ * target the previous group, clear a healthy mapping, or modify Settings before
+ * completion. On any failure the previously active binding is left unchanged.
+ */
+export async function queueLogGroupRepair(
+  api: LogGroupProbeApi,
+  input: { adminId: string; ownerTelegramId: number },
+): Promise<ConfirmResult> {
+  const binding = await readLogGroupBindingFresh();
+  if (!binding.configured || binding.chatId === null) {
+    return { ok: false, safeMessage: LOG_GROUP_NOT_CONFIGURED_TEXT };
+  }
+  // Validate the CURRENT group before staging anything.
+  const probe = await probeLogGroupTarget(api, binding.chatId, input.ownerTelegramId);
+  const verdict = evaluateLogGroupTarget(probe);
+  if (!verdict.ok) {
+    return { ok: false, safeMessage: verdict.safeMessage };
+  }
+  // Coherent snapshot for the seed; if the binding moved between the fresh read
+  // and the snapshot (a concurrent activation), do NOT stage a stale map.
+  const snapshot = await loadLogGroupRoutingSnapshot();
+  if (snapshot.chatId !== binding.chatId) {
+    return { ok: false, safeMessage: SETUP_ALREADY_RUNNING_TEXT };
+  }
+  const seed: Record<string, number> = {};
+  for (const t of snapshot.topics) {
+    if (t.boundToCurrentGroup && t.topicId !== null) {
+      seed[t.key] = t.topicId;
+    }
+  }
+  const created = await createLogGroupSetupAttempt({
+    chatId: binding.chatId,
+    title: verdict.title,
+    adminId: input.adminId,
+    previous: { chatId: binding.chatId, title: binding.title },
+    seedBindings: seed,
+  });
+  if (!created.ok) {
+    return {
+      ok: false,
+      safeMessage:
+        created.reason === "active-exists" ? SETUP_ALREADY_RUNNING_TEXT : INVALID_CHAT_ID_TEXT,
+    };
+  }
+  return confirmLogGroupConnection(api, created.attempt.id, input.ownerTelegramId);
 }
 
 /**

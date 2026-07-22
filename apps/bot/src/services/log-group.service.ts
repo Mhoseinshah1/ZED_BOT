@@ -1,5 +1,6 @@
 import { prisma, type LogTopic } from "@zedbot/database";
 import {
+  LOG_GROUP_CHAT_ID_RE,
   OPS_LOG_TOPIC_KEYS,
   OPS_LOG_TOPIC_TITLES,
   type OpsLogTopicKey,
@@ -7,7 +8,7 @@ import {
 import { GrammyError } from "grammy";
 
 import { logger } from "../core/logger.js";
-import { deleteSetting, getSetting, setSetting } from "./settings.service.js";
+import { clearSettingCacheKeys, deleteSetting, setSetting } from "./settings.service.js";
 import { LOG_GROUP_CHAT_ID_KEY } from "./system-log.service.js";
 
 // =============================================================================
@@ -63,22 +64,93 @@ export interface LogGroupSettings {
   title: string | null;
 }
 
+// Postgres int8 (the BigInt telegramChatId column) range. A stored chat id
+// outside it - a manually corrupted Setting, or an over-long value that slipped
+// a shape regex - must be treated as an INVALID binding here, never routed to
+// and never allowed to throw from BigInt().
+const INT8_MIN = -9223372036854775808n;
+const INT8_MAX = 9223372036854775807n;
+
 /**
- * The bot-side view of the active group binding. Reads go through the settings
- * cache (30s TTL), so after a WORKER-side activation (the numeric-ID path
- * commits log_group_chat_id/title in its own process) this bot process can
- * serve the PREVIOUS group's chat id/title for up to the TTL - there is no
- * cross-process cache invalidation. This is bounded and safe: it only affects
- * bot-side DISPLAY reads (status page, an admin test send, the
- * boundToCurrentGroup comparison) and always lags toward the previous group
- * (never a not-yet-active one). The safety-critical delivery routing is
- * unaffected - the worker's log-delivery reads the log_group_chat_id Setting
- * directly from the database, never this cache.
+ * Validates a stored chat-id string for BINDING use: the `-100…` supergroup
+ * shape AND int8-column compatibility. Returns the value when safe, else null
+ * (no throw). The digit-length cap bounds BigInt() before the range check.
+ */
+function chatIdForBinding(value: string): string | null {
+  if (!LOG_GROUP_CHAT_ID_RE.test(value) || !/^-?[0-9]{1,19}$/.test(value)) {
+    return null;
+  }
+  try {
+    const big = BigInt(value);
+    return big >= INT8_MIN && big <= INT8_MAX ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The authoritative, uncached view of the active log-group binding (§2). */
+export interface LogGroupBinding {
+  /** True only when a well-formed, routable chat id is stored. */
+  configured: boolean;
+  /** The valid `-100…` chat id, or null when unconfigured/invalid. */
+  chatId: string | null;
+  title: string | null;
+  /** A chat-id value is stored but is malformed / out of int8 range. */
+  invalid: boolean;
+}
+
+/**
+ * DATABASE-AUTHORITATIVE binding read (§2). Queries both Setting keys directly
+ * through Prisma in ONE query and NEVER uses the 30s process-local settings
+ * cache - so a worker-side activation in a separate process is visible to this
+ * bot process immediately, with no cross-process cache-invalidation dependency.
+ * A malformed/out-of-range stored chat id returns an explicit invalid-binding
+ * state (configured:false, invalid:true) rather than routing to it or throwing.
+ * The full chat id is never logged. Use this for every correctness-sensitive
+ * destination decision.
+ */
+/** Parses the two Setting rows into the validated binding (shared by the
+ * fresh read and the coherent snapshot). */
+function parseBindingRows(rows: Array<{ key: string; value: string }>): LogGroupBinding {
+  const rawChatId = rows.find((r) => r.key === LOG_GROUP_CHAT_ID_KEY)?.value ?? "";
+  const rawTitle = rows.find((r) => r.key === LOG_GROUP_TITLE_KEY)?.value ?? "";
+  const title = rawTitle === "" ? null : rawTitle;
+  if (rawChatId.trim() === "") {
+    return { configured: false, chatId: null, title, invalid: false };
+  }
+  const chatId = chatIdForBinding(rawChatId.trim());
+  if (chatId === null) {
+    // A value is stored but unusable - fail safe as an explicit invalid state
+    // (never route a Telegram mutation/test to a corrupted id).
+    logger.warn("stored log-group chat id is malformed - treating binding as invalid");
+    return { configured: false, chatId: null, title, invalid: true };
+  }
+  return { configured: true, chatId, title, invalid: false };
+}
+
+export async function readLogGroupBindingFresh(): Promise<LogGroupBinding> {
+  try {
+    const rows = await prisma.setting.findMany({
+      where: { key: { in: [LOG_GROUP_CHAT_ID_KEY, LOG_GROUP_TITLE_KEY] } },
+      select: { key: true, value: true },
+    });
+    return parseBindingRows(rows);
+  } catch (err) {
+    logger.warn("fresh log-group binding read failed", {
+      error: err instanceof Error ? err.message.slice(0, 120) : "unknown",
+    });
+    return { configured: false, chatId: null, title: null, invalid: false };
+  }
+}
+
+/**
+ * The active group binding. Now delegates to the DATABASE-AUTHORITATIVE fresh
+ * read (§2) - no process-local cache decides where a Telegram mutation/test is
+ * sent. An invalid stored binding degrades to `chatId: null` here (fail safe).
  */
 export async function getLogGroupSettings(): Promise<LogGroupSettings> {
-  const chatId = await getSetting(LOG_GROUP_CHAT_ID_KEY, "");
-  const title = await getSetting(LOG_GROUP_TITLE_KEY, "");
-  return { chatId: chatId === "" ? null : chatId, title: title === "" ? null : title };
+  const binding = await readLogGroupBindingFresh();
+  return { chatId: binding.chatId, title: binding.title };
 }
 
 /** Saves the group binding (title is stored truncated, never markup). */
@@ -91,6 +163,17 @@ export async function saveLogGroup(chatId: string, title: string): Promise<void>
 export async function disconnectLogGroup(): Promise<void> {
   await deleteSetting(LOG_GROUP_CHAT_ID_KEY);
   await deleteSetting(LOG_GROUP_TITLE_KEY);
+}
+
+/**
+ * Self-healing cache invalidation (§6): drop the two log-group Setting cache
+ * keys after a worker-side activation is observed ACTIVE. Correctness does NOT
+ * depend on this (every routing-sensitive read is uncached via
+ * readLogGroupBindingFresh); it only keeps any OTHER cached generic reads of
+ * these keys from lagging. Never throws.
+ */
+export function invalidateLogGroupSettingCache(): void {
+  clearSettingCacheKeys([LOG_GROUP_CHAT_ID_KEY, LOG_GROUP_TITLE_KEY]);
 }
 
 export interface LogGroupStatus {
@@ -118,39 +201,12 @@ export interface LogGroupStatus {
 }
 
 export async function getLogGroupStatus(): Promise<LogGroupStatus> {
-  const settings = await getLogGroupSettings();
-  const totalTopicCount = OPS_LOG_TOPIC_KEYS.length;
-  let enabledTopicCount = 0;
-  let boundTopicCount = 0;
-  let invalidatedTopicCount = 0;
+  // One coherent snapshot drives the binding + all current-group readiness
+  // counts (§9) - never a cached group id combined with fresh topic rows.
+  const snapshot = await loadLogGroupRoutingSnapshot();
   let lastSuccessAt: Date | null = null;
   let lastError: LogGroupStatus["lastError"] = null;
   try {
-    // Count in JS over the exact stable-key rows so "bound to the current
-    // group" is an exact chat-id match (BigInt telegramChatId vs the stored
-    // string setting). A corrupted/absent chat-id setting simply matches
-    // nothing -> zero ready, never a throw.
-    const configuredChatId = settings.chatId;
-    const rows = await prisma.logTopic.findMany({
-      where: { key: { in: [...OPS_LOG_TOPIC_KEYS] } },
-      select: { key: true, topicId: true, telegramChatId: true, isEnabled: true },
-    });
-    if (configuredChatId !== null) {
-      for (const row of rows) {
-        const boundHere =
-          row.topicId !== null &&
-          row.telegramChatId !== null &&
-          row.telegramChatId.toString() === configuredChatId;
-        if (boundHere) {
-          boundTopicCount += 1;
-          if (row.isEnabled) {
-            enabledTopicCount += 1;
-          }
-        }
-      }
-      // Every stable key not currently bound to this group needs (re)creation.
-      invalidatedTopicCount = totalTopicCount - boundTopicCount;
-    }
     const lastSent = await prisma.systemLogDelivery.findFirst({
       where: { status: "SENT" },
       orderBy: { sentAt: "desc" },
@@ -171,13 +227,13 @@ export async function getLogGroupStatus(): Promise<LogGroupStatus> {
     });
   }
   return {
-    configured: settings.chatId !== null,
-    chatId: settings.chatId,
-    title: settings.title,
-    enabledTopicCount,
-    totalTopicCount,
-    boundTopicCount,
-    invalidatedTopicCount,
+    configured: snapshot.configured,
+    chatId: snapshot.chatId,
+    title: snapshot.title,
+    enabledTopicCount: snapshot.enabledReadyCount,
+    totalTopicCount: snapshot.totalTopicCount,
+    boundTopicCount: snapshot.boundTopicCount,
+    invalidatedTopicCount: snapshot.invalidatedTopicCount,
     lastSuccessAt,
     lastError,
   };
@@ -198,17 +254,8 @@ export interface OpsTopicEntry {
   boundToCurrentGroup: boolean;
 }
 
-/** All operational topics, merged over the stable key list (stable order). */
-export async function listOpsTopics(): Promise<OpsTopicEntry[]> {
-  const settings = await getLogGroupSettings();
-  let rows: LogTopic[] = [];
-  try {
-    rows = await prisma.logTopic.findMany({ where: { key: { in: [...OPS_LOG_TOPIC_KEYS] } } });
-  } catch (err) {
-    logger.warn("log topic list failed", {
-      error: err instanceof Error ? err.message.slice(0, 120) : "unknown",
-    });
-  }
+/** Merges LogTopic rows over the stable key list against a chat id (pure). */
+function topicsForChatId(rows: LogTopic[], chatId: string | null): OpsTopicEntry[] {
   const byKey = new Map(rows.map((row) => [row.key, row]));
   return OPS_LOG_TOPIC_KEYS.map((key) => {
     const row = byKey.get(key);
@@ -223,10 +270,96 @@ export async function listOpsTopics(): Promise<OpsTopicEntry[]> {
         row?.topicId !== null &&
         row?.telegramChatId !== null &&
         row?.telegramChatId !== undefined &&
-        settings.chatId !== null &&
-        row.telegramChatId.toString() === settings.chatId,
+        chatId !== null &&
+        row.telegramChatId.toString() === chatId,
     };
   });
+}
+
+/**
+ * COHERENT routing snapshot (§3): the fresh binding AND all stable LogTopic
+ * rows read in ONE transaction, so the displayed group, readiness counts,
+ * selected destination, exact topic mapping and CAS-expected values all derive
+ * from the SAME consistent state - never an old chat id paired with new topic
+ * rows (or the reverse). This is the single source every routing-sensitive
+ * admin action reloads before deciding.
+ */
+export interface LogGroupRoutingSnapshot {
+  configured: boolean;
+  invalid: boolean;
+  chatId: string | null;
+  title: string | null;
+  topics: OpsTopicEntry[];
+  totalTopicCount: number;
+  /** Topics with a topicId bound to the current group (any enabled state). */
+  boundTopicCount: number;
+  /** Enabled AND bound to the current group (the "ready" delivery targets). */
+  enabledReadyCount: number;
+  /** Stable keys needing (re)creation for this group (missing + mismatched). */
+  invalidatedTopicCount: number;
+  missing: OpsLogTopicKey[];
+  mismatched: OpsLogTopicKey[];
+}
+
+export async function loadLogGroupRoutingSnapshot(): Promise<LogGroupRoutingSnapshot> {
+  let binding: LogGroupBinding = { configured: false, chatId: null, title: null, invalid: false };
+  let rows: LogTopic[] = [];
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const settingRows = await tx.setting.findMany({
+        where: { key: { in: [LOG_GROUP_CHAT_ID_KEY, LOG_GROUP_TITLE_KEY] } },
+        select: { key: true, value: true },
+      });
+      const topicRows = await tx.logTopic.findMany({
+        where: { key: { in: [...OPS_LOG_TOPIC_KEYS] } },
+      });
+      return { settingRows, topicRows };
+    });
+    binding = parseBindingRows(result.settingRows);
+    rows = result.topicRows;
+  } catch (err) {
+    logger.warn("log-group routing snapshot failed", {
+      error: err instanceof Error ? err.message.slice(0, 120) : "unknown",
+    });
+  }
+  const topics = topicsForChatId(rows, binding.chatId);
+  let boundTopicCount = 0;
+  let enabledReadyCount = 0;
+  const missing: OpsLogTopicKey[] = [];
+  const mismatched: OpsLogTopicKey[] = [];
+  for (const t of topics) {
+    if (binding.chatId === null) {
+      continue;
+    }
+    if (t.boundToCurrentGroup) {
+      boundTopicCount += 1;
+      if (t.isEnabled) {
+        enabledReadyCount += 1;
+      }
+    } else if (t.topicId === null) {
+      missing.push(t.key);
+    } else {
+      mismatched.push(t.key);
+    }
+  }
+  return {
+    configured: binding.configured,
+    invalid: binding.invalid,
+    chatId: binding.chatId,
+    title: binding.title,
+    topics,
+    totalTopicCount: OPS_LOG_TOPIC_KEYS.length,
+    boundTopicCount,
+    enabledReadyCount,
+    invalidatedTopicCount: binding.chatId === null ? 0 : missing.length + mismatched.length,
+    missing,
+    mismatched,
+  };
+}
+
+/** All operational topics, merged over the stable key list (stable order). */
+export async function listOpsTopics(): Promise<OpsTopicEntry[]> {
+  return (await loadLogGroupRoutingSnapshot()).topics;
 }
 
 /** Flips ONE topic's enabled flag (row is created with defaults if absent). */
@@ -238,69 +371,11 @@ export async function setTopicEnabled(key: OpsLogTopicKey, enabled: boolean): Pr
   });
 }
 
-export interface EnsureTopicsResult {
-  ok: boolean;
-  createdCount: number;
-  existingCount: number;
-  failedCount: number;
-  safeMessage: string | null;
-}
-
-/**
- * Ensures every stable topic key has a LogTopic row AND a real forum topic
- * in the configured group. Idempotent: rows already bound to the current
- * group are skipped; missing/mismatched ones get a fresh createForumTopic.
- */
-export async function ensureDefaultTopics(api: LogGroupApi): Promise<EnsureTopicsResult> {
-  const settings = await getLogGroupSettings();
-  if (settings.chatId === null) {
-    return {
-      ok: false,
-      createdCount: 0,
-      existingCount: 0,
-      failedCount: 0,
-      safeMessage: LOG_GROUP_NOT_CONFIGURED_TEXT,
-    };
-  }
-  const chatId = settings.chatId;
-  let createdCount = 0;
-  let existingCount = 0;
-  let failedCount = 0;
-  let firstError: string | null = null;
-  for (const key of OPS_LOG_TOPIC_KEYS) {
-    const row = await prisma.logTopic.upsert({
-      where: { key },
-      update: {},
-      create: { key, title: OPS_LOG_TOPIC_TITLES[key] },
-    });
-    if (row.topicId !== null && row.telegramChatId?.toString() === chatId) {
-      existingCount += 1;
-      continue;
-    }
-    try {
-      const topic = await api.createForumTopic(chatId, row.title);
-      await prisma.logTopic.update({
-        where: { key },
-        data: { topicId: topic.message_thread_id, telegramChatId: BigInt(chatId) },
-      });
-      createdCount += 1;
-    } catch (err) {
-      failedCount += 1;
-      firstError ??= classifyTelegramError(err);
-      logger.warn("forum topic creation failed", {
-        key,
-        error: err instanceof Error ? err.message.slice(0, 120) : "unknown",
-      });
-    }
-  }
-  return {
-    ok: failedCount === 0,
-    createdCount,
-    existingCount,
-    failedCount,
-    safeMessage: firstError,
-  };
-}
+// ensureDefaultTopics (inline bot-side forum-topic creation) was REMOVED in the
+// post-activation hotfix: topic repair now runs through the durable worker
+// pipeline (queueLogGroupRepair -> LogGroupSetupAttempt), which reads the
+// binding fresh, honours the Telegram timeout / 429 / setup lock and atomically
+// reasserts the current group. No bot callback performs createForumTopic writes.
 
 export interface SyncTopicsReport {
   total: number;
@@ -313,16 +388,12 @@ export interface SyncTopicsReport {
 
 /** Read-only reconciliation report - which topics need (re)creation. */
 export async function syncTopics(): Promise<SyncTopicsReport> {
-  const topics = await listOpsTopics();
-  const missing = topics.filter((t) => t.topicId === null).map((t) => t.key);
-  const mismatched = topics
-    .filter((t) => t.topicId !== null && !t.boundToCurrentGroup)
-    .map((t) => t.key);
+  const snapshot = await loadLogGroupRoutingSnapshot();
   return {
-    total: topics.length,
-    ready: topics.length - missing.length - mismatched.length,
-    missing,
-    mismatched,
+    total: snapshot.totalTopicCount,
+    ready: snapshot.boundTopicCount,
+    missing: snapshot.missing,
+    mismatched: snapshot.mismatched,
   };
 }
 
@@ -378,12 +449,14 @@ export async function testLogGroup(
   api: LogGroupApi,
   key: OpsLogTopicKey = "SYSTEM",
 ): Promise<LogGroupTestResult> {
-  const settings = await getLogGroupSettings();
-  if (settings.chatId === null) {
+  // One coherent snapshot: the destination chat id AND the topic mapping come
+  // from the SAME consistent read (§3), never a cached group with fresh topics.
+  const snapshot = await loadLogGroupRoutingSnapshot();
+  if (snapshot.chatId === null) {
     return { ok: false, safeCode: "log-group-unset", safeMessage: LOG_GROUP_NOT_CONFIGURED_TEXT };
   }
-  const topics = await listOpsTopics();
-  const topic = topics.find((t) => t.key === key);
+  const settings = { chatId: snapshot.chatId };
+  const topic = snapshot.topics.find((t) => t.key === key);
   // The exact topic must be mapped to the CURRENT group - never send without a
   // proven message_thread_id (that would deliver to General and lie about it).
   if (topic === undefined || topic.topicId === null || !topic.boundToCurrentGroup) {
