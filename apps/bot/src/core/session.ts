@@ -8,7 +8,12 @@ import type {
   ServiceLocation,
   TrafficResetCycle,
 } from "@zedbot/database";
-import type { DiagnosticSnapshot, ServiceDiagnosticAction } from "@zedbot/shared";
+import type {
+  DiagnosticSnapshot,
+  ServiceDiagnosticAction,
+  SupportTicketCategory,
+  SupportTicketOrigin,
+} from "@zedbot/shared";
 
 /** In-progress "add panel" wizard state. */
 export interface PanelAddState {
@@ -293,9 +298,20 @@ export interface SessionData {
     // "stock" = AWAITING_STOCK list (specialized-workflows phase, additive).
     adminManualOrderLastFilter?: "open" | "info" | "ready" | "delivered" | "stock";
     adminManualOrderLastPage?: number;
-    // Support tickets (Phase 32): user new-ticket/reply draft + the admin
-    // reply target.
-    supportDraft?: { subject?: string; ticketId?: string };
+    // Support tickets (Phase 32 + V2): the user new-ticket wizard + reply draft.
+    // V2 adds the chosen structured category, the origin the ticket was opened
+    // from, an OPTIONAL owner-scoped linked serviceId (re-resolved before every
+    // final submission — never trusted from the session alone), and the Service
+    // picker page. All fields are bounded typed values or ids — never a
+    // subscription URL, config or token. `ticketId` is the reply target.
+    supportDraft?: {
+      subject?: string;
+      ticketId?: string;
+      category?: SupportTicketCategory;
+      origin?: SupportTicketOrigin;
+      serviceId?: string;
+      servicePage?: number;
+    };
     // Device connection guides (feat/device-connection-guides): short-lived,
     // server-side handoff context so the support prompt can show the selected
     // service/device/app and the cancel button can return to the EXACT guide

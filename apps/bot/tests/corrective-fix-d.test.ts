@@ -69,8 +69,9 @@ describe("support navigation (Fix D)", () => {
     const handler = src("apps/bot/src/handlers/user-support/support.handler.ts");
     expect(handler).toContain('getMessageTemplate("support_landing_text")');
     expect(handler).toContain('getMessageTemplate("support_subject_prompt"');
-    expect(handler).toContain('getMessageTemplate("support_message_prompt"');
-    expect(handler).toContain('getMessageTemplate("support_reply_prompt"');
+    // Support Tickets V2 unified the message + reply prompts into one template
+    // that mentions text-or-attachment input.
+    expect(handler).toContain('getMessageTemplate("support_message_or_attachment_prompt"');
     expect(handler).toContain('getMessageTemplate("support_empty_tickets_text")');
     expect(handler).toContain('getMessageTemplate("support_ticket_created_text")');
   });

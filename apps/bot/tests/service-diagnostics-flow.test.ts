@@ -27,7 +27,7 @@ vi.mock("../src/services/panel-adapter-factory.js", () => ({
 
 import { initialSession, type SessionData } from "../src/core/session.js";
 import { diagnosticsHandler } from "../src/handlers/user-services/diagnostics.handler.js";
-import { supportTextHandler } from "../src/handlers/user-support/support.handler.js";
+import { supportInputHandler } from "../src/handlers/user-support/support.handler.js";
 import {
   buildServiceDiagnosticsEntry,
   renderDiagnosticReport,
@@ -253,7 +253,12 @@ d("service-diagnostics: safe support snapshot", () => {
     panelState.account = { ok: true, status: "active", usedBytes: 5n * GIB, totalBytes: 10n * GIB, remainingBytes: 5n * GIB };
     const run = await runServiceDiagnostics(service, owner.id);
     const snapshot = snapshotForSupport(run.report, run.primary);
-    const outcome = await createSupportTicket(owner.id, "بررسی مشکل سرویس — x", "کار نمی‌کند", {
+    const outcome = await createSupportTicket({
+      userId: owner.id,
+      subject: "بررسی مشکل سرویس — x",
+      content: { text: "کار نمی‌کند" },
+      category: "CONNECTION",
+      origin: "SERVICE_DIAGNOSTICS",
       serviceId: service.id,
       diagnosticSnapshot: snapshot,
     });
@@ -270,7 +275,11 @@ d("service-diagnostics: safe support snapshot", () => {
   });
 
   it("a normal ticket (no attachment) keeps serviceId null — regression", async () => {
-    const outcome = await createSupportTicket(owner.id, "سوال عادی", "سلام");
+    const outcome = await createSupportTicket({
+      userId: owner.id,
+      subject: "سوال عادی",
+      content: { text: "سلام" },
+    });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     expect(outcome.ticket.serviceId).toBeNull();
@@ -337,19 +346,36 @@ function armedSession(serviceId: string, shortId: string): SessionData {
   return session;
 }
 
-/** Drives the real support text handler once against a session. */
+// Each driven message gets a fresh update_id — Support Tickets V2 keys ticket
+// idempotency on the inbound update_id (unique sourceUpdateId). The disposable
+// PostgreSQL persists across runs, so the id must be RUN-scoped (runTag-based),
+// not a fixed constant, or a re-run collides with a prior run's stored id and is
+// treated as a duplicate delivery.
+let driveUpdateSeq = 0;
+
+/** Drives the real unified support input handler once against a session. */
 async function driveText(text: string, user: User, session: SessionData): Promise<void> {
-  const message = { text, message_id: 6, chat: { id: 1, type: "private" }, from: { id: 1, first_name: "T" } };
+  driveUpdateSeq += 1;
+  const message = {
+    text,
+    message_id: 900_000 + driveUpdateSeq, // small int (sourceMessageId is Int?)
+    chat: { id: 1, type: "private" },
+    from: { id: 1, first_name: "T" },
+  };
   const ctx = {
     session,
     dbUser: user,
     message,
+    chat: message.chat,
     from: message.from,
-    update: { update_id: 2, message },
+    // Globally-unique bigint update_id (runTag distinguishes runs).
+    update: { update_id: runTag + BigInt(driveUpdateSeq), message },
     reply: async () => ({}),
-    api: {} as never,
+    editMessageText: async () => ({}),
+    answerCallbackQuery: async () => true,
+    api: { sendMessage: async () => ({}) },
   };
-  await supportTextHandler.middleware()(ctx as never, async () => undefined);
+  await supportInputHandler.middleware()(ctx as never, async () => undefined);
 }
 
 /** Drives the support text handler; returns whether it created a ticket (by

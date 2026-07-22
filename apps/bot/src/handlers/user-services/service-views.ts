@@ -271,6 +271,7 @@ export function serviceDetailKeyboard(
   actions: ServiceDetailActions = NO_DETAIL_ACTIONS,
   guide: { label: string } | null = null,
   diagnostics: { label: string } | null = null,
+  support: { label: string } | null = null,
 ): InlineKeyboard {
   const sid = serviceShortId(service);
   // Row 1: refresh.
@@ -341,8 +342,12 @@ export function serviceDetailKeyboard(
   // Callback owned by user-notifications/notification.handler.ts; literal here
   // for the same import-cycle reason as the list keyboard above.
   kb.text("اعلان‌های این سرویس 🔔", `user:nsvc:${sid}`).row();
-  // Row 7: support entry - routes into the existing ticket flow.
-  kb.text("مشکل دارم", CB.USER_SUPPORT).row();
+  // Row 7: support entry - opens a ticket PRE-LINKED to this exact service
+  // (Support Tickets V2: `user:svc:support:<sid>` seeds the owner-scoped Service
+  // + SERVICE_DETAIL origin, so the user never re-picks the service). The label
+  // is the operator-editable `support_service_ticket` button; routing is by the
+  // stable callback, never the label.
+  kb.text(support?.label ?? "پشتیبانی این سرویس 🎫", `user:svc:support:${sid}`).row();
   // Row 8: back navigation (doc right/left order).
   kb.text("بازگشت به لیست", svcCb.list(1)).text("بازگشت به منوی اصلی", CB.USER_MENU);
   return kb;

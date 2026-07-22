@@ -78,11 +78,11 @@ import {
 } from "./handlers/user-services/services.handler.js";
 import {
   supportHandler,
-  supportTextHandler,
+  supportInputHandler,
 } from "./handlers/user-support/support.handler.js";
 import {
   adminSupportHandler,
-  adminSupportTextHandler,
+  adminSupportInputHandler,
 } from "./handlers/admin-support/support-admin.handler.js";
 import {
   adminBroadcastHandler,
@@ -105,6 +105,7 @@ import {
   diagnosticsAdminHandler,
   diagnosticsAdminTextHandler,
 } from "./handlers/admin-settings/diagnostics-admin.handler.js";
+import { supportAttachmentsAdminHandler } from "./handlers/admin-settings/support-attachments-admin.handler.js";
 import {
   deviceGuidesHandler,
   deviceGuidesTextHandler,
@@ -250,6 +251,10 @@ export function createBot(token: string): Bot<BotContext> {
   adminArea.use(referralAdminHandler);
   adminArea.use(deviceGuidesHandler);
   adminArea.use(diagnosticsAdminHandler);
+  // Support Tickets V2: OWNER-only «تنظیمات ضمیمه‌ها 📎» attachment-settings page
+  // (admin:supatt:*) — master switch, size presets, reset, 24h counters, synthetic
+  // preview. Never downloads a file, moves money, or mutates a Service.
+  adminArea.use(supportAttachmentsAdminHandler);
   // Telegram Stars subscriptions (Phase 2): OWNER-only «اشتراک‌های ماهانه Stars ⭐»
   // admin page (admin:starsub:*) — master switch + activation gate + counts.
   adminArea.use(starsSubscriptionAdminHandler);
@@ -286,7 +291,6 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(adminFinanceTextHandler);
   adminFlowText.use(manualOrdersTextHandler);
   adminFlowText.use(stockTextHandler);
-  adminFlowText.use(adminSupportTextHandler);
   adminFlowText.use(adminBroadcastTextHandler);
   adminFlowText.use(adminTextSettingsTextHandler);
   // Checkout-payment reminders (Phase 2): numeric config input for the two
@@ -317,6 +321,17 @@ export function createBot(token: string): Bot<BotContext> {
     }
     if (flow === "payment:receipt") {
       await paymentReceiptHandler.middleware()(ctx, next);
+      return;
+    }
+    // Support Tickets V2: the user + admin support flows accept text, photo AND
+    // document, so they dispatch BEFORE the text-only early-return below. Each
+    // handler self-gates on its own flow(s) and passes through otherwise.
+    if (flow === "support:subject" || flow === "support:message" || flow === "support:reply") {
+      await supportInputHandler.middleware()(ctx, next);
+      return;
+    }
+    if (flow === "admin_support:reply") {
+      await adminSupportInputHandler.middleware()(ctx, next);
       return;
     }
     if (ctx.message.text === undefined) {
@@ -365,11 +380,6 @@ export function createBot(token: string): Bot<BotContext> {
     }
     if (flow === "other_product:info") {
       await otherProductInfoTextHandler.middleware()(ctx, next);
-      return;
-    }
-    // Phase 32 user ticket flows (subject / first message / reply).
-    if (flow === "support:subject" || flow === "support:message" || flow === "support:reply") {
-      await supportTextHandler.middleware()(ctx, next);
       return;
     }
     if (ctx.admin === null) {

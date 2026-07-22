@@ -1845,6 +1845,15 @@ model SupportTicket {
   service            Service? @relation("ServiceSupportTickets", fields: [serviceId], references: [id], onDelete: SetNull)
   diagnosticSnapshot Json?
 
+  // Support Tickets V2 (feat/support-ticket-attachments-service-context): a
+  // structured category + the origin the ticket was opened from. Both additive +
+  // nullable, so every existing ticket keeps category = null / origin = null.
+  // Values are STABLE machine codes from @zedbot/shared (SUPPORT_TICKET_CATEGORIES
+  // / SUPPORT_TICKET_ORIGINS); Persian rendering maps off these — behaviour never
+  // depends on the displayed label.
+  category String?
+  origin   String?
+
   messages SupportMessage[]
 
   @@index([userId])
@@ -1852,6 +1861,7 @@ model SupportTicket {
   @@index([userId, updatedAt])
   @@index([status, updatedAt])
   @@index([serviceId])
+  @@index([category, updatedAt])
 }
 
 model SupportMessage {
@@ -1867,8 +1877,27 @@ model SupportMessage {
   fileId        String?
   createdAt     DateTime                 @default(now())
 
+  // Support Tickets V2: ONE optional attachment per message, stored as Telegram
+  // file REFERENCES only — never file bytes, never a download URL, never external
+  // object storage. `attachmentType` is a stable code (SUPPORT_ATTACHMENT_TYPES).
+  // The Telegram-supplied `fileName` / `mimeType` are UNTRUSTED hints, validated +
+  // sanitized before persistence. All additive + nullable, so every existing
+  // message (including the many with fileId = null) stays valid.
+  attachmentType  String?
+  fileUniqueId    String?
+  fileName        String?
+  mimeType        String?
+  fileSizeBytes   BigInt?
+  // The inbound Telegram update_id, for idempotent processing: a duplicate
+  // delivery (same update_id) can never create a second ticket/message. Nullable
+  // (older rows + internally-generated SYSTEM messages carry null) and UNIQUE.
+  sourceUpdateId  BigInt?  @unique
+  // The inbound Telegram message_id (operational audit only; not an idempotency key).
+  sourceMessageId Int?
+
   @@index([ticketId])
   @@index([createdAt])
+  @@index([ticketId, createdAt])
 }
 
 // =============================================================================

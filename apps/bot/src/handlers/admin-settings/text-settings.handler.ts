@@ -138,6 +138,10 @@ export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     // (handler re-checks); literal callback avoids importing the admin handler.
     .text("عیب‌یابی سرویس 🛠", "admin:diag:root")
     .row()
+    // Support Tickets V2 attachment settings. OWNER-only (handler re-checks);
+    // literal callback avoids importing the admin handler here.
+    .text("تنظیمات ضمیمه‌ها 📎", "admin:supatt:root")
+    .row()
     .text("تنظیمات گروه لاگ 📝", LG_CB.root)
     .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);

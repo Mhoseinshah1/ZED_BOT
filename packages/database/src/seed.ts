@@ -122,6 +122,13 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   // cooldown + recent-connection thresholds are code-defaulted in @zedbot/shared and
   // clamped to their bounds, so tuning a default never needs a data migration.
   { key: "service_diagnostics_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Support Tickets V2 (feat/support-ticket-attachments-service-context). MASTER
+  // switch seeds FALSE — support stays text-only, and every attachment input/
+  // callback fails safely, until the OWNER explicitly enables it. Enabling moves
+  // no money and mutates no Service; disabling deletes no attachment metadata. The
+  // per-attachment byte ceiling is code-defaulted in @zedbot/shared and clamped to
+  // its bounds, so tuning it never needs a data migration.
+  { key: "support_attachments_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are

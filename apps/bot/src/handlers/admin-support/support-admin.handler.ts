@@ -9,6 +9,10 @@ import {
   diagnosticOverallLabel,
 } from "../../services/service-diagnostics.service.js";
 import {
+  logSupportAttachmentAccepted,
+  logSupportAttachmentRejected,
+} from "../../services/support-attachment-log.service.js";
+import {
   addAdminTicketReply,
   closeSupportTicket,
   getAdminTicketCounts,
@@ -16,16 +20,31 @@ import {
   listAdminTickets,
   notifyUserAboutAdminReply,
   notifyUserTicketClosed,
+  resolveAdminAttachment,
   TICKET_MESSAGE_MAX,
   TICKET_STATUS_ICON,
   TICKET_STATUS_LABEL,
-  ticketMessagePreview,
   type AdminTicketFilter,
   type TicketWithMessages,
 } from "../../services/support-ticket.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { statusLabel as serviceStatusLabel } from "../user-services/service-views.js";
+import {
+  extractSupportMessageInput,
+  type InboundMessageLike,
+  loadSupportInputSettings,
+  renderSupportAttachmentRejection,
+} from "../user-support/support-input.js";
+import {
+  hasAttachment,
+  sendSupportAttachment,
+  supportAttachmentButton,
+  supportCategoryLabel,
+  supportMessageLine,
+  supportOriginLabel,
+} from "../user-support/support-detail.js";
+import { getMessageTemplate } from "../../services/text.service.js";
 
 // =============================================================================
 // «تیکت‌های پشتیبانی 🎫» (Phase 32) - the admin side: counters landing,
@@ -141,10 +160,63 @@ function diagnosticSummaryLines(ticket: TicketWithMessages): string[] {
  * the admin cannot open the ticket at all. */
 const SUPPORT_DETAIL_TEXT_MAX = 3900;
 
-export function detailText(ticket: TicketWithMessages): string {
+/** Stable Persian category/origin lines (display only; code-driven behaviour). */
+function categoryOriginLines(ticket: TicketWithMessages): string[] {
+  const lines: string[] = [];
+  const category = supportCategoryLabel(ticket.category);
+  const origin = supportOriginLabel(ticket.origin);
+  if (category !== null) {
+    lines.push(`دسته: ${category}`);
+  }
+  if (origin !== null) {
+    lines.push(`منشأ: ${origin}`);
+  }
+  return lines;
+}
+
+function serviceGib(bytes: bigint): string {
+  return (Number(bytes) / (1024 * 1024 * 1024)).toFixed(1);
+}
+
+/**
+ * The admin linked-Service block (§20). Shows the account label, status, safe
+ * quota / expiry / last-sync — and NEVER a subscription URL, config, token or
+ * panel credential. A null relation is surfaced without breaking the ticket.
+ */
+function adminServiceLines(ticket: TicketWithMessages): string[] {
+  if (ticket.serviceId === null || ticket.serviceId === undefined) {
+    return [];
+  }
+  if (ticket.service === null || ticket.service === undefined) {
+    return ["", "سرویس مرتبط دیگر در دسترس نیست."];
+  }
+  const s = ticket.service;
+  const quota = s.volumeBytes === 0n ? "نامحدود" : `${serviceGib(s.remainingBytes)}/${serviceGib(s.volumeBytes)} GB`;
+  const lines = [
+    "",
+    `سرویس مرتبط: ${escapeHtml(s.username)} | وضعیت: ${serviceStatusLabel(s.status)}`,
+    `حجم باقی‌مانده: ${quota}`,
+    `انقضا: ${s.expiresAt === null ? "بدون انقضا" : s.expiresAt.toISOString().slice(0, 10)}`,
+  ];
+  if (s.lastSubscriptionUpdateAt !== null) {
+    lines.push(`آخرین بروزرسانی: ${s.lastSubscriptionUpdateAt.toISOString().slice(0, 10)}`);
+  }
+  return lines;
+}
+
+/** True when the ticket carries at least one USER-supplied attachment — the
+ * admin must be warned that its MIME/filename are untrusted and the file was
+ * never inspected (§6). Admin-uploaded attachments are trusted and excluded. */
+function ticketHasUntrustedAttachment(ticket: TicketWithMessages): boolean {
+  return ticket.messages.some((m) => m.senderType === "USER" && hasAttachment(m));
+}
+
+export function detailText(ticket: TicketWithMessages, untrustedNotice?: string): string {
   // Header — the ONLY part with live <code> tags (bounded: an 8-char id, the
   // numeric telegram id, a Telegram-bounded username, a ≤100-char subject). It
-  // is never truncated, so a live tag can never be split.
+  // is never truncated, so a live tag can never be split. The untrusted-file
+  // warning lives HERE (not in the clampable body) so it can never be truncated
+  // away when a ticket has many message previews.
   const header = [
     `تیکت 🎫 <code>${ticket.id.slice(0, 8)}</code>`,
     "",
@@ -154,6 +226,7 @@ export function detailText(ticket: TicketWithMessages): string {
         : ` (@${escapeHtml(ticket.user.username)})`
     }`,
     `موضوع: ${escapeHtml(ticket.subject ?? "-")}`,
+    ...categoryOriginLines(ticket),
     `وضعیت: ${TICKET_STATUS_LABEL[ticket.status]}`,
     `ایجاد: ${ticket.createdAt.toISOString().slice(0, 10)} | به‌روزرسانی: ${ticket.updatedAt.toISOString().slice(0, 10)}`,
   ];
@@ -164,15 +237,20 @@ export function detailText(ticket: TicketWithMessages): string {
       }`,
     );
   }
+  if (
+    untrustedNotice !== undefined &&
+    untrustedNotice !== "" &&
+    ticketHasUntrustedAttachment(ticket)
+  ) {
+    header.push("", escapeHtml(untrustedNotice));
+  }
   // Body — the potentially unbounded part (the diagnostic summary + up to ten
   // 300-char message previews + a long linked service username). It is FULLY
   // escaped plain text (no live tags), so it can be safely clamped without
   // breaking parse_mode: HTML — the header is reserved first.
-  const body = [...diagnosticSummaryLines(ticket), "", "پیام‌ها:"];
+  const body = [...adminServiceLines(ticket), ...diagnosticSummaryLines(ticket), "", "پیام‌ها:"];
   for (const message of ticket.messages) {
-    const label =
-      message.senderType === "USER" ? "👤 کاربر" : message.senderType === "ADMIN" ? "👨‍💼 پشتیبانی" : "⚙️ سیستم";
-    body.push(`${label}: ${escapeHtml(ticketMessagePreview(message.text))}`);
+    body.push(supportMessageLine("admin", message));
   }
   const headerText = header.join("\n");
   const bodyBudget = Math.max(0, SUPPORT_DETAIL_TEXT_MAX - headerText.length - 1);
@@ -185,16 +263,32 @@ async function renderDetail(ctx: BotContext, ticket: TicketWithMessages): Promis
   if (ticket.status !== "CLOSED") {
     kb.text("پاسخ دادن ✍️", ASUP_CB.reply(sid)).text("بستن تیکت ✅", ASUP_CB.close(sid)).row();
   }
-  // Service self-diagnostics: an admin/owner-scoped jump to the user's existing
-  // services list (which surfaces the linked service). Reuses the existing admin
-  // surface — no Service administration is duplicated in the ticket page.
+  // One retrieval button per visible attachment (≤10 previews → ≤10 buttons).
+  let attachmentButtons = 0;
+  for (const message of ticket.messages) {
+    if (attachmentButtons >= 10) {
+      break;
+    }
+    const button = supportAttachmentButton("admin", sid, message);
+    if (button !== null) {
+      kb.text(button.label, button.data).row();
+      attachmentButtons += 1;
+    }
+  }
+  // Owner-scoped jump to the user's existing services list (surfaces the linked
+  // service). Reuses the existing admin surface — no Service admin is duplicated.
   if (ticket.serviceId !== null && ticket.serviceId !== undefined) {
     kb.text("سرویس‌های کاربر 🛍", `admin:users:svc:${ticket.userId.slice(0, 8)}:1`).row();
   }
   kb.text("در انتظار ادمین ⏳", ASUP_CB.list("waiting_admin", 1))
     .row()
     .text("بازگشت به تیکت‌ها", ASUP_CB.root);
-  await safeEditOrReply(ctx, detailText(ticket), kb, HTML);
+  // Fetch the operator-editable untrusted-file warning only when the ticket
+  // actually carries a user attachment (§6 admin-facing notice).
+  const untrustedNotice = ticketHasUntrustedAttachment(ticket)
+    ? await getMessageTemplate("support_untrusted_attachment_notice")
+    : undefined;
+  await safeEditOrReply(ctx, detailText(ticket, untrustedNotice), kb, HTML);
 }
 
 async function renderList(
@@ -294,9 +388,27 @@ adminSupportHandler.callbackQuery(/^admin:sup:reply:([0-9a-f-]+)$/, async (ctx) 
   await safeAnswerCallback(ctx);
   await safeEditOrReply(
     ctx,
-    `پاسخ پشتیبانی (حداکثر ${TICKET_MESSAGE_MAX} کاراکتر):`,
+    `پاسخ پشتیبانی (متن حداکثر ${TICKET_MESSAGE_MAX} کاراکتر، یا یک تصویر / فایل):`,
     new InlineKeyboard().text("انصراف", ASUP_CB.view(ticket.id.slice(0, 8))),
   );
+});
+
+// Admin attachment retrieval — resolves the ticket + the exact message and
+// re-sends the stored attachment (protected, generic caption, no file id).
+adminSupportHandler.callbackQuery(/^admin:sup:att:([0-9a-f-]+):([0-9a-f-]+)$/, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  const attachment = await resolveAdminAttachment(ctx.match[1], ctx.match[2]);
+  if (attachment === null) {
+    await safeAnswerCallback(ctx, NOT_FOUND);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const sent = await sendSupportAttachment(ctx, attachment);
+  if (!sent) {
+    await safeReply(ctx, "این ضمیمه دیگر از طریق تلگرام قابل دریافت نیست.");
+  }
 });
 
 adminSupportHandler.callbackQuery(/^admin:sup:close:([0-9a-f-]+)$/, async (ctx) => {
@@ -344,17 +456,22 @@ adminSupportHandler.callbackQuery(/^admin:sup:close_yes:([0-9a-f-]+)$/, async (c
   }
 });
 
-// --- admin reply text input --------------------------------------------------------------------
+// --- admin reply input (text / photo / document) ------------------------------------------------
 
-export const adminSupportTextHandler = new Composer<BotContext>();
+export const adminSupportInputHandler = new Composer<BotContext>();
 
-adminSupportTextHandler.on("message:text", async (ctx, next) => {
+adminSupportInputHandler.on("message", async (ctx, next) => {
   const admin = ctx.admin;
   if (admin === null || ctx.session.currentFlow !== REPLY_FLOW) {
     return next();
   }
-  const text = ctx.message.text;
-  if (text.startsWith("/")) {
+  const message = ctx.message;
+  if (message === undefined) {
+    return next();
+  }
+  const settings = await loadSupportInputSettings();
+  const input = extractSupportMessageInput(message as InboundMessageLike, settings);
+  if (input.kind === "command") {
     clearAdminSupportState(ctx);
     return next();
   }
@@ -364,14 +481,59 @@ adminSupportTextHandler.on("message:text", async (ctx, next) => {
     await safeReply(ctx, DRAFT_EXPIRED_TEXT);
     return;
   }
-  const outcome = await addAdminTicketReply(admin.id, ticketId, text);
+  const cancelKb = new InlineKeyboard().text("انصراف", ASUP_CB.view(ticketId.slice(0, 8)));
+  if (input.kind === "rejected") {
+    void logSupportAttachmentRejected({
+      operation: "admin_reply",
+      senderType: "ADMIN",
+      reason: input.reason,
+      userId: admin.id,
+      ticketId,
+    });
+    await safeReply(ctx, await renderSupportAttachmentRejection(input.reason, settings.maxBytes), cancelKb);
+    return;
+  }
+  if (input.kind === "unsupported") {
+    await safeReply(
+      ctx,
+      `پاسخ پشتیبانی (متن حداکثر ${TICKET_MESSAGE_MAX} کاراکتر، یا یک تصویر / فایل):`,
+      cancelKb,
+    );
+    return;
+  }
+  const content =
+    input.kind === "attachment"
+      ? {
+          text: input.caption,
+          attachment: input.attachment,
+          sourceUpdateId: BigInt(ctx.update.update_id),
+          sourceMessageId: message.message_id,
+        }
+      : {
+          text: input.text,
+          sourceUpdateId: BigInt(ctx.update.update_id),
+          sourceMessageId: message.message_id,
+        };
+  const outcome = await addAdminTicketReply(admin.id, { ticketId, content });
   if (!outcome.ok) {
     clearAdminSupportState(ctx);
     await safeReply(ctx, outcome.safeMessage);
     return;
   }
   clearAdminSupportState(ctx);
-  await notifyUserAboutAdminReply(ctx.api, ticketId);
+  if (input.kind === "attachment" && outcome.created !== false) {
+    void logSupportAttachmentAccepted({
+      operation: "admin_reply",
+      senderType: "ADMIN",
+      attachmentType: input.attachment.type,
+      sizeBytes: input.attachment.sizeBytes,
+      userId: admin.id,
+      ticketId,
+    });
+  }
+  if (outcome.created !== false) {
+    await notifyUserAboutAdminReply(ctx.api, ticketId);
+  }
   await safeReply(ctx, "پاسخ ثبت و برای کاربر ارسال شد ✅");
   const fresh = await getAdminTicketDetail(ticketId.slice(0, 8));
   if (fresh !== null) {

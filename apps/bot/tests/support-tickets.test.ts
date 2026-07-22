@@ -64,7 +64,11 @@ describe.runIf(hasDb)("support tickets (Phase 32)", () => {
   }
 
   async function newTicket(user: User, subject: string, text = "پیام اولیه") {
-    const outcome = await createSupportTicket(user.id, subject, text);
+    const outcome = await createSupportTicket({
+      userId: user.id,
+      subject,
+      content: { text },
+    });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("createSupportTicket failed");
     return outcome.ticket;
@@ -103,21 +107,29 @@ describe.runIf(hasDb)("support tickets (Phase 32)", () => {
   });
 
   it("validates subject and message bounds", async () => {
-    const shortSubject = await createSupportTicket(userA.id, "اب", "متن معتبر");
+    const shortSubject = await createSupportTicket({
+      userId: userA.id,
+      subject: "اب",
+      content: { text: "متن معتبر" },
+    });
     expect(shortSubject).toEqual({ ok: false, safeMessage: INVALID_TICKET_SUBJECT_TEXT });
-    const longSubject = await createSupportTicket(
-      userA.id,
-      "x".repeat(TICKET_SUBJECT_MAX + 1),
-      "متن معتبر",
-    );
+    const longSubject = await createSupportTicket({
+      userId: userA.id,
+      subject: "x".repeat(TICKET_SUBJECT_MAX + 1),
+      content: { text: "متن معتبر" },
+    });
     expect(longSubject).toEqual({ ok: false, safeMessage: INVALID_TICKET_SUBJECT_TEXT });
-    const emptyMessage = await createSupportTicket(userA.id, "موضوع معتبر", "   ");
+    const emptyMessage = await createSupportTicket({
+      userId: userA.id,
+      subject: "موضوع معتبر",
+      content: { text: "   " },
+    });
     expect(emptyMessage).toEqual({ ok: false, safeMessage: INVALID_TICKET_MESSAGE_TEXT });
-    const longMessage = await createSupportTicket(
-      userA.id,
-      "موضوع معتبر",
-      "y".repeat(TICKET_MESSAGE_MAX + 1),
-    );
+    const longMessage = await createSupportTicket({
+      userId: userA.id,
+      subject: "موضوع معتبر",
+      content: { text: "y".repeat(TICKET_MESSAGE_MAX + 1) },
+    });
     expect(longMessage).toEqual({ ok: false, safeMessage: INVALID_TICKET_MESSAGE_TEXT });
   });
 
@@ -140,12 +152,15 @@ describe.runIf(hasDb)("support tickets (Phase 32)", () => {
 
   it("user reply: WAITING_ADMIN transition, refused after close", async () => {
     const ticket = await newTicket(userA, `پاسخ کاربر ${runTag}`);
-    await addAdminTicketReply(admin.id, ticket.id, "بررسی شد.");
+    await addAdminTicketReply(admin.id, { ticketId: ticket.id, content: { text: "بررسی شد." } });
     expect(
       (await prisma.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } })).status,
     ).toBe("WAITING_USER");
 
-    const reply = await addUserTicketReply(userA.id, ticket.id, "هنوز مشکل دارم.");
+    const reply = await addUserTicketReply(userA.id, {
+      ticketId: ticket.id,
+      content: { text: "هنوز مشکل دارم." },
+    });
     expect(reply.ok).toBe(true);
     const after = await prisma.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } });
     expect(after.status).toBe("WAITING_ADMIN");
@@ -155,17 +170,26 @@ describe.runIf(hasDb)("support tickets (Phase 32)", () => {
     expect(userMessages).toBe(2);
 
     // Foreign user cannot reply at all.
-    const foreignReply = await addUserTicketReply(userB.id, ticket.id, "من نیستم");
+    const foreignReply = await addUserTicketReply(userB.id, {
+      ticketId: ticket.id,
+      content: { text: "من نیستم" },
+    });
     expect(foreignReply.ok).toBe(false);
 
     await closeSupportTicket(admin.id, ticket.id);
-    const closedReply = await addUserTicketReply(userA.id, ticket.id, "بعد از بستن");
+    const closedReply = await addUserTicketReply(userA.id, {
+      ticketId: ticket.id,
+      content: { text: "بعد از بستن" },
+    });
     expect(closedReply).toEqual({ ok: false, safeMessage: TICKET_CLOSED_TEXT });
   });
 
   it("admin reply: WAITING_USER transition, refused after close", async () => {
     const ticket = await newTicket(userB, `پاسخ ادمین ${runTag}`);
-    const reply = await addAdminTicketReply(admin.id, ticket.id, "سلام، در حال بررسی هستیم.");
+    const reply = await addAdminTicketReply(admin.id, {
+      ticketId: ticket.id,
+      content: { text: "سلام، در حال بررسی هستیم." },
+    });
     expect(reply.ok).toBe(true);
     const after = await prisma.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } });
     expect(after.status).toBe("WAITING_USER");
@@ -175,7 +199,10 @@ describe.runIf(hasDb)("support tickets (Phase 32)", () => {
     expect(adminMessage.senderAdminId).toBe(admin.id);
 
     await closeSupportTicket(admin.id, ticket.id);
-    const closedReply = await addAdminTicketReply(admin.id, ticket.id, "دیر شد");
+    const closedReply = await addAdminTicketReply(admin.id, {
+      ticketId: ticket.id,
+      content: { text: "دیر شد" },
+    });
     expect(closedReply).toEqual({ ok: false, safeMessage: TICKET_CLOSED_TEXT });
   });
 
@@ -204,7 +231,7 @@ describe.runIf(hasDb)("support tickets (Phase 32)", () => {
   it("admin filters return only their statuses", async () => {
     const waiting = await newTicket(userA, `فیلتر-منتظر ${runTag}`);
     const answered = await newTicket(userA, `فیلتر-پاسخ ${runTag}`);
-    await addAdminTicketReply(admin.id, answered.id, "پاسخ");
+    await addAdminTicketReply(admin.id, { ticketId: answered.id, content: { text: "پاسخ" } });
     const closed = await newTicket(userA, `فیلتر-بسته ${runTag}`);
     await closeSupportTicket(admin.id, closed.id);
 

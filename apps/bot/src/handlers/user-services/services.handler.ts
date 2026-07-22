@@ -112,15 +112,16 @@ export async function renderServiceDetail(
   service: Service,
   staleNotice: string | null = null,
 ): Promise<void> {
-  const [actions, guide, diagnostics] = await Promise.all([
+  const [actions, guide, diagnostics, supportLabel] = await Promise.all([
     resolveServiceDetailActions(service),
     buildServiceGuideEntry(service),
     buildServiceDiagnosticsEntry(),
+    getButtonText("support_service_ticket"),
   ]);
   await safeEditOrReply(
     ctx,
     serviceDetailText(service, staleNotice),
-    serviceDetailKeyboard(service, actions, guide, diagnostics),
+    serviceDetailKeyboard(service, actions, guide, diagnostics, { label: supportLabel }),
     HTML,
   );
 }
@@ -798,8 +799,14 @@ servicesHandler.callbackQuery(/^user:svc:gsup:([0-9a-f-]+):([a-z0-9]+):([a-z0-9-
   // selection and lets the cancel button return to the exact guide page. The
   // ticket itself is created by the existing support text handler when the user
   // writes their message — no second support engine.
+  // Support Tickets V2: the guide handoff opens a normal ticket through the SAME
+  // engine, pre-classified CONNECTION / CONNECTION_GUIDE and linked to the exact
+  // owner-scoped Service. Only safe ids are kept (no URL/config/QR).
   ctx.session.temp.supportDraft = {
     subject: buildGuideSupportSubject(GUIDE_PLATFORM_NEUTRAL_LABEL[platform], app.displayName),
+    category: "CONNECTION",
+    origin: "CONNECTION_GUIDE",
+    serviceId: service.id,
   };
   ctx.session.temp.guideSupportContext = { sid, pcode, slug };
   ctx.session.currentFlow = "support:message";
