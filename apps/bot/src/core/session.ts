@@ -395,6 +395,21 @@ export interface SessionData {
       answers: Record<string, string>;
       reviewing?: boolean;
     };
+    // Admin Service Operations (feat/admin-service-operations): the in-progress
+    // admin lifecycle mutation / note. Holds ONLY the target service id, the
+    // operation type, the chosen value, the captured stale-preview fingerprint,
+    // the entered reason/note and a one-shot nonce (= the operation's
+    // idempotency seed, consumed BEFORE executing so a double confirm can never
+    // re-run). No subscription URL / config / token ever lives here.
+    adminServiceOpDraft?: {
+      serviceId: string;
+      type: "ENABLE" | "DISABLE" | "ADD_VOLUME" | "ADD_TIME" | "REGENERATE_LINK" | "ADD_NOTE";
+      step: "reason" | "custom_volume" | "custom_time" | "note" | "ready";
+      nonce: string;
+      expectedFingerprint?: string;
+      requestedCount?: number;
+      reason?: string;
+    };
     [key: string]: unknown;
   };
 }

@@ -9,6 +9,7 @@ import {
   type AdminServiceOperation,
   type Panel,
   type Service,
+  type User,
 } from "@zedbot/database";
 import {
   type AddServiceTimeResult,
@@ -46,10 +47,7 @@ import {
   serviceOperationLockKey,
   SERVICE_LOCK_WAIT_MS,
 } from "./service-lock.service.js";
-import {
-  regenerateServiceSubscriptionUnlocked,
-  SERVICE_SUBSCRIPTION_REGENERATED_BY_ADMIN_EVENT_TYPE,
-} from "./service-link.service.js";
+import { regenerateServiceSubscriptionUnlocked } from "./service-link.service.js";
 import { readServiceForDiagnostics } from "./service-sync.service.js";
 import { toggleServiceStatusUnlocked, type ToggleAction } from "./service-toggle.service.js";
 
@@ -1316,6 +1314,20 @@ export function getAdminServiceOperationById(id: string): Promise<AdminServiceOp
   return prisma.adminServiceOperation.findUnique({ where: { id } });
 }
 
+/** Resolve an operation by its 8-char short id (take-2 ambiguity safety). */
+export async function getAdminServiceOperationByShortId(
+  shortId: string,
+): Promise<AdminServiceOperation | null> {
+  if (!/^[0-9a-f-]{4,36}$/i.test(shortId)) {
+    return null;
+  }
+  const matches = await prisma.adminServiceOperation.findMany({
+    where: { id: { startsWith: shortId } },
+    take: 2,
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export interface AdminOperationPage {
   operations: AdminServiceOperation[];
   page: number;
@@ -1365,4 +1377,78 @@ export async function listReconciliationOperations(
     take: pageSize,
   });
   return { operations, page: safePage, pages, total };
+}
+
+// -----------------------------------------------------------------------------
+// Detail resolution + button eligibility (§7, §8)
+// -----------------------------------------------------------------------------
+
+export interface AdminServiceDetail {
+  service: Service;
+  panel: Panel;
+  owner: User | null;
+}
+
+/**
+ * Admin-scoped Service resolution by 8-char short id — take-2 ambiguity safety
+ * (an ambiguous or unknown prefix resolves to null), excludes deleted, and
+ * includes the Panel + owner so the detail page needs no second query (§7).
+ */
+export async function getAdminServiceDetail(shortId: string): Promise<AdminServiceDetail | null> {
+  if (!/^[0-9a-f-]{4,32}$/i.test(shortId)) {
+    return null;
+  }
+  const matches = await prisma.service.findMany({
+    where: { id: { startsWith: shortId }, deletedAt: null, status: { not: ServiceStatus.DELETED } },
+    include: { panel: true, user: true },
+    take: 2,
+  });
+  if (matches.length !== 1) {
+    return null;
+  }
+  const { panel, user, ...service } = matches[0];
+  return { service, panel, owner: user };
+}
+
+const ALL_ADMIN_MUTATION_TYPES: AdminServiceMutationType[] = [
+  "ENABLE",
+  "DISABLE",
+  "ADD_VOLUME",
+  "ADD_TIME",
+  "REGENERATE_LINK",
+];
+
+/**
+ * The mutation types STRUCTURALLY eligible for this Service+Panel right now
+ * (adapter supports it, remote model is global, panel ACTIVE, status eligible,
+ * value-domain valid). The view layers the switch / OWNER / conflicting-op
+ * gates on top (§8) — this function never consults the DB or the switch.
+ */
+export function adminServiceEligibleMutations(
+  service: Service,
+  panel: Panel,
+): AdminServiceMutationType[] {
+  if (!serviceSupportsGlobalLifecycle(service) || panel.status !== PanelStatus.ACTIVE) {
+    return [];
+  }
+  const out: AdminServiceMutationType[] = [];
+  for (const type of ALL_ADMIN_MUTATION_TYPES) {
+    if (!adminMutationCapabilityAvailable(type, panel)) {
+      continue;
+    }
+    if (!ELIGIBLE_STATUS[type].includes(service.status)) {
+      continue;
+    }
+    if (type === "ENABLE" && isServiceExpired(service)) {
+      continue;
+    }
+    if (type === "ADD_VOLUME" && service.volumeBytes <= 0n) {
+      continue;
+    }
+    if (type === "ADD_TIME" && service.expiresAt === null) {
+      continue;
+    }
+    out.push(type);
+  }
+  return out;
 }
