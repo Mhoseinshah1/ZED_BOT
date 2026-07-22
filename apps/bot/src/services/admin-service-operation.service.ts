@@ -262,13 +262,13 @@ type ApplierResult =
 const ELIGIBLE_STATUS: Record<AdminServiceMutationType, ServiceStatus[]> = {
   ENABLE: [ServiceStatus.DISABLED],
   DISABLE: [ServiceStatus.ACTIVE, ServiceStatus.LIMITED],
-  ADD_VOLUME: [ServiceStatus.ACTIVE, ServiceStatus.LIMITED, ServiceStatus.DISABLED],
-  ADD_TIME: [
-    ServiceStatus.ACTIVE,
-    ServiceStatus.LIMITED,
-    ServiceStatus.DISABLED,
-    ServiceStatus.EXPIRED,
-  ],
+  // Volume/time grants use the addServiceTime mechanism, which sets status
+  // "active" on the panel — so they are NOT offered on a DISABLED service (it
+  // must be ENABLED first; otherwise the panel would silently re-enable while
+  // the local row stays DISABLED). Extending an EXPIRED service via time is the
+  // intended "give more time" revival.
+  ADD_VOLUME: [ServiceStatus.ACTIVE, ServiceStatus.LIMITED],
+  ADD_TIME: [ServiceStatus.ACTIVE, ServiceStatus.LIMITED, ServiceStatus.EXPIRED],
   REGENERATE_LINK: [ServiceStatus.ACTIVE, ServiceStatus.LIMITED, ServiceStatus.DISABLED],
 };
 
@@ -597,6 +597,52 @@ async function safeLog(
 // Appliers — the ONE remote mutation + local persist per operation type
 // -----------------------------------------------------------------------------
 
+/**
+ * Verify-after-write for a FAILED grant mutation (§11). Some adapters (Marzban's
+ * addServiceTime / renew) do NOT flag an ambiguous modify-timeout as `uncertain`,
+ * so a definite-looking failure may actually have landed. A possibly/actually
+ * applied grant must NEVER be classified FAILED (which would invite a retry and
+ * double-grant); it becomes RECONCILIATION_REQUIRED (the reconciler confirms and
+ * syncs local). Only a fresh read that POSITIVELY shows the pre-state is a
+ * definite FAILURE. `applied(read)` is the per-operation "did the target land?"
+ * predicate.
+ */
+async function verifyGrantFailure(
+  service: Service,
+  panel: Panel,
+  projectedAfter: AdminServiceStateSnapshot,
+  applied: (read: GetServiceAccountResult) => "applied" | "not-applied" | "inconclusive",
+): Promise<ApplierResult> {
+  const adapter = buildAdapterForPanel(panel);
+  let read: GetServiceAccountResult;
+  try {
+    read = await adapter.getServiceAccount({
+      username: service.username,
+      subscriptionBaseUrl: normalizeSubscriptionBase(panel),
+    });
+  } catch {
+    return { kind: "uncertain", status: "UNCERTAIN", projectedAfter, errorCode: "PANEL_UNCERTAIN" };
+  }
+  if (!read.ok) {
+    return { kind: "uncertain", status: "UNCERTAIN", projectedAfter, errorCode: "PANEL_UNCERTAIN" };
+  }
+  const verdict = applied(read);
+  if (verdict === "not-applied") {
+    return { kind: "failed", errorCode: "PANEL_REJECTED" };
+  }
+  if (verdict === "applied") {
+    // The change LANDED despite the error — never re-issue it; the read-only
+    // reconciler will confirm and sync the local row.
+    return {
+      kind: "uncertain",
+      status: "RECONCILIATION_REQUIRED",
+      projectedAfter,
+      errorCode: "INCONSISTENT_REMOTE_STATE",
+    };
+  }
+  return { kind: "uncertain", status: "UNCERTAIN", projectedAfter, errorCode: "PANEL_UNCERTAIN" };
+}
+
 async function runApplier(
   type: AdminServiceMutationType,
   service: Service,
@@ -766,7 +812,16 @@ async function applyAdminVolumeGrant(
     };
   }
   if (!res.ok) {
-    return { kind: "failed", errorCode: "PANEL_REJECTED" };
+    // Verify-after-write (§11): a possibly-applied grant must never be FAILED.
+    return verifyGrantFailure(service, panel, projectedAfter, (read) => {
+      if (read.totalBytes === undefined || read.totalBytes === null) {
+        return "inconclusive";
+      }
+      if (read.totalBytes >= newTotal) {
+        return "applied";
+      }
+      return read.totalBytes <= currentTotal ? "not-applied" : "inconclusive";
+    });
   }
 
   const now = new Date();
@@ -777,12 +832,9 @@ async function applyAdminVolumeGrant(
       : newTotal - finalUsed > 0n
         ? newTotal - finalUsed
         : 0n;
-  const nextStatus =
-    service.status === ServiceStatus.DISABLED
-      ? ServiceStatus.DISABLED
-      : finalRemaining <= 0n
-        ? ServiceStatus.LIMITED
-        : ServiceStatus.ACTIVE;
+  // DISABLED services are ineligible for volume grants, so the panel's
+  // status "active" (set by addServiceTime) matches: exhausted → LIMITED.
+  const nextStatus = finalRemaining <= 0n ? ServiceStatus.LIMITED : ServiceStatus.ACTIVE;
 
   const persist = (): Promise<void> =>
     prisma.$transaction(async (tx) => {
@@ -933,17 +985,30 @@ async function applyAdminTimeGrant(
     };
   }
   if (!res.ok) {
-    return { kind: "failed", errorCode: "PANEL_REJECTED" };
+    // Verify-after-write (§11): a possibly-applied extension must never be FAILED.
+    const targetMs = newExpiry.getTime();
+    const currentMs = currentExpiry.getTime();
+    return verifyGrantFailure(service, panel, projectedAfter, (read) => {
+      if (read.expiresAt === undefined || read.expiresAt === null) {
+        return "inconclusive";
+      }
+      const seen = read.expiresAt.getTime();
+      if (seen >= targetMs - 60_000) {
+        return "applied";
+      }
+      return Math.abs(seen - currentMs) <= 60_000 ? "not-applied" : "inconclusive";
+    });
   }
 
   const finalExpiry =
     res.expiresAt !== undefined && res.expiresAt !== null ? res.expiresAt : newExpiry;
+  // DISABLED services are ineligible for time grants; extending time revives an
+  // EXPIRED service. Exhausted finite traffic stays LIMITED (time never resets
+  // usage), otherwise ACTIVE.
   const nextStatus =
-    service.status === ServiceStatus.DISABLED
-      ? ServiceStatus.DISABLED
-      : service.volumeBytes > 0n && service.remainingBytes <= 0n
-        ? ServiceStatus.LIMITED
-        : ServiceStatus.ACTIVE;
+    service.volumeBytes > 0n && service.remainingBytes <= 0n
+      ? ServiceStatus.LIMITED
+      : ServiceStatus.ACTIVE;
 
   const persist = (): Promise<void> =>
     prisma.$transaction(async (tx) => {
