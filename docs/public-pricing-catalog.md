@@ -336,3 +336,36 @@ or surrogate pair), `boundToast` (toast text with a safe fallback when blank), a
 bounding is Pricing-specific so payment/support text is never implicitly cut.
 When truncation occurs a single ellipsis is appended. Operator edits remain
 stored verbatim (up to the editor maximum); only their RENDERED use is bounded.
+
+## Reply-keyboard flow-escape (fix/pricing-reply-keyboard-flow-escape)
+
+The checkout-state exit above fires whenever a Pricing renderer runs — but in
+REPLY menu mode the persistent Pricing button sends ordinary text, and the
+app.ts flow dispatcher (and `userMenuTextRouter`, which self-returns while any
+`currentFlow` is active) runs BEFORE Pricing could resolve. So during an active
+checkout/payment input flow the Pricing label used to be consumed by the flow
+(validated as a discount code, uploaded as a receipt, parsed as an amount).
+
+`pricingReplyEscapeRouter` (`apps/bot/src/handlers/user-menu-actions.ts`) is a
+NARROW pre-flow router mounted in `app.ts` **before** the flow dispatcher. It
+intercepts a text message only when ALL hold:
+
+1. the user menu mode is `REPLY`;
+2. `currentFlow` is one of the SIX interruptible checkout/payment flows
+   (`isInterruptibleCheckoutFlow` — `checkout:discount`, `payment:receipt`,
+   `wallet:topup:amount`, `renew:discount`, `extra_volume:discount`,
+   `extra_time:discount`);
+3. the trimmed text resolves through the CURRENT ButtonText registry
+   (`resolveMainMenuAction`) to exactly `PRICING` (edited labels work; stale/old
+   labels and ambiguous duplicates fail closed to no-match);
+4. the text is not a command.
+
+It then applies the same `ensureUserAccess` gate as every other menu entry
+(access is decided BEFORE any state is cleared; a blocked/maintenance/terms/
+force-join user gets the normal gate and the message is consumed — never
+validated/uploaded) and opens Pricing via `renderPricingRoot`, which clears
+state. Everything else — arbitrary text, other menu labels, unrelated flows
+(support / representative-application / customer-input-form / admin / any future
+flow), INLINE mode, and commands — calls `next()` and reaches the flow
+dispatcher exactly as before. The fix is Pricing-specific and limited to the six
+checkout/payment flows; `userMenuTextRouter` (no-flow navigation) is unchanged.

@@ -1,6 +1,32 @@
 import type { BotContext } from "../../core/context.js";
 
 /**
+ * The SIX checkout/payment INPUT flows that are safe to abandon when the user
+ * deliberately navigates away (e.g. presses the Pricing button): discount
+ * entry, the card-to-card receipt upload, the wallet top-up amount, and the
+ * renewal / extra-volume / extra-time discount entries. `clearCheckoutState`
+ * resets exactly these, and the Pricing reply-keyboard escape route
+ * (fix/pricing-reply-keyboard-flow-escape) may interrupt ONLY these. Support,
+ * representative-application, customer-input-form, admin and every other
+ * conversational flow are deliberately NOT here — they keep their priority.
+ */
+export const INTERRUPTIBLE_CHECKOUT_FLOWS = [
+  "checkout:discount",
+  "renew:discount",
+  "extra_volume:discount",
+  "extra_time:discount",
+  "wallet:topup:amount",
+  "payment:receipt",
+] as const;
+
+const INTERRUPTIBLE_CHECKOUT_FLOW_SET: ReadonlySet<string> = new Set(INTERRUPTIBLE_CHECKOUT_FLOWS);
+
+/** True when `flow` is one of the six interruptible checkout/payment flows. */
+export function isInterruptibleCheckoutFlow(flow: string | null): boolean {
+  return flow !== null && INTERRUPTIBLE_CHECKOUT_FLOW_SET.has(flow);
+}
+
+/**
  * Clears the user checkout state (pre-invoice draft + discount-entry flow).
  *
  * Called wherever the user leaves the checkout surface: /start, /menu, the
@@ -9,14 +35,7 @@ import type { BotContext } from "../../core/context.js";
  * never cleared here (their own handlers/commands manage that).
  */
 export function clearCheckoutState(ctx: BotContext): void {
-  if (
-    ctx.session.currentFlow === "checkout:discount" ||
-    ctx.session.currentFlow === "renew:discount" ||
-    ctx.session.currentFlow === "extra_volume:discount" ||
-    ctx.session.currentFlow === "extra_time:discount" ||
-    ctx.session.currentFlow === "wallet:topup:amount" ||
-    ctx.session.currentFlow === "payment:receipt"
-  ) {
+  if (isInterruptibleCheckoutFlow(ctx.session.currentFlow)) {
     ctx.session.currentFlow = null;
   }
   ctx.session.temp.checkoutDraft = undefined;

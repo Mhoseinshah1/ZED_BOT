@@ -156,7 +156,10 @@ import { startHandler } from "./handlers/start.handler.js";
 import { termsHandler } from "./handlers/terms.handler.js";
 import { freeTrialHandler } from "./handlers/user-free-trial/free-trial.handler.js";
 import { adminMenuTextRouter } from "./handlers/admin-menu-actions.js";
-import { userMenuTextRouter } from "./handlers/user-menu-actions.js";
+import {
+  pricingReplyEscapeRouter,
+  userMenuTextRouter,
+} from "./handlers/user-menu-actions.js";
 import { userPlaceholdersHandler } from "./handlers/user-placeholders.handler.js";
 import { pricingHandler } from "./handlers/user-pricing/pricing.handler.js";
 import { userReferralHandler } from "./handlers/user-referral/referral.handler.js";
@@ -338,6 +341,13 @@ export function createBot(token: string): Bot<BotContext> {
   // Corrective Phase: wallet auto-renewal pre-charge notice minutes input
   // ("war:notice-minutes"). Self-gates on currentFlow.
   adminFlowText.use(autoRenewalAdminTextHandler);
+  // Pricing reply-keyboard escape (fix/pricing-reply-keyboard-flow-escape): a
+  // NARROW pre-flow router that runs BEFORE the flow dispatcher below and only
+  // rescues the CURRENT Pricing reply button out of the six interruptible
+  // checkout/payment INPUT flows (REPLY mode, exact label match, access-gated).
+  // Everything else calls next() and reaches the flow dispatcher exactly as
+  // before, so support/representative/customer-input/admin flows keep priority.
+  bot.on("message:text", pricingReplyEscapeRouter.middleware());
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {
