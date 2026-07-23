@@ -120,3 +120,12 @@ constants. Rendered as escaped plain text and clamped under Telegram's limit.
 | `pricing_page_empty_services` | pricing | — | Empty service section. |
 | `pricing_page_empty_other` | pricing | — | Empty other-product section. |
 | `pricing_page_product_unavailable` | pricing | — | Stale/forged/hidden product toast. |
+
+## Rendering budgets (Pricing Catalog)
+
+The `pricing_page_*` templates are editable up to the generic maximum, but each
+is bounded to a per-sink Telegram budget when rendered (root/detail/empty pages;
+`pricing_page_product_unavailable` is bounded to the small `answerCallbackQuery`
+toast limit with a safe fallback when blank). No valid operator edit can push a
+Pricing page past Telegram's limit or silently fail; the stored content is never
+altered. See `docs/public-pricing-catalog.md`.

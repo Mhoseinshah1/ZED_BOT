@@ -14,9 +14,16 @@ import { getProductByShortId } from "../../services/product.service.js";
 import { isRepresentativeProgramEnabled } from "../../services/representative-settings.service.js";
 import { getRepresentativeByUserId } from "../../services/representative.service.js";
 import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
-import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
+import { clearCheckoutState } from "../user-checkout/checkout-state.js";
 import { startRetailPreInvoice } from "../user-checkout/checkout.handler.js";
+import {
+  boundHtmlText,
+  boundPlainText,
+  boundToast,
+  PRICING_EMPTY_SAFE_LIMIT,
+  PRICING_ROOT_SAFE_LIMIT,
+} from "./pricing-bounds.js";
 import { PRICE_CB, parsePricingPage } from "./pricing-cb.js";
 import {
   buttonName,
@@ -49,9 +56,70 @@ const PRODUCTS_PAGE_SIZE = 5;
 
 const BACK_TO_MENU = "بازگشت به منوی اصلی";
 
-/** Short spinner toast when a re-resolved product is stale/forged/hidden. */
+/** Escape-aware bound for an operator-controlled page-header name (HTML sink). */
+const HEADER_NAME_BUDGET = 200;
+
+/** Safe default when the unavailable template is blank. */
+const UNAVAILABLE_FALLBACK = "این محصول دیگر در دسترس نیست.";
+
+/**
+ * Short spinner toast when a re-resolved product is stale/forged/hidden. The
+ * template is bounded to the (small) callback-query notification limit and falls
+ * back to a safe default when blank — a long operator edit can no longer silently
+ * fail (fix/pricing-catalog-post-merge-safety §C). `safeAnswerCallback` never
+ * throws, so the caller's page refresh always runs even if the toast fails.
+ */
 async function unavailableToast(): Promise<string> {
-  return getMessageTemplate("pricing_page_product_unavailable");
+  return boundToast(await getMessageTemplate("pricing_page_product_unavailable"), UNAVAILABLE_FALLBACK);
+}
+
+/**
+ * Entering or navigating the read-only Pricing catalog abandons any incompatible
+ * checkout/payment INPUT interaction (discount entry, receipt upload, wallet
+ * top-up, renewal/extra pre-invoice drafts) via the ONE authoritative
+ * `clearCheckoutState`, so a stale pre-invoice can never consume the user's next
+ * message (fix/pricing-catalog-post-merge-safety §B). It only touches checkout
+ * state — support, representative-application and admin flows are untouched.
+ * Pressing Buy does NOT call this (it enters `startRetailPreInvoice`, which
+ * itself clears then seeds exactly the new authoritative retail draft).
+ */
+function enterPricingSurface(ctx: BotContext): void {
+  clearCheckoutState(ctx);
+}
+
+/**
+ * Plain-text empty-state body: a static title prefix + the editable empty-state
+ * template bounded so the completed message stays within PRICING_EMPTY_SAFE_LIMIT
+ * and the navigation buttons always render (no oversized fallback loop). Exported
+ * for direct bound testing.
+ */
+export function emptyStateBody(prefix: string, template: string): string {
+  const header = `${prefix}\n\n`;
+  return header + boundPlainText(template, Math.max(0, PRICING_EMPTY_SAFE_LIMIT - header.length));
+}
+
+/**
+ * Plain-text pricing-root body (fix/pricing-catalog-post-merge-safety §A). The
+ * editable intro + disclaimer are bounded so the completed message stays within
+ * PRICING_ROOT_SAFE_LIMIT while the code-generated counts are NEVER truncated.
+ * Pure + exported so the bound is unit-testable without a live catalog.
+ */
+export function pricingRootBody(
+  intro: string,
+  disclaimer: string,
+  serviceCount: number,
+  otherCount: number,
+): string {
+  const countsBlock = `🌐 پلن‌های اشتراک قابل خرید: ${serviceCount}\n🛍 محصولات دیگر قابل خرید: ${otherCount}`;
+  const compose = (i: string, d: string): string =>
+    ["💰 تعرفه‌ها", "", i, "", countsBlock, "", d].join("\n");
+  const templateBudget = Math.max(0, PRICING_ROOT_SAFE_LIMIT - compose("", "").length);
+  const boundedIntro = boundPlainText(intro, Math.floor(templateBudget * 0.6));
+  const boundedDisclaimer = boundPlainText(
+    disclaimer,
+    Math.max(0, templateBudget - boundedIntro.length),
+  );
+  return compose(boundedIntro, boundedDisclaimer);
 }
 
 export const pricingHandler = new Composer<BotContext>();
@@ -141,6 +209,7 @@ export async function renderPricingRoot(ctx: BotContext): Promise<void> {
   if (user === null) {
     return;
   }
+  enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const [catalog, intro, disclaimer, repApplicable] = await Promise.all([
     loadUserRetailCatalog(user),
@@ -154,16 +223,10 @@ export async function renderPricingRoot(ctx: BotContext): Promise<void> {
   );
   const otherCount = catalog.otherProductCategories.reduce((sum, c) => sum + c.products.length, 0);
 
-  const body = [
-    "💰 تعرفه‌ها",
-    "",
-    intro,
-    "",
-    `🌐 پلن‌های اشتراک قابل خرید: ${serviceCount}`,
-    `🛍 محصولات دیگر قابل خرید: ${otherCount}`,
-    "",
-    disclaimer,
-  ].join("\n");
+  // Plain-text sink (no parse mode). Bound intro + disclaimer so the completed
+  // message never exceeds the Telegram limit while the counts + buttons ALWAYS
+  // render (fix/pricing-catalog-post-merge-safety §A).
+  const body = pricingRootBody(intro, disclaimer, serviceCount, otherCount);
 
   const kb = new InlineKeyboard()
     .text(await getButtonText("pricing_services"), PRICE_CB.serviceRoot)
@@ -186,12 +249,13 @@ async function renderServicePanels(ctx: BotContext, page: number): Promise<void>
   if (user === null) {
     return;
   }
+  enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const catalog = await loadUserRetailCatalog(user);
   if (catalog.servicePanels.length === 0) {
     await safeEditOrReply(
       ctx,
-      `🌐 تعرفه اشتراک‌ها\n\n${await getMessageTemplate("pricing_page_empty_services")}`,
+      emptyStateBody("🌐 تعرفه اشتراک‌ها", await getMessageTemplate("pricing_page_empty_services")),
       new InlineKeyboard().text("بازگشت به تعرفه‌ها", PRICE_CB.root).row().text(BACK_TO_MENU, CB.USER_MENU),
     );
     return;
@@ -234,6 +298,7 @@ async function renderServiceCategories(ctx: BotContext, panelSid: string, page: 
   if (user === null) {
     return;
   }
+  enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const catalog = await loadUserRetailCatalog(user);
   const resolved = resolveByShortId(catalog.servicePanels, panelSid, (e) => e.panel.id);
@@ -269,7 +334,7 @@ async function renderServiceCategoriesFor(
   );
   await safeEditOrReply(
     ctx,
-    `🌐 <b>${escapeHtml(panelEntry.panel.name)}</b> — صفحه ${slice.page}/${slice.pages}\n\n${cards.join("\n\n")}`,
+    `🌐 <b>${boundHtmlText(panelEntry.panel.name, HEADER_NAME_BUDGET)}</b> — صفحه ${slice.page}/${slice.pages}\n\n${cards.join("\n\n")}`,
     kb,
     HTML,
   );
@@ -285,6 +350,7 @@ async function renderServiceProducts(
   if (user === null) {
     return;
   }
+  enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const catalog = await loadUserRetailCatalog(user);
   const panel = resolveByShortId(catalog.servicePanels, panelSid, (e) => e.panel.id);
@@ -312,7 +378,7 @@ async function renderServiceProducts(
   const cards = slice.items.map((p) => serviceProductCard(p));
   await safeEditOrReply(
     ctx,
-    `📂 <b>${escapeHtml(cat.value.category.name)}</b> — صفحه ${slice.page}/${slice.pages}\n\n${cards.join("\n\n")}`,
+    `📂 <b>${boundHtmlText(cat.value.category.name, HEADER_NAME_BUDGET)}</b> — صفحه ${slice.page}/${slice.pages}\n\n${cards.join("\n\n")}`,
     kb,
     HTML,
   );
@@ -329,6 +395,7 @@ async function renderServiceDetail(
   if (user === null) {
     return;
   }
+  enterPricingSurface(ctx);
   const product = await getProductByShortId(prodSid);
   if (
     product === null ||
@@ -362,7 +429,7 @@ async function renderServiceDetail(
   kb.text("بازگشت به لیست", PRICE_CB.serviceCategory(panelSid, catSid, page)).row();
   kb.text(await getButtonText("pricing_back"), PRICE_CB.root).text(BACK_TO_MENU, CB.USER_MENU);
 
-  await safeEditOrReply(ctx, serviceDetailBody(product, escapeHtml(disclaimer)), kb, HTML);
+  await safeEditOrReply(ctx, serviceDetailBody(product, disclaimer), kb, HTML);
 }
 
 // --- Other-product branch: categories → products → detail --------------------
@@ -372,12 +439,13 @@ async function renderOtherCategories(ctx: BotContext, page: number): Promise<voi
   if (user === null) {
     return;
   }
+  enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const catalog = await loadUserRetailCatalog(user);
   if (catalog.otherProductCategories.length === 0) {
     await safeEditOrReply(
       ctx,
-      `🛍 تعرفه محصولات دیگر\n\n${await getMessageTemplate("pricing_page_empty_other")}`,
+      emptyStateBody("🛍 تعرفه محصولات دیگر", await getMessageTemplate("pricing_page_empty_other")),
       new InlineKeyboard().text("بازگشت به تعرفه‌ها", PRICE_CB.root).row().text(BACK_TO_MENU, CB.USER_MENU),
     );
     return;
@@ -409,6 +477,7 @@ async function renderOtherProducts(ctx: BotContext, catSid: string, page: number
   if (user === null) {
     return;
   }
+  enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const catalog = await loadUserRetailCatalog(user);
   const cat = resolveByShortId(catalog.otherProductCategories, catSid, (c) => c.category.id);
@@ -431,7 +500,7 @@ async function renderOtherProducts(ctx: BotContext, catSid: string, page: number
   const cards = slice.items.map((p) => otherProductCard(p));
   await safeEditOrReply(
     ctx,
-    `📂 <b>${escapeHtml(cat.value.category.name)}</b> — صفحه ${slice.page}/${slice.pages}\n\n${cards.join("\n\n")}`,
+    `📂 <b>${boundHtmlText(cat.value.category.name, HEADER_NAME_BUDGET)}</b> — صفحه ${slice.page}/${slice.pages}\n\n${cards.join("\n\n")}`,
     kb,
     HTML,
   );
@@ -447,6 +516,7 @@ async function renderOtherDetail(
   if (user === null) {
     return;
   }
+  enterPricingSurface(ctx);
   const product = await getProductByShortId(prodSid);
   if (
     product === null ||
@@ -467,7 +537,7 @@ async function renderOtherDetail(
     .row()
     .text(await getButtonText("pricing_back"), PRICE_CB.root)
     .text(BACK_TO_MENU, CB.USER_MENU);
-  await safeEditOrReply(ctx, otherDetailBody(product, escapeHtml(disclaimer)), kb, HTML);
+  await safeEditOrReply(ctx, otherDetailBody(product, disclaimer), kb, HTML);
 }
 
 // --- Direct checkout (Buy) ---------------------------------------------------
