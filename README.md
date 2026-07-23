@@ -430,6 +430,17 @@ glass buttons inside the message (default) or as a persistent reply
 keyboard below the input field — one shared menu definition drives both
 modes; see `docs/user-menu-keyboard-modes.md`.
 
+**Admin-controlled unified purchase menu**: the OWNER can switch the user
+main-menu purchase entry between SPLIT (the historical «خرید اشتراک» + «محصولات
+دیگر» buttons, default) and COMBINED (one «خرید محصولات 🛒» that opens a read-only
+purchase hub) from «تنظیمات عمومی ⚙️ → نوع نمایش منوها → تنظیم چیدمان خرید 🛒».
+It is presentation only: the hub enters the SAME `startBuyFlow` /
+`openOtherProductsSection` flows (no new checkout engine/catalog/pricing/payment),
+old inline callbacks and stale reply keyboards keep working across a toggle, both
+keyboard modes stay in sync, and the change is an OWNER-only atomic
+compare-and-set with a privacy-safe audit event — no migration. See
+`docs/combined-purchase-menu.md`.
+
 **Two-way User/Admin navigation**: active admins get a «پنل مدیریت 🛠» entry
 in the user menu, and the admin main menu's final full-width row
 «بازگشت به منوی کاربر 👤» returns to the user surface. The return button reuses

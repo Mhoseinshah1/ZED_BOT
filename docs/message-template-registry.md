@@ -121,6 +121,12 @@ constants. Rendered as escaped plain text and clamped under Telegram's limit.
 | `pricing_page_empty_other` | pricing | — | Empty other-product section. |
 | `pricing_page_product_unavailable` | pricing | — | Stale/forged/hidden product toast. |
 
+## Admin-controlled unified purchase menu (feat/admin-controlled-unified-purchase-menu)
+
+| key | category | variables | notes |
+| --- | --- | --- | --- |
+| `purchase_hub_intro` | menu | — | Combined-mode purchase hub intro. Bounded at render time; create-if-missing (operator edits preserved). See `docs/combined-purchase-menu.md`. |
+
 ## Rendering budgets (Pricing Catalog)
 
 The `pricing_page_*` templates are editable up to the generic maximum, but each

@@ -165,7 +165,19 @@ The six interruptible checkout/payment INPUT flows are now a single shared list,
 (`checkout:discount`, `payment:receipt`, `wallet:topup:amount`, `renew:discount`,
 `extra_volume:discount`, `extra_time:discount`) — the exact set `clearCheckoutState`
 resets AND the only set the Pricing reply-keyboard escape may interrupt. In REPLY
-mode the pre-flow `pricingReplyEscapeRouter` (mounted before the app.ts flow
-dispatcher) rescues the current Pricing label out of these flows; every other
-flow (support / representative / customer-input / admin / …) keeps its existing
-priority. See `docs/public-pricing-catalog.md`.
+mode the pre-flow escape router (mounted before the app.ts flow dispatcher)
+rescues the current Pricing label out of these flows; every other flow (support /
+representative / customer-input / admin / …) keeps its existing priority. See
+`docs/public-pricing-catalog.md`.
+
+## Admin-controlled unified purchase menu
+
+The OWNER can replace the two separate purchase buttons (`user:buy`,
+`user:other_products`) with ONE «خرید محصولات 🛒» (`user:purchase`) that opens a
+read-only purchase hub. The hub is pure navigation: it calls `clearCheckoutState`
+and enters the SAME `startBuyFlow` / `openOtherProductsSection` entry points — no
+checkout engine, catalog, pricing, payment, Order or Product code is duplicated,
+and opening it writes nothing. The pre-flow escape router is generalized to also
+rescue the purchase-hub / VPN / Other-Products reply labels out of the six
+interruptible flows. The combined layout produces the SAME eventual purchase
+records as the split layout. See `docs/combined-purchase-menu.md`.

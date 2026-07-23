@@ -1,4 +1,9 @@
 import { type ButtonText, type MessageTemplate, type Panel } from "@zedbot/database";
+import {
+  parsePurchaseLayoutExpectedCombined,
+  purchaseLayoutCode,
+  purchaseMenuLayout,
+} from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -40,7 +45,12 @@ import {
   setUserMenuMode,
   type MenuMode,
 } from "../../services/menu-mode.service.js";
+import {
+  compareAndSetCombinedPurchaseMenuEnabled,
+  isCombinedPurchaseMenuEnabled,
+} from "../../services/purchase-menu-layout.service.js";
 import { clearSettingsCache } from "../../services/settings.service.js";
+import { OPS_EVENTS, writeSystemLog } from "../../services/system-log.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { cb as panelCb } from "../panels/panel-cb.js";
@@ -79,6 +89,13 @@ const TX_CB = {
     `admin:menu_mode:ask:${scope}:${mode}`,
   menuModeSet: (scope: "user" | "admin", mode: "inline" | "reply"): string =>
     `admin:menu_mode:set:${scope}:${mode}`,
+  // Admin-controlled unified purchase menu: the purchase-layout control on the
+  // SAME «نوع نمایش منوها» page. The confirmation callbacks carry the OWNER-
+  // observed layout CODE (0=split, 1=combined) so a stale confirmation is caught
+  // by the atomic compare-and-set. All well under Telegram's 64-byte limit.
+  menuBuy: "admin:menu_buy",
+  menuBuyAsk: (code: "0" | "1"): string => `admin:menu_buy:ask:${code}`,
+  menuBuySet: (code: "0" | "1"): string => `admin:menu_buy:set:${code}`,
   cancel: "admin:texts:cancel",
   templates: (page: number): string => `admin:texts:templates:${page}`,
   buttons: (page: number): string => `admin:texts:buttons:${page}`,
@@ -206,21 +223,33 @@ async function setModeForScope(scope: MenuModeScope, mode: MenuMode): Promise<vo
   }
 }
 
-/** The combined overview: current mode of BOTH menus + per-menu entries. */
+/** The combined overview: current mode of BOTH menus + the purchase layout +
+ * per-entry buttons. */
 async function renderMenuModesOverview(ctx: BotContext): Promise<void> {
   await safeAnswerCallback(ctx);
-  const [userMode, adminMode] = await Promise.all([getUserMenuMode(), getAdminMenuMode()]);
+  const [userMode, adminMode, combined] = await Promise.all([
+    getUserMenuMode(),
+    getAdminMenuMode(),
+    isCombinedPurchaseMenuEnabled(),
+  ]);
+  const purchaseLayoutLabel = combined
+    ? PURCHASE_LAYOUT_OVERVIEW_COMBINED
+    : PURCHASE_LAYOUT_OVERVIEW_SPLIT;
   const kb = new InlineKeyboard()
     .text("تنظیم منوی کاربران", TX_CB.menuModeScope("user"))
     .row()
     .text("تنظیم منوی ادمین", TX_CB.menuModeScope("admin"))
+    .row()
+    // Admin-controlled unified purchase menu: opens the purchase-layout page.
+    .text("تنظیم چیدمان خرید 🛒", TX_CB.menuBuy)
     .row()
     .text("بازگشت به تنظیمات عمومی", TX_CB.settings);
   await safeEditOrReply(
     ctx,
     "نوع نمایش منوها\n\n" +
       `منوی کاربر:\n${MENU_MODE_LABELS[userMode]}\n\n` +
-      `منوی ادمین:\n${MENU_MODE_LABELS[adminMode]}`,
+      `منوی ادمین:\n${MENU_MODE_LABELS[adminMode]}\n\n` +
+      `چیدمان خرید منوی کاربر:\n${purchaseLayoutLabel}`,
     kb,
   );
 }
@@ -302,6 +331,133 @@ adminTextSettingsHandler.callbackQuery(
     await renderMenuModeScopePage(ctx, scope);
   },
 );
+
+// --- purchase menu layout (admin-controlled unified purchase menu, §4/§5) ----
+// A control on the SAME «نوع نمایش منوها» page that selects the user main-menu
+// purchase layout: SPLIT (two buttons) or COMBINED (one «خرید محصولات» button +
+// hub). All ACTIVE admins may VIEW the current layout; only the live OWNER may
+// mutate it (requireOwner re-checks on ask + set — the keyboard is never
+// trusted). The confirmation callbacks carry the OWNER-observed layout CODE
+// (0=split, 1=combined); the mutation is an atomic compare-and-set against that
+// observed value, so a stale/racing confirmation loses and converges idempotently.
+// Flipping the setting changes PRESENTATION only — no business flow is touched.
+
+const PURCHASE_LAYOUT_OVERVIEW_SPLIT = "جداگانه";
+const PURCHASE_LAYOUT_OVERVIEW_COMBINED = "یکپارچه";
+const PURCHASE_LAYOUT_STATUS_SPLIT = "دکمه‌های خرید جدا هستند";
+const PURCHASE_LAYOUT_STATUS_COMBINED = "دکمه‌های خرید در یک دکمه ادغام شده‌اند";
+const PURCHASE_LAYOUT_ENABLE_BTN = "فعال‌کردن منوی خرید یکپارچه ✅";
+const PURCHASE_LAYOUT_DISABLE_BTN = "بازگرداندن دکمه‌های جداگانه ↩️";
+const PURCHASE_LAYOUT_ENABLE_ASK =
+  "آیا منوی خرید کاربران به حالت یکپارچه (یک دکمه «خرید محصولات») تغییر کند؟";
+const PURCHASE_LAYOUT_DISABLE_ASK =
+  "آیا دکمه‌های خرید کاربران دوباره جداگانه («خرید اشتراک» و «محصولات دیگر») شوند؟";
+const PURCHASE_LAYOUT_ENABLED_TOAST = "منوی خرید یکپارچه فعال شد ✅";
+const PURCHASE_LAYOUT_DISABLED_TOAST = "دکمه‌های خرید جداگانه بازگردانده شد.";
+const PURCHASE_LAYOUT_STALE_TEXT = "وضعیت چیدمان تغییر کرده بود؛ وضعیت به‌روز نمایش داده شد.";
+const PURCHASE_LAYOUT_APPLY_NOTE =
+  "چیدمان جدید با بازکردن دوباره منوی اصلی برای کاربران نمایش داده می‌شود.";
+
+/**
+ * The purchase-layout page: the current status + the single opposite-direction
+ * toggle button + back. `note` (used after a successful change) is appended to
+ * make the §10 "opens on next main-menu render" behavior explicit. The toggle
+ * carries the CURRENT layout code so the confirm/commit can detect staleness.
+ */
+async function renderPurchaseLayoutPage(
+  ctx: BotContext,
+  toast?: string,
+  note?: string,
+): Promise<void> {
+  const combined = await isCombinedPurchaseMenuEnabled();
+  await safeAnswerCallback(ctx, toast);
+  const code = purchaseLayoutCode(combined);
+  const kb = new InlineKeyboard();
+  if (combined) {
+    kb.text(PURCHASE_LAYOUT_DISABLE_BTN, TX_CB.menuBuyAsk(code)).row();
+  } else {
+    kb.text(PURCHASE_LAYOUT_ENABLE_BTN, TX_CB.menuBuyAsk(code)).row();
+  }
+  kb.text("بازگشت", TX_CB.menuMode);
+  const status = combined ? PURCHASE_LAYOUT_STATUS_COMBINED : PURCHASE_LAYOUT_STATUS_SPLIT;
+  const lines = ["چیدمان خرید منوی کاربر", "", "وضعیت فعلی:", `- ${status}`];
+  if (note !== undefined) {
+    lines.push("", note);
+  }
+  await safeEditOrReply(ctx, lines.join("\n"), kb);
+}
+
+// View: any ACTIVE admin (not OWNER-gated — viewing the layout leaks nothing).
+adminTextSettingsHandler.callbackQuery(TX_CB.menuBuy, async (ctx) => {
+  if (ctx.admin === null) {
+    return;
+  }
+  await renderPurchaseLayoutPage(ctx);
+});
+
+// Confirm step: OWNER-only. A stale observed code (someone already changed the
+// layout) fails safe to a fresh re-render instead of asking to confirm a
+// no-longer-current transition. No state changes here.
+adminTextSettingsHandler.callbackQuery(/^admin:menu_buy:ask:(0|1)$/, async (ctx) => {
+  if (ctx.admin === null || !(await requireOwner(ctx))) {
+    return;
+  }
+  const expectedCombined = parsePurchaseLayoutExpectedCombined(ctx.match[1]);
+  if ((await isCombinedPurchaseMenuEnabled()) !== expectedCombined) {
+    await renderPurchaseLayoutPage(ctx, PURCHASE_LAYOUT_STALE_TEXT);
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const ask = expectedCombined ? PURCHASE_LAYOUT_DISABLE_ASK : PURCHASE_LAYOUT_ENABLE_ASK;
+  await safeEditOrReply(
+    ctx,
+    ask,
+    new InlineKeyboard()
+      .text("تایید ✅", TX_CB.menuBuySet(ctx.match[1] as "0" | "1"))
+      .row()
+      .text("انصراف", TX_CB.menuBuy),
+  );
+});
+
+// Commit step: OWNER-only + atomic compare-and-set against the OWNER-observed
+// layout. Two concurrent OWNER confirmations (or a stale one) can never both
+// flip: the loser converges to the idempotent "state moved on" re-render. On a
+// win: clear the settings cache (immediate effect on the next render), write the
+// privacy-safe audit event, and show the applied state + the §10 note.
+adminTextSettingsHandler.callbackQuery(/^admin:menu_buy:set:(0|1)$/, async (ctx) => {
+  const admin = ctx.admin;
+  if (admin === null || !(await requireOwner(ctx))) {
+    return;
+  }
+  const expectedCombined = parsePurchaseLayoutExpectedCombined(ctx.match[1]);
+  const nextCombined = !expectedCombined;
+  if (!(await compareAndSetCombinedPurchaseMenuEnabled(expectedCombined, nextCombined))) {
+    logger.info("purchase layout change lost the race / stale confirmation", {
+      adminId: admin.id,
+      action: "user-menu-purchase-layout",
+      result: "stale",
+    });
+    await renderPurchaseLayoutPage(ctx, PURCHASE_LAYOUT_STALE_TEXT);
+    return;
+  }
+  clearSettingsCache();
+  await writeSystemLog({
+    level: "INFO",
+    eventType: OPS_EVENTS.USER_MENU_PURCHASE_LAYOUT_CHANGED,
+    message: OPS_EVENTS.USER_MENU_PURCHASE_LAYOUT_CHANGED,
+    adminId: admin.id,
+    // Privacy-safe: previous layout, next layout, actor role only (no Telegram/
+    // user id, no label, no callback payload). The timestamp is stamped by the
+    // system-log writer.
+    metadata: {
+      previousLayout: purchaseMenuLayout(expectedCombined),
+      nextLayout: purchaseMenuLayout(nextCombined),
+      actorRole: admin.role,
+    },
+  });
+  const toast = nextCombined ? PURCHASE_LAYOUT_ENABLED_TOAST : PURCHASE_LAYOUT_DISABLED_TOAST;
+  await renderPurchaseLayoutPage(ctx, toast, PURCHASE_LAYOUT_APPLY_NOTE);
+});
 
 async function renderTextsLanding(ctx: BotContext): Promise<void> {
   clearAdminTextSettingsState(ctx);

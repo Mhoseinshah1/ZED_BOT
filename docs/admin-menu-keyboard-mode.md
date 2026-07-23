@@ -398,3 +398,14 @@ rows exist.
   currently shows the full approved menu to every active admin, with role
   gates enforced inside the sections. `visibleActions` is the single
   place where centralized RBAC hiding will land.
+
+## Purchase layout control (same «نوع نمایش منوها» page)
+
+The admin-controlled unified purchase menu adds a «تنظیم چیدمان خرید 🛒» control
+to the SAME «تنظیمات عمومی → نوع نمایش منوها» page (`text-settings.handler.ts`).
+The overview shows «چیدمان خرید منوی کاربر: جداگانه/یکپارچه». All active admins
+may VIEW the layout; only the live OWNER may mutate it (`requireOwner` re-checks
+on the `admin:menu_buy:ask|set:<code>` callbacks; a regular admin gets an
+OWNER-only toast). The change is an atomic compare-and-set against the observed
+layout code and writes the privacy-safe `user_menu.purchase_layout_changed`
+audit event. See `docs/combined-purchase-menu.md`.

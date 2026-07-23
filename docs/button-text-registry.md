@@ -16,10 +16,12 @@ overwritten (see `docs/text-system.md`).
 - Operators edit per item via «تنظیمات عمومی ⚙️ → مدیریت متن‌ها ✍️»
   (update or reset-to-default; `isEditable` rows only — all seeded rows are
   editable).
-- **Duplicate-label restriction (menu-keyboard-mode phases)**: the 8 user
+- **Duplicate-label restriction (menu-keyboard-mode phases)**: the user
   main-menu keys (`buy_subscription`, `renew_service`, `my_services`,
-  `wallet`, `other_products`, `my_orders`, `support`, `free_test` —
-  `MAIN_MENU_BUTTON_KEYS`) may never share a current label, and neither
+  `wallet`, `other_products`, `purchase_hub`, `my_orders`, `support`,
+  `free_test`, `pricing`, `referral`, `representative`, `admin_panel` —
+  `MAIN_MENU_BUTTON_KEYS`; `purchase_hub` was added by the admin-controlled
+  unified purchase menu) may never share a current label, and neither
   may the 9 admin main-menu keys (the `admin_*` rows below —
   `ADMIN_MAIN_MENU_BUTTON_KEYS`), because in `REPLY` keyboard mode
   incoming text is resolved against the current labels of each menu. An
@@ -67,6 +69,7 @@ overwritten (see `docs/text-system.md`).
 | `free_test` | اکانت تست رایگان | اکانت تست رایگان 🎁 | yes |
 | `referral` | زیرمجموعه گیری | زیرمجموعه گیری 👥 | yes |
 | `other_products` | محصولات دیگر | محصولات دیگر 🛍 | yes |
+| `purchase_hub` | خرید محصولات (یکپارچه) | خرید محصولات 🛒 | yes |
 | `my_orders` | سفارش‌های من | سفارش‌های من 🧾 | yes |
 | `pricing` | تعرفه اشتراک‌ها | تعرفه اشتراک‌ها 💵 | yes |
 | `representative_request` | درخواست نمایندگی | درخواست نمایندگی 👨‍💼 | yes |
