@@ -27,9 +27,11 @@ const USER_SECTIONS: Array<{ callback: string; buttonKey: string }> = [
   // referral page (handlers/user-referral) owns it now.
   // CB.USER_REPRESENTATIVE left this list in the representative-program phase —
   // the real representative page (handlers/user-representative) owns it now.
+  // CB.USER_PRICING left this list in the public-pricing-catalog phase — the real
+  // pricing page (handlers/user-pricing) owns it now, registered BEFORE this
+  // handler so old `user:pricing` keyboards open the real catalog.
   { callback: CB.USER_WHEEL, buttonKey: "lucky_wheel" },
   { callback: CB.USER_TUTORIALS, buttonKey: "tutorials" },
-  { callback: CB.USER_PRICING, buttonKey: "pricing" },
 ];
 
 /** Every user menu button opens a placeholder page in this phase. */

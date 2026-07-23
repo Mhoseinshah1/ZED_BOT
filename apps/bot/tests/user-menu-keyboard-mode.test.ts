@@ -137,11 +137,14 @@ describe.runIf(hasDb)("user main-menu keyboard mode", () => {
     const inlineRows = inline.inline_keyboard.map((row) =>
       row.map((b) => [("text" in b ? b.text : ""), ("callback_data" in b ? b.callback_data : "")]),
     );
-    // The approved inline contract: 4 rows, exact callbacks, in order.
+    // The approved inline contract: exact callbacks, in order. The public
+    // Pricing Catalog adds an always-visible standalone «تعرفه‌ها» row after
+    // OTHER_PRODUCTS/MY_ORDERS and before the feature-gated rows.
     expect(inlineRows.map((row) => row.map(([, cb]) => cb))).toEqual([
       [CB.USER_BUY, CB.USER_RENEW],
       [CB.USER_SERVICES, CB.USER_WALLET],
       [CB.USER_OTHER_PRODUCTS, CB.USER_ORDERS],
+      [CB.USER_PRICING],
       [CB.USER_SUPPORT],
     ]);
 

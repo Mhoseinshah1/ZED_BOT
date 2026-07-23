@@ -83,6 +83,22 @@ export interface ProductAddState {
   customerInputSchemaPreset?: "TELEGRAM_PREMIUM" | "PERSONALIZED_AI" | "NONE";
 }
 
+/**
+ * Where a checkout pre-invoice was opened FROM — pure navigation metadata used
+ * only to route the pre-invoice «بازگشت» button back to the exact surface the
+ * user came from (feat/public-pricing-catalog). It NEVER affects price, product
+ * eligibility, settlement or authorization: those are always re-derived from the
+ * live Product + user group at click time. A missing origin behaves exactly like
+ * the historical RETAIL_CATALOG buy flow. The pricing variants carry only bounded
+ * ids + a page number so the return page can be rebuilt server-side; no callback
+ * string is ever stored.
+ */
+export type CheckoutOrigin =
+  | { kind: "RETAIL_CATALOG" }
+  | { kind: "PRICING_SERVICE"; panelId: string; categoryId: string; page: number }
+  | { kind: "PRICING_OTHER"; categoryId: string; page: number }
+  | { kind: "REPRESENTATIVE" };
+
 /** Pre-invoice draft (user checkout browsing). No DB rows until "continue". */
 export interface CheckoutDraft {
   productId: string;
@@ -97,6 +113,12 @@ export interface CheckoutDraft {
   finalPriceToman: number;
   /** Unique per pre-invoice; wallet-payment idempotency key (Phase 15). */
   draftNonce?: string;
+  /**
+   * Where this pre-invoice was opened from (feat/public-pricing-catalog). Drives
+   * ONLY the «بازگشت» destination; absent = the historical retail buy-flow back
+   * navigation. Never consulted for pricing, eligibility, settlement or auth.
+   */
+  origin?: CheckoutOrigin;
   /**
    * Representative Program (feat/representative-program, §16): present ONLY for
    * a reseller-priced purchase started from «خرید نمایندگی». When absent (every

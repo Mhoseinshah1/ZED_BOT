@@ -70,11 +70,16 @@ const hasDb =
 const runTag = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
 let seq = 0;
 
-/** The pre-feature normal-user contract (user-menu-placeholders.test.ts). */
+/**
+ * The baseline normal-user contract (user-menu-placeholders.test.ts). The
+ * public Pricing Catalog added an always-visible standalone «تعرفه‌ها» row after
+ * OTHER_PRODUCTS/MY_ORDERS.
+ */
 const PRE_FEATURE_CALLBACK_ROWS: string[][] = [
   [CB.USER_BUY, CB.USER_RENEW],
   [CB.USER_SERVICES, CB.USER_WALLET],
   [CB.USER_OTHER_PRODUCTS, CB.USER_ORDERS],
+  [CB.USER_PRICING],
   [CB.USER_SUPPORT],
 ];
 
@@ -83,6 +88,7 @@ const PRE_FEATURE_KEY_ROWS: string[][] = [
   ["buy_subscription", "renew_service"],
   ["my_services", "wallet"],
   ["other_products", "my_orders"],
+  ["pricing"],
   ["support"],
 ];
 
@@ -722,6 +728,7 @@ describe.runIf(hasDb)("admin entry in the user main menu", () => {
         [CB.USER_BUY, CB.USER_RENEW],
         [CB.USER_SERVICES, CB.USER_WALLET],
         [CB.USER_OTHER_PRODUCTS, CB.USER_ORDERS],
+        [CB.USER_PRICING],
         [CB.USER_FREE_TEST],
         [CB.USER_SUPPORT],
       ]);
@@ -730,6 +737,7 @@ describe.runIf(hasDb)("admin entry in the user main menu", () => {
         [CB.USER_BUY, CB.USER_RENEW],
         [CB.USER_SERVICES, CB.USER_WALLET],
         [CB.USER_OTHER_PRODUCTS, CB.USER_ORDERS],
+        [CB.USER_PRICING],
         [CB.USER_FREE_TEST],
         [CB.USER_SUPPORT],
         [CB.ADMIN_MENU],

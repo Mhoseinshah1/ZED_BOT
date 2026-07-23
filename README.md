@@ -407,6 +407,23 @@ runs the representative lifecycle (approve/reject/suspend/reactivate/terminate)
 from «تنظیمات عمومی ⚙️ → مدیریت نمایندگی 🤝». See
 `docs/representative-program.md`.
 
+**Public retail Pricing Catalog («تعرفه‌ها»)**: a live, user-specific,
+**read-only** retail catalog reachable from an always-visible user main-menu row
+(`user:pricing`). It displays current retail prices straight from active
+`Product.priceToman` via the ONE authoritative `loadUserRetailCatalog`, respects
+the user's group and every Product/Category/Panel visibility+readiness rule
+(`isProductVisible`), groups service plans by Panel → Category and Other products
+by Category, and paginates deterministically (panels 8, categories 8, products
+5). Product detail carries no operational secret (no panel URL/credentials/inbound
+ids/stock counts). Pressing Buy enters the **existing** retail pre-invoice through
+the shared `startRetailPreInvoice`; a typed `CheckoutDraft.origin` returns the
+pre-invoice «بازگشت» button to the exact pricing page. Prices are always the
+standard retail price (never representative/discount/Stars); an ACTIVE/SUSPENDED
+representative may see a «تعرفه نمایندگی من 🤝» link into the existing
+representative surface, and the retail CTA («خرید عادی این پلن») always seeds a
+normal retail draft. Browsing creates no financial or stock record. See
+`docs/public-pricing-catalog.md`.
+
 **Configurable user main-menu keyboard**: admins choose («تنظیمات عمومی ⚙️
 → نوع نمایش منوی کاربر») whether the user main menu renders as inline
 glass buttons inside the message (default) or as a persistent reply

@@ -335,3 +335,13 @@ PostgreSQL via `DATABASE_URL`; skips otherwise — see `docs/testing.md`):
   session flag; switching back to INLINE produces exactly one
   «نوع منوی ربات تغییر کرده است.» + `remove_keyboard` message followed by
   the inline menu, with no repeated notice on later renders.
+
+## Pricing row (feat/public-pricing-catalog)
+
+The shared menu definition gained an always-visible `PRICING` action
+(ButtonText `pricing`, callback `CB.USER_PRICING`) rendered as a standalone row
+after `OTHER_PRODUCTS`/`MY_ORDERS` and before every feature-gated row. It has no
+rollout switch, is handled by the exhaustive `UserMainMenuAction` dispatch in
+both keyboard modes, and resolves its (possibly edited) reply-keyboard label
+through `resolveMainMenuAction` — the label never authorizes or routes. See
+`docs/public-pricing-catalog.md`.

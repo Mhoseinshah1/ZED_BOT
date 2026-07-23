@@ -6,6 +6,7 @@ import type { CheckoutDraft } from "../../core/session.js";
 import { categoryShortId } from "../../services/category.service.js";
 import { productShortId, type ProductWithRelations } from "../../services/product.service.js";
 import { escapeHtml } from "../../utils/html.js";
+import { PRICE_CB } from "../user-pricing/pricing-cb.js";
 import { ccb, CO_CB } from "./checkout-cb.js";
 
 export const EMPTY_CATALOG_TEXT = "فعلاً محصولی برای این بخش فعال نیست.";
@@ -191,14 +192,29 @@ export function preInvoiceKeyboard(
       kb.text("حذف کد تخفیف ❌", CO_CB.DISCOUNT_CLEAR).row();
     }
   }
-  const backCb =
-    draft.representative !== undefined
-      ? "user:rep:buy"
-      : draft.flowType === "SERVICE_PRODUCT"
-        ? draft.panelId !== undefined
-          ? ccb.buyCategory(draft.panelId.slice(0, 8), draft.categoryId.slice(0, 8))
-          : CO_CB.BUY
-        : ccb.otherCategory(draft.categoryId.slice(0, 8));
+  // «بازگشت» destination. A Pricing-origin draft returns to the EXACT pricing
+  // product-list page it was opened from (feat/public-pricing-catalog §12);
+  // representative and normal-retail drafts behave exactly as before.
+  const origin = draft.origin;
+  let backCb: string;
+  if (origin?.kind === "PRICING_SERVICE") {
+    backCb = PRICE_CB.serviceCategory(
+      origin.panelId.slice(0, 8),
+      origin.categoryId.slice(0, 8),
+      origin.page,
+    );
+  } else if (origin?.kind === "PRICING_OTHER") {
+    backCb = PRICE_CB.otherCategory(origin.categoryId.slice(0, 8), origin.page);
+  } else if (draft.representative !== undefined) {
+    backCb = "user:rep:buy";
+  } else if (draft.flowType === "SERVICE_PRODUCT") {
+    backCb =
+      draft.panelId !== undefined
+        ? ccb.buyCategory(draft.panelId.slice(0, 8), draft.categoryId.slice(0, 8))
+        : CO_CB.BUY;
+  } else {
+    backCb = ccb.otherCategory(draft.categoryId.slice(0, 8));
+  }
   kb.text("بازگشت", backCb).text("منوی اصلی", CB.USER_MENU);
   return kb;
 }

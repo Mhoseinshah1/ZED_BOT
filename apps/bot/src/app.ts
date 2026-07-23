@@ -158,6 +158,7 @@ import { freeTrialHandler } from "./handlers/user-free-trial/free-trial.handler.
 import { adminMenuTextRouter } from "./handlers/admin-menu-actions.js";
 import { userMenuTextRouter } from "./handlers/user-menu-actions.js";
 import { userPlaceholdersHandler } from "./handlers/user-placeholders.handler.js";
+import { pricingHandler } from "./handlers/user-pricing/pricing.handler.js";
 import { userReferralHandler } from "./handlers/user-referral/referral.handler.js";
 import { safeAnswerCallback } from "./utils/safe-reply.js";
 
@@ -470,6 +471,10 @@ export function createBot(token: string): Bot<BotContext> {
   // placeholder handler, which used to own CB.USER_REFERRAL.
   userArea.use(userReferralHandler);
   userArea.use(representativeHandler);
+  // Public retail Pricing Catalog (feat/public-pricing-catalog): the real
+  // «تعرفه‌ها» page. MUST run before the placeholder handler, which used to own
+  // CB.USER_PRICING — so old `user:pricing` keyboards open the real page.
+  userArea.use(pricingHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());

@@ -80,3 +80,18 @@ panel).
 Payment/receipt/provisioning logic, online gateways, Telegram Stars,
 renewal/extra volume/extra time/service actions, seed data (still creates
 no categories/products/panels).
+
+## Authoritative user catalog (feat/public-pricing-catalog)
+
+`loadUserRetailCatalog(user)` (`apps/bot/src/services/catalog.service.ts`) is the
+single authoritative loader for the user-facing retail tree — a panel-first
+`SERVICE` hierarchy plus a flat `OTHER_PRODUCT` grouping — assembled in two
+`findMany` calls (no N+1). Every returned Product passes the ONE predicate
+`isProductVisible`; a Panel or Category with zero purchasable products is
+dropped; group filtering precedes counts / minimum-price / pagination. As part of
+this, the buy-list helpers `visibleServiceProducts` / `visibleOtherProducts` were
+tightened to apply the same `isProductVisible` predicate (previously only the
+group filter), so a Product that would be rejected on click (unready panel /
+invalid XUI inbound) never appears in the list either. This is a strict superset
+of the previous filter and does not regress the panel-first buy flow. See
+`docs/public-pricing-catalog.md`.

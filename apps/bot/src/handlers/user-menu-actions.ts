@@ -9,6 +9,7 @@ import { showAdminMenu } from "./admin.handler.js";
 import { openOtherProductsSection, startBuyFlow } from "./user-checkout/checkout.handler.js";
 import { openFreeTrialSection } from "./user-free-trial/free-trial.handler.js";
 import { renderOrdersHub } from "./user-orders/orders.handler.js";
+import { renderPricingRoot } from "./user-pricing/pricing.handler.js";
 import { renderReferralPage } from "./user-referral/referral.handler.js";
 import { renderRepresentativeLanding } from "./user-representative/representative.handler.js";
 import { renderRenewableList } from "./user-renewal/renewal.handler.js";
@@ -39,6 +40,7 @@ const ACTION_HANDLERS: Record<UserMainMenuAction, (ctx: BotContext) => Promise<v
   WALLET: (ctx) => renderWallet(ctx),
   OTHER_PRODUCTS: openOtherProductsSection,
   MY_ORDERS: (ctx) => renderOrdersHub(ctx),
+  PRICING: (ctx) => renderPricingRoot(ctx),
   SUPPORT: (ctx) => renderSupportLanding(ctx),
   FREE_TRIAL: openFreeTrialSection,
   REFERRAL: (ctx) => renderReferralPage(ctx),

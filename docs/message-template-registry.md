@@ -110,3 +110,13 @@ constants. Rendered as escaped plain text and clamped under Telegram's limit.
 | `service_diagnostics_support_preview` | diagnostics | — | Support handoff preview intro. |
 | `service_diagnostics_support_prompt` | diagnostics | — | "Write your message" prompt. |
 | `service_diagnostics_limitations` | diagnostics | — | What the check can/can't inspect. |
+
+## Public retail Pricing Catalog (feat/public-pricing-catalog)
+
+| key | category | variables | notes |
+| --- | --- | --- | --- |
+| `pricing_page_intro` | pricing | — | «تعرفه‌ها» root intro. |
+| `pricing_page_disclaimer` | pricing | — | Retail-only price disclaimer (root + detail). |
+| `pricing_page_empty_services` | pricing | — | Empty service section. |
+| `pricing_page_empty_other` | pricing | — | Empty other-product section. |
+| `pricing_page_product_unavailable` | pricing | — | Stale/forged/hidden product toast. |

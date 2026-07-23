@@ -9,11 +9,12 @@ import {
  * Main user menu - button texts come from the database (operator-editable
  * ButtonText rows; Phase 34 admin editing).
  *
- * Only IMPLEMENTED sections are visible. The unfinished placeholder
- * sections (referral, lucky_wheel, tutorials, pricing,
- * representative_request) are HIDDEN from the menu until their real flows
- * land - their callbacks stay registered in user-placeholders.handler.ts so
- * buttons on old Telegram messages keep answering instead of dead-ending.
+ * Only IMPLEMENTED sections are visible. The remaining unfinished placeholder
+ * sections (lucky_wheel, tutorials) are HIDDEN from the menu until their real
+ * flows land - their callbacks stay registered in user-placeholders.handler.ts
+ * so buttons on old Telegram messages keep answering instead of dead-ending.
+ * «تعرفه‌ها» (CB.USER_PRICING) is now a real, always-visible standalone row
+ * (feat/public-pricing-catalog).
  *
  * Free-trial phase: «اکانت تست رایگان 🎁» (ButtonText free_test) renders
  * ONLY when the feature is globally enabled AND at least one trial-ready

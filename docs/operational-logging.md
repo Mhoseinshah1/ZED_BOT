@@ -262,3 +262,13 @@ does not.)
 - Aggregation loses the repeat count (see above) — the full record is
   always in `SystemLog`.
 - `ERROR`/`SUPPORT`/`BROADCAST` topics have no emitters yet.
+
+## Pricing Catalog privacy (feat/public-pricing-catalog)
+
+Opening or navigating the public retail Pricing Catalog («تعرفه‌ها») writes **no**
+`SystemLog` row per tap — there is deliberately no noisy per-view logging. The
+pages never render a panel base URL, credentials, API variant, token,
+subscription domain, inbound ids, config link, stock count/content, or
+customer-input schema internals; all operator-controlled values are HTML-escaped
+and length-bounded, and callbacks never carry a price, a full id, or free-form
+text. See `docs/public-pricing-catalog.md`.

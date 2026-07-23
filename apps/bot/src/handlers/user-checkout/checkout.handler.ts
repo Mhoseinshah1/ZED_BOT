@@ -11,7 +11,7 @@ import {
   isWalletPaymentEnabled,
   WALLET_PAYMENT_DISABLED_TEXT,
 } from "../../services/payment-settings.service.js";
-import type { CheckoutDraft } from "../../core/session.js";
+import type { CheckoutDraft, CheckoutOrigin } from "../../core/session.js";
 import {
   categoriesOf,
   getPurchasablePanelByShortId,
@@ -96,7 +96,24 @@ export async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<
   }
 }
 
-async function startPreInvoice(ctx: BotContext, product: ProductWithRelations): Promise<void> {
+/**
+ * THE single authoritative retail pre-invoice builder (feat/public-pricing-catalog
+ * §11). Both the normal retail buy-list flow and the new Pricing page enter the
+ * existing checkout through here, so there is exactly one checkout-draft builder.
+ *
+ * It clears any incompatible previous checkout/discount state, seeds a fresh
+ * typed CheckoutDraft priced from the CURRENT `product.priceToman`, records the
+ * existing product/category/panel identifiers, mints the wallet-payment
+ * idempotency nonce, stamps the navigation-only `origin`, and renders the
+ * existing pre-invoice. It moves NO money and creates NO Payment / Order /
+ * CheckoutSession / Service / panel call.
+ */
+export async function startRetailPreInvoice(
+  ctx: BotContext,
+  product: ProductWithRelations,
+  origin: CheckoutOrigin,
+): Promise<void> {
+  clearCheckoutState(ctx);
   ctx.session.currentFlow = null;
   const draft: CheckoutDraft = {
     productId: product.id,
@@ -108,6 +125,8 @@ async function startPreInvoice(ctx: BotContext, product: ProductWithRelations): 
     finalPriceToman: product.priceToman,
     // One nonce per pre-invoice: the wallet payment's idempotency key.
     draftNonce: randomUUID(),
+    // Pure navigation metadata (§12): drives ONLY the «بازگشت» destination.
+    origin,
   };
   ctx.session.temp.checkoutDraft = draft;
   await renderPreInvoice(ctx, true);
@@ -236,7 +255,7 @@ checkoutHandler.callbackQuery(/^user:buy:prod:([0-9a-f-]+):([0-9a-f-]+):([0-9a-f
     return;
   }
   await safeAnswerCallback(ctx);
-  await startPreInvoice(ctx, product);
+  await startRetailPreInvoice(ctx, product, { kind: "RETAIL_CATALOG" });
 });
 
 // Legacy compatibility: the removed "service type" step (old keyboards may
@@ -305,7 +324,7 @@ checkoutHandler.callbackQuery(/^user:op:p:([0-9a-f-]+)$/, async (ctx) => {
     return;
   }
   await safeAnswerCallback(ctx);
-  await startPreInvoice(ctx, product);
+  await startRetailPreInvoice(ctx, product, { kind: "RETAIL_CATALOG" });
 });
 
 // --- Discount code ---------------------------------------------------------------------
