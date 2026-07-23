@@ -1007,6 +1007,47 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
       "• رعایت قوانین استفاده الزامی است؛ در صورت تخلف، نمایندگی تعلیق یا لغو می‌شود.",
     allowedVariables: [],
   },
+  // Public retail Pricing Catalog (feat/public-pricing-catalog). All static
+  // copy — no dynamic variables — so nothing here is ever interpolated or
+  // secret-shaped. Operator edits are preserved by the create-if-missing seed.
+  {
+    key: "pricing_page_intro",
+    title: "تعرفه‌ها - متن معرفی",
+    category: "pricing",
+    defaultContent:
+      "تعرفه‌های فعلی محصولات قابل خرید برای حساب شما در این بخش نمایش داده می‌شوند.\n\n" +
+      "قیمت‌ها ممکن است تغییر کنند و مبلغ نهایی همیشه در پیش‌فاکتور تأیید می‌شود.",
+    allowedVariables: [],
+  },
+  {
+    key: "pricing_page_disclaimer",
+    title: "تعرفه‌ها - توضیح قیمت",
+    category: "pricing",
+    defaultContent:
+      "قیمت‌های این صفحه، قیمت عادی و فعلی محصولات هستند. مبلغ نهایی در پیش‌فاکتور نمایش داده می‌شود.",
+    allowedVariables: [],
+  },
+  {
+    key: "pricing_page_empty_services",
+    title: "تعرفه‌ها - نبود پلن اشتراک",
+    category: "pricing",
+    defaultContent: "در حال حاضر پلن اشتراکی برای نمایش موجود نیست.",
+    allowedVariables: [],
+  },
+  {
+    key: "pricing_page_empty_other",
+    title: "تعرفه‌ها - نبود محصول دیگر",
+    category: "pricing",
+    defaultContent: "در حال حاضر محصول دیگری برای نمایش موجود نیست.",
+    allowedVariables: [],
+  },
+  {
+    key: "pricing_page_product_unavailable",
+    title: "تعرفه‌ها - محصول ناموجود",
+    category: "pricing",
+    defaultContent: "این محصول دیگر در دسترس نیست.",
+    allowedVariables: [],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -1028,6 +1069,14 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "other_products", title: "محصولات دیگر", text: "محصولات دیگر 🛍" },
   { key: "my_orders", title: "سفارش‌های من", text: "سفارش‌های من 🧾" },
   { key: "pricing", title: "تعرفه اشتراک‌ها", text: "تعرفه اشتراک‌ها 💵" },
+  // Public retail Pricing Catalog (feat/public-pricing-catalog): the in-page
+  // section/detail/back buttons. Editable labels never determine routing.
+  { key: "pricing_services", title: "تعرفه‌ها - اشتراک‌ها", text: "تعرفه اشتراک‌ها 🌐" },
+  { key: "pricing_other_products", title: "تعرفه‌ها - محصولات دیگر", text: "تعرفه محصولات دیگر 🛍" },
+  { key: "pricing_representative", title: "تعرفه‌ها - نمایندگی", text: "تعرفه نمایندگی من 🤝" },
+  { key: "pricing_buy_service", title: "تعرفه‌ها - خرید پلن", text: "خرید این پلن 🛒" },
+  { key: "pricing_buy_other", title: "تعرفه‌ها - خرید محصول", text: "خرید این محصول 🛒" },
+  { key: "pricing_back", title: "تعرفه‌ها - بازگشت", text: "بازگشت به تعرفه‌ها" },
   { key: "representative_request", title: "درخواست نمایندگی", text: "درخواست نمایندگی 👨‍💼" },
   // Representative Program (feat/representative-program, §22). The main-menu row
   // label + the reseller dashboard/section buttons. Editable labels never drive

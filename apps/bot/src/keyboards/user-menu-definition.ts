@@ -23,6 +23,7 @@ export type UserMainMenuAction =
   | "WALLET"
   | "OTHER_PRODUCTS"
   | "MY_ORDERS"
+  | "PRICING"
   | "SUPPORT"
   | "FREE_TRIAL"
   | "REFERRAL"
@@ -50,6 +51,10 @@ export const MAIN_MENU_ACTION_WIRING: Record<
   WALLET: { buttonKey: "wallet", callback: CB.USER_WALLET },
   OTHER_PRODUCTS: { buttonKey: "other_products", callback: CB.USER_OTHER_PRODUCTS },
   MY_ORDERS: { buttonKey: "my_orders", callback: CB.USER_ORDERS },
+  // Public retail Pricing Catalog (feat/public-pricing-catalog): opens the real
+  // «تعرفه‌ها» page. Always visible once this feature landed (no rollout switch);
+  // the label is display-only and never determines routing.
+  PRICING: { buttonKey: "pricing", callback: CB.USER_PRICING },
   SUPPORT: { buttonKey: "support", callback: CB.USER_SUPPORT },
   FREE_TRIAL: { buttonKey: "free_test", callback: CB.USER_FREE_TEST },
   // Referral affiliate phase: opens the real referral page. Visible only when the
@@ -78,6 +83,9 @@ const APPROVED_ROWS: UserMainMenuAction[][] = [
   ["BUY_SUBSCRIPTION", "RENEW_SERVICE"],
   ["MY_SERVICES", "WALLET"],
   ["OTHER_PRODUCTS", "MY_ORDERS"],
+  // Standalone Pricing row: after OTHER_PRODUCTS/MY_ORDERS and before every
+  // feature-gated row (free trial / referral / representative).
+  ["PRICING"],
   ["FREE_TRIAL"],
   ["REFERRAL"],
   ["REPRESENTATIVE"],

@@ -193,7 +193,7 @@ function fakeCheckout(overrides: Partial<Record<string, unknown>> = {}): Checkou
 // --- 1-5: landing pages carry exactly the approved labels --------------------
 
 describe("main menus and landing pages (exact approved labels)", () => {
-  it("user main menu: exact labels and callbacks in the agreed four rows", async () => {
+  it("user main menu: exact labels and callbacks including the Pricing row", async () => {
     const kb = await buildUserMainKeyboard();
     expect(rows(kb).map((row) => row.map((b) => [b.text, b.callback_data]))).toEqual([
       [
@@ -208,6 +208,8 @@ describe("main menus and landing pages (exact approved labels)", () => {
         ["محصولات دیگر 🛍", "user:other_products"],
         ["سفارش‌های من 🧾", "user:orders"],
       ],
+      // Public retail Pricing Catalog: standalone always-visible row.
+      [["تعرفه اشتراک‌ها 💵", "user:pricing"]],
       [["پشتیبانی ☎️", "user:support"]],
     ]);
     expect(callbacks(kb)).toEqual([
@@ -217,6 +219,7 @@ describe("main menus and landing pages (exact approved labels)", () => {
       CB.USER_WALLET,
       CB.USER_OTHER_PRODUCTS,
       CB.USER_ORDERS,
+      CB.USER_PRICING,
       CB.USER_SUPPORT,
     ]);
   });
@@ -308,14 +311,9 @@ describe("service detail page (approved fields, no dead/unfinished buttons)", ()
 
   it("hides every unfinished capability instead of rendering it dead", async () => {
     const userLabels = labels(await buildUserMainKeyboard());
-    for (const forbidden of [
-      "آموزش",
-      "اشتراک رایگان",
-      "زیرمجموعه",
-      "تعرفه",
-      "نمایندگی",
-      "گردونه",
-    ]) {
+    // «تعرفه» (Pricing) graduated to a real, always-visible row in the
+    // public-pricing-catalog phase, so it is no longer a forbidden/dead label.
+    for (const forbidden of ["آموزش", "اشتراک رایگان", "زیرمجموعه", "نمایندگی", "گردونه"]) {
       for (const label of userLabels) {
         expect(label, `user menu must not show: ${forbidden}`).not.toContain(forbidden);
       }

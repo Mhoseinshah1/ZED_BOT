@@ -170,3 +170,17 @@ Callback data is `ntf:<shortId>:<code>`; the label is never authorization. The c
 | `diagnostics_back_service` | بازگشت به سرویس | Back to the service detail. |
 
 _Labels only — callback routing never depends on an editable label._
+
+## Public retail Pricing Catalog (feat/public-pricing-catalog)
+
+| key | default | usage |
+| --- | --- | --- |
+| `pricing` | تعرفه اشتراک‌ها 💵 | User main-menu «تعرفه‌ها» row (reused). |
+| `pricing_services` | تعرفه اشتراک‌ها 🌐 | Root → service section. |
+| `pricing_other_products` | تعرفه محصولات دیگر 🛍 | Root → other-product section. |
+| `pricing_representative` | تعرفه نمایندگی من 🤝 | Link into the EXISTING representative surface (ACTIVE/SUSPENDED reps only). |
+| `pricing_buy_service` | خرید این پلن 🛒 | Service detail CTA (retail). |
+| `pricing_buy_other` | خرید این محصول 🛒 | Other detail CTA (retail). |
+| `pricing_back` | بازگشت به تعرفه‌ها | Back to the pricing root. |
+
+_Labels only — callback routing never depends on an editable label._

@@ -107,8 +107,10 @@ is locked by `apps/bot/tests/navigation-integrity.test.ts`.
 
 ## Main-menu labels and reply-keyboard routing
 
-Since the menu-keyboard-mode phase, the 8 user main-menu ButtonText rows
-(`MAIN_MENU_BUTTON_KEYS`) do double duty: besides being displayed, their
+Since the menu-keyboard-mode phase, the user main-menu ButtonText rows
+(`MAIN_MENU_BUTTON_KEYS`, derived from `MAIN_MENU_ACTION_WIRING` — the
+public-pricing-catalog phase added the always-visible `pricing` row) do double
+duty: besides being displayed, their
 **current** labels are what incoming reply-keyboard text is matched
 against when the user menu runs in `REPLY` mode (exact trimmed match →
 language-neutral action; the label still never selects behavior on its
@@ -121,9 +123,9 @@ own — the wiring is stable). Consequences:
   SAME main menu identical — «این متن دکمه با یکی دیگر از دکمه‌های همین
   منو یکسان است.» — since a duplicate would make text routing ambiguous
   (the resolver additionally fails safe to no action on any residual
-  ambiguity). The guard runs per menu scope: the 8 user main-menu keys
-  and the 9 `admin_*` admin main-menu keys are separate reply-routing
-  contexts, so the same label may exist in both menus.
+  ambiguity). The guard runs per menu scope: the user main-menu keys
+  (`MAIN_MENU_BUTTON_KEYS`) and the `admin_*` admin main-menu keys are
+  separate reply-routing contexts, so the same label may exist in both menus.
 
 Design details in `docs/user-menu-keyboard-modes.md` and
 `docs/admin-menu-keyboard-mode.md`.

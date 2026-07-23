@@ -24,32 +24,38 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 
 type Button = { text: string; callback_data?: string };
 
+// The still-unfinished placeholder sections. «تعرفه‌ها» (CB.USER_PRICING)
+// GRADUATED to a real, always-visible row in the public-pricing-catalog phase,
+// so it is no longer hidden and no longer a placeholder.
 const HIDDEN = [
   CB.USER_REFERRAL,
   CB.USER_FREE_TEST,
   CB.USER_WHEEL,
   CB.USER_TUTORIALS,
-  CB.USER_PRICING,
   CB.USER_REPRESENTATIVE,
 ];
 
 describe("user main menu (placeholders hidden)", () => {
-  it("shows exactly the implemented sections in the agreed four rows", async () => {
+  it("shows the implemented sections with the always-visible Pricing row", async () => {
     const kb = await buildUserMainKeyboard();
     const rows = kb.inline_keyboard as Button[][];
     expect(rows.map((row) => row.map((b) => b.callback_data))).toEqual([
       [CB.USER_BUY, CB.USER_RENEW],
       [CB.USER_SERVICES, CB.USER_WALLET],
       [CB.USER_OTHER_PRODUCTS, CB.USER_ORDERS],
+      // Public retail Pricing Catalog: standalone row after OTHER/ORDERS and
+      // before the (hidden) feature-gated rows.
+      [CB.USER_PRICING],
       [CB.USER_SUPPORT],
     ]);
     // Labels keep coming from getButtonText (fallbacks without a DB).
     const labels = rows.flat().map((b) => b.text);
     expect(labels).toContain("خرید اشتراک 🔐");
     expect(labels).toContain("محصولات دیگر 🛍");
+    expect(labels).toContain("تعرفه اشتراک‌ها 💵");
   });
 
-  it("hides all six unfinished placeholder sections", async () => {
+  it("hides the remaining unfinished placeholder sections", async () => {
     const kb = await buildUserMainKeyboard();
     const callbacks = (kb.inline_keyboard as Button[][])
       .flat()
@@ -59,24 +65,25 @@ describe("user main menu (placeholders hidden)", () => {
     }
   });
 
-  it("keeps the placeholder callbacks registered for old keyboards", () => {
+  it("keeps the remaining placeholder callbacks registered for old keyboards", () => {
     const handler = readFileSync(
       path.join(repoRoot, "apps/bot/src/handlers/user-placeholders.handler.ts"),
       "utf8",
     );
-    for (const constant of [
-      "USER_REFERRAL",
-      "USER_FREE_TEST",
-      "USER_WHEEL",
-      "USER_TUTORIALS",
-      "USER_PRICING",
-      "USER_REPRESENTATIVE",
-    ]) {
+    for (const constant of ["USER_WHEEL", "USER_TUTORIALS"]) {
       expect(handler, `CB.${constant} must stay in USER_SECTIONS`).toContain(`CB.${constant}`);
     }
+    // Pricing graduated out of the placeholder handler's active list: it is now
+    // owned by the real pricing handler, registered before it in app.ts.
     expect(handler).toContain("userPlaceholdersHandler.callbackQuery(section.callback");
     const app = readFileSync(path.join(repoRoot, "apps/bot/src/app.ts"), "utf8");
     expect(app).toContain("userPlaceholdersHandler");
+    expect(app).toContain("pricingHandler");
+    // Ordering: the real pricing handler MUST be mounted before the placeholder
+    // handler so old `user:pricing` keyboards reach the real catalog.
+    expect(app.indexOf("userArea.use(pricingHandler)")).toBeLessThan(
+      app.indexOf("userArea.use(userPlaceholdersHandler)"),
+    );
   });
 
   it("keeps the locked flows: user:buy unchanged, other_products separate", async () => {

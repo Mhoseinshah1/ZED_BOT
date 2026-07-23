@@ -292,3 +292,17 @@ downline, no custom panel access, no bulk account creation, no CSV export, no
 invoice PDFs, no tax documents, no KYC/identity uploads, no web/Mini-App
 dashboard, no representative-created products, and no manual price entry during
 checkout.
+
+## Interaction with the public Pricing Catalog (feat/public-pricing-catalog)
+
+The public retail Pricing Catalog («تعرفه‌ها») is **retail-only** and never
+touches representative pricing: it never calls `resolveEffectiveProductPrice`,
+`listEligibleRepresentativeProducts`, or any tier/price-row logic, and never
+creates a `RepresentativePurchase`. For an ACTIVE or SUSPENDED representative
+(and only while the program master switch is on) the pricing surface may show a
+«تعرفه نمایندگی من 🤝» button that routes to the EXISTING
+`user:representative_request` landing. When an active representative buys from the
+public page, the retail CTA is labelled «خرید عادی این پلن» and seeds a normal
+retail `CheckoutDraft` (no `draft.representative`) priced from
+`Product.priceToman`. Representative pricing remains owned exclusively by this
+program. See `docs/public-pricing-catalog.md`.

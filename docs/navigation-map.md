@@ -42,21 +42,51 @@ Legend: `»` opens page · *(flow)* switches to a text-input flow.
 
 `user:menu` and `common:back` both re-render the main menu.
 
-## User main menu (4 rows + conditional trial row, ButtonText-backed)
+## User main menu (rows + conditional trial row, ButtonText-backed)
 
 | row | button → callback |
 | --- | --- |
 | 1 | خرید اشتراک 🔐 → `user:buy` (**LOCKED**) · تمدید سرویس ♻️ → `user:renew` |
 | 2 | سرویس‌های من 🛍 → `user:services` · کیف پول + شارژ 🏦 → `user:wallet` |
 | 3 | محصولات دیگر 🛍 → `user:other_products` (**LOCKED**, separate) · سفارش‌های من 🧾 → `user:orders` |
+| 3¾ | تعرفه اشتراک‌ها 💵 → `user:pricing` — the real **public retail Pricing Catalog** (feat/public-pricing-catalog). Always visible, no rollout switch; standalone row after OTHER_PRODUCTS/MY_ORDERS and before every feature-gated row. See `docs/public-pricing-catalog.md`. |
 | 3½ (conditional) | اکانت تست رایگان 🎁 → `user:free_test` — rendered ONLY when free trials are globally enabled AND ≥ 1 trial-ready panel exists — ready includes free capacity (`getFreeTrialMenuAvailability`, the same shared policy the admin «تنظیمات اکانت تست 🎁» diagnostics page reads; feature-gated, never a placeholder) |
 | 4 | پشتیبانی ☎️ → `user:support` |
 
 Hidden until implemented (callbacks still answered with the placeholder
 page for old keyboards): `user:referral`,
-`user:lucky_wheel`, `user:tutorials`, `user:pricing`,
+`user:lucky_wheel`, `user:tutorials`,
 `user:representative_request`. `user:free_test` left this list in the
-free-trial phase — it is now the real trial flow above.
+free-trial phase — it is now the real trial flow above. `user:pricing` left
+this list in the public-pricing-catalog phase — the real «تعرفه‌ها» page
+(`apps/bot/src/handlers/user-pricing`) owns it now, registered **before** the
+placeholder handler so old `user:pricing` keyboards open the real catalog.
+
+### تعرفه‌ها — public retail Pricing Catalog (`user:pricing`)
+
+Read-only catalog + navigation into the existing retail pre-invoice. Prices
+come only from `Product.priceToman` via the one authoritative
+`loadUserRetailCatalog`. Callback contract (all ≤ 64 bytes, 8-char short ids,
+base36 pages):
+
+```
+user:pricing                                           root
+user:price:s[:<page36>]                                service panel list
+user:price:sp:<panelSid>:<page36>                      panel → category list
+user:price:sc:<panelSid>:<catSid>:<page36>             category → product list (5/page)
+user:price:sv:<prodSid>:<panelSid>:<catSid>:<page36>   service product detail
+user:price:bs:<prodSid>:<panelSid>:<catSid>:<page36>   BUY (→ retail pre-invoice)
+user:price:o[:<page36>]                                other-product category list
+user:price:oc:<catSid>:<page36>                        other category → product list (5/page)
+user:price:ov:<prodSid>:<catSid>:<page36>              other product detail
+user:price:bo:<prodSid>:<catSid>:<page36>              BUY (→ retail pre-invoice)
+```
+
+The «تعرفه نمایندگی من 🤝» button (shown only for an ACTIVE/SUSPENDED
+representative) routes to the **existing** `user:representative_request`
+surface — the retail page never resolves or snapshots a representative price.
+A pricing-origin pre-invoice returns to the exact product-list page via the
+typed `CheckoutDraft.origin`.
 
 **Keyboard mode (menu-keyboard-mode phase):** the table above is the
 `INLINE` (default) rendering. When the admin selects `REPLY` mode

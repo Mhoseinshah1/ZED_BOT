@@ -130,3 +130,17 @@ user service list, required-user-info collection, DiscountCodeUsage
 creation/usage counters, checkout-session cleanup worker, admin discount
 management. All other user menu sections stay placeholders; admin flows are
 untouched.
+
+## Shared retail pre-invoice entry (feat/public-pricing-catalog)
+
+The pre-invoice draft builder is now the single exported helper
+`startRetailPreInvoice(ctx, product, origin)` in
+`apps/bot/src/handlers/user-checkout/checkout.handler.ts`. Both the normal
+panel-first buy flow and the public Pricing Catalog enter the **same** existing
+pre-invoice through it — there is exactly one `CheckoutDraft` builder. It prices
+from the current `Product.priceToman`, mints the wallet-payment idempotency
+nonce, and stamps a typed navigation-only `CheckoutDraft.origin`
+(`RETAIL_CATALOG` | `PRICING_SERVICE` | `PRICING_OTHER` | `REPRESENTATIVE`) that
+drives ONLY the pre-invoice «بازگشت» destination. Origin never affects price,
+eligibility, settlement or authorization; a missing origin behaves exactly like
+the historical retail buy flow. See `docs/public-pricing-catalog.md`.
