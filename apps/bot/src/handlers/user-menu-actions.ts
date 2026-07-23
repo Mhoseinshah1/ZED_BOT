@@ -6,6 +6,7 @@ import { resolveMainMenuAction, type UserMainMenuAction } from "../keyboards/use
 import { ensureActiveAdminAccess } from "../middlewares/admin-auth.middleware.js";
 import { ensureUserAccess } from "../middlewares/user-access.middleware.js";
 import { showAdminMenu } from "./admin.handler.js";
+import { isInterruptibleCheckoutFlow } from "./user-checkout/checkout-state.js";
 import { openOtherProductsSection, startBuyFlow } from "./user-checkout/checkout.handler.js";
 import { openFreeTrialSection } from "./user-free-trial/free-trial.handler.js";
 import { renderOrdersHub } from "./user-orders/orders.handler.js";
@@ -106,4 +107,56 @@ userMenuTextRouter.on("message:text", async (ctx, next) => {
     return;
   }
   await openMainMenuSection(ctx, action);
+});
+
+/**
+ * Pre-flow Pricing reply-keyboard escape (fix/pricing-reply-keyboard-flow-escape).
+ *
+ * `userMenuTextRouter` above runs AFTER the flow dispatcher and self-returns
+ * while any `currentFlow` is active, so during one of the six interruptible
+ * checkout/payment INPUT flows the persistent Pricing reply button used to be
+ * consumed by the flow (validated as a discount code, uploaded as a receipt,
+ * ...) before Pricing could resolve. This router is mounted in app.ts BEFORE
+ * the flow dispatcher and rescues ONLY that exact case:
+ *
+ *   1. the user menu mode is REPLY;
+ *   2. `currentFlow` is one of the SIX interruptible checkout/payment flows
+ *      (`isInterruptibleCheckoutFlow`) — never support / representative /
+ *      customer-input / admin / any other flow;
+ *   3. the trimmed text resolves through the CURRENT ButtonText registry
+ *      (`resolveMainMenuAction`) to exactly `PRICING` (edited labels work,
+ *      stale/old labels and ambiguous duplicates fail closed to no-match);
+ *   4. the text is not a command.
+ *
+ * It then applies the SAME `ensureUserAccess` gate as every other menu entry
+ * (blocked/maintenance/terms/force-join get the normal gate and the message is
+ * consumed — never validated/uploaded), and only then opens Pricing via the
+ * existing `renderPricingRoot`, which invokes the authoritative
+ * `clearCheckoutState`. Everything else calls `next()` and reaches the flow
+ * dispatcher exactly as before. Matching a label never authorizes anything and
+ * no checkout state is cleared before the access decision.
+ */
+export const pricingReplyEscapeRouter = new Composer<BotContext>();
+
+pricingReplyEscapeRouter.on("message:text", async (ctx, next) => {
+  if (!isInterruptibleCheckoutFlow(ctx.session.currentFlow)) {
+    return next(); // only the six interruptible checkout/payment flows
+  }
+  const text = ctx.message.text;
+  if (text.startsWith("/")) {
+    return next(); // commands keep their existing cancellation/priority
+  }
+  if ((await getUserMenuMode()) !== "REPLY") {
+    return next(); // INLINE mode never routes plain text
+  }
+  if ((await resolveMainMenuAction(text)) !== "PRICING") {
+    return next(); // arbitrary text / other labels / stale label → the active flow
+  }
+  // The user pressed the CURRENT Pricing reply button. Access is decided BEFORE
+  // any state is cleared; a gated user gets the normal gate and the message is
+  // consumed (never validated as a discount / uploaded as a receipt).
+  if (!(await ensureUserAccess(ctx))) {
+    return;
+  }
+  await renderPricingRoot(ctx); // invokes the authoritative clearCheckoutState
 });

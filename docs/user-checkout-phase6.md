@@ -157,3 +157,15 @@ Support, representative-application and admin flows are untouched. Pressing Buy
 does not clear-then-render; it enters `startRetailPreInvoice`, which clears then
 seeds exactly the one new authoritative retail draft. See
 `docs/public-pricing-catalog.md`.
+
+## Pricing reply-keyboard escapes the six interruptible flows (post-merge hotfix)
+
+The six interruptible checkout/payment INPUT flows are now a single shared list,
+`INTERRUPTIBLE_CHECKOUT_FLOWS` in `user-checkout/checkout-state.js`
+(`checkout:discount`, `payment:receipt`, `wallet:topup:amount`, `renew:discount`,
+`extra_volume:discount`, `extra_time:discount`) — the exact set `clearCheckoutState`
+resets AND the only set the Pricing reply-keyboard escape may interrupt. In REPLY
+mode the pre-flow `pricingReplyEscapeRouter` (mounted before the app.ts flow
+dispatcher) rescues the current Pricing label out of these flows; every other
+flow (support / representative / customer-input / admin / …) keeps its existing
+priority. See `docs/public-pricing-catalog.md`.
