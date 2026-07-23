@@ -274,3 +274,65 @@ CSV export, public web URL, Mini App, user-driven search/sorting, favorites,
 comparison basket, representative price editing, discount previews, coupon
 discovery, stock counts, service transfer, custom service naming, support SLA,
 lucky wheel, or gamification.
+
+## Post-merge safety hotfix (fix/pricing-catalog-post-merge-safety)
+
+Two message-boundary + state defects found after PR #125 merged are addressed
+here. Behaviour, prices and checkout contracts are otherwise unchanged.
+
+### Checkout-state exit contract
+
+Entering or navigating the read-only Pricing catalog explicitly abandons any
+**incompatible** checkout/payment INPUT interaction through the ONE authoritative
+`clearCheckoutState` (wrapped as `enterPricingSurface(ctx)`), so a stale inline
+`user:pricing` / `user:price:*` button can never leave a hidden pre-invoice armed
+to consume the user's next message. It runs for the root (both the inline
+callback and the reply-keyboard menu action) and for every read-only navigation
+render (panels, categories, product list, product detail — service and other).
+It clears `currentFlow` and the associated drafts for exactly the six checkout
+flows — `checkout:discount`, `payment:receipt`, `wallet:topup:amount`,
+`renew:discount`, `extra_volume:discount`, `extra_time:discount` — and **nothing
+else**: support, representative-application and admin flows are untouched.
+Opening a Product detail creates no new draft (and clears any stale one); a
+Pricing-origin pre-invoice's «بازگشت» to its product list clears the old draft;
+pressing Buy does NOT call it — Buy enters `startRetailPreInvoice`, which itself
+clears then seeds exactly the one new authoritative retail draft.
+
+### Telegram message-budget contract
+
+The generic MessageTemplate editor permits ~4000 characters, which is **not** the
+rendering limit: a Pricing page composes several editable templates + dynamic
+content into ONE Telegram payload, and different sinks have different limits.
+Per-sink budgets live in `handlers/user-pricing/pricing-bounds.ts`:
+
+| constant | value | sink |
+| --- | --- | --- |
+| `TELEGRAM_TEXT_LIMIT` | 4096 | real text-message limit |
+| `PRICING_ROOT_SAFE_LIMIT` | 3900 | root page |
+| `PRICING_DETAIL_SAFE_LIMIT` | 3900 | service/other detail |
+| `PRICING_EMPTY_SAFE_LIMIT` | 3900 | empty-state page |
+| `CALLBACK_TOAST_SAFE_LIMIT` | 180 | `answerCallbackQuery` toast |
+
+Pure helpers enforce them: `boundPlainText` (plain sinks — root, empty, toast),
+`boundHtmlText` (HTML sinks — escape-aware: it bounds the RAW template and
+escapes code point by code point, so a truncation never cuts an HTML entity, tag
+or surrogate pair), `boundToast` (toast text with a safe fallback when blank), and
+`withinTelegramLimit` (final verification). Application:
+
+- **root** — intro and disclaimer are each bounded so the completed message stays
+  within `PRICING_ROOT_SAFE_LIMIT`; the code-generated service/other counts and
+  the keyboard are never truncated or omitted;
+- **detail** — the disclaimer, product name/panel/category and (existing-contract)
+  description are each bounded to a per-field ESCAPED budget whose sum stays well
+  under `PRICING_DETAIL_SAFE_LIMIT`; the message remains valid HTML;
+- **empty state** — the editable template is bounded under
+  `PRICING_EMPTY_SAFE_LIMIT`; navigation buttons always render (no oversized
+  fallback loop);
+- **unavailable toast** — bounded to `CALLBACK_TOAST_SAFE_LIMIT` with a safe
+  fallback; because `safeAnswerCallback` never throws, a toast failure never
+  prevents the stale-product page refresh.
+
+`safeEditOrReply` / `safeAnswerCallback` are **not** changed globally — the
+bounding is Pricing-specific so payment/support text is never implicitly cut.
+When truncation occurs a single ellipsis is appended. Operator edits remain
+stored verbatim (up to the editor maximum); only their RENDERED use is bounded.

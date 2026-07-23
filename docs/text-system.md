@@ -129,3 +129,17 @@ own — the wiring is stable). Consequences:
 
 Design details in `docs/user-menu-keyboard-modes.md` and
 `docs/admin-menu-keyboard-mode.md`.
+
+## Storage limit vs. rendering limit (Pricing Catalog)
+
+The generic MessageTemplate editor maximum (~4000 characters) is a **storage**
+limit, NOT a per-page rendering limit. A page may compose several editable
+templates plus dynamic content into one Telegram payload, and different sinks
+have different real limits (a text message ≈ 4096 UTF-16 code units; an
+`answerCallbackQuery` toast is far smaller). Surfaces that compose editable text
+must therefore bound each value to a per-sink budget at render time — see the
+public retail Pricing Catalog (`apps/bot/src/handlers/user-pricing/pricing-bounds.ts`:
+`boundPlainText`, `boundHtmlText`, `boundToast`, `withinTelegramLimit`; HTML
+bounding is escape-aware so a truncation never cuts an entity/tag/surrogate).
+Operator edits stay stored verbatim; only the rendered use is bounded. See
+`docs/public-pricing-catalog.md`.

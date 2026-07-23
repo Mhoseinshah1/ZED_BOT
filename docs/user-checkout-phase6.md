@@ -144,3 +144,16 @@ nonce, and stamps a typed navigation-only `CheckoutDraft.origin`
 drives ONLY the pre-invoice «بازگشت» destination. Origin never affects price,
 eligibility, settlement or authorization; a missing origin behaves exactly like
 the historical retail buy flow. See `docs/public-pricing-catalog.md`.
+
+## Pricing navigation abandons incompatible checkout input (post-merge hotfix)
+
+Entering or navigating the read-only public Pricing Catalog calls the ONE
+authoritative `clearCheckoutState` (via `enterPricingSurface`), so a stale inline
+`user:pricing` / `user:price:*` button abandons any in-progress
+`checkout:discount` / `payment:receipt` / `wallet:topup:amount` /
+`renew:discount` / `extra_volume:discount` / `extra_time:discount` input flow and
+its draft — a hidden pre-invoice can no longer consume the user's next message.
+Support, representative-application and admin flows are untouched. Pressing Buy
+does not clear-then-render; it enters `startRetailPreInvoice`, which clears then
+seeds exactly the one new authoritative retail draft. See
+`docs/public-pricing-catalog.md`.
