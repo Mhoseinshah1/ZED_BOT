@@ -315,6 +315,11 @@ retries/reconciliation) — `docs/service-naming-strategies.md`,
 `docs/provisioning-idempotency.md`. OTHER_PRODUCT orders get safe
 deterministic delivery references — `docs/other-product-naming.md`.
 
+On every paid VPN service purchase the buyer chooses their own remote panel
+username (custom or opaque crypto-random) and an optional private subscription
+note, held by a DB-authoritative reservation from selection through
+provisioning — `docs/service-checkout-username-note.md`.
+
 **Device connection guides** (disabled by default): an `آموزش اتصال 📱`
 capability under every eligible Service with per-platform, operator-managed
 "how to connect" pages for iPhone/iPad, Android, Windows, macOS, Linux and
