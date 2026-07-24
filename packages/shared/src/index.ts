@@ -20,3 +20,4 @@ export * from "./representative-program.js";
 export * from "./purchase-menu.js";
 export * from "./stars-subscription.js";
 export * from "./template.js";
+export * from "./service-username.js";

@@ -122,6 +122,32 @@ enum UsernamePatternType {
   REPRESENTATIVE_TEXT_SEQUENCE
 }
 
+// Service-checkout username selection (feat/service-checkout-username-note): how
+// the buyer chose the REMOTE panel account username during checkout. CUSTOM = the
+// buyer typed it; RANDOM = an opaque `u_`-prefixed value generated with node
+// crypto. This is the ORIGIN of the identity, orthogonal to the panel's
+// UsernamePatternType (which only applies when the buyer makes no explicit choice).
+enum ServiceUsernameMode {
+  CUSTOM
+  RANDOM
+}
+
+// Durable reservation lifecycle for a buyer-selected service username. The DB is
+// the single authority (never an in-memory Set / Redis-only lock / session-only
+// flag). HELD = short-TTL hold while the buyer finishes checkout; BOUND = attached
+// to a durable CheckoutSession/Order (no HELD TTL — expiry then derives from the
+// linked checkout/payment/order state); CONSUMED = a Service was created with this
+// username; RELEASED = explicitly given up (username change / abandonment);
+// EXPIRED = reclaimed by the bounded cleanup sweep. Only HELD/BOUND/CONSUMED hold
+// the `(panelId, activeUsernameKey)` uniqueness slot; RELEASED/EXPIRED free it.
+enum ServiceUsernameReservationStatus {
+  HELD
+  BOUND
+  CONSUMED
+  RELEASED
+  EXPIRED
+}
+
 enum ProductType {
   SERVICE_PRODUCT
   OTHER_PRODUCT
@@ -596,6 +622,8 @@ model User {
   representative              Representative?              @relation("UserRepresentative")
   representativeApplications  RepresentativeApplication[]
   representativePurchases     RepresentativePurchase[]
+  // Service-checkout username selection: this user's buyer-username reservations.
+  serviceUsernameReservations ServiceUsernameReservation[]
 
   @@index([status])
   @@index([group])
@@ -754,6 +782,8 @@ model Panel {
   freeTrialClaims       FreeTrialClaim[]
   freeTrialEntitlements FreeTrialEntitlement[]
   serviceEventLogs      ServiceEventLog[]
+  // Service-checkout username selection: buyer-username reservations on this panel.
+  usernameReservations  ServiceUsernameReservation[]
 
   @@index([status])
   @@index([type])
@@ -971,10 +1001,12 @@ model CheckoutSession {
   createdAt                       DateTime        @default(now())
   updatedAt                       DateTime        @updatedAt
 
-  orders         Order[]
-  payments       Payment[]
-  discountUsages DiscountCodeUsage[]
-  customerInput  CheckoutCustomerInput?
+  orders               Order[]
+  payments             Payment[]
+  discountUsages       DiscountCodeUsage[]
+  customerInput        CheckoutCustomerInput?
+  // Service-checkout username selection: reservation(s) BOUND to this checkout.
+  usernameReservations ServiceUsernameReservation[]
 
   @@index([userId])
   @@index([status])
@@ -1026,6 +1058,13 @@ model Order {
   // legacy orders (they resolve from live config at provisioning time).
   inboundIdsSnapshot         Json?
   noteSnapshot               String?
+  // Service-checkout username selection (feat/service-checkout-username-note):
+  // the buyer's OPTIONAL subscription note, captured while the Telegram session
+  // was still alive and frozen here so every payment method (wallet, card,
+  // gateway, Stars) provisions from the same immutable text. Null = the buyer
+  // skipped the note (or a legacy order predates this feature). This is the
+  // buyer-facing note ONLY - never the internal `zedbot order:...` panel marker.
+  serviceNoteSnapshot        String?
   panelNameSnapshot          String?
   locationSnapshot           String?
   categorySnapshot           String?
@@ -1052,13 +1091,15 @@ model Order {
   cancelledAt DateTime?
   refundedAt  DateTime?
 
-  payments               Payment[]            @relation("PaymentOrder")
-  walletTransactions     WalletTransaction[]  @relation("OrderWalletTransactions")
+  payments               Payment[]                    @relation("PaymentOrder")
+  walletTransactions     WalletTransaction[]          @relation("OrderWalletTransactions")
   discountUsages         DiscountCodeUsage[]
-  createdServices        Service[]            @relation("OrderCreatedService")
+  createdServices        Service[]                    @relation("OrderCreatedService")
   otherProductOrder      OtherProductOrder?
   referralCommissions    ReferralCommission[]
-  firstPurchaseReferrals Referral[]           @relation("ReferralFirstPurchaseOrder")
+  firstPurchaseReferrals Referral[]                   @relation("ReferralFirstPurchaseOrder")
+  // Service-checkout username selection: reservation(s) BOUND to this order.
+  usernameReservations   ServiceUsernameReservation[]
 
   @@index([userId])
   @@index([status])
@@ -1289,6 +1330,13 @@ model Service {
   panelType              PanelType // snapshot of the panel type at creation
   username               String        @unique
   note                   String?
+  // Service-checkout username selection (feat/service-checkout-username-note):
+  // the buyer's OPTIONAL subscription note, copied verbatim from
+  // Order.serviceNoteSnapshot at provisioning. Null = the buyer skipped it (or a
+  // legacy service predates this feature). This is buyer-facing and rendered
+  // (HTML-escaped) on the service detail page; it is NEVER the internal `note`
+  // marker above and is NEVER pushed to the remote panel.
+  userNote               String?
   // Naming phase: how `username` (the REMOTE technical identity) was
   // resolved - { strategy, version, resolvedRemoteUsername,
   // resolvedDisplayName }. Null = LEGACY (created before the naming phase);
@@ -1362,6 +1410,9 @@ model Service {
   supportTickets         SupportTicket[]                @relation("ServiceSupportTickets")
   // Admin Service Operations: durable admin lifecycle/note audit rows.
   adminOperations        AdminServiceOperation[]
+  // Service-checkout username selection: the reservation that this Service
+  // CONSUMED (at most one; the reservation's serviceId is unique).
+  usernameReservation    ServiceUsernameReservation?
 
   @@index([userId])
   @@index([panelId])
@@ -1405,6 +1456,75 @@ model ServiceEventLog {
   @@index([panelId])
   @@index([eventType])
   @@index([createdAt])
+}
+
+// Service-checkout username selection (feat/service-checkout-username-note). The
+// DURABLE, DB-authoritative reservation of a buyer-selected REMOTE panel username
+// held from selection through provisioning. It is the ONLY authority for the
+// "one active reservation per (panelId, username)" invariant — never an in-memory
+// Set, a Redis-only lock, or Telegram-session state.
+//
+// `normalizedUsername` is the lower-cased, validated username (kept for audit /
+// display / lookup in EVERY state). `activeUsernameKey` mirrors it ONLY while the
+// reservation is HELD/BOUND/CONSUMED and is set to NULL on RELEASED/EXPIRED; the
+// `@@unique([panelId, activeUsernameKey])` constraint (NULLs are distinct in
+// Postgres) is therefore a FILTERED uniqueness that lets a freed username be
+// re-reserved while still forbidding two live holders — a check-then-insert race
+// surfaces as P2002, resolved by re-reading the winner. Global collisions across
+// panels are additionally guarded by Service.username @unique + a service-layer
+// availability check.
+//
+// Lifecycle transitions are CAS (updateMany with a status guard), so concurrent
+// settlement / cleanup / change-username paths converge deterministically:
+//   HELD ──bind──▶ BOUND ──consume──▶ CONSUMED
+//     │              │
+//     └── release/expire ─┴──▶ RELEASED / EXPIRED
+// Changing username atomically INSERTs the new active row before RELEASE-ing the
+// old one, so the buyer never loses their hold on a P2002.
+model ServiceUsernameReservation {
+  id                 String                           @id @default(uuid())
+  panelId            String
+  panel              Panel                            @relation(fields: [panelId], references: [id])
+  userId             String
+  user               User                             @relation(fields: [userId], references: [id])
+  // The validated, lower-cased username. Retained in every state for audit.
+  normalizedUsername String
+  // Mirrors normalizedUsername while HELD/BOUND/CONSUMED; NULL once RELEASED or
+  // EXPIRED so the (panelId, activeUsernameKey) slot is freed for re-use.
+  activeUsernameKey  String?
+  mode               ServiceUsernameMode
+  status             ServiceUsernameReservationStatus @default(HELD)
+  // The checkout draft nonce that created/refreshed this hold. Same
+  // (userId, draftNonce) idempotently reuses the existing row instead of
+  // stacking duplicate holds.
+  draftNonce         String?
+  // Durable links, populated as the reservation advances. A BOUND reservation is
+  // protected from HELD-TTL expiry precisely because these point at live rows;
+  // the cleanup sweep consults the linked checkout/payment/order/service state.
+  checkoutSessionId  String?
+  checkoutSession    CheckoutSession?                 @relation(fields: [checkoutSessionId], references: [id])
+  orderId            String?
+  order              Order?                           @relation(fields: [orderId], references: [id])
+  serviceId          String?                          @unique
+  service            Service?                         @relation(fields: [serviceId], references: [id])
+  // Short HELD-state TTL. Null once BOUND (BOUND expiry derives from the linked
+  // durable state, never this timestamp).
+  expiresAt          DateTime?
+  boundAt            DateTime?
+  consumedAt         DateTime?
+  releasedAt         DateTime?
+  createdAt          DateTime                         @default(now())
+  updatedAt          DateTime                         @updatedAt
+
+  @@unique([panelId, activeUsernameKey])
+  @@index([userId])
+  @@index([panelId])
+  @@index([status])
+  @@index([normalizedUsername])
+  @@index([checkoutSessionId])
+  @@index([orderId])
+  @@index([expiresAt])
+  @@index([userId, draftNonce])
 }
 
 // Admin Service Operations (feat/admin-service-operations). The DURABLE audit +
