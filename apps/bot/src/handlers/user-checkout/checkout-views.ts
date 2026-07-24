@@ -13,6 +13,7 @@ import { CB } from "../../core/callbacks.js";
 import type { CheckoutDraft } from "../../core/session.js";
 import { categoryShortId } from "../../services/category.service.js";
 import { productShortId, type ProductWithRelations } from "../../services/product.service.js";
+import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { PRICE_CB } from "../user-pricing/pricing-cb.js";
 import { ccb, CO_CB } from "./checkout-cb.js";
@@ -178,6 +179,24 @@ export function preInvoiceText(
 // paid SERVICE checkout that provisions a normal VPN account. All buyer-facing
 // dynamic values are HTML-escaped; every callback binds to a CO_CB constant.
 
+// --- registry keys + fallback copy -------------------------------------------
+// Operator-editable via the admin text panel (seed-if-missing). The buyer-facing
+// display text comes from the registry with these constants as the fallback;
+// routing always binds to CO_CB.* constants, never to any label.
+export const SVC_TEXT_KEYS = {
+  method: "svc_username_method",
+  customPrompt: "svc_username_custom_prompt",
+  notePrompt: "svc_note_prompt",
+} as const;
+export const SVC_BUTTON_KEYS = {
+  custom: "svc_username_custom",
+  random: "svc_username_random",
+  regen: "svc_username_regen",
+  method: "svc_username_method_back",
+  confirm: "svc_username_confirm",
+  noteSkip: "svc_note_skip",
+} as const;
+
 export const SERVICE_USERNAME_METHOD_TEXT = [
   "👤 <b>انتخاب یوزرنیم سرویس</b>",
   "",
@@ -204,13 +223,36 @@ export const SERVICE_NOTE_PROMPT_TEXT = [
   `حداکثر ${SERVICE_NOTE_MAX_CODE_POINTS} کاراکتر. برای رد شدن، دکمه زیر را بزنید.`,
 ].join("\n");
 
-export function serviceUsernameMethodKeyboard(): InlineKeyboard {
+// Button-label fallbacks (mirror the seeded ButtonText defaults).
+const SVC_LABEL = {
+  custom: "✍️ انتخاب یوزرنیم دلخواه",
+  random: "🎲 یوزرنیم تصادفی",
+  regen: "🎲 تولید مجدد",
+  method: "↩️ انتخاب روش دیگر",
+  confirm: "✅ تأیید و ادامه",
+  noteSkip: "رد کردن (بدون یادداشت)",
+  cancel: "انصراف",
+  backMenu: "بازگشت به منو",
+  changeUsername: "↩️ تغییر یوزرنیم",
+} as const;
+
+export async function serviceUsernameMethodText(): Promise<string> {
+  return getMessageTemplate(SVC_TEXT_KEYS.method, SERVICE_USERNAME_METHOD_TEXT);
+}
+export async function serviceUsernameCustomPromptText(): Promise<string> {
+  return getMessageTemplate(SVC_TEXT_KEYS.customPrompt, SERVICE_USERNAME_CUSTOM_PROMPT_TEXT);
+}
+export async function serviceNotePromptText(): Promise<string> {
+  return getMessageTemplate(SVC_TEXT_KEYS.notePrompt, SERVICE_NOTE_PROMPT_TEXT);
+}
+
+export async function serviceUsernameMethodKeyboard(): Promise<InlineKeyboard> {
   return new InlineKeyboard()
-    .text("✍️ انتخاب یوزرنیم دلخواه", CO_CB.UN_CUSTOM)
+    .text(await getButtonText(SVC_BUTTON_KEYS.custom, SVC_LABEL.custom), CO_CB.UN_CUSTOM)
     .row()
-    .text("🎲 یوزرنیم تصادفی", CO_CB.UN_RANDOM)
+    .text(await getButtonText(SVC_BUTTON_KEYS.random, SVC_LABEL.random), CO_CB.UN_RANDOM)
     .row()
-    .text("بازگشت به منو", CB.USER_MENU);
+    .text(SVC_LABEL.backMenu, CB.USER_MENU);
 }
 
 export function serviceUsernameConfirmText(username: string, isRandom: boolean): string {
@@ -227,24 +269,28 @@ export function serviceUsernameConfirmText(username: string, isRandom: boolean):
   ].join("\n");
 }
 
-export function serviceUsernameConfirmKeyboard(isRandom: boolean): InlineKeyboard {
-  const kb = new InlineKeyboard().text("✅ تأیید و ادامه", CO_CB.UN_CONFIRM).row();
+export async function serviceUsernameConfirmKeyboard(isRandom: boolean): Promise<InlineKeyboard> {
+  const kb = new InlineKeyboard()
+    .text(await getButtonText(SVC_BUTTON_KEYS.confirm, SVC_LABEL.confirm), CO_CB.UN_CONFIRM)
+    .row();
   if (isRandom) {
-    kb.text("🎲 تولید مجدد", CO_CB.UN_REGEN).row();
+    kb.text(await getButtonText(SVC_BUTTON_KEYS.regen, SVC_LABEL.regen), CO_CB.UN_REGEN).row();
   }
-  kb.text("↩️ انتخاب روش دیگر", CO_CB.UN_METHOD).row().text("بازگشت به منو", CB.USER_MENU);
+  kb.text(await getButtonText(SVC_BUTTON_KEYS.method, SVC_LABEL.method), CO_CB.UN_METHOD)
+    .row()
+    .text(SVC_LABEL.backMenu, CB.USER_MENU);
   return kb;
 }
 
 export function serviceUsernameCustomPromptKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("انصراف", CO_CB.UN_METHOD);
+  return new InlineKeyboard().text(SVC_LABEL.cancel, CO_CB.UN_METHOD);
 }
 
-export function serviceNotePromptKeyboard(): InlineKeyboard {
+export async function serviceNotePromptKeyboard(): Promise<InlineKeyboard> {
   return new InlineKeyboard()
-    .text("رد کردن (بدون یادداشت)", CO_CB.NOTE_SKIP)
+    .text(await getButtonText(SVC_BUTTON_KEYS.noteSkip, SVC_LABEL.noteSkip), CO_CB.NOTE_SKIP)
     .row()
-    .text("↩️ تغییر یوزرنیم", CO_CB.UN_METHOD);
+    .text(SVC_LABEL.changeUsername, CO_CB.UN_METHOD);
 }
 
 /** Safe, buyer-facing message for a rejected username (never echoes raw input). */

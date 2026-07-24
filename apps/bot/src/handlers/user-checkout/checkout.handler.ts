@@ -62,15 +62,15 @@ import {
   preInvoiceKeyboard,
   preInvoiceText,
   productListKeyboard,
-  SERVICE_NOTE_PROMPT_TEXT,
-  SERVICE_USERNAME_CUSTOM_PROMPT_TEXT,
-  SERVICE_USERNAME_METHOD_TEXT,
   serviceNotePromptKeyboard,
+  serviceNotePromptText,
   serviceNoteRejectText,
   serviceUsernameConfirmKeyboard,
   serviceUsernameConfirmText,
   serviceUsernameCustomPromptKeyboard,
+  serviceUsernameCustomPromptText,
   serviceUsernameMethodKeyboard,
+  serviceUsernameMethodText,
   serviceUsernameRejectText,
   serviceUsernameUnavailableText,
   walletConfirmText,
@@ -403,12 +403,12 @@ async function renderServiceUsernameEntry(
   let text: string;
   let keyboard: InlineKeyboard;
   if (draft.serviceCustomization === undefined) {
-    text = SERVICE_USERNAME_METHOD_TEXT;
-    keyboard = serviceUsernameMethodKeyboard();
+    text = await serviceUsernameMethodText();
+    keyboard = await serviceUsernameMethodKeyboard();
   } else {
     const isRandom = draft.serviceCustomization.usernameMode === ServiceUsernameMode.RANDOM;
     text = serviceUsernameConfirmText(draft.serviceCustomization.normalizedUsername, isRandom);
-    keyboard = serviceUsernameConfirmKeyboard(isRandom);
+    keyboard = await serviceUsernameConfirmKeyboard(isRandom);
   }
   if (edit) {
     await safeEditOrReply(ctx, text, keyboard, HTML);
@@ -457,7 +457,7 @@ checkoutHandler.callbackQuery(CO_CB.UN_CUSTOM, async (ctx) => {
   await safeAnswerCallback(ctx);
   await safeEditOrReply(
     ctx,
-    SERVICE_USERNAME_CUSTOM_PROMPT_TEXT,
+    await serviceUsernameCustomPromptText(),
     serviceUsernameCustomPromptKeyboard(),
     HTML,
   );
@@ -506,7 +506,7 @@ checkoutHandler.callbackQuery(CO_CB.UN_CONFIRM, async (ctx) => {
   }
   ctx.session.currentFlow = SVC_NOTE_FLOW;
   await safeAnswerCallback(ctx);
-  await safeEditOrReply(ctx, SERVICE_NOTE_PROMPT_TEXT, serviceNotePromptKeyboard(), HTML);
+  await safeEditOrReply(ctx, await serviceNotePromptText(), await serviceNotePromptKeyboard(), HTML);
 });
 
 // Skip the optional note (stores null) → render the pre-invoice.
@@ -908,7 +908,7 @@ async function handleServiceNoteText(
   }
   const normalized = normalizeServiceNote(text);
   if (!normalized.ok) {
-    await safeReply(ctx, serviceNoteRejectText(normalized.reason), serviceNotePromptKeyboard());
+    await safeReply(ctx, serviceNoteRejectText(normalized.reason), await serviceNotePromptKeyboard());
     return;
   }
   draft.serviceCustomization.note = normalized.normalized.length > 0 ? normalized.normalized : null;

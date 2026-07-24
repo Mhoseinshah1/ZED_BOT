@@ -27,6 +27,7 @@ import {
   type WorkerRedisConnection,
 } from "./queues.js";
 import { rawRedisClient } from "./redis.js";
+import { startReservationCleanupLoop } from "./reservations/cleanup.js";
 import { startScheduleReconciler } from "./scheduler.js";
 import { createBackupProcessor } from "./workers.js";
 
@@ -83,6 +84,10 @@ async function run(options: RedisConnectionOptions): Promise<void> {
   const redis = await rawRedisClient(backupQueue);
   const stopHeartbeat = startHeartbeat(redis);
   const stopReconciler = startScheduleReconciler(backupQueue);
+  // Service-checkout username reservation cleanup (feat/service-checkout-username-note):
+  // an unconditional bounded sweep that reclaims abandoned username holds. Runs on
+  // its own fixed cadence, independent of any feature master switch.
+  const stopReservationCleanup = startReservationCleanupLoop();
 
   // Wallet auto-renewal engine (own scan/reconcile/cleanup queue + scheduler).
   // Dormant until the operator enables the master switch. Started BEFORE the
@@ -169,6 +174,7 @@ async function run(options: RedisConnectionOptions): Promise<void> {
     logger.info(`received ${signal}, shutting down`);
     stopHeartbeat();
     stopReconciler();
+    stopReservationCleanup();
     try {
       await notificationEngine.stop();
       await starsSubscriptionEngine.stop();
