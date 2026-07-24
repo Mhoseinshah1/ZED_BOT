@@ -1,4 +1,12 @@
 import type { CheckoutSession, Panel, ProductCategory, User } from "@zedbot/database";
+import {
+  SERVICE_NOTE_MAX_CODE_POINTS,
+  SERVICE_USERNAME_MAX_LENGTH,
+  SERVICE_USERNAME_MIN_LENGTH,
+  type ServiceNoteRejectReason,
+  type ServiceUsernameAvailabilityOutcome,
+  type ServiceUsernameRejectReason,
+} from "@zedbot/shared";
 import { InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -103,6 +111,17 @@ export function preInvoiceText(
       `⏳ مدت اعتبار: ${durationLabel(product.durationDays)}`,
       `🧯 حجم سرویس: ${volumeLabel(product.volumeGb)}`,
     );
+    // Service-checkout username selection (feat/service-checkout-username-note):
+    // the buyer-chosen remote username and optional note, both HTML-escaped.
+    const custom = draft.serviceCustomization;
+    if (custom !== undefined && custom.completed) {
+      lines.push(`👤 یوزرنیم: <code>${escapeHtml(custom.normalizedUsername)}</code>`);
+      lines.push(
+        custom.note !== null && custom.note !== ""
+          ? `📝 یادداشت: ${escapeHtml(custom.note)}`
+          : "📝 یادداشت: ندارد",
+      );
+    }
   } else {
     if (product.durationDays !== null && product.durationDays > 0) {
       lines.push(`⏳ مدت اعتبار: ${durationLabel(product.durationDays)}`);
@@ -152,6 +171,124 @@ export function preInvoiceText(
     lines.push("موجودی کیف پول برای پرداخت کافی نیست.");
   }
   return lines.join("\n");
+}
+
+// --- Service username + optional note steps ---------------------------------
+// (feat/service-checkout-username-note). Shown BEFORE the pre-invoice for every
+// paid SERVICE checkout that provisions a normal VPN account. All buyer-facing
+// dynamic values are HTML-escaped; every callback binds to a CO_CB constant.
+
+export const SERVICE_USERNAME_METHOD_TEXT = [
+  "👤 <b>انتخاب یوزرنیم سرویس</b>",
+  "",
+  "یوزرنیم، نام کاربری واقعی حساب شما روی پنل است و پس از ساخت سرویس ثابت می‌ماند.",
+  "",
+  `• بین ${SERVICE_USERNAME_MIN_LENGTH} تا ${SERVICE_USERNAME_MAX_LENGTH} کاراکتر`,
+  "• فقط حروف کوچک انگلیسی، عدد و زیرخط (_)",
+  "• شروع با یک حرف کوچک انگلیسی",
+  "",
+  "می‌توانید خودتان یوزرنیم را انتخاب کنید یا یک یوزرنیم تصادفی امن دریافت کنید.",
+].join("\n");
+
+export const SERVICE_USERNAME_CUSTOM_PROMPT_TEXT = [
+  "یوزرنیم دلخواه خود را ارسال کنید:",
+  "",
+  `• بین ${SERVICE_USERNAME_MIN_LENGTH} تا ${SERVICE_USERNAME_MAX_LENGTH} کاراکتر`,
+  "• فقط حروف کوچک انگلیسی، عدد و زیرخط (_)، شروع با حرف",
+].join("\n");
+
+export const SERVICE_NOTE_PROMPT_TEXT = [
+  "📝 <b>یادداشت سرویس (اختیاری)</b>",
+  "",
+  "می‌توانید یک یادداشت کوتاه برای این سرویس ثبت کنید (مثلاً نام دستگاه یا کاربر).",
+  `حداکثر ${SERVICE_NOTE_MAX_CODE_POINTS} کاراکتر. برای رد شدن، دکمه زیر را بزنید.`,
+].join("\n");
+
+export function serviceUsernameMethodKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("✍️ انتخاب یوزرنیم دلخواه", CO_CB.UN_CUSTOM)
+    .row()
+    .text("🎲 یوزرنیم تصادفی", CO_CB.UN_RANDOM)
+    .row()
+    .text("بازگشت به منو", CB.USER_MENU);
+}
+
+export function serviceUsernameConfirmText(username: string, isRandom: boolean): string {
+  return [
+    "👤 <b>یوزرنیم انتخابی شما</b>",
+    "",
+    `<code>${escapeHtml(username)}</code>`,
+    "",
+    isRandom
+      ? "این یوزرنیم به‌صورت تصادفی و امن ساخته شده است."
+      : "این یوزرنیم روی پنل برای حساب شما ثبت خواهد شد.",
+    "",
+    "برای ادامه تأیید کنید یا یوزرنیم را تغییر دهید.",
+  ].join("\n");
+}
+
+export function serviceUsernameConfirmKeyboard(isRandom: boolean): InlineKeyboard {
+  const kb = new InlineKeyboard().text("✅ تأیید و ادامه", CO_CB.UN_CONFIRM).row();
+  if (isRandom) {
+    kb.text("🎲 تولید مجدد", CO_CB.UN_REGEN).row();
+  }
+  kb.text("↩️ انتخاب روش دیگر", CO_CB.UN_METHOD).row().text("بازگشت به منو", CB.USER_MENU);
+  return kb;
+}
+
+export function serviceUsernameCustomPromptKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("انصراف", CO_CB.UN_METHOD);
+}
+
+export function serviceNotePromptKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("رد کردن (بدون یادداشت)", CO_CB.NOTE_SKIP)
+    .row()
+    .text("↩️ تغییر یوزرنیم", CO_CB.UN_METHOD);
+}
+
+/** Safe, buyer-facing message for a rejected username (never echoes raw input). */
+export function serviceUsernameRejectText(reason: ServiceUsernameRejectReason): string {
+  switch (reason) {
+    case "EMPTY":
+      return "یوزرنیم نمی‌تواند خالی باشد. دوباره ارسال کنید.";
+    case "TOO_SHORT":
+      return `یوزرنیم باید حداقل ${SERVICE_USERNAME_MIN_LENGTH} کاراکتر باشد. دوباره ارسال کنید.`;
+    case "TOO_LONG":
+      return `یوزرنیم باید حداکثر ${SERVICE_USERNAME_MAX_LENGTH} کاراکتر باشد. دوباره ارسال کنید.`;
+    case "BAD_FIRST_CHAR":
+      return "یوزرنیم باید با یک حرف کوچک انگلیسی شروع شود. دوباره ارسال کنید.";
+    case "BAD_CHARS":
+      return "فقط حروف کوچک انگلیسی، عدد و زیرخط (_) مجاز است. دوباره ارسال کنید.";
+  }
+}
+
+/** Safe, buyer-facing message for an unavailable username (never raw panel errors). */
+export function serviceUsernameUnavailableText(
+  outcome: Exclude<ServiceUsernameAvailabilityOutcome, "AVAILABLE">,
+): string {
+  switch (outcome) {
+    case "TAKEN_LOCAL":
+    case "TAKEN_REMOTE":
+    case "RESERVED":
+      return "این یوزرنیم قبلاً گرفته شده است. لطفاً یوزرنیم دیگری انتخاب کنید.";
+    case "INVALID":
+      return "یوزرنیم نامعتبر است. لطفاً دوباره تلاش کنید.";
+    case "PANEL_UNAVAILABLE":
+      return "امکان بررسی یوزرنیم روی این پنل در حال حاضر وجود ندارد. لطفاً بعداً تلاش کنید یا یوزرنیم تصادفی بگیرید.";
+    case "UNVERIFIABLE":
+      return "بررسی این یوزرنیم ممکن نشد. لطفاً دوباره تلاش کنید یا یوزرنیم تصادفی بگیرید.";
+  }
+}
+
+/** Safe, buyer-facing message for a rejected note (never echoes raw input). */
+export function serviceNoteRejectText(reason: ServiceNoteRejectReason): string {
+  switch (reason) {
+    case "TOO_LONG":
+      return `یادداشت باید حداکثر ${SERVICE_NOTE_MAX_CODE_POINTS} کاراکتر باشد. دوباره ارسال کنید یا رد کنید.`;
+    case "CONTROL_OR_BIDI":
+      return "یادداشت شامل کاراکترهای غیرمجاز است. لطفاً متن دیگری ارسال کنید یا رد کنید.";
+  }
 }
 
 /** True when the wallet-pay button may be offered for this draft (Phase 15). */

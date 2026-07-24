@@ -6,6 +6,7 @@ import type {
   PanelType,
   ProductType,
   ServiceLocation,
+  ServiceUsernameMode,
   TrafficResetCycle,
 } from "@zedbot/database";
 import type {
@@ -127,6 +128,36 @@ export interface CheckoutDraft {
    * fingerprints) that the settlement boundary re-validates before money moves.
    */
   representative?: RepresentativeDraftContext;
+  /**
+   * Service-checkout username selection (feat/service-checkout-username-note):
+   * present ONLY on a SERVICE_PRODUCT checkout that provisions a normal VPN
+   * Service. Captures the buyer's chosen remote username (+ its durable
+   * reservation) and optional subscription note BEFORE the pre-invoice renders.
+   * Absent on OTHER_PRODUCT and on legacy in-flight drafts. `completed` gates the
+   * pre-invoice: a SERVICE pre-invoice never renders until it is true.
+   */
+  serviceCustomization?: ServiceCustomizationDraft;
+}
+
+/**
+ * The buyer's service-username + note choices carried on a SERVICE checkout draft
+ * (feat/service-checkout-username-note). The durable authority is the DB
+ * reservation (reservationId) + CheckoutSession.productSnapshot; this session copy
+ * only drives the UI and is re-validated at every settlement boundary.
+ */
+export interface ServiceCustomizationDraft {
+  /** "CUSTOM" (buyer typed it) or "RANDOM" (opaque u_-prefixed crypto value). */
+  usernameMode: ServiceUsernameMode;
+  /** The validated, lower-cased remote username the reservation holds. */
+  normalizedUsername: string;
+  /** Id of the durable ServiceUsernameReservation currently held for this draft. */
+  reservationId: string;
+  /** The optional subscription note, or null when the buyer chose «رد کردن». */
+  note: string | null;
+  /** ISO timestamp the username was confirmed (audit / snapshot). */
+  usernameConfirmedAt: string;
+  /** True once BOTH steps (username confirmed + note entered/skipped) are done. */
+  completed: boolean;
 }
 
 /** The frozen reseller-pricing agreement carried on a representative checkout

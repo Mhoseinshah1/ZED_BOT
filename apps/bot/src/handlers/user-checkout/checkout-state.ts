@@ -1,17 +1,21 @@
 import type { BotContext } from "../../core/context.js";
 
 /**
- * The SIX checkout/payment INPUT flows that are safe to abandon when the user
+ * The checkout/payment INPUT flows that are safe to abandon when the user
  * deliberately navigates away (e.g. presses the Pricing button): discount
- * entry, the card-to-card receipt upload, the wallet top-up amount, and the
- * renewal / extra-volume / extra-time discount entries. `clearCheckoutState`
- * resets exactly these, and the Pricing reply-keyboard escape route
- * (fix/pricing-reply-keyboard-flow-escape) may interrupt ONLY these. Support,
- * representative-application, customer-input-form, admin and every other
- * conversational flow are deliberately NOT here — they keep their priority.
+ * entry, the card-to-card receipt upload, the wallet top-up amount, the
+ * renewal / extra-volume / extra-time discount entries, and the two SERVICE
+ * username/note input steps (feat/service-checkout-username-note).
+ * `clearCheckoutState` resets exactly these, and the Pricing reply-keyboard
+ * escape route (fix/pricing-reply-keyboard-flow-escape) may interrupt ONLY
+ * these. Support, representative-application, customer-input-form, admin and
+ * every other conversational flow are deliberately NOT here — they keep their
+ * priority.
  */
 export const INTERRUPTIBLE_CHECKOUT_FLOWS = [
   "checkout:discount",
+  "checkout:service_username",
+  "checkout:service_note",
   "renew:discount",
   "extra_volume:discount",
   "extra_time:discount",
