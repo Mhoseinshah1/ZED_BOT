@@ -55,6 +55,21 @@ has_command() { command -v "$1" >/dev/null 2>&1; }
 
 timestamp() { date +%Y%m%d-%H%M%S; }
 
+# Strip leading/trailing shell whitespace (space, tab, CR, newline) from a value
+# WITHOUT eval, without logging/printing it to output, and without exposing its
+# length or touching interior characters. Mirrors the runtime resolver's
+# value.trim() (packages/shared/src/telegram-token.ts) so a whitespace-only token
+# reads as unset in exactly the same way. Returns the trimmed value via stdout
+# (captured with $(...), like the other value helpers) - never echoed to a log.
+# The dependency-free scripts/validate-env.sh keeps a behaviourally identical
+# inline copy; keep the two in sync.
+trim_env_token_value() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}" # strip leading whitespace
+  v="${v%"${v##*[![:space:]]}"}" # strip trailing whitespace
+  printf '%s' "$v"
+}
+
 require_root() {
   if [ "$(id -u)" -ne 0 ]; then
     log_error "This command must be run as root (try again with sudo)."

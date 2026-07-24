@@ -49,6 +49,19 @@ has_value() {
   [ -n "$value" ]
 }
 
+# Strip leading/trailing shell whitespace (space, tab, CR, newline) WITHOUT eval,
+# without printing/logging it, and without exposing its length or touching
+# interior characters. Behaviourally identical to scripts/lib/common.sh's
+# trim_env_token_value; kept inline here because validate-env.sh is deliberately
+# dependency-free (it runs before install clones the repo). Mirrors the runtime
+# resolver's value.trim() so a whitespace-only token reads as unset.
+trim_env_token_value() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}" # strip leading whitespace
+  v="${v%"${v##*[![:space:]]}"}" # strip trailing whitespace
+  printf '%s' "$v"
+}
+
 echo "ZED_BOT env check: ${ENV_FILE}"
 
 # --- Telegram bot token ------------------------------------------------------
@@ -56,17 +69,23 @@ echo "ZED_BOT env check: ${ENV_FILE}"
 # env-check can never say OK when the bot and worker would resolve different
 # tokens: TELEGRAM_BOT_TOKEN is canonical, BOT_TOKEN is a legacy fallback, an
 # equal pair is a duplicate-key warning, and a differing pair is a hard conflict.
-# Only key names + a compare-equal result are ever used; NO value is printed.
-if has_value TELEGRAM_BOT_TOKEN && has_value BOT_TOKEN; then
-  if [ "$(env_get TELEGRAM_BOT_TOKEN)" = "$(env_get BOT_TOKEN)" ]; then
+# Each key is read ONCE and edge-trimmed (like the resolver's value.trim()), so a
+# whitespace-only value (e.g. "   ") reads as unset - never resolved, never a
+# false conflict. Only key names + a compare-equal result are ever used; NO value
+# is printed. (The generic has_value is NOT used here: it does not trim, so it
+# would treat a whitespace-only token as configured.)
+TELEGRAM_TOKEN_TRIMMED="$(trim_env_token_value "$(env_get TELEGRAM_BOT_TOKEN)")"
+BOT_TOKEN_TRIMMED="$(trim_env_token_value "$(env_get BOT_TOKEN)")"
+if [ -n "$TELEGRAM_TOKEN_TRIMMED" ] && [ -n "$BOT_TOKEN_TRIMMED" ]; then
+  if [ "$TELEGRAM_TOKEN_TRIMMED" = "$BOT_TOKEN_TRIMMED" ]; then
     ok "TELEGRAM_BOT_TOKEN"
     warn "BOT_TOKEN is also set to the same value (duplicate key; TELEGRAM_BOT_TOKEN is used)"
   else
     invalid "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN and BOT_TOKEN conflict"
   fi
-elif has_value TELEGRAM_BOT_TOKEN; then
+elif [ -n "$TELEGRAM_TOKEN_TRIMMED" ]; then
   ok "TELEGRAM_BOT_TOKEN"
-elif has_value BOT_TOKEN; then
+elif [ -n "$BOT_TOKEN_TRIMMED" ]; then
   ok "BOT_TOKEN"
   warn "using the legacy BOT_TOKEN name; rename it to TELEGRAM_BOT_TOKEN when convenient"
 else
