@@ -654,6 +654,15 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
     return;
   }
 
+  // Defense in depth: a SERVICE checkout must have a confirmed username + note
+  // before it can create a CheckoutSession. The pre-invoice gate already enforces
+  // this, so this only catches a stale «تایید خرید» callback — re-render the step.
+  if (draftNeedsServiceCustomization(draft) && !serviceCustomizationComplete(draft)) {
+    await safeAnswerCallback(ctx);
+    await renderPreInvoice(ctx, true);
+    return;
+  }
+
   // Re-validate pricing + discount at click time (price/code may have changed).
   if (draft.representative !== undefined) {
     // Representative purchase (§16): re-resolve the reseller price from live data

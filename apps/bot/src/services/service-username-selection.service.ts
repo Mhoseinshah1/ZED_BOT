@@ -309,19 +309,24 @@ export async function bindReservationToCheckout(
 }
 
 /**
- * Record the settled Order id on a still-active reservation (kept BOUND). Runs
- * inside the settlement transaction alongside the Order create.
+ * Record the settled Order id (and checkout id) on a still-active reservation,
+ * transitioning it to BOUND and clearing the HELD TTL. Runs inside the settlement
+ * transaction alongside the Order create. Accepts a HELD reservation too (the
+ * wallet path creates its checkout + order together and never pre-bound), so this
+ * one call covers every payment method. Idempotent CAS; no-op once CONSUMED.
  */
 export async function attachReservationToOrder(
   tx: Db,
   reservationId: string,
   orderId: string,
+  checkoutSessionId: string,
 ): Promise<void> {
   await tx.serviceUsernameReservation.updateMany({
     where: { id: reservationId, status: { in: REBINDABLE_STATUSES } },
     data: {
       status: ServiceUsernameReservationStatus.BOUND,
       orderId,
+      checkoutSessionId,
       boundAt: new Date(),
       expiresAt: null,
     },

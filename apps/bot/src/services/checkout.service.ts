@@ -10,6 +10,7 @@ import { REPRESENTATIVE_PRICING_MODE } from "@zedbot/shared";
 import type { CheckoutDraft } from "../core/session.js";
 import { buildFulfillmentSnapshot } from "./other-product-profile.service.js";
 import { recordRepresentativePurchase } from "./representative.service.js";
+import { bindReservationToCheckout } from "./service-username-selection.service.js";
 import { getSetting } from "./settings.service.js";
 import { resolveProductInboundIds } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
@@ -60,6 +61,21 @@ export function buildProductSnapshot(
           namingCustomText: product.panel.usernameCustomText,
           namingRandomLength: product.panel.usernameRandomLength,
           namingRepresentativePrefix: product.panel.representativeUsernamePrefix,
+        }
+      : {}),
+    // Service-checkout username selection (feat/service-checkout-username-note):
+    // the buyer-chosen remote username + its source + the durable reservation id
+    // + the optional note, all captured NOW (session still alive) so every
+    // payment method provisions from the same immutable snapshot. Only present on
+    // a completed SERVICE customization; OTHER_PRODUCT snapshots never carry it.
+    ...(product.type === "SERVICE_PRODUCT" && draft.serviceCustomization?.completed === true
+      ? {
+          serviceUsername: draft.serviceCustomization.normalizedUsername,
+          serviceUsernameMode: draft.serviceCustomization.usernameMode,
+          serviceUsernameSelectionSource:
+            draft.serviceCustomization.usernameMode === "RANDOM" ? "USER_RANDOM" : "USER_CUSTOM",
+          serviceUsernameReservationId: draft.serviceCustomization.reservationId,
+          serviceUserNote: draft.serviceCustomization.note,
         }
       : {}),
     originalPriceToman: draft.originalPriceToman,
@@ -187,6 +203,14 @@ export async function createCheckoutSession(
           priceFingerprint: draft.representative.priceFingerprint,
         },
       });
+    }
+
+    // Service-checkout username selection: promote the buyer's HELD username
+    // reservation to BOUND, linked to this durable checkout. From here the hold
+    // is protected from the short HELD TTL for the whole payment window.
+    const reservationId = draft.serviceCustomization?.reservationId;
+    if (reservationId !== undefined) {
+      await bindReservationToCheckout(tx, reservationId, checkout.id, user.id);
     }
 
     return checkout;

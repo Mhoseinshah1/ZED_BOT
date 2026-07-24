@@ -29,6 +29,7 @@ import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { claimDiscountUsage } from "./discount.service.js";
+import { attachReservationToOrder } from "./service-username-selection.service.js";
 import {
   findCaseForDuplicatePayment,
   notifyDuplicateSuccessCase,
@@ -816,12 +817,19 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
           locationSnapshot:
             snapshot.allLocations === true ? "ALL" : snapshotString(snapshot, "serviceLocation"),
           categorySnapshot: snapshotString(snapshot, "categoryName"),
+          // Service-checkout username selection: the buyer's optional note.
+          serviceNoteSnapshot: snapshotString(snapshot, "serviceUserNote"),
           paidAt: now,
         });
         order = result.order;
         orderCreated = result.created;
       }
       if (orderCreated) {
+        // Bind the buyer's username reservation to this settled order (BOUND).
+        const reservationId = snapshotString(snapshot, "serviceUsernameReservationId");
+        if (reservationId !== null) {
+          await attachReservationToOrder(tx, reservationId, order.id, checkout.id);
+        }
         await tx.payment.update({
           where: { id: payment.id },
           data: { orderId: order.id },

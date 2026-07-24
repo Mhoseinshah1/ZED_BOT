@@ -134,6 +134,17 @@ export function checkoutNamingCapture(
       typeof record.namingRepresentativePrefix === "string"
         ? record.namingRepresentativePrefix
         : null,
+    // Service-checkout username selection (feat/service-checkout-username-note):
+    // a buyer-chosen username captured at checkout is used verbatim by the naming
+    // resolver (no panel strategy / counter is run). Absent on legacy checkouts.
+    userSelectedUsername:
+      typeof record.serviceUsername === "string" ? record.serviceUsername : null,
+    userSelectionSource:
+      record.serviceUsernameSelectionSource === "USER_RANDOM"
+        ? "USER_RANDOM"
+        : record.serviceUsernameSelectionSource === "USER_CUSTOM"
+          ? "USER_CUSTOM"
+          : null,
   };
 }
 
