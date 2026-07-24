@@ -16,6 +16,7 @@ import {
   cancelSetupAttempt,
   confirmLogGroupConnection,
   createLogGroupSetupAttempt,
+  evaluateWorkerTelegramTokenReadiness,
   freeSlotBestEffort,
   getSetupAttemptByShortId,
   INVALID_CHAT_ID_TEXT,
@@ -310,8 +311,17 @@ export async function buildProgressView(
       "",
       `علت: ${failureCategory(attempt.safeErrorCode)}`,
     ];
+    // When the failure was a missing/conflicting worker token, the retry is a
+    // "recheck the Worker, then try again" action (§8): the same durable retry
+    // callback, but labelled to make clear it revalidates the worker first (the
+    // retry path rechecks the fresh capability snapshot and refuses while the
+    // token is still missing/conflicting).
+    const retryLabel =
+      attempt.safeErrorCode === "bot-token-missing"
+        ? "بررسی مجدد Worker و تلاش دوباره"
+        : "تلاش مجدد";
     const keyboard = new InlineKeyboard()
-      .text("تلاش مجدد", retryCb(sid))
+      .text(retryLabel, retryCb(sid))
       .row()
       .text("وارد کردن آیدی دیگر", CB_ID)
       .row()
@@ -368,6 +378,15 @@ async function requeueFailedAttempt(
   // its own live state (idempotent).
   if (attempt.status !== LogGroupSetupStatus.FAILED) {
     return { ok: true, attempt };
+  }
+  // Token preflight before re-queueing (§8): a retry after a `bot-token-missing`
+  // failure must recheck the WORKER's fresh capability snapshot and refuse while
+  // the token is still MISSING/CONFLICTing, so we never re-queue an attempt that
+  // is already known to be unable to call Telegram. An absent snapshot defers to
+  // the enqueue-time handling below (the worker stays the final authority).
+  const tokenReadiness = await evaluateWorkerTelegramTokenReadiness();
+  if (!tokenReadiness.ok) {
+    return { ok: false, safeMessage: tokenReadiness.safeMessage };
   }
   let claimed: LogGroupSetupAttempt;
   try {

@@ -34,9 +34,25 @@ import { LOG_GROUP_TITLE_KEY } from "../../src/services/log-group.service.js";
 // dependency-free of the tests so all suites converge on ONE harness.
 // =============================================================================
 
-// The worker's config reads BOT_TOKEN (NOT TELEGRAM_BOT_TOKEN) - a dummy value
-// makes botToken() return non-null so the processor reaches provisioning.
+// The worker's config resolves the token through the shared contract
+// (fix/worker-telegram-token-env-contract): `TELEGRAM_BOT_TOKEN` is canonical,
+// `BOT_TOKEN` is a legacy fallback. A dummy value makes botToken() return
+// non-null so the processor reaches provisioning. `setCanonicalWorkerToken`
+// mirrors a real installer `.env` (TELEGRAM_BOT_TOKEN only, no BOT_TOKEN).
 export const DUMMY_BOT_TOKEN = "123456:worker-test-token";
+
+/** Set the canonical TELEGRAM_BOT_TOKEN and clear any legacy BOT_TOKEN so the
+ * env exactly matches an installer-generated production `.env`. */
+export function setCanonicalWorkerToken(token: string = DUMMY_BOT_TOKEN): void {
+  process.env.TELEGRAM_BOT_TOKEN = token;
+  delete process.env.BOT_TOKEN;
+}
+
+/** Remove BOTH token vars (the "neither configured" state). */
+export function clearWorkerToken(): void {
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.BOT_TOKEN;
+}
 
 /** Path to the BUILT worker processor - the exact code the worker runs. */
 export const WORKER_LOG_GROUP_SETUP_DIST = fileURLToPath(

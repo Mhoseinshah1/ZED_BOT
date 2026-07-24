@@ -8,6 +8,8 @@ import {
   WORKER_HEARTBEAT_TTL_SECONDS,
   createLogger,
   errorMessage,
+  isTelegramBotTokenConfigured,
+  telegramBotTokenSourceFromEnv,
   type WorkerCapabilities,
 } from "@zedbot/shared";
 
@@ -47,6 +49,11 @@ async function publishOnce(redis: RawRedis): Promise<void> {
     backupDirWritable: await probeBackupDirWritable(dir),
     backupDir: dir,
     gitSha: gitSha(),
+    // Safe token readiness from the WORKER's own env, so the bot's log-group
+    // preflight / diagnostics can see whether the worker can call Telegram BEFORE
+    // queueing an attempt. Presence + key-name only; never the token itself.
+    telegramBotTokenConfigured: isTelegramBotTokenConfigured(process.env),
+    telegramBotTokenSource: telegramBotTokenSourceFromEnv(process.env),
     checkedAt: now,
   };
   await redis.set(

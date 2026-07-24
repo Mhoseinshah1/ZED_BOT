@@ -10,7 +10,10 @@ import { NOTIFICATION_JOB_NAMES } from "@zedbot/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 process.env.APP_SECRET ??= "checkout-delivery-tests-secret-0123456789";
-process.env.BOT_TOKEN = "111222:checkout-delivery-token";
+// Canonical token var (see docs/telegram-bot-token.md); the worker's delivery
+// processor resolves it through the ONE shared contract.
+process.env.TELEGRAM_BOT_TOKEN = "111222:checkout-delivery-token";
+delete process.env.BOT_TOKEN;
 
 import { createNotificationDeliveryProcessor } from "../../worker/src/notifications/delivery.js";
 

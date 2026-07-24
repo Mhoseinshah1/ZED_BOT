@@ -30,7 +30,7 @@ import {
   maskChatId,
   readLogGroupBindingFresh,
 } from "./log-group.service.js";
-import { enqueueLogGroupSetup } from "./ops-queue.service.js";
+import { enqueueLogGroupSetup, readWorkerCapabilities } from "./ops-queue.service.js";
 import { clearSettingsCache, setSettingWithClient } from "./settings.service.js";
 
 // =============================================================================
@@ -59,6 +59,38 @@ export const SETUP_ALREADY_RUNNING_TEXT =
 /** Fallback when Redis/queue is unavailable at enqueue time. */
 export const SETUP_QUEUE_UNAVAILABLE_TEXT =
   "صف راه‌اندازی در دسترس نیست. سرویس worker و Redis را بررسی کنید.";
+
+/** The worker reports no Telegram token — do not queue an attempt that cannot call
+ * Telegram (fix/worker-telegram-token-env-contract §6). */
+export const WORKER_TOKEN_MISSING_TEXT = "توکن تلگرام در سرویس Worker تنظیم نشده است.";
+/** The worker reports TELEGRAM_BOT_TOKEN and BOT_TOKEN set to different values. */
+export const WORKER_TOKEN_CONFLICT_TEXT = "تنظیمات توکن تلگرام Bot و Worker با هم مغایرت دارد.";
+
+/**
+ * Preflight against the WORKER's fresh capability snapshot before queueing a
+ * setup/repair (§6). Redis stores the snapshot with a 45s TTL, so a non-null read
+ * IS fresh; an absent snapshot (worker offline / older worker that does not yet
+ * publish token readiness) returns `ok:true` so the EXISTING Redis/worker-
+ * unavailable handling at enqueue time still applies. When the worker DOES report
+ * MISSING or CONFLICT, we refuse to create a QUEUED attempt that is already known
+ * to be unable to call Telegram. The worker keeps its own `bot-token-missing`
+ * terminal protection regardless.
+ */
+export async function evaluateWorkerTelegramTokenReadiness(): Promise<
+  { ok: true } | { ok: false; safeMessage: string }
+> {
+  const caps = await readWorkerCapabilities();
+  if (caps === null || caps.telegramBotTokenSource === undefined) {
+    return { ok: true }; // snapshot unavailable / older worker → defer to enqueue-time handling
+  }
+  if (caps.telegramBotTokenSource === "MISSING") {
+    return { ok: false, safeMessage: WORKER_TOKEN_MISSING_TEXT };
+  }
+  if (caps.telegramBotTokenSource === "CONFLICT") {
+    return { ok: false, safeMessage: WORKER_TOKEN_CONFLICT_TEXT };
+  }
+  return { ok: true };
+}
 
 // The in-flight states that occupy the single active-setup slot.
 const RUNNING_STATUSES: LogGroupSetupStatus[] = [
@@ -445,6 +477,14 @@ export async function confirmLogGroupConnection(
   const verdict = evaluateLogGroupTarget(probe);
   if (!verdict.ok) {
     return { ok: false, safeMessage: verdict.safeMessage };
+  }
+
+  // Token preflight (§6): if the worker's fresh snapshot says its Telegram token
+  // is MISSING or CONFLICTing, refuse to queue an attempt that cannot call
+  // Telegram. An absent snapshot defers to the existing enqueue-time handling.
+  const tokenReadiness = await evaluateWorkerTelegramTokenReadiness();
+  if (!tokenReadiness.ok) {
+    return { ok: false, safeMessage: tokenReadiness.safeMessage };
   }
 
   let claimed: LogGroupSetupAttempt;

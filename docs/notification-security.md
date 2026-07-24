@@ -6,10 +6,14 @@ a database snapshot, a log line, or a Telegram message.
 
 ## Secrets never leave their boundary
 
-- **Bot token** — read from `BOT_TOKEN` in `apps/worker/src/config.ts`, used only
+- **Bot token** — `apps/worker/src/config.ts` `botToken()` resolves it through the
+  ONE shared contract `resolveTelegramBotTokenFromEnv` (canonical
+  `TELEGRAM_BOT_TOKEN`, legacy `BOT_TOKEN` fallback, conflicting pair fails
+  closed; see `docs/telegram-bot-token.md`), IDENTICAL to the bot. It is used only
   to build the `https://api.telegram.org/bot<token>/…` request URL in
-  `telegram.ts`. It never appears in a log, error, return value, queue payload,
-  or DB row. Every Telegram failure is collapsed to a short safe code
+  `telegram.ts` and never appears in a log, error, return value, queue payload,
+  or DB row (worker diagnostics expose only the token SOURCE key-name, never
+  bytes). Every Telegram failure is collapsed to a short safe code
   (`rate-limited`, `forbidden`, `chat-not-found`, `network-error`, …).
 - **Subscription url / token, panel credentials, provider payloads, prices** —
   never read into a notification. The scan writes a `payloadSnapshot` with ONLY:

@@ -22,6 +22,7 @@ fi
 FAILURES=0
 
 ok()      { printf '  [ OK    ] %s\n' "$1"; }
+warn()    { printf '  [ WARN  ] %s\n' "$1"; }
 missing() { printf '  [MISSING] %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 invalid() { printf '  [INVALID] %s - %s\n' "$1" "$2"; FAILURES=$((FAILURES + 1)); }
 
@@ -51,10 +52,23 @@ has_value() {
 echo "ZED_BOT env check: ${ENV_FILE}"
 
 # --- Telegram bot token ------------------------------------------------------
-if has_value TELEGRAM_BOT_TOKEN; then
+# Matches the runtime resolver (packages/shared/src/telegram-token.ts) EXACTLY so
+# env-check can never say OK when the bot and worker would resolve different
+# tokens: TELEGRAM_BOT_TOKEN is canonical, BOT_TOKEN is a legacy fallback, an
+# equal pair is a duplicate-key warning, and a differing pair is a hard conflict.
+# Only key names + a compare-equal result are ever used; NO value is printed.
+if has_value TELEGRAM_BOT_TOKEN && has_value BOT_TOKEN; then
+  if [ "$(env_get TELEGRAM_BOT_TOKEN)" = "$(env_get BOT_TOKEN)" ]; then
+    ok "TELEGRAM_BOT_TOKEN"
+    warn "BOT_TOKEN is also set to the same value (duplicate key; TELEGRAM_BOT_TOKEN is used)"
+  else
+    invalid "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN and BOT_TOKEN conflict"
+  fi
+elif has_value TELEGRAM_BOT_TOKEN; then
   ok "TELEGRAM_BOT_TOKEN"
 elif has_value BOT_TOKEN; then
   ok "BOT_TOKEN"
+  warn "using the legacy BOT_TOKEN name; rename it to TELEGRAM_BOT_TOKEN when convenient"
 else
   missing "TELEGRAM_BOT_TOKEN (or BOT_TOKEN)"
 fi

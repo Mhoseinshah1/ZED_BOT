@@ -151,6 +151,25 @@ export function classifyCreateForumTopicError(
     if (d.includes("chat not found")) {
       return { safeErrorCode: "chat-not-found", retryable: false };
     }
+    // Permission patterns are checked BEFORE any broad forum/topic wording
+    // (fix/worker-telegram-token-env-contract §9): Telegram phrases a
+    // missing-permission error as "not enough rights to create a forum topic",
+    // which contains "forum" — so a bare `includes("forum")` mislabels a real
+    // permission error as `topics-disabled`. An administrator who simply lacks
+    // the Manage Topics right must map to `manage-topics-required`, never
+    // `topics-disabled`.
+    if (
+      d.includes("not enough rights") ||
+      d.includes("chat_admin_required") ||
+      d.includes("manage topics") ||
+      d.includes("manage_topics") ||
+      d.includes("need administrator") ||
+      d.includes("need to be an administrator")
+    ) {
+      return { safeErrorCode: "manage-topics-required", retryable: false };
+    }
+    // Only now (after permission wording is excluded) does broad forum/topic
+    // wording mean the forum feature itself is off / the chat is not a forum.
     if (
       d.includes("not a forum") ||
       d.includes("is not a forum") ||
@@ -158,15 +177,6 @@ export function classifyCreateForumTopicError(
       d.includes("forum")
     ) {
       return { safeErrorCode: "topics-disabled", retryable: false };
-    }
-    if (
-      d.includes("not enough rights") ||
-      d.includes("chat_admin_required") ||
-      d.includes("manage topics") ||
-      d.includes("manage_topics") ||
-      d.includes("need administrator")
-    ) {
-      return { safeErrorCode: "manage-topics-required", retryable: false };
     }
     return { safeErrorCode: "bad-request", retryable: false };
   }

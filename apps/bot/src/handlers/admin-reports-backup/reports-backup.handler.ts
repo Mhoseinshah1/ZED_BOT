@@ -35,6 +35,7 @@ import {
   getSystemHealth,
   listBackups,
   requestManualBackup,
+  telegramTokenSourceLabel,
   type BackupListEntry,
   type BackupScheduleInterval,
   type SystemHealth,
@@ -338,6 +339,10 @@ async function renderDeployPage(ctx: BotContext, toast?: string): Promise<void> 
       : diag.pgDumpAvailable
         ? "pg_dump آماده ✅"
         : "نصب نیست ❌",
+    "",
+    "توکن تلگرام:",
+    `ربات: ${telegramTokenSourceLabel(diag.botTelegramTokenSource)}`,
+    `Worker: ${telegramTokenSourceLabel(diag.workerTelegramTokenSource)}`,
   );
   const kb = new InlineKeyboard()
     .text("اجرای تست بکاپ", RB_CB.testbk)

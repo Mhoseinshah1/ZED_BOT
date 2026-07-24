@@ -68,6 +68,19 @@ check_ubuntu() {
   [ -r /etc/os-release ] && ( . /etc/os-release && [ "${ID:-}" = "ubuntu" ] )
 }
 
+# Telegram token readiness (fix/worker-telegram-token-env-contract §5). Reads the
+# loaded env (never prints a value): PASS only when the canonical
+# TELEGRAM_BOT_TOKEN is set and does not conflict with a differing BOT_TOKEN.
+# A legacy-only BOT_TOKEN, a conflicting pair, or a missing token all WARN and
+# point at `zedbot env-check` for the authoritative, runtime-matching detail.
+check_telegram_token() {
+  local tg="${TELEGRAM_BOT_TOKEN:-}" bt="${BOT_TOKEN:-}"
+  if [ -n "$tg" ] && [ -n "$bt" ] && [ "$tg" != "$bt" ]; then
+    return 1 # conflict
+  fi
+  [ -n "$tg" ] # canonical set (equal-duplicate is fine); legacy-only/missing WARN
+}
+
 check_cli_fresh() {
   ! cli_is_stale
 }
@@ -207,6 +220,12 @@ main() {
   core_check "App directory exists (${ZEDBOT_APP_DIR})" test -d "$ZEDBOT_APP_DIR"
   core_check "docker-compose.yml exists" test -f "${ZEDBOT_APP_DIR}/docker-compose.yml"
   optional_check ".env exists" "run the installer to create it" test -f "$ZEDBOT_ENV_FILE"
+  # Telegram token readiness — presence + conflict only, never the value. The bot
+  # and worker share TELEGRAM_BOT_TOKEN (BOT_TOKEN is a legacy fallback); a
+  # conflicting pair is a real config error surfaced by `zedbot env-check`.
+  optional_check "Telegram bot token configured (TELEGRAM_BOT_TOKEN)" \
+    "set TELEGRAM_BOT_TOKEN in .env (BOT_TOKEN is a legacy fallback); run: zedbot env-check" \
+    check_telegram_token
 
   # System resources
   optional_check "Disk space (>= 2 GB free on ${ZEDBOT_BASE_DIR})" "free up disk space" check_disk_space

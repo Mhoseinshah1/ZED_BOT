@@ -1,4 +1,12 @@
-import { DEFAULT_CONTAINER_BACKUP_DIR, intEnv, normalizeGitSha, optionalEnv } from "@zedbot/shared";
+import {
+  DEFAULT_CONTAINER_BACKUP_DIR,
+  getTelegramBotToken,
+  intEnv,
+  normalizeGitSha,
+  optionalEnv,
+  resolveTelegramBotToken,
+  type TelegramBotTokenResolution,
+} from "@zedbot/shared";
 
 // =============================================================================
 // Worker configuration - every env read lives here so the rest of the worker
@@ -41,10 +49,23 @@ export function backupEncryptionPassword(): string | null {
   return value === "" ? null : value;
 }
 
-/** Telegram bot token for notifications; the token itself is never logged. */
+/**
+ * Telegram bot token for every worker Telegram path (log-group setup, ops log
+ * delivery, notification delivery, backup notice, Stars recovery). Resolved
+ * through the ONE shared contract (`resolveTelegramBotTokenFromEnv`), IDENTICAL
+ * to the bot: `TELEGRAM_BOT_TOKEN` is canonical, `BOT_TOKEN` is a legacy
+ * fallback, an equal duplicate uses the canonical, and a conflicting pair fails
+ * closed (null). This is the fix for the production defect where an
+ * installer-generated `TELEGRAM_BOT_TOKEN`-only `.env` left the worker tokenless.
+ * The token itself is never logged.
+ */
 export function botToken(): string | null {
-  const value = optionalEnv("BOT_TOKEN");
-  return value === "" ? null : value;
+  return getTelegramBotToken();
+}
+
+/** The full typed token resolution (source + warnings) for worker diagnostics. */
+export function botTokenResolution(): TelegramBotTokenResolution {
+  return resolveTelegramBotToken();
 }
 
 /** Baked image build identity (GIT_SHA); null when built without it. */

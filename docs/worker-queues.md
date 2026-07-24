@@ -282,3 +282,16 @@ existing notification delivery/maintenance reconciler delivers. The charge itsel
 (the `service-auto-renewal-execute` job) is gated on that notice's status — deferred
 in bounded 5-minute steps while the notice is in-flight, hard-capped at
 `expectedChargeAt + 30min`, then proceeds with `precharge-delivery-unconfirmed`.
+
+## Telegram bot token (worker)
+
+Every worker Telegram path — log-group setup, operational log delivery,
+notification delivery, backup notice, Stars recovery — gets its token from
+`apps/worker/src/config.ts` `botToken()`, which resolves through the ONE shared
+contract `resolveTelegramBotTokenFromEnv` (canonical `TELEGRAM_BOT_TOKEN`, legacy
+`BOT_TOKEN` fallback, conflicting pair fails closed), IDENTICAL to the bot. An
+installer-generated `TELEGRAM_BOT_TOKEN`-only `.env` is therefore consumed
+directly by the worker with no `BOT_TOKEN` alias. The worker publishes safe token
+readiness (`telegramBotTokenConfigured` / `telegramBotTokenSource`, key-name only)
+in its capability snapshot; the bot's log-group preflight refuses to queue a setup
+attempt the worker cannot execute. See `docs/telegram-bot-token.md`.

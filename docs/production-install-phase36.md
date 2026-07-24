@@ -60,8 +60,11 @@ app directory and root.
   removes only matching `zedbot-db-*.sql.gz` files older than that many
   days after a successful backup.
 - **`zedbot env-check`** runs `scripts/validate-env.sh [env-file]`
-  (default `/opt/zedbot/app/.env`). Checks: `TELEGRAM_BOT_TOKEN` or
-  `BOT_TOKEN` present; `ADMIN_TELEGRAM_IDS` or `OWNER_TELEGRAM_ID` present
+  (default `/opt/zedbot/app/.env`). Checks: the Telegram token matches the
+  runtime resolver exactly — `TELEGRAM_BOT_TOKEN` (canonical) or `BOT_TOKEN`
+  (legacy fallback, warns) present; both-equal warns (duplicate key); both set
+  to DIFFERENT values FAILS with «TELEGRAM_BOT_TOKEN and BOT_TOKEN conflict»
+  (see `docs/telegram-bot-token.md`); `ADMIN_TELEGRAM_IDS` or `OWNER_TELEGRAM_ID` present
   and numeric/comma-numeric; `APP_SECRET` ≥ 32 chars; `DATABASE_URL`
   present; `REDIS_URL` or `REDIS_HOST` present; `NODE_ENV=production`;
   `BACKUP_DIR` present or defaultable. Output is **key names +

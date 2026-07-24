@@ -15,9 +15,12 @@ import {
   DEPLOYED_REPO_SHA_SETTING_KEY,
   errorMessage,
   normalizeGitSha,
+  telegramBotTokenSourceFromEnv,
   type BackupFileKind,
+  type TelegramBotTokenSource,
 } from "@zedbot/shared";
 
+import { getBotToken } from "../config/env.js";
 import { logger } from "../core/logger.js";
 import {
   enqueueBackupCreate,
@@ -647,6 +650,14 @@ export interface DeploymentDiagnostics {
   pgDumpVersion: string | null;
   /** Any pairwise difference among the NON-NULL shas above. */
   mismatch: boolean;
+  /** Whether THIS bot process resolves a Telegram token (presence only). */
+  botTelegramTokenConfigured: boolean;
+  /** The bot's token source (key name only): the safe env classification. */
+  botTelegramTokenSource: TelegramBotTokenSource;
+  /** Worker-published token readiness; null = unknown (no/older snapshot). */
+  workerTelegramTokenConfigured: boolean | null;
+  /** Worker-published token source (key name only); null = unknown. */
+  workerTelegramTokenSource: TelegramBotTokenSource | null;
 }
 
 /**
@@ -676,7 +687,33 @@ export async function getDeploymentDiagnostics(): Promise<DeploymentDiagnostics>
       gitShasDiffer(repoSha, botSha) ||
       gitShasDiffer(repoSha, workerSha) ||
       gitShasDiffer(botSha, workerSha),
+    // Safe token readiness (presence + key name only, never token bytes). The
+    // bot reads its own env; the worker's is taken from its capability snapshot
+    // (null when the snapshot is absent or from an older worker).
+    botTelegramTokenConfigured: getBotToken() !== null,
+    botTelegramTokenSource: telegramBotTokenSourceFromEnv(process.env),
+    workerTelegramTokenConfigured: capabilities?.telegramBotTokenConfigured ?? null,
+    workerTelegramTokenSource: capabilities?.telegramBotTokenSource ?? null,
   };
+}
+
+/**
+ * Safe Persian label for a Telegram-token source (fix/worker-telegram-token-env-contract §5).
+ * Reveals only the KEY-NAME classification — never token length/hash/prefix/bytes.
+ */
+export function telegramTokenSourceLabel(source: TelegramBotTokenSource | null): string {
+  switch (source) {
+    case "TELEGRAM_BOT_TOKEN":
+      return "تنظیم است ✅";
+    case "BOT_TOKEN":
+      return "از نام قدیمی BOT_TOKEN استفاده می‌شود ⚠️";
+    case "CONFLICT":
+      return "دو متغیر توکن با هم مغایرت دارند ❌";
+    case "MISSING":
+      return "تنظیم نشده است ❌";
+    default:
+      return "نامشخص (Worker در دسترس نیست)";
+  }
 }
 
 // --- health ------------------------------------------------------------------------------------
