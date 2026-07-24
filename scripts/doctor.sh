@@ -74,9 +74,15 @@ check_ubuntu() {
 # A legacy-only BOT_TOKEN, a conflicting pair, or a missing token all WARN and
 # point at `zedbot env-check` for the authoritative, runtime-matching detail.
 check_telegram_token() {
-  local tg="${TELEGRAM_BOT_TOKEN:-}" bt="${BOT_TOKEN:-}"
+  # Edge-trim both loaded values (shared trim_env_token_value) BEFORE the
+  # presence/conflict comparisons, so a whitespace-only value reads as unset
+  # exactly like the runtime resolver: a "   " token must never PASS or count as
+  # configured, and a padded-but-equal pair is not a conflict.
+  local tg bt
+  tg="$(trim_env_token_value "${TELEGRAM_BOT_TOKEN:-}")"
+  bt="$(trim_env_token_value "${BOT_TOKEN:-}")"
   if [ -n "$tg" ] && [ -n "$bt" ] && [ "$tg" != "$bt" ]; then
-    return 1 # conflict
+    return 1 # conflict (differing usable values)
   fi
   [ -n "$tg" ] # canonical set (equal-duplicate is fine); legacy-only/missing WARN
 }
@@ -303,4 +309,9 @@ main() {
   exit 0
 }
 
-main "$@"
+# Run only when executed directly (zedbot doctor). Sourcing the script - e.g. a
+# unit test exercising check_telegram_token - loads the functions without running
+# the full diagnostic. In production doctor.sh is always executed, so main runs.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi

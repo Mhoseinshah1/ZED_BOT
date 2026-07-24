@@ -256,5 +256,166 @@ describe("deploy scripts (Phase 36)", () => {
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain("env file not found");
     });
+
+    // Whitespace-only token normalization (matches the runtime resolver's
+    // value.trim()): a "   " value must read as unset, never resolved and never a
+    // false conflict. NO token value ever appears in the output.
+    const REST = [
+      "OWNER_TELEGRAM_ID=123456789",
+      `APP_SECRET='${SECRET}'`,
+      "DATABASE_URL='postgresql://zedbot:pw@postgres:5432/zedbot'",
+      "REDIS_HOST=redis",
+      "NODE_ENV=production",
+    ];
+
+    it("treats a whitespace-only TELEGRAM_BOT_TOKEN as missing (fails)", () => {
+      const result = runWithEnvFile([`TELEGRAM_BOT_TOKEN='   '`, ...REST].join("\n"));
+      expect(result.status).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain("[MISSING] TELEGRAM_BOT_TOKEN");
+    });
+
+    it("treats a whitespace-only BOT_TOKEN as missing (fails)", () => {
+      const result = runWithEnvFile([`BOT_TOKEN='   '`, ...REST].join("\n"));
+      expect(result.status).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain("[MISSING] TELEGRAM_BOT_TOKEN");
+    });
+
+    it("whitespace-only canonical + a valid legacy → legacy fallback OK + warning", () => {
+      const result = runWithEnvFile(
+        [`TELEGRAM_BOT_TOKEN='   '`, `BOT_TOKEN='${TOKEN}'`, ...REST].join("\n"),
+      );
+      expect(result.status).toBe(0);
+      const out = result.stdout + result.stderr;
+      expect(out).toContain("[ OK    ] BOT_TOKEN");
+      expect(out).toMatch(/\[ WARN {2}\].*legacy BOT_TOKEN/);
+      expect(out).not.toContain("[ OK    ] TELEGRAM_BOT_TOKEN");
+      expect(out).not.toContain("conflict");
+      expect(out).not.toContain(TOKEN);
+    });
+
+    it("a valid canonical + whitespace-only legacy → canonical OK (no duplicate/conflict)", () => {
+      const result = runWithEnvFile(
+        [`TELEGRAM_BOT_TOKEN='${TOKEN}'`, `BOT_TOKEN='   '`, ...REST].join("\n"),
+      );
+      expect(result.status).toBe(0);
+      const out = result.stdout + result.stderr;
+      expect(out).toContain("[ OK    ] TELEGRAM_BOT_TOKEN");
+      expect(out).not.toContain("duplicate key");
+      expect(out).not.toContain("conflict");
+      expect(out).not.toContain(TOKEN);
+    });
+
+    it("both whitespace-padded but EQUAL after trimming → duplicate warning, OK", () => {
+      const result = runWithEnvFile(
+        [`TELEGRAM_BOT_TOKEN='  ${TOKEN}  '`, `BOT_TOKEN='${TOKEN}'`, ...REST].join("\n"),
+      );
+      expect(result.status).toBe(0);
+      const out = result.stdout + result.stderr;
+      expect(out).toContain("[ OK    ] TELEGRAM_BOT_TOKEN");
+      expect(out).toMatch(/\[ WARN {2}\].*duplicate key/);
+      expect(out).not.toContain("conflict");
+      expect(out).not.toContain(TOKEN);
+    });
+
+    it("both whitespace-padded and DIFFERENT after trimming → conflict (fails)", () => {
+      const TOKEN2 = "987654:ZZZyyyXXXwww-other-secret-token";
+      const result = runWithEnvFile(
+        [`TELEGRAM_BOT_TOKEN='  ${TOKEN}  '`, `BOT_TOKEN='  ${TOKEN2}  '`, ...REST].join("\n"),
+      );
+      expect(result.status).not.toBe(0);
+      const out = result.stdout + result.stderr;
+      expect(out).toContain("[INVALID] TELEGRAM_BOT_TOKEN");
+      expect(out).toContain("TELEGRAM_BOT_TOKEN and BOT_TOKEN conflict");
+      expect(out).not.toContain(TOKEN);
+      expect(out).not.toContain(TOKEN2);
+    });
+
+    // Source-level guard: Telegram-token resolution must NOT fall back to the
+    // untrimmed generic has_value (the exact defect this fixes). We assert the
+    // token section reads the two keys through trim_env_token_value and that no
+    // `has_value TELEGRAM_BOT_TOKEN` / `has_value BOT_TOKEN` call remains.
+    it("token resolution never uses the untrimmed has_value helper", () => {
+      const src = readFileSync(script, "utf8");
+      expect(src).toContain('trim_env_token_value "$(env_get TELEGRAM_BOT_TOKEN)"');
+      expect(src).toContain('trim_env_token_value "$(env_get BOT_TOKEN)"');
+      expect(src).not.toMatch(/has_value\s+TELEGRAM_BOT_TOKEN/);
+      expect(src).not.toMatch(/has_value\s+BOT_TOKEN/);
+    });
+
+    // Source-parity: validate-env.sh keeps a behaviourally identical inline copy
+    // of the shared helper because it is deliberately dependency-free. The two
+    // function bodies must stay byte-identical so they can never diverge.
+    it("its inline trim_env_token_value matches scripts/lib/common.sh verbatim", () => {
+      const extract = (file: string): string => {
+        const text = readFileSync(file, "utf8");
+        const match = text.match(/^trim_env_token_value\(\) \{\n[\s\S]*?^\}/m);
+        expect(match, `trim_env_token_value not found in ${file}`).toBeTruthy();
+        return (match as RegExpMatchArray)[0];
+      };
+      const inline = extract(script);
+      const shared = extract(path.join(scriptsDir, "lib", "common.sh"));
+      expect(inline).toBe(shared);
+    });
+  });
+
+  // doctor.sh `check_telegram_token` sourced directly (BASH_SOURCE guard) so the
+  // REAL function is exercised: it must trim edge whitespace exactly like the
+  // runtime resolver, so a whitespace-only value never PASSes / never counts as
+  // configured, and equal-after-trim is not a conflict. No value is ever printed.
+  describe("doctor.sh check_telegram_token (whitespace-safe)", () => {
+    const doctorScript = path.join(scriptsDir, "doctor.sh");
+    const TOKEN = "123456:doctor-check-secret-token";
+    const OTHER = "987654:doctor-other-secret-token";
+
+    function tokenCheck(tg: string, bt: string) {
+      const snippet =
+        `source '${doctorScript}' >/dev/null 2>&1 || true\n` +
+        `if check_telegram_token; then echo TOKEN_PASS; else echo TOKEN_FAIL; fi`;
+      return bash(["-c", snippet], { TELEGRAM_BOT_TOKEN: tg, BOT_TOKEN: bt });
+    }
+
+    it("does NOT pass a whitespace-only canonical token", () => {
+      const r = tokenCheck("   ", "");
+      expect(r.stdout).toContain("TOKEN_FAIL");
+      expect(r.stdout).not.toContain("TOKEN_PASS");
+    });
+
+    it("does NOT count a whitespace-only legacy token as configured", () => {
+      const r = tokenCheck("", "   ");
+      expect(r.stdout).toContain("TOKEN_FAIL");
+      expect(r.stdout).not.toContain("TOKEN_PASS");
+    });
+
+    it("passes a valid canonical token (no value printed)", () => {
+      const r = tokenCheck(TOKEN, "");
+      expect(r.stdout).toContain("TOKEN_PASS");
+      expect(r.stdout + r.stderr).not.toContain(TOKEN);
+    });
+
+    it("whitespace-only canonical + valid legacy → not a canonical PASS", () => {
+      // tg trims to empty → check returns non-zero (WARN at the doctor level),
+      // never a canonical PASS. bt being present does not rescue the canonical.
+      const r = tokenCheck("   ", TOKEN);
+      expect(r.stdout).toContain("TOKEN_FAIL");
+      expect(r.stdout + r.stderr).not.toContain(TOKEN);
+    });
+
+    it("valid canonical + whitespace-only legacy → canonical ready", () => {
+      const r = tokenCheck(TOKEN, "   ");
+      expect(r.stdout).toContain("TOKEN_PASS");
+    });
+
+    it("passes a padded pair equal after trimming (not a conflict)", () => {
+      const r = tokenCheck(`  ${TOKEN}  `, TOKEN);
+      expect(r.stdout).toContain("TOKEN_PASS");
+    });
+
+    it("fails a padded pair that differs after trimming (conflict)", () => {
+      const r = tokenCheck(`  ${TOKEN}  `, `  ${OTHER}  `);
+      expect(r.stdout).toContain("TOKEN_FAIL");
+      const out = r.stdout + r.stderr;
+      expect(out).not.toContain(TOKEN);
+      expect(out).not.toContain(OTHER);
+    });
   });
 });
