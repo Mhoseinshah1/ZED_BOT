@@ -227,7 +227,10 @@ function starTx(user: User, payloadId: string, over: Partial<FakeTx> = {}): Fake
 
 describe.runIf(hasDb)("stars subscription recovery + operations", () => {
   beforeAll(async () => {
-    process.env.BOT_TOKEN = "test:token";
+    // Canonical token var (see docs/telegram-bot-token.md); Stars recovery
+    // resolves the token through the ONE shared contract.
+    process.env.TELEGRAM_BOT_TOKEN = "test:token";
+    delete process.env.BOT_TOKEN;
     panel = await prisma.panel.create({
       data: {
         type: "MARZBAN",

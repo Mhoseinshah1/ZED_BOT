@@ -17,12 +17,12 @@ import {
   createAttempt,
   createWorkerHarness,
   deleteAttemptsFor,
-  DUMMY_BOT_TOKEN,
   makeFetchMock,
   makeJob,
   makeProbeApi,
   resetOpsTopicBindings,
   seedOpsTopics,
+  setCanonicalWorkerToken,
   ERR,
   WORKER_LOG_GROUP_SETUP_DIST,
   type WorkerHarness,
@@ -53,7 +53,9 @@ describe.runIf(hasDb && hasRedis)("provisioning + worker processor - scenarios 3
   const suiteStartedAt = new Date();
 
   beforeAll(async () => {
-    process.env.BOT_TOKEN = DUMMY_BOT_TOKEN;
+    // Canonical installer `.env`: TELEGRAM_BOT_TOKEN only, no legacy BOT_TOKEN.
+    // Proves the worker provisions all 11 topics from the canonical key alone.
+    setCanonicalWorkerToken();
     owner = await prisma.admin.create({
       data: { telegramId: BigInt(OWNER_TG), role: "OWNER", isActive: true },
     });

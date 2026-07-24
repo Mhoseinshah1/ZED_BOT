@@ -189,6 +189,68 @@ describe("deploy scripts (Phase 36)", () => {
       expect(out).toContain("REDIS_HOST");
     });
 
+    it("warns (does not fail) when the legacy BOT_TOKEN alias is used alone", () => {
+      const result = runWithEnvFile(
+        [
+          `BOT_TOKEN='${TOKEN}'`,
+          "OWNER_TELEGRAM_ID=123456789",
+          `APP_SECRET='${SECRET}'`,
+          "DATABASE_URL='postgresql://zedbot:pw@postgres:5432/zedbot'",
+          "REDIS_HOST=redis",
+          "NODE_ENV=production",
+        ].join("\n"),
+      );
+      expect(result.status).toBe(0);
+      const out = result.stdout + result.stderr;
+      // The legacy name still resolves, but env-check nudges toward the canonical key.
+      expect(out).toMatch(/\[ WARN {2}\].*legacy BOT_TOKEN/);
+    });
+
+    it("warns on a duplicate token pair (both set to the SAME value) without printing it", () => {
+      const result = runWithEnvFile(
+        [
+          `TELEGRAM_BOT_TOKEN='${TOKEN}'`,
+          `BOT_TOKEN='${TOKEN}'`,
+          "OWNER_TELEGRAM_ID=123456789",
+          `APP_SECRET='${SECRET}'`,
+          "DATABASE_URL='postgresql://zedbot:pw@postgres:5432/zedbot'",
+          "REDIS_HOST=redis",
+          "NODE_ENV=production",
+        ].join("\n"),
+      );
+      // A matching duplicate is safe: the runtime resolver uses the canonical key.
+      expect(result.status).toBe(0);
+      const out = result.stdout + result.stderr;
+      expect(out).toContain("[ OK    ] TELEGRAM_BOT_TOKEN");
+      expect(out).toMatch(/\[ WARN {2}\].*duplicate key/);
+      expect(out).not.toContain(TOKEN);
+    });
+
+    it("FAILS a conflicting token pair (both set to DIFFERENT values), value-safe", () => {
+      const TOKEN2 = "987654:ZZZyyyXXXwww-other-secret-token";
+      const result = runWithEnvFile(
+        [
+          `TELEGRAM_BOT_TOKEN='${TOKEN}'`,
+          `BOT_TOKEN='${TOKEN2}'`,
+          "OWNER_TELEGRAM_ID=123456789",
+          `APP_SECRET='${SECRET}'`,
+          "DATABASE_URL='postgresql://zedbot:pw@postgres:5432/zedbot'",
+          "REDIS_HOST=redis",
+          "NODE_ENV=production",
+        ].join("\n"),
+      );
+      // Diverging tokens are the exact bug this contract prevents: fail closed,
+      // matching the runtime resolver's CONFLICT, so env-check never green-lights
+      // a bot/worker token split.
+      expect(result.status).not.toBe(0);
+      const out = result.stdout + result.stderr;
+      expect(out).toContain("[INVALID] TELEGRAM_BOT_TOKEN");
+      expect(out).toContain("TELEGRAM_BOT_TOKEN and BOT_TOKEN conflict");
+      // NEVER print either token value.
+      expect(out).not.toContain(TOKEN);
+      expect(out).not.toContain(TOKEN2);
+    });
+
     it("fails safely on a missing env file", () => {
       const result = bash([script, path.join(tempDir, "does-not-exist")]);
       expect(result.status).not.toBe(0);

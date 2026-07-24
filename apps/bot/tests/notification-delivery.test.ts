@@ -10,7 +10,10 @@ import { NOTIFICATION_JOB_NAMES, type NotificationPayloadSnapshot } from "@zedbo
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 process.env.APP_SECRET ??= "notification-delivery-tests-secret-0123456789";
-process.env.BOT_TOKEN = "111222:delivery-test-token";
+// Canonical token var (see docs/telegram-bot-token.md); the worker's delivery
+// processor resolves it through the ONE shared contract.
+process.env.TELEGRAM_BOT_TOKEN = "111222:delivery-test-token";
+delete process.env.BOT_TOKEN;
 
 import { createNotificationDeliveryProcessor } from "../../worker/src/notifications/delivery.js";
 import { planExpiry, type RulePanelState, type RuleServiceState } from "../../worker/src/notifications/rules.js";

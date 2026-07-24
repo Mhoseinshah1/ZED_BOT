@@ -7,8 +7,10 @@ import { sendTelegramMessage } from "../telegram.js";
 // =============================================================================
 // SEND_BACKUP_NOTIFICATION: a short, safe Persian summary to the requesting
 // OWNER's private chat. Skips silently when there is no requesting admin,
-// no resolvable Telegram id or no BOT_TOKEN. Message content is built ONLY
-// from safe fields (filename, size, status, safeErrorCode).
+// no resolvable Telegram id or no resolvable Telegram token (botToken() → the
+// shared resolver: TELEGRAM_BOT_TOKEN canonical / BOT_TOKEN legacy fallback).
+// Message content is built ONLY from safe fields (filename, size, status,
+// safeErrorCode).
 // =============================================================================
 
 const logger = createLogger("worker:backup-notify");

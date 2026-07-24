@@ -18,7 +18,7 @@ import {
   createAttempt,
   createWorkerHarness,
   deleteAttemptsFor,
-  DUMMY_BOT_TOKEN,
+  setCanonicalWorkerToken,
   ERR,
   makeFetchMock,
   makeJob,
@@ -64,7 +64,9 @@ describe.runIf(hasDb && hasRedis)("log-group replacement - scenarios 52-57", () 
   const suiteStartedAt = new Date();
 
   beforeAll(async () => {
-    process.env.BOT_TOKEN = DUMMY_BOT_TOKEN;
+    // Canonical worker env (TELEGRAM_BOT_TOKEN only, no legacy BOT_TOKEN) so a
+    // CI-global TELEGRAM_BOT_TOKEN never CONFLICTs with a legacy value.
+    setCanonicalWorkerToken();
     owner = await prisma.admin.create({
       data: { telegramId: BigInt(OWNER_TG), role: "OWNER", isActive: true },
     });

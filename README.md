@@ -240,7 +240,7 @@ All configuration lives in `/opt/zedbot/app/.env` (created by the installer,
 | `API_PORT`                             | `3000`                 | Published API port                     |
 | `LOG_LEVEL`                            | `info`                 | `debug` / `info` / `warn` / `error`    |
 | `SSL_EMAIL`                            | `admin@<APP_DOMAIN>`   | Email for SSL certificates (later phase) |
-| `TELEGRAM_BOT_TOKEN`                   | —                      | Bot token from @BotFather              |
+| `TELEGRAM_BOT_TOKEN`                   | —                      | Bot token from @BotFather — read by BOTH the bot and the worker (`BOT_TOKEN` is a legacy fallback; do not set both to different values). See `docs/telegram-bot-token.md`. |
 | `ADMIN_TELEGRAM_IDS`                   | —                      | Comma-separated admin Telegram IDs     |
 | `POSTGRES_DB` / `POSTGRES_USER`        | `zedbot`               | Database name / user                   |
 | `POSTGRES_PASSWORD`                    | auto-generated         | Database password                      |

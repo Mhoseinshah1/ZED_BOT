@@ -807,12 +807,26 @@ export async function readWorkerCapabilities(): Promise<WorkerCapabilities | nul
       return null;
     }
     const value = parsed as Record<string, unknown>;
+    // Safe token-readiness (fix/worker-telegram-token-env-contract): older workers
+    // do not publish these, so they default to undefined and the reader treats an
+    // absent snapshot field as "unknown" (never a false "missing").
+    const tokenSource =
+      value.telegramBotTokenSource === "TELEGRAM_BOT_TOKEN" ||
+      value.telegramBotTokenSource === "BOT_TOKEN" ||
+      value.telegramBotTokenSource === "MISSING" ||
+      value.telegramBotTokenSource === "CONFLICT"
+        ? value.telegramBotTokenSource
+        : undefined;
     return {
       pgDumpVersion: typeof value.pgDumpVersion === "string" ? value.pgDumpVersion : null,
       backupDirWritable: value.backupDirWritable === true,
       backupDir: typeof value.backupDir === "string" ? value.backupDir : "",
       // Baked image build identity; older workers do not publish it yet.
       gitSha: typeof value.gitSha === "string" ? value.gitSha : null,
+      ...(typeof value.telegramBotTokenConfigured === "boolean"
+        ? { telegramBotTokenConfigured: value.telegramBotTokenConfigured }
+        : {}),
+      ...(tokenSource === undefined ? {} : { telegramBotTokenSource: tokenSource }),
       checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : "",
     };
   } catch {

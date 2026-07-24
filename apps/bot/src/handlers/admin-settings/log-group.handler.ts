@@ -30,8 +30,10 @@ import {
 } from "../../services/log-group.service.js";
 import {
   getLogGroupSetupQueueCounts,
+  readWorkerCapabilities,
   readWorkerHeartbeat,
 } from "../../services/ops-queue.service.js";
+import { telegramTokenSourceLabel } from "../../services/backup-health.service.js";
 import { OPS_EVENTS, writeSystemLog } from "../../services/system-log.service.js";
 import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
 
@@ -103,11 +105,12 @@ export async function renderLogGroupPage(ctx: BotContext, toast?: string): Promi
   // The richer status block: connection state (with an in-flight setup made
   // visible), topic readiness, worker liveness and the setup-queue depth all
   // come from the shared services - no chat id ever leaves the page unmasked.
-  const [status, activeAttempt, heartbeat, queueCounts] = await Promise.all([
+  const [status, activeAttempt, heartbeat, queueCounts, capabilities] = await Promise.all([
     getLogGroupStatus(),
     getActiveSetupAttempt(),
     readWorkerHeartbeat(),
     getLogGroupSetupQueueCounts(),
+    readWorkerCapabilities(),
   ]);
   const connectionState =
     activeAttempt !== null
@@ -133,6 +136,9 @@ export async function renderLogGroupPage(ctx: BotContext, toast?: string): Promi
     // The heartbeat key carries a TTL, so its very presence means "alive
     // recently" - readWorkerHeartbeat returns null when absent/unreachable.
     `Worker: ${heartbeat !== null ? "فعال ✅" : "غیرفعال ❌"}`,
+    // Safe worker token readiness (key-name classification only) so the OWNER can
+    // see BEFORE queueing whether the worker can call Telegram (§5/§6).
+    `توکن تلگرام Worker: ${telegramTokenSourceLabel(capabilities?.telegramBotTokenSource ?? null)}`,
     queueLine,
     `آخرین ارسال موفق: ${status.lastSuccessAt === null ? "—" : formatTime(status.lastSuccessAt)}`,
     `آخرین خطا: ${status.lastError === null ? "—" : `${status.lastError.code} (${formatTime(status.lastError.at)})`}`,

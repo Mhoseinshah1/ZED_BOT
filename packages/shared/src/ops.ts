@@ -6,6 +6,8 @@
 // bullmq) so every package can import it.
 // =============================================================================
 
+import type { TelegramBotTokenSource } from "./telegram-token.js";
+
 // --- queues / jobs -------------------------------------------------------------------------------
 
 export const BACKUP_QUEUE_NAME = "database-backup";
@@ -73,6 +75,18 @@ export interface WorkerCapabilities {
   backupDir: string;
   /** Baked image build identity (GIT_SHA); null when built without it. */
   gitSha?: string | null;
+  /**
+   * Whether the WORKER resolves a usable Telegram bot token
+   * (fix/worker-telegram-token-env-contract). Presence only — never token bytes.
+   * Optional so a snapshot published by an older worker still parses.
+   */
+  telegramBotTokenConfigured?: boolean;
+  /**
+   * Which env key the worker's token came from, or why none is usable:
+   * "TELEGRAM_BOT_TOKEN" | "BOT_TOKEN" | "MISSING" | "CONFLICT". Reveals only the
+   * KEY NAME, never any token data.
+   */
+  telegramBotTokenSource?: TelegramBotTokenSource;
   checkedAt: string;
 }
 
