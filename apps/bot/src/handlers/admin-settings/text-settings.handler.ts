@@ -432,23 +432,29 @@ adminTextSettingsHandler.callbackQuery(/^admin:menu_buy:set:(0|1)$/, async (ctx)
   const expectedCombined = parsePurchaseLayoutExpectedCombined(ctx.match[1]);
   const nextCombined = !expectedCombined;
   if (!(await compareAndSetCombinedPurchaseMenuEnabled(expectedCombined, nextCombined))) {
+    // Fixed safe fields only — NEVER the admin database id (this event is
+    // privacy-minimal, see the writeSystemLog note below). `expectedLayout` is
+    // the OWNER-observed layout the confirmation was for; `result: "stale"` marks
+    // that the stored state had already moved on (a stale/racing confirmation).
     logger.info("purchase layout change lost the race / stale confirmation", {
-      adminId: admin.id,
       action: "user-menu-purchase-layout",
       result: "stale",
+      expectedLayout: purchaseMenuLayout(expectedCombined),
     });
     await renderPurchaseLayoutPage(ctx, PURCHASE_LAYOUT_STALE_TEXT);
     return;
   }
   clearSettingsCache();
+  // Privacy-MINIMAL audit event: previous layout, next layout and actor role
+  // ONLY. The OWNER is revalidated above (requireOwner), but their identity is
+  // DELIBERATELY not persisted here — no adminId / userId / Telegram id is passed,
+  // so every SystemLog relation-id column stays null (fix/purchase-menu-audit-privacy).
+  // No label, no callback payload, no Product/payment data. The timestamp is
+  // stamped by the system-log writer.
   await writeSystemLog({
     level: "INFO",
     eventType: OPS_EVENTS.USER_MENU_PURCHASE_LAYOUT_CHANGED,
     message: OPS_EVENTS.USER_MENU_PURCHASE_LAYOUT_CHANGED,
-    adminId: admin.id,
-    // Privacy-safe: previous layout, next layout, actor role only (no Telegram/
-    // user id, no label, no callback payload). The timestamp is stamped by the
-    // system-log writer.
     metadata: {
       previousLayout: purchaseMenuLayout(expectedCombined),
       nextLayout: purchaseMenuLayout(nextCombined),

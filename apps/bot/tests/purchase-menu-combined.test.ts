@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { prisma, type Admin, type User } from "@zedbot/database";
 import {
   purchaseMenuLayout,
@@ -133,6 +137,41 @@ async function setLayout(combined: boolean): Promise<void> {
   clearSettingsCache();
 }
 
+// --- source-level privacy regression (no DB) --------------------------------
+// The purchase-layout mutation must persist NO actor identifier for the
+// privacy-minimal audit event: neither the writeSystemLog success call nor the
+// stale/race logger may reference the admin database id
+// (fix/purchase-menu-audit-privacy).
+describe("purchase-layout audit is privacy-minimal (source level)", () => {
+  it("the admin:menu_buy:set handler references no admin identifier", () => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+    const src = readFileSync(
+      path.join(repoRoot, "apps/bot/src/handlers/admin-settings/text-settings.handler.ts"),
+      "utf8",
+    );
+    const setIdx = src.indexOf("admin:menu_buy:set:(0|1)");
+    expect(setIdx).toBeGreaterThan(-1);
+    // The set-callback body ends where the next top-level declaration begins.
+    const endIdx = src.indexOf("async function renderTextsLanding", setIdx);
+    expect(endIdx).toBeGreaterThan(setIdx);
+    const block = src.slice(setIdx, endIdx);
+    // Sanity: this IS the block that writes the event + the stale logger.
+    expect(block).toContain("writeSystemLog(");
+    expect(block).toContain("USER_MENU_PURCHASE_LAYOUT_CHANGED");
+    expect(block).toContain("purchase layout change lost the race");
+    // Assert on CODE only — strip comments so an explanatory comment that merely
+    // mentions the forbidden field names does not trip the regression.
+    const code = block
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    // Regression: no persisted or logged admin identifier anywhere in the code.
+    expect(code).not.toContain("adminId");
+    expect(code).not.toContain("admin.id");
+    expect(code).not.toContain("userId");
+    expect(code).not.toContain("telegramId");
+  });
+});
+
 describe.runIf(hasDb)("admin-controlled unified purchase menu", () => {
   let owner: Admin;
   let support: Admin;
@@ -180,8 +219,10 @@ describe.runIf(hasDb)("admin-controlled unified purchase menu", () => {
 
   afterAll(async () => {
     await deleteSetting(USER_COMBINED_PURCHASE_MENU_ENABLED_KEY);
+    // The audit event carries NO relation id, so it can only be cleaned up by its
+    // (unique) event type — this suite is the only producer of it.
     await prisma.systemLog.deleteMany({
-      where: { adminId: { in: [owner.id, support.id] } },
+      where: { eventType: "user_menu.purchase_layout_changed" },
     });
     await prisma.buttonText.updateMany({ where: { key: "buy_subscription" }, data: { currentText: BUY_LABEL } });
     await prisma.buttonText.updateMany({ where: { key: "other_products" }, data: { currentText: OTHER_LABEL } });
@@ -470,15 +511,17 @@ describe.runIf(hasDb)("admin-controlled unified purchase menu", () => {
       expect(await isCombinedPurchaseMenuEnabled()).toBe(false); // untouched
     });
 
-    it("OWNER enable: confirm page → commit flips to combined + writes the audit event", async () => {
+    it("OWNER enable: commit flips to combined + writes a privacy-MINIMAL audit event", async () => {
       await setLayout(false);
       // ask shows the confirm page with the set button carrying the observed code.
       const ask = fakeCallbackCtx(owner.telegramId, "admin:menu_buy:ask:0", { admin: owner });
       await dispatchSettings(ask.ctx);
       expect(inlineButtons(ask.sent[0].other)[0]).toEqual({ text: "تایید ✅", data: "admin:menu_buy:set:0" });
 
+      // Located by the UNIQUE event type + an isolated before/after window — NEVER
+      // by adminId, because the event deliberately carries no actor identifier.
       const before = await prisma.systemLog.count({
-        where: { eventType: "user_menu.purchase_layout_changed", adminId: owner.id },
+        where: { eventType: "user_menu.purchase_layout_changed" },
       });
       const set = fakeCallbackCtx(owner.telegramId, "admin:menu_buy:set:0", { admin: owner });
       await dispatchSettings(set.ctx);
@@ -488,18 +531,51 @@ describe.runIf(hasDb)("admin-controlled unified purchase menu", () => {
       expect(set.sent[set.sent.length - 1].text).toContain(
         "چیدمان جدید با بازکردن دوباره منوی اصلی برای کاربران نمایش داده می‌شود.",
       );
-      // Privacy-safe audit event written with safe fields only.
+
       const logs = await prisma.systemLog.findMany({
-        where: { eventType: "user_menu.purchase_layout_changed", adminId: owner.id },
+        where: { eventType: "user_menu.purchase_layout_changed" },
         orderBy: { createdAt: "desc" },
       });
       expect(logs.length).toBe(before + 1);
-      const meta = logs[0].metadata as Record<string, unknown>;
+      const row = logs[0];
+
+      // Every relation-id column is null — no correlation to an Admin/User row.
+      expect(row.userId).toBeNull();
+      expect(row.adminId).toBeNull();
+      expect(row.orderId).toBeNull();
+      expect(row.paymentId).toBeNull();
+      expect(row.serviceId).toBeNull();
+
+      // Metadata is EXACTLY the three safe fields.
+      const meta = row.metadata as Record<string, unknown>;
       expect(meta).toEqual({
         previousLayout: purchaseMenuLayout(false),
         nextLayout: purchaseMenuLayout(true),
         actorRole: "OWNER",
       });
+
+      // …and contains NO identifier / label / callback / Product / Payment field.
+      const metaKeys = Object.keys(meta);
+      for (const forbidden of [
+        "id",
+        "adminId",
+        "userId",
+        "telegramId",
+        "label",
+        "callback",
+        "product",
+        "productId",
+        "payment",
+        "paymentId",
+        "amount",
+      ]) {
+        expect(metaKeys, `metadata must not contain "${forbidden}"`).not.toContain(forbidden);
+      }
+      // Belt-and-suspenders: the serialized metadata mentions no forbidden token.
+      const metaJson = JSON.stringify(meta).toLowerCase();
+      for (const token of ["adminid", "userid", "telegramid", "callback", "payment"]) {
+        expect(metaJson.includes(token), `metadata json must not mention "${token}"`).toBe(false);
+      }
     });
 
     it("OWNER disable: from combined, commit returns to split", async () => {

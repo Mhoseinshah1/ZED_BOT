@@ -60,8 +60,10 @@ export const OPS_EVENTS = {
   // enabled flag + product TYPE + short correlation id only (§8, §13, §24).
   PRODUCT_REP_ELIGIBILITY_CHANGED: "product.representative_eligibility_changed",
   // Admin-controlled unified purchase menu: the OWNER flipped the user main-menu
-  // purchase layout between SPLIT and COMBINED. Privacy-safe: previous layout +
-  // next layout + actor role only (never a Telegram/user id, label or payload).
+  // purchase layout between SPLIT and COMBINED. Privacy-MINIMAL: metadata is
+  // EXACTLY { previousLayout, nextLayout, actorRole } and the row carries NO
+  // relation id (adminId/userId/… all null) — the actor is revalidated at
+  // mutation time but never persisted here (fix/purchase-menu-audit-privacy).
   USER_MENU_PURCHASE_LAYOUT_CHANGED: "user_menu.purchase_layout_changed",
 } as const;
 export type OpsEventType = (typeof OPS_EVENTS)[keyof typeof OPS_EVENTS];
