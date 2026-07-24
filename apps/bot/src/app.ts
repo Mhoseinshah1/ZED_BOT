@@ -157,11 +157,12 @@ import { termsHandler } from "./handlers/terms.handler.js";
 import { freeTrialHandler } from "./handlers/user-free-trial/free-trial.handler.js";
 import { adminMenuTextRouter } from "./handlers/admin-menu-actions.js";
 import {
-  pricingReplyEscapeRouter,
+  purchaseNavigationEscapeRouter,
   userMenuTextRouter,
 } from "./handlers/user-menu-actions.js";
 import { userPlaceholdersHandler } from "./handlers/user-placeholders.handler.js";
 import { pricingHandler } from "./handlers/user-pricing/pricing.handler.js";
+import { purchaseHubHandler } from "./handlers/user-purchase-hub/purchase-hub.handler.js";
 import { userReferralHandler } from "./handlers/user-referral/referral.handler.js";
 import { safeAnswerCallback } from "./utils/safe-reply.js";
 
@@ -341,13 +342,15 @@ export function createBot(token: string): Bot<BotContext> {
   // Corrective Phase: wallet auto-renewal pre-charge notice minutes input
   // ("war:notice-minutes"). Self-gates on currentFlow.
   adminFlowText.use(autoRenewalAdminTextHandler);
-  // Pricing reply-keyboard escape (fix/pricing-reply-keyboard-flow-escape): a
-  // NARROW pre-flow router that runs BEFORE the flow dispatcher below and only
-  // rescues the CURRENT Pricing reply button out of the six interruptible
-  // checkout/payment INPUT flows (REPLY mode, exact label match, access-gated).
-  // Everything else calls next() and reaches the flow dispatcher exactly as
-  // before, so support/representative/customer-input/admin flows keep priority.
-  bot.on("message:text", pricingReplyEscapeRouter.middleware());
+  // Purchase-navigation reply-keyboard escape (admin-controlled unified purchase
+  // menu §13; generalizes fix/pricing-reply-keyboard-flow-escape): a NARROW
+  // pre-flow router that runs BEFORE the flow dispatcher below and only rescues a
+  // CURRENT purchase-navigation reply button (Pricing / purchase hub / VPN /
+  // Other Products) out of the six interruptible checkout/payment INPUT flows
+  // (REPLY mode, exact label match, access-gated). Everything else calls next()
+  // and reaches the flow dispatcher exactly as before, so support / representative
+  // / customer-input / admin flows keep priority.
+  bot.on("message:text", purchaseNavigationEscapeRouter.middleware());
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {
@@ -481,6 +484,10 @@ export function createBot(token: string): Bot<BotContext> {
   // placeholder handler, which used to own CB.USER_REFERRAL.
   userArea.use(userReferralHandler);
   userArea.use(representativeHandler);
+  // Admin-controlled unified purchase menu: the combined-mode purchase hub
+  // (CB.USER_PURCHASE_HUB). MUST run before the placeholder handler so old
+  // `user:purchase` keyboards open the real hub in EVERY layout.
+  userArea.use(purchaseHubHandler);
   // Public retail Pricing Catalog (feat/public-pricing-catalog): the real
   // «تعرفه‌ها» page. MUST run before the placeholder handler, which used to own
   // CB.USER_PRICING — so old `user:pricing` keyboards open the real page.

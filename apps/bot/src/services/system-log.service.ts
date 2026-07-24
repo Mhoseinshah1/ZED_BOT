@@ -59,6 +59,10 @@ export const OPS_EVENTS = {
   // reseller sale (Product.representativeEligible). Privacy-safe: action +
   // enabled flag + product TYPE + short correlation id only (§8, §13, §24).
   PRODUCT_REP_ELIGIBILITY_CHANGED: "product.representative_eligibility_changed",
+  // Admin-controlled unified purchase menu: the OWNER flipped the user main-menu
+  // purchase layout between SPLIT and COMBINED. Privacy-safe: previous layout +
+  // next layout + actor role only (never a Telegram/user id, label or payload).
+  USER_MENU_PURCHASE_LAYOUT_CHANGED: "user_menu.purchase_layout_changed",
 } as const;
 export type OpsEventType = (typeof OPS_EVENTS)[keyof typeof OPS_EVENTS];
 

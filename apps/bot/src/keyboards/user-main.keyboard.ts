@@ -21,11 +21,15 @@ import {
  * panel exists - a fully operational section or no button at all, never a
  * visible placeholder.
  *
- * LOCKED layout decisions:
- *  - «خرید اشتراک» opens the existing subscription purchase flow
- *    (CB.USER_BUY) - unchanged.
- *  - «محصولات دیگر» stays a SEPARATE section (CB.USER_OTHER_PRODUCTS) -
- *    never merged into the subscription purchase.
+ * LAYOUT invariant (admin-controlled unified purchase menu):
+ *  - «خرید اشتراک» (CB.USER_BUY) and «محصولات دیگر» (CB.USER_OTHER_PRODUCTS) are
+ *    two SEPARATE business flows and stay separate — no flow is ever merged.
+ *  - Only their main-menu ENTRY BUTTONS may be combined: in COMBINED mode the two
+ *    buttons are replaced by a single «خرید محصولات 🛒» (CB.USER_PURCHASE_HUB)
+ *    that opens a purchase hub from which the SAME two flows are entered. The
+ *    OWNER's `user_combined_purchase_menu_enabled` setting selects the layout;
+ *    it is presentation only and never gates a flow (both callbacks stay valid
+ *    in every layout, on old inline keyboards and stale reply keyboards alike).
  */
 export async function buildUserMainKeyboard(viewer?: UserMainMenuViewer): Promise<InlineKeyboard> {
   // Menu-keyboard-mode phase: rendered from the ONE shared menu definition

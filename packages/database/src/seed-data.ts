@@ -1048,6 +1048,16 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     defaultContent: "این محصول دیگر در دسترس نیست.",
     allowedVariables: [],
   },
+  // Admin-controlled unified purchase menu: the COMBINED-mode purchase hub intro.
+  // Static copy — no dynamic variables — rendered as a plain-text page; operator
+  // edits are preserved by the create-if-missing seed and bounded at render time.
+  {
+    key: "purchase_hub_intro",
+    title: "منوی خرید - متن معرفی",
+    category: "menu",
+    defaultContent: "نوع محصول موردنظر خود را انتخاب کنید.",
+    allowedVariables: [],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -1067,6 +1077,11 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "admin_panel", title: "منوی کاربر: پنل مدیریت", text: "پنل مدیریت 🛠" },
   { key: "referral", title: "زیرمجموعه گیری", text: "زیرمجموعه گیری 👥" },
   { key: "other_products", title: "محصولات دیگر", text: "محصولات دیگر 🛍" },
+  // Admin-controlled unified purchase menu: the COMBINED-mode single purchase
+  // button (replaces buy_subscription + other_products in the rendered menu when
+  // the OWNER enables the combined layout). Editable like every main-menu label;
+  // its current text also drives combined-mode reply routing (never behaviour).
+  { key: "purchase_hub", title: "خرید محصولات (یکپارچه)", text: "خرید محصولات 🛒" },
   { key: "my_orders", title: "سفارش‌های من", text: "سفارش‌های من 🧾" },
   { key: "pricing", title: "تعرفه اشتراک‌ها", text: "تعرفه اشتراک‌ها 💵" },
   // Public retail Pricing Catalog (feat/public-pricing-catalog): the in-page

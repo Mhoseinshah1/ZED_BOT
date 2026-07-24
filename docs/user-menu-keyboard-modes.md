@@ -345,3 +345,15 @@ rollout switch, is handled by the exhaustive `UserMainMenuAction` dispatch in
 both keyboard modes, and resolves its (possibly edited) reply-keyboard label
 through `resolveMainMenuAction` — the label never authorizes or routes. See
 `docs/public-pricing-catalog.md`.
+
+## Purchase layout (admin-controlled unified purchase menu)
+
+The purchase ENTRY has two layouts selected by the OWNER setting
+`user_combined_purchase_menu_enabled` (default SPLIT): the historical two buttons
+(`BUY_SUBSCRIPTION` + `OTHER_PRODUCTS`) or ONE `PURCHASE_HUB` button that opens a
+purchase hub. The setting is presentation only; both keyboard modes render the
+identical layout from the ONE shared definition. Reply-text resolution is
+layout-independent for the three purchase actions (`BUY_SUBSCRIPTION`,
+`OTHER_PRODUCTS`, `PURCHASE_HUB`), so a stale reply keyboard from the other layout
+keeps routing after a toggle; `purchase_hub` joins `MAIN_MENU_BUTTON_KEYS` for the
+duplicate-label guard. See `docs/combined-purchase-menu.md`.

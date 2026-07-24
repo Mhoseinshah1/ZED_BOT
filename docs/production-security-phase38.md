@@ -120,3 +120,14 @@ username, subscription URL, config, token, panel base URL/credentials, raw
 response, remote client id or ticket text. A diagnostic snapshot is persisted only
 after explicit support handoff and is strictly validated to be secret-free. See
 `docs/service-self-diagnostics.md`.
+
+## Purchase-layout change audit (admin-controlled unified purchase menu)
+
+Flipping the user main-menu purchase layout (split ↔ combined) writes ONE
+privacy-safe audit event, `user_menu.purchase_layout_changed`, via the standard
+`writeSystemLog`. It carries only the previous layout, the next layout and the
+actor role (plus the writer's timestamp) — never a Telegram id, user id, button
+label, callback payload, raw error, or Product/payment information. Only the live
+OWNER can trigger it (revalidated on the confirmation callback); the mutation is
+an atomic compare-and-set so a stale/racing confirmation cannot double-toggle or
+log a phantom change. See `docs/combined-purchase-menu.md`.

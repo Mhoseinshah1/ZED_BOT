@@ -677,7 +677,10 @@ describe.runIf(hasDb)("admin main-menu keyboard mode", () => {
     expect(sent[0].text).toBe(
       "نوع نمایش منوها\n\n" +
         `منوی کاربر:\n${MENU_MODE_LABELS.INLINE}\n\n` +
-        `منوی ادمین:\n${MENU_MODE_LABELS.INLINE}`,
+        `منوی ادمین:\n${MENU_MODE_LABELS.INLINE}\n\n` +
+        // Admin-controlled unified purchase menu: the purchase-layout line;
+        // default installations are SPLIT ("جداگانه").
+        "چیدمان خرید منوی کاربر:\nجداگانه",
     );
     const overviewButtons = inlineRows(
       sent[0].other?.reply_markup as { inline_keyboard: Array<Array<Record<string, unknown>>> },
@@ -685,6 +688,7 @@ describe.runIf(hasDb)("admin main-menu keyboard mode", () => {
     expect(overviewButtons).toEqual([
       { label: "تنظیم منوی کاربران", callback: "admin:menu_mode:user" },
       { label: "تنظیم منوی ادمین", callback: "admin:menu_mode:admin" },
+      { label: "تنظیم چیدمان خرید 🛒", callback: "admin:menu_buy" },
       { label: "بازگشت به تنظیمات عمومی", callback: "admin:general_settings" },
     ]);
 

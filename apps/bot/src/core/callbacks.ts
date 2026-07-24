@@ -18,6 +18,11 @@ export const CB = {
   USER_PRICING: "user:pricing",
   USER_REPRESENTATIVE: "user:representative_request",
   USER_OTHER_PRODUCTS: "user:other_products",
+  // Admin-controlled unified purchase menu: the combined-mode purchase hub root
+  // (feat/admin-controlled-unified-purchase-menu). Old split-mode keyboards may
+  // carry it too - it always opens the hub; the layout setting is presentation
+  // only and never gates the underlying VPN / Other-Products flows.
+  USER_PURCHASE_HUB: "user:purchase",
   USER_ORDERS: "user:orders",
   USER_EXTRA_VOLUME: "user:extra_volume",
   USER_EXTRA_TIME: "user:extra_time",

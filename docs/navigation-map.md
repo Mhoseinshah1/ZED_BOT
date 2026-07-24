@@ -44,12 +44,20 @@ Legend: `»` opens page · *(flow)* switches to a text-input flow.
 
 ## User main menu (rows + conditional trial row, ButtonText-backed)
 
-| row | button → callback |
+The purchase entry has TWO layouts, selected by the OWNER setting
+`user_combined_purchase_menu_enabled` (default SPLIT). See
+`docs/combined-purchase-menu.md`. **SPLIT** (default) is shown below; in
+**COMBINED** mode rows 1 + 3 change to `[خرید محصولات 🛒 → user:purchase · تمدید
+سرویس ♻️ → user:renew]` and `[سفارش‌های من 🧾 → user:orders · تعرفه اشتراک‌ها 💵 →
+user:pricing]`, and `user:buy` / `user:other_products` are not rendered (their
+flows stay reachable via the hub, old inline callbacks and stale reply labels).
+
+| row | button → callback (SPLIT) |
 | --- | --- |
-| 1 | خرید اشتراک 🔐 → `user:buy` (**LOCKED**) · تمدید سرویس ♻️ → `user:renew` |
+| 1 | خرید اشتراک 🔐 → `user:buy` · تمدید سرویس ♻️ → `user:renew` |
 | 2 | سرویس‌های من 🛍 → `user:services` · کیف پول + شارژ 🏦 → `user:wallet` |
-| 3 | محصولات دیگر 🛍 → `user:other_products` (**LOCKED**, separate) · سفارش‌های من 🧾 → `user:orders` |
-| 3¾ | تعرفه اشتراک‌ها 💵 → `user:pricing` — the real **public retail Pricing Catalog** (feat/public-pricing-catalog). Always visible, no rollout switch; standalone row after OTHER_PRODUCTS/MY_ORDERS and before every feature-gated row. See `docs/public-pricing-catalog.md`. |
+| 3 | محصولات دیگر 🛍 → `user:other_products` · سفارش‌های من 🧾 → `user:orders` |
+| 3¾ | تعرفه اشتراک‌ها 💵 → `user:pricing` — the real **public retail Pricing Catalog** (feat/public-pricing-catalog). Always visible, no rollout switch. See `docs/public-pricing-catalog.md`. |
 | 3½ (conditional) | اکانت تست رایگان 🎁 → `user:free_test` — rendered ONLY when free trials are globally enabled AND ≥ 1 trial-ready panel exists — ready includes free capacity (`getFreeTrialMenuAvailability`, the same shared policy the admin «تنظیمات اکانت تست 🎁» diagnostics page reads; feature-gated, never a placeholder) |
 | 4 | پشتیبانی ☎️ → `user:support` |
 
