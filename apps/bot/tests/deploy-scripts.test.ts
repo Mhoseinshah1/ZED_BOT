@@ -356,6 +356,61 @@ describe("deploy scripts (Phase 36)", () => {
       const shared = extract(path.join(scriptsDir, "lib", "common.sh"));
       expect(inline).toBe(shared);
     });
+
+    // Non-ASCII whitespace parity with the runtime resolver's value.trim():
+    // U+00A0 (NBSP), U+3000 (ideographic space) and U+FEFF (BOM) are stripped by
+    // String.prototype.trim() but NOT by POSIX [[:space:]]. The scripts must
+    // match, so a NBSP-only token reads as missing and a NBSP/ideographic-padded
+    // pair equal-after-trim is a duplicate, not a conflict. (Escapes are explicit
+    // so the exact code points are unambiguous in the test source.)
+    const NBSP = "\u00A0";
+    const IDEO = "\u3000";
+    const BOM = "\uFEFF";
+
+    it("treats a U+00A0 (NBSP)-only TELEGRAM_BOT_TOKEN as missing", () => {
+      const result = runWithEnvFile([`TELEGRAM_BOT_TOKEN='${NBSP}${NBSP}'`, ...REST].join("\n"));
+      expect(result.status).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain("[MISSING] TELEGRAM_BOT_TOKEN");
+    });
+
+    it("treats a U+3000 / U+FEFF whitespace-only BOT_TOKEN as missing", () => {
+      const result = runWithEnvFile([`BOT_TOKEN='${IDEO}${BOM}'`, ...REST].join("\n"));
+      expect(result.status).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain("[MISSING] TELEGRAM_BOT_TOKEN");
+    });
+
+    it("a NBSP/ideographic-padded pair equal after trimming -> duplicate warning, not conflict", () => {
+      const result = runWithEnvFile(
+        [
+          `TELEGRAM_BOT_TOKEN=' ${IDEO}${TOKEN}${NBSP} '`,
+          `BOT_TOKEN='${BOM}${TOKEN} '`,
+          ...REST,
+        ].join("\n"),
+      );
+      expect(result.status).toBe(0);
+      const out = result.stdout + result.stderr;
+      expect(out).toContain("[ OK    ] TELEGRAM_BOT_TOKEN");
+      expect(out).toMatch(/\[ WARN {2}\].*duplicate key/);
+      expect(out).not.toContain("conflict");
+      expect(out).not.toContain(TOKEN);
+    });
+
+    it("a NBSP-padded pair differing after trimming -> conflict", () => {
+      const TOKEN2 = "987654:ZZZyyyXXXwww-other-secret-token";
+      const result = runWithEnvFile(
+        [
+          `TELEGRAM_BOT_TOKEN='${NBSP}${TOKEN}${NBSP}'`,
+          `BOT_TOKEN='${IDEO}${TOKEN2}${IDEO}'`,
+          ...REST,
+        ].join("\n"),
+      );
+      expect(result.status).not.toBe(0);
+      const out = result.stdout + result.stderr;
+      expect(out).toContain("[INVALID] TELEGRAM_BOT_TOKEN");
+      expect(out).toContain("TELEGRAM_BOT_TOKEN and BOT_TOKEN conflict");
+      expect(out).not.toContain(TOKEN);
+      expect(out).not.toContain(TOKEN2);
+    });
   });
 
   // doctor.sh `check_telegram_token` sourced directly (BASH_SOURCE guard) so the
@@ -416,6 +471,64 @@ describe("deploy scripts (Phase 36)", () => {
       const out = r.stdout + r.stderr;
       expect(out).not.toContain(TOKEN);
       expect(out).not.toContain(OTHER);
+    });
+
+    // Non-ASCII whitespace parity (U+00A0 NBSP, U+3000 ideographic space, U+FEFF
+    // BOM) - the runtime resolver's value.trim() strips these, so doctor must too.
+    const NBSP = "\u00A0";
+    const IDEO = "\u3000";
+    const BOM = "\uFEFF";
+
+    it("does NOT pass a U+00A0 (NBSP)-only canonical token", () => {
+      const r = tokenCheck(`${NBSP}${NBSP}`, "");
+      expect(r.stdout).toContain("TOKEN_FAIL");
+      expect(r.stdout).not.toContain("TOKEN_PASS");
+    });
+
+    it("does NOT count a U+3000/U+FEFF whitespace-only legacy token as configured", () => {
+      const r = tokenCheck("", `${IDEO}${BOM}`);
+      expect(r.stdout).toContain("TOKEN_FAIL");
+      expect(r.stdout).not.toContain("TOKEN_PASS");
+    });
+
+    it("passes a NBSP/ideographic-padded pair equal after trimming (not a conflict)", () => {
+      const r = tokenCheck(`${NBSP}${TOKEN}${IDEO}`, `${BOM}${TOKEN} `);
+      expect(r.stdout).toContain("TOKEN_PASS");
+      expect(r.stdout + r.stderr).not.toContain(TOKEN);
+    });
+  });
+
+  // Direct runtime-parity: the shared shell trim helper must produce the same
+  // bytes as JavaScript String.prototype.trim() for the full trim character set,
+  // including code points POSIX [[:space:]] misses (NBSP, ideographic space,
+  // line/paragraph separators, BOM) and one it must NOT strip (U+200B ZWSP).
+  describe("trim_env_token_value vs String.prototype.trim() byte parity", () => {
+    const commonSh = path.join(scriptsDir, "lib", "common.sh");
+    const samples = [
+      "\u00A0token\u00A0", // NBSP
+      "\u3000token\u3000", // ideographic space
+      "\u2028token\u2029", // line + paragraph separators
+      "\uFEFFtoken\uFEFF", // BOM / ZWNBSP
+      "\u2003 \ttoken\r\u205F", // mixed em-space/ASCII/narrow math space
+      "\u200Btoken\u200B", // zero-width space: NOT trimmed by JS
+      "\u00A0\u3000\u2028", // whitespace-only → empty
+      "plain-token", // no padding
+      "", // empty
+    ];
+
+    it("matches node's .trim() exactly for every sample", () => {
+      // Run the real shared helper once per sample, comparing base64 in/out so no
+      // token value is ever emitted to the test log.
+      const b64 = (s: string): string => Buffer.from(s, "utf8").toString("base64");
+      for (const sample of samples) {
+        const snippet =
+          `source '${commonSh}' >/dev/null 2>&1 || true\n` +
+          `raw="$(printf '%s' "$1" | base64 -d)"\n` +
+          `printf '%s' "$(trim_env_token_value "$raw")" | base64 -w0`;
+        const r = bash(["-c", snippet, "bash", b64(sample)]);
+        expect(r.status).toBe(0);
+        expect(r.stdout.trim()).toBe(b64(sample.trim()));
+      }
     });
   });
 });

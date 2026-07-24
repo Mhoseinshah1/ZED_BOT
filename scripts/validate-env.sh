@@ -49,17 +49,40 @@ has_value() {
   [ -n "$value" ]
 }
 
-# Strip leading/trailing shell whitespace (space, tab, CR, newline) WITHOUT eval,
-# without printing/logging it, and without exposing its length, prefix, suffix, or
-# hash - interior characters are left untouched. Behaviourally identical to
-# scripts/lib/common.sh's trim_env_token_value; kept inline here because
-# validate-env.sh is deliberately dependency-free (it runs before install clones
-# the repo). A source-parity test keeps the two copies in sync. Mirrors the
-# runtime resolver's value.trim() so a whitespace-only token reads as unset.
+# Trim a token value to match the runtime resolver's value.trim() EXACTLY (JS
+# String.prototype.trim). Behaviourally identical to scripts/lib/common.sh's
+# trim_env_token_value; kept inline here because validate-env.sh is deliberately
+# dependency-free (it runs before install clones the repo). A source-parity test
+# keeps the two function bodies verbatim-equal. No eval, no printing/logging, and
+# the value's length/prefix/suffix/hash are never exposed.
 trim_env_token_value() {
-  local v="$1"
-  v="${v#"${v%%[![:space:]]*}"}" # strip leading whitespace
-  v="${v%"${v##*[![:space:]]}"}" # strip trailing whitespace
+  # Force byte-wise matching (locale-independent) and trim EXACTLY the character
+  # set that JavaScript String.prototype.trim() removes: the ASCII whitespace via
+  # the C [[:space:]] class (tab, LF, VT, FF, CR, space) plus the multi-byte UTF-8
+  # whitespace .trim() also strips - NBSP (U+00A0), Ogham space (U+1680), the en/em
+  # quads and spaces (U+2000-U+200A), line/paragraph separators (U+2028/U+2029),
+  # narrow/medium math spaces (U+202F/U+205F), ideographic space (U+3000) and the
+  # BOM/ZWNBSP (U+FEFF). Given as exact \xHH byte sequences so no locale, eval, or
+  # external command is needed; U+200B (zero-width space) is NOT trimmed, matching
+  # JS. The value is never printed/logged; length/prefix/suffix/hash never exposed.
+  local LC_ALL=C v="$1" prev="" ws
+  local -a mb=(
+    $'\xc2\xa0' $'\xe1\x9a\x80'
+    $'\xe2\x80\x80' $'\xe2\x80\x81' $'\xe2\x80\x82' $'\xe2\x80\x83'
+    $'\xe2\x80\x84' $'\xe2\x80\x85' $'\xe2\x80\x86' $'\xe2\x80\x87'
+    $'\xe2\x80\x88' $'\xe2\x80\x89' $'\xe2\x80\x8a'
+    $'\xe2\x80\xa8' $'\xe2\x80\xa9' $'\xe2\x80\xaf' $'\xe2\x81\x9f'
+    $'\xe3\x80\x80' $'\xef\xbb\xbf'
+  )
+  while [ "$v" != "$prev" ]; do
+    prev="$v"
+    v="${v#"${v%%[![:space:]]*}"}" # strip leading ASCII whitespace
+    v="${v%"${v##*[![:space:]]}"}" # strip trailing ASCII whitespace
+    for ws in "${mb[@]}"; do
+      while [ "${v#"$ws"}" != "$v" ]; do v="${v#"$ws"}"; done # leading
+      while [ "${v%"$ws"}" != "$v" ]; do v="${v%"$ws"}"; done # trailing
+    done
+  done
   printf '%s' "$v"
 }
 
