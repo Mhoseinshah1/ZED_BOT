@@ -14,8 +14,11 @@
 //     Persian strings. Persian rendering lives in the bot view layer.
 //   * This module imports NOTHING from @zedbot/database or the bot — pure data +
 //     pure functions, so the api/worker/tests can consume it too.
-//   * The audit event is privacy-safe: it carries the previous/next layout and
-//     the actor role only — never Telegram ids, user ids, labels or payloads.
+//   * The audit event is privacy-MINIMAL: it carries the previous/next layout and
+//     the actor role only — never a Telegram id, user id, ADMIN id, label,
+//     callback payload or Product/payment data. It is written with NO relation id
+//     (adminId/userId/orderId/…), so every SystemLog relation-id column stays null;
+//     the actor's identity is revalidated at mutation time but never persisted here.
 // =============================================================================
 
 // --- rollout setting ---------------------------------------------------------
@@ -59,6 +62,8 @@ export function parsePurchaseLayoutExpectedCombined(raw: string): boolean {
 
 // --- privacy-safe audit event ------------------------------------------------
 
-/** Audit marker written when the OWNER flips the purchase layout. Safe fields
- * only (previous layout, next layout, actor role, timestamp). */
+/** Audit marker written when the OWNER flips the purchase layout. Privacy-minimal:
+ * metadata is EXACTLY { previousLayout, nextLayout, actorRole } and the row carries
+ * NO relation id (adminId/userId/orderId/paymentId/serviceId all null); the writer
+ * stamps the timestamp. */
 export const USER_MENU_PURCHASE_LAYOUT_CHANGED_EVENT = "user_menu.purchase_layout_changed";
