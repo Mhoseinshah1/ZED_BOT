@@ -27,6 +27,7 @@ import {
   PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA,
   renderSafeSummary,
 } from "../src/services/customer-input-schema.service.js";
+import { productDetailKeyboard } from "../src/handlers/products/product-views.js";
 import { dispatchPaidOrderFulfillment } from "../src/services/order-fulfillment.service.js";
 import { deliverManualOrder } from "../src/services/other-product-delivery.service.js";
 import {
@@ -867,6 +868,28 @@ describe.runIf(hasDb)("Apple ID personalized vs stock fulfillment (DB)", () => {
     expect(summary).not.toContain("09120000000");
     // Country/region (not identifying) stays readable.
     expect(summary).toContain("United States");
+  });
+
+  it("26. personalized Apple detail hides the ineffective legacy user-info toggle; a legacy manual kind keeps it", async () => {
+    const persKb = productDetailKeyboard(await productWithRelations(personalizedProduct.id));
+    const persCodes = persKb.inline_keyboard.flat().map((b) => ("callback_data" in b ? b.callback_data : ""));
+    // The legacy requiredUserInfoEnabled toggle (admin:prod:rui:) is suppressed:
+    // a PERSONALIZED_SERVICE always requires the structured form, so the toggle
+    // would falsely report info as disabled.
+    expect(persCodes.some((c) => c?.startsWith("admin:prod:rui:"))).toBe(false);
+
+    // A legacy GENERIC manual product keeps the free-text toggle.
+    const generic = await createProduct({
+      name: `apple-generic-${runTag}`,
+      otherProductKind: "GENERIC",
+      otherProductFulfillmentProfile: null,
+      deliveryType: "MANUAL_ADMIN",
+      requiredUserInfoEnabled: true,
+      stockEnabled: false,
+    });
+    const genKb = productDetailKeyboard(await productWithRelations(generic.id));
+    const genCodes = genKb.inline_keyboard.flat().map((b) => ("callback_data" in b ? b.callback_data : ""));
+    expect(genCodes.some((c) => c?.startsWith("admin:prod:rui:"))).toBe(true);
   });
 });
 

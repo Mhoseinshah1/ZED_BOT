@@ -376,9 +376,14 @@ export function productDetailKeyboard(
       ).row();
     }
     kb.text("پیام تکمیل سفارش", pcb.fieldEdit(sid, "cmt")).row();
-    // Customer-info settings: hidden for a ready-from-stock Apple product
-    // (تحویل آماده collects no info); shown for personalized and other kinds.
-    if (!(isApple && !personalized)) {
+    // Legacy free-text customer-info settings (toggle + prompt): hidden for a
+    // ready-from-stock Apple product (تحویل آماده collects no info) AND for any
+    // PERSONALIZED_SERVICE product. A personalized profile ALWAYS requires the
+    // structured form (resolveEffectiveProfile forces requiresCustomerInfo=true),
+    // so the legacy toggle would falsely report info as disabled and the
+    // free-text prompt has no effect on the structured fields buyers receive.
+    // Shown only for the legacy free-text kinds (e.g. GENERIC manual delivery).
+    if (!personalized && !(isApple && !personalized)) {
       kb.text(
         product.requiredUserInfoEnabled ? "اطلاعات کاربر: ✅" : "اطلاعات کاربر: ❌",
         pcb.toggleUserInfo(sid),

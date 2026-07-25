@@ -4,6 +4,7 @@ import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
+import { CO_CB } from "./checkout-cb.js";
 import { logger } from "../../core/logger.js";
 import {
   CUSTOMER_INPUT_SAVED_NOTICE,
@@ -441,18 +442,24 @@ customerInputFormHandler.callbackQuery(/^cinput:start:([0-9a-f-]{4,32})$/, async
   await safeAnswerCallback(ctx);
   // Reconstruct the payment continuation so a cancel-then-resume buyer of a
   // mandatory pre-payment form (still-unpaid Apple ID build) is not stranded
-  // after submitting: return them to the payment-method screen for THIS
-  // checkout. Without this, re-entry loses the resume hint and the post-submit
-  // screen would offer only the main menu.
-  const opts =
-    checkout.status === CheckoutStatus.PENDING && snapshot.requireInfoBeforeSettlement
-      ? {
-          resumePayment: {
-            label: "ادامه پرداخت 💳",
-            callback: `user:pay:m:${checkout.id.slice(0, 8)}`,
-          },
-        }
-      : undefined;
+  // after submitting. When THIS checkout is the one the active session draft
+  // materialized for a WALLET payment, restore the wallet continuation (a
+  // re-tap of «پرداخت با کیف پول ✅» settles the now-satisfied checkout) —
+  // otherwise return to the payment-method screen for gateway/card. This keeps
+  // wallet-only deployments (where the method screen lists no gateways) usable.
+  let opts: { resumePayment: { label: string; callback: string } } | undefined;
+  if (checkout.status === CheckoutStatus.PENDING && snapshot.requireInfoBeforeSettlement) {
+    const walletDraft = ctx.session.temp.checkoutDraft;
+    opts =
+      walletDraft?.otherProductCheckoutId === checkout.id
+        ? { resumePayment: { label: "پرداخت با کیف پول ✅", callback: CO_CB.WALLET_CONFIRM } }
+        : {
+            resumePayment: {
+              label: "ادامه پرداخت 💳",
+              callback: `user:pay:m:${checkout.id.slice(0, 8)}`,
+            },
+          };
+  }
   await startCustomerInputForm(ctx, checkout.id, schema, opts);
 });
 
