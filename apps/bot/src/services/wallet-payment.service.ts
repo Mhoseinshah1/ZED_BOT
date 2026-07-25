@@ -542,7 +542,28 @@ async function materializePendingOtherProductCheckout(
     // checkouts and lingering copies of submitted personal data. The resume
     // path never reaches here, so an in-progress checkout is never cancelled.
     const superseded = await tx.checkoutSession.findMany({
-      where: { userId: user.id, productId: args.product.id, status: CheckoutStatus.PENDING },
+      where: {
+        userId: user.id,
+        productId: args.product.id,
+        status: CheckoutStatus.PENDING,
+        // NEVER supersede a checkout that still has a payment awaiting
+        // settlement: a card receipt in review (approveReceiptPayment requires
+        // the checkout to stay PENDING) or a gateway payment in flight.
+        // Cancelling it would strand the buyer's already-transferred money with
+        // no reconciliation path. Such a checkout is left PENDING so its own
+        // payment can still settle.
+        payments: {
+          none: {
+            status: {
+              in: [
+                PaymentStatus.PENDING,
+                PaymentStatus.PENDING_REVIEW,
+                PaymentStatus.PROCESSING,
+              ],
+            },
+          },
+        },
+      },
       select: { id: true },
     });
     if (superseded.length > 0) {

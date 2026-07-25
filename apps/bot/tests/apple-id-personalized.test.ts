@@ -891,6 +891,40 @@ describe.runIf(hasDb)("Apple ID personalized vs stock fulfillment (DB)", () => {
     const genCodes = genKb.inline_keyboard.flat().map((b) => ("callback_data" in b ? b.callback_data : ""));
     expect(genCodes.some((c) => c?.startsWith("admin:prod:rui:"))).toBe(true);
   });
+
+  it("27. a fresh wallet attempt never cancels a checkout whose card receipt is awaiting review", async () => {
+    const user = await createUser();
+    // A: form submitted, card receipt uploaded → checkout PENDING, payment
+    // PENDING_REVIEW.
+    const checkoutA = await makeCheckout(user, personalizedProduct);
+    await submitInfo(checkoutA.id, user);
+    const submitted = await submitReceipt(user, checkoutA, cardGateway.id, undefined, {
+      text: "کارت به کارت انجام شد",
+    });
+    expect(submitted.ok).toBe(true);
+    if (!submitted.ok) {
+      return;
+    }
+
+    // A fresh wallet attempt for the SAME product materializes a new checkout
+    // but must NOT supersede A (its transfer would be stranded).
+    const draft = draftFor(personalizedProduct);
+    const b = await payPurchaseDraftWithWallet(user, draft);
+    if (b.ok || !("needsCustomerInfo" in b)) {
+      throw new Error("expected needsCustomerInfo");
+    }
+    expect(b.checkoutId).not.toBe(checkoutA.id);
+    expect(
+      (await prisma.checkoutSession.findUniqueOrThrow({ where: { id: checkoutA.id } })).status,
+    ).toBe("PENDING");
+
+    // The admin can still approve the receipt and settle A normally.
+    const approved = await approveReceiptPayment(submitted.payment.id, admin);
+    expect(approved.ok).toBe(true);
+    expect(
+      (await prisma.checkoutSession.findUniqueOrThrow({ where: { id: checkoutA.id } })).status,
+    ).toBe("PAID");
+  });
 });
 
 describe.skipIf(hasDb)("Apple ID personalized fulfillment (skipped — no DATABASE_URL)", () => {
