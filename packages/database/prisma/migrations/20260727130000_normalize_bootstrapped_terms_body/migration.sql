@@ -31,11 +31,21 @@ DO $$
 DECLARE
     bootstrapped RECORD;
     normalized TEXT;
+    utf16_length INTEGER;
     next_version INTEGER;
 BEGIN
     IF to_regclass('"TermsDocument"') IS NULL THEN
         RETURN;
     END IF;
+
+    -- Serialize against live publication. Deployments keep the OLD application
+    -- containers serving traffic while migrations run (scripts/update.sh), so an
+    -- OWNER can publish a version between this SELECT and the INSERT below —
+    -- which would make max(version) stale and the insert collide with the
+    -- single-PUBLISHED partial unique index, aborting the deployment. This is
+    -- the same transaction-level lock every terms mutation takes; the key must
+    -- stay identical to TERMS_CONFIG_LOCK in terms-document.service.ts.
+    PERFORM pg_advisory_xact_lock(hashtext('zedbot-terms-config'));
 
     SELECT "id", "body" INTO bootstrapped
     FROM "TermsDocument"
@@ -49,19 +59,40 @@ BEGIN
         RETURN;
     END IF;
 
-    normalized := btrim(
+    -- Mirror normalizeTermsBody exactly, in its order: fold CRLF and lone CR to
+    -- LF FIRST, because the control-character sweep below would otherwise delete
+    -- a lone CR outright and run two clauses together ("A\rB" -> "AB").
+    normalized := regexp_replace(
         regexp_replace(
-            translate(
-                bootstrapped.body,
-                U&'\200B\200E\200F\202A\202B\202C\202D\202E\2066\2067\2068\2069\FEFF',
-                ''
+            regexp_replace(
+                translate(
+                    regexp_replace(bootstrapped.body, E'\r\n?', E'\n', 'g'),
+                    U&'\200B\200E\200F\202A\202B\202C\202D\202E\2066\2067\2068\2069\FEFF',
+                    ''
+                ),
+                U&'[\0001-\0008\000B-\001F\007F-\009F]', '', 'g'
             ),
-            U&'[\0001-\0008\000B-\001F\007F-\009F]', '', 'g'
-        )
+            '^[[:space:]]+', ''
+        ),
+        '[[:space:]]+$', ''
     );
 
-    IF normalized = bootstrapped.body THEN
-        -- Already clean and within limits: nothing to repair, nobody disturbed.
+    -- The application measures its 3,500 limit with JavaScript `.length`, i.e.
+    -- UTF-16 code units, while PostgreSQL length() counts code points. They
+    -- diverge on astral characters (emoji): 2,100 emoji are 2,100 here but 4,200
+    -- to the bot, which would then refuse to render the document at all. Count
+    -- the same units the application does — each astral code point is two.
+    utf16_length := length(normalized) + coalesce((
+        SELECT count(*)
+        FROM regexp_split_to_table(normalized, '') AS ch
+        WHERE ascii(ch) > 65535
+    ), 0);
+
+    -- Nothing to repair ONLY if the body is both unchanged AND renderable. An
+    -- already-clean but over-limit body must still fall through: leaving it
+    -- published would gate every user behind a screen that (correctly) refuses
+    -- to offer acceptance of a document it cannot show in full.
+    IF normalized = bootstrapped.body AND utf16_length <= 3500 THEN
         RETURN;
     END IF;
 
@@ -72,11 +103,15 @@ BEGIN
         "updatedAt" = CURRENT_TIMESTAMP
     WHERE "id" = bootstrapped.id;
 
-    -- "Meaningful" must match the application's test, which ignores ALL
-    -- whitespace. One-argument btrim only strips SPACES, so a body of, say, a
-    -- bidi override wrapped in tabs and newlines would survive as whitespace
-    -- and be published as an effectively blank screen.
-    IF regexp_replace(normalized, '[[:space:]]', '', 'g') = '' THEN
+    -- "Meaningful" must match isMeaningfulTermsBody, which ignores all
+    -- whitespace AND the joiners. ZWNJ/ZWJ are kept inside real Persian text but
+    -- a body of nothing else is blank: an RLO followed by a ZWNJ passes the
+    -- original bootstrap (the RLO counts), and once the RLO is stripped only the
+    -- invisible joiner is left.
+    IF regexp_replace(
+           translate(normalized, U&'\200C\200D', ''),
+           '[[:space:]]', '', 'g'
+       ) = '' THEN
         RAISE NOTICE 'Versioned terms: bootstrapped version 1 held no meaningful content once normalized; archived and nothing published.';
         RETURN;
     END IF;
@@ -86,7 +121,7 @@ BEGIN
     -- clauses; leaving nothing published is the honest outcome. The gate treats
     -- "enforcement on with nothing published" as a misconfiguration, steps
     -- aside and alerts the OWNER, so no user is locked out meanwhile.
-    IF length(normalized) > 3500 THEN
+    IF utf16_length > 3500 THEN
         RAISE NOTICE 'Versioned terms: bootstrapped version 1 exceeds the 3500-character limit; archived and nothing published - publish a new version from the admin panel.';
         RETURN;
     END IF;

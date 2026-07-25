@@ -29,8 +29,13 @@ import { clearSettingCacheKeys } from "../settings.service.js";
 export const TERMS_REQUIRED_KEY = "terms_required";
 
 /**
- * ONE dedicated advisory-lock namespace serializing EVERY terms configuration
- * mutation (publish, draft create/edit/delete, enable, disable, acceptance).
+ * ONE dedicated advisory-lock namespace serializing every terms CONFIGURATION
+ * mutation (publish, draft create/edit/delete, enable, disable) — and the
+ * 20260727130000 repair migration, which runs while the old containers are
+ * still serving traffic. Recording an acceptance deliberately does NOT take it:
+ * that is the hot path every user hits after a publication, and it is already
+ * correct without the lock because the insert names one document id and
+ * `@@unique([userId, termsDocumentId])` makes a duplicate impossible.
  *
  * Row locks cannot do this job: "there is currently no published document" and
  * "there is currently no draft" are statements about an EMPTY row set, and

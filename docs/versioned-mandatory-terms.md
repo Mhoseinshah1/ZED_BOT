@@ -175,8 +175,11 @@ or the normal menu according to the gate order.
 
 ## 6. Concurrency
 
-Every configuration mutation — publish, draft create/edit/delete, enable,
-disable, acceptance — takes one dedicated transaction-level advisory lock:
+Every **configuration** mutation — publish, draft create/edit/delete, enable,
+disable — takes one dedicated transaction-level advisory lock. The repair
+migration `20260727130000` takes the same lock, because deployments keep the old
+containers serving traffic while migrations run. Recording an **acceptance**
+deliberately does not (see below):
 
 ```ts
 const TERMS_CONFIG_LOCK = "zedbot-terms-config";
@@ -201,9 +204,21 @@ decorative.
 ### The acceptance/publication race
 
 If a user presses the version-N button at the moment version N+1 is published,
-`recordTermsAcceptance` re-reads the published document under the lock and
-**rejects the stale acceptance before inserting anything**. Whichever order the
-two transactions commit in:
+`recordTermsAcceptance` re-reads the published document inside its own
+transaction and **rejects the stale acceptance before inserting anything**.
+
+It does this *without* taking the configuration lock. Acceptance is the one hot
+path here — every user hits it after a publication — and serializing all of them
+behind the OWNER's lock would turn a routine publish into a stampede. It does not
+need the lock to be correct: the insert is keyed to one specific document id, and
+`@@unique([userId, termsDocumentId])` makes a duplicate impossible, so a `P2002`
+is simply read as "already accepted".
+
+A version-N acceptance may therefore legitimately *land* after version N+1 is
+published — it is a truthful historical record of a body the user really was
+shown. What can never happen is an acceptance row for N+1, because no button for
+N+1 was ever rendered to that user. Whichever order the two transactions commit
+in:
 
 - the user is never marked as having accepted N+1,
 - and they are still required to accept the current version.

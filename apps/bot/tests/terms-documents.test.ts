@@ -702,6 +702,62 @@ describe.runIf(hasDb)("versioned terms — bootstrap repair migration (§11)", (
     expect(await hasAcceptedTermsDocument(userId, published?.id ?? "")).toBe(false);
   });
 
+  it("M7 archives an already-clean body that is over the limit", async () => {
+    // The body needs no normalization, so the "unchanged" fast path used to
+    // return early and leave it published. The screen refuses to render a
+    // document it cannot show in full, so that left every user gated with no
+    // button to press — the length check has to come first.
+    const v1 = await seedBootstrappedV1("ن".repeat(4000));
+
+    await runRepairMigration();
+
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    expect(await getPublishedTerms()).toBeNull();
+  });
+
+  it("M8 measures the limit in UTF-16 code units, as the application does", async () => {
+    // 2,100 emoji are 2,100 characters to PostgreSQL's length() but 4,200 to
+    // JavaScript's .length — over the limit the bot actually enforces.
+    const emoji = "😀".repeat(2100);
+    expect(emoji.length).toBe(4200);
+    const v1 = await seedBootstrappedV1(`‮${emoji}`);
+
+    await runRepairMigration();
+
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    expect(await getPublishedTerms()).toBeNull();
+  });
+
+  it("M9 treats a joiner-only body as blank", async () => {
+    // The RLO is what let this past the original bootstrap's emptiness test.
+    // Once stripped, only an invisible ZWNJ remains — which the application
+    // does not consider meaningful either.
+    const v1 = await seedBootstrappedV1("‮‌");
+
+    await runRepairMigration();
+
+    expect(isMeaningfulTermsBody("‌")).toBe(false);
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    expect(await getPublishedTerms()).toBeNull();
+  });
+
+  it("M10 folds a lone carriage return to a newline instead of deleting it", async () => {
+    // Stripping CR as a control character would run two clauses together.
+    await seedBootstrappedV1("‮بند الف\rبند ب");
+
+    await runRepairMigration();
+
+    const published = await getPublishedTerms();
+    expect(published?.body).toBe("بند الف\nبند ب");
+    expect(published?.body).toBe(normalizeTermsBody("‮بند الف\rبند ب"));
+  });
+
   it("M6 is idempotent — running it twice changes nothing further", async () => {
     await seedBootstrappedV1(`‮قوانین`);
 
