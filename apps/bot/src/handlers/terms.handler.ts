@@ -8,6 +8,7 @@ import { logger } from "../core/logger.js";
 import {
   ensurePreTermsAccess,
   ensureUserAccess,
+  type EnsureAccessOptions,
 } from "../middlewares/user-access.middleware.js";
 import {
   parseTermsAcceptCallback,
@@ -27,7 +28,6 @@ import {
   buildTermsScreen,
   TERMS_ACCEPTED_TOAST_FALLBACK,
   TERMS_STALE_TEXT_FALLBACK,
-  TERMS_UNAVAILABLE_TEXT_FALLBACK,
 } from "../services/terms/terms-views.js";
 import { getMessageTemplate } from "../services/text.service.js";
 import { registerOrUpdateUser } from "../services/user.service.js";
@@ -56,20 +56,35 @@ import { showUserMenu } from "./menu.handler.js";
 
 export const termsHandler = new Composer<BotContext>();
 
-/** Re-draws the CURRENT terms after a stale/unknown button, or reports absence. */
-async function redrawCurrentTerms(ctx: BotContext, notice: string): Promise<void> {
+/**
+ * Re-draws the CURRENT terms after a stale/unknown button.
+ *
+ * Returns false — having sent nothing — when there is no published document to
+ * draw. Callers must then hand the user to the access path rather than report
+ * the absence: "enforcement on, nothing published" is the recoverable
+ * misconfiguration `ensureUserAccess` deliberately steps aside for, and a
+ * message about it is a dead end no button can clear.
+ */
+async function redrawCurrentTerms(ctx: BotContext, notice: string): Promise<boolean> {
   const published = await getPublishedTerms();
   if (published === null) {
-    await safeAnswerCallback(ctx);
-    await safeReply(
-      ctx,
-      await getMessageTemplate("terms_unavailable_text", TERMS_UNAVAILABLE_TEXT_FALLBACK),
-    );
-    return;
+    return false;
   }
   await safeAnswerCallback(ctx, notice);
   const screen = await buildTermsScreen(published);
   await safeReply(ctx, screen.text, screen.keyboard);
+  return true;
+}
+
+/** Acknowledges the press and lets the access path decide where the user goes. */
+async function continueThroughAccessPath(
+  ctx: BotContext,
+  options: EnsureAccessOptions = {},
+): Promise<void> {
+  await safeAnswerCallback(ctx);
+  if (await ensureUserAccess(ctx, options)) {
+    await showUserMenu(ctx);
+  }
 }
 
 // Routed on the PREFIX, not the strict payload shape: a malformed short id must
@@ -104,7 +119,12 @@ termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
     const shortId = parseTermsAcceptCallback(ctx.callbackQuery.data);
     const document = shortId === null ? null : await resolveTermsDocumentByShortId(shortId);
     if (document === null) {
-      await redrawCurrentTerms(ctx, staleNotice);
+      // ...unless nothing is published, in which case there is no current
+      // button to point at and the access path takes over.
+      if (await redrawCurrentTerms(ctx, staleNotice)) {
+        return;
+      }
+      await continueThroughAccessPath(ctx, { enforceTerms: true });
       return;
     }
 
@@ -112,8 +132,13 @@ termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
     if (!result.ok && result.code === "STALE") {
       // A newer version was published between render and press (or the button
       // was for an archived version). No acceptance of the current version was
-      // recorded, so the user is shown the version they actually owe.
-      await redrawCurrentTerms(ctx, staleNotice);
+      // recorded, so the user is shown the version they actually owe. STALE
+      // means a published document existed a moment ago; if it has since been
+      // archived, fall through to the access path rather than a dead end.
+      if (await redrawCurrentTerms(ctx, staleNotice)) {
+        return;
+      }
+      await continueThroughAccessPath(ctx, { enforceTerms: true });
       return;
     }
 
@@ -163,9 +188,10 @@ termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
 /**
  * Keyboards sent BEFORE this upgrade carry the old version-less `terms:accept`.
  * That payload names no document, so it can never satisfy the "accept exactly
- * what you were shown" invariant and accepts nothing. It is answered here (
- * rather than left to fall through unhandled) with the current terms and the
- * current button, which is precisely what the user needs to proceed.
+ * what you were shown" invariant and accepts nothing. It is answered here
+ * (rather than left to fall through unhandled) with the current terms and the
+ * current button — or, when the requirement is switched off or has no current
+ * version, with the access path, which is what the user needs to proceed.
  */
 termsHandler.callbackQuery(CB.TERMS_ACCEPT, async (ctx) => {
   // Same preflight as the versioned button: maintenance mode and account status
@@ -181,17 +207,22 @@ termsHandler.callbackQuery(CB.TERMS_ACCEPT, async (ctx) => {
     // keyboard was sent there is nothing to accept, so re-drawing the terms
     // would strand the user on a screen the bot no longer requires.
     if (!(await getBooleanSettingFresh(TERMS_REQUIRED_KEY, false))) {
-      await safeAnswerCallback(ctx);
-      if (await ensureUserAccess(ctx)) {
-        await showUserMenu(ctx);
-      }
+      await continueThroughAccessPath(ctx);
       return;
     }
 
-    await redrawCurrentTerms(
-      ctx,
-      await getMessageTemplate("terms_stale_text", TERMS_STALE_TEXT_FALLBACK),
-    );
+    // Enforcement IS on — but if nothing is published there is no current
+    // button to hand over, and reporting that is a dead end. The access gate
+    // steps aside for exactly this state (§4), so this path must too; the
+    // repair migration reaches it whenever it archives an unusable version 1.
+    if (
+      !(await redrawCurrentTerms(
+        ctx,
+        await getMessageTemplate("terms_stale_text", TERMS_STALE_TEXT_FALLBACK),
+      ))
+    ) {
+      await continueThroughAccessPath(ctx);
+    }
   } catch (err) {
     logger.error("legacy terms callback failed", { error: errorMessage(err) });
     await safeAnswerCallback(ctx);

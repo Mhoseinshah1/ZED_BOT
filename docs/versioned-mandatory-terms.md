@@ -184,6 +184,13 @@ published is a recoverable misconfiguration the gate steps aside for, and the
 state is reachable in production whenever the `20260727130000` repair migration
 archives an unrenderable version 1 without publishing a replacement.
 
+The same rule governs **every** path that would otherwise "show the current
+terms": the versioned button with an unresolvable short id, and the pre-upgrade
+`terms:accept` button, which names no document and so always lands there. All
+three re-enter the access path when there is no current version to draw, and
+none of them reports the absence to the user — a message about a
+misconfiguration only the OWNER can fix is a dead end, not an answer.
+
 For `DISABLED` the handler also drops `terms_required` from **this process's**
 30-second settings cache before re-entering the gate. The acceptance transaction
 decided `DISABLED` against the database; the gate reads the cache. Without the

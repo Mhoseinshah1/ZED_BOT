@@ -597,6 +597,43 @@ describe.runIf(hasDb)("versioned terms — access gate (§1, §6, §7)", () => {
     expect(sent.flatMap((m) => callbacksOf(m.keyboard)).some(isTermsAcceptCallback)).toBe(false);
   });
 
+  it("G28 the LEGACY accept button continues the access path when nothing is published", async () => {
+    // Same dead end as G25, on the pre-upgrade `terms:accept` payload: it names
+    // no document, so it always lands on "re-draw the current terms" — and with
+    // enforcement on but nothing published there is no current terms to draw.
+    const { id } = await publish("قوانین");
+    const user = await makeUser();
+    await prisma.termsDocument.update({
+      where: { id },
+      data: { status: TermsDocumentStatus.ARCHIVED },
+    });
+
+    const { ctx, sent } = fakeCtx(user, CB.TERMS_ACCEPT);
+    await termsHandler.middleware()(ctx, async () => {});
+
+    expect((ctx.session as { lastMenu?: string }).lastMenu).toBe("user_main");
+    expect(sent.some((m) => m.text === TERMS_UNAVAILABLE_TEXT_FALLBACK)).toBe(false);
+  });
+
+  it("G29 an UNRESOLVABLE accept payload continues the access path when nothing is published", async () => {
+    // The third route into the same dead end: a malformed/unknown short id
+    // resolves to no document, so the handler re-draws the current terms —
+    // which do not exist. Nothing is owed, so the menu is the right answer.
+    const { id } = await publish("قوانین");
+    const user = await makeUser();
+    await prisma.termsDocument.update({
+      where: { id },
+      data: { status: TermsDocumentStatus.ARCHIVED },
+    });
+
+    const { ctx, sent } = fakeCtx(user, "user:terms:accept:zzz");
+    await termsHandler.middleware()(ctx, async () => {});
+
+    expect(await prisma.termsAcceptance.count({ where: { userId: user.id } })).toBe(0);
+    expect((ctx.session as { lastMenu?: string }).lastMenu).toBe("user_main");
+    expect(sent.some((m) => m.text === TERMS_UNAVAILABLE_TEXT_FALLBACK)).toBe(false);
+  });
+
   it("G21 the legacy terms:accept callback is NOT treated as a versioned accept", async () => {
     await publish("قوانین");
     await enableTermsRequirement();
