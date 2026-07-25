@@ -297,6 +297,13 @@ exists.
 | Legacy database with configured `terms_text` and 3 accepting users | Version 1 published; 3 acceptances backfilled with original timestamps; the 2 non-accepting users still owe an acceptance |
 | Re-running the bootstrap | No-op (`DOCUMENT_EXISTS`) |
 
+> **Note for installs that never customized `terms_text`.** The seeded default
+> («برای استفاده از ربات، ابتدا قوانین را مطالعه و تایید کنید.») is non-empty, so
+> it does become published version 1. That is deliberate and changes nothing for
+> users: whoever had accepted that exact text is backfilled and is not asked
+> again, and if enforcement was off it stays off. Publish version 2 from the
+> admin panel when the real terms are ready.
+
 ---
 
 ## 11. Rollback
