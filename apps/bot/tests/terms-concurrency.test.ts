@@ -263,14 +263,35 @@ describe.runIf(hasDb)("versioned terms — concurrency (§10)", () => {
   it("C11 edit racing publish never changes a published body", async () => {
     const draftId = await makeDraft("متن اصلی");
 
-    await Promise.all([
+    const [publishResult, editResult] = await Promise.all([
       publishTermsDraft(draftId, null),
       updateTermsDraftBody(draftId, "متن دستکاری‌شده"),
     ]);
 
     const row = await prisma.termsDocument.findUniqueOrThrow({ where: { id: draftId } });
-    if (row.status === TermsDocumentStatus.PUBLISHED) {
-      // Published documents are immutable: the edit must have lost.
+
+    if (!publishResult.ok) {
+      // Publication lost outright - nothing became mandatory.
+      expect(row.status).toBe(TermsDocumentStatus.DRAFT);
+      return;
+    }
+
+    // Editing a draft before it is published is legitimate, so BOTH bodies are
+    // valid outcomes here. The invariant is not "the original text wins", it is
+    // that whatever body publication FROZE is the body that survives: the stored
+    // row must never drift away from what publishTermsDraft returned.
+    expect(row.status).toBe(TermsDocumentStatus.PUBLISHED);
+    expect(row.body).toBe(publishResult.document.body);
+    expect(row.contentHash).toBe(publishResult.document.contentHash);
+
+    if (editResult.ok) {
+      // The edit committed while the row was still a draft; publication then
+      // froze the edited text and the hash above proves the two agree.
+      expect(row.body).toBe("متن دستکاری‌شده");
+    } else {
+      // The edit arrived after publication and was refused - a published
+      // document is not reachable through the draft path (see also T17).
+      expect(editResult.code).toBe("NOT_FOUND");
       expect(row.body).toBe("متن اصلی");
     }
   });
