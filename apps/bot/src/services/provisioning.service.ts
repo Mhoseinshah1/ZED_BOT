@@ -18,6 +18,7 @@ import { errorMessage, referralCorrelationHash } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
+import { hasBlockingServiceUsernameUnboundCase } from "./financial-reconciliation.service.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import { enqueueReferralReverse } from "./ops-queue.service.js";
 import {
@@ -334,6 +335,25 @@ async function provisionPaidOrderUnlocked(
   }
   if (order.status !== OrderStatus.PAID) {
     return { ok: false, refunded: false, error: "وضعیت سفارش برای ساخت سرویس معتبر نیست." };
+  }
+
+  // §5: the provisioning-authority defense. An OPEN/IN_REVIEW
+  // SERVICE_USERNAME_UNBOUND reconciliation case blocks provisioning HERE, inside
+  // the authority itself — not only in the outer Telegram dispatcher — so a
+  // direct/internal provisionPaidOrder call (settlement sweep, startup recovery,
+  // an admin action) can never bypass an unresolved case and create a service on
+  // an unbound username. Money is untouched: the order stays PAID for the OWNER
+  // retry-bind to resolve. An already-provisioned order returns above via the
+  // existing-Service idempotency check, so this never blocks a legitimate replay.
+  if (
+    order.checkoutSessionId !== null &&
+    (await hasBlockingServiceUsernameUnboundCase(order.checkoutSessionId))
+  ) {
+    return {
+      ok: false,
+      refunded: false,
+      error: "ساخت سرویس به دلیل نیاز به بررسی رزرو نام کاربری، متوقف شد.",
+    };
   }
 
   // Pre-flight configuration checks. The order is PAID, so any dead end here

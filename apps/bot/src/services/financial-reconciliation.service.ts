@@ -11,6 +11,7 @@ import {
 import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
+import { bindSettledReservationFromSnapshot } from "./service-username-selection.service.js";
 import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 
 // =============================================================================
@@ -167,15 +168,15 @@ export interface ServiceUsernameUnboundInput {
 export async function fileServiceUsernameUnboundCase(
   tx: Prisma.TransactionClient,
   input: ServiceUsernameUnboundInput,
-): Promise<{ created: boolean }> {
+): Promise<{ created: boolean; reconciliationCase: FinancialReconciliationCase }> {
   const existing = await tx.financialReconciliationCase.findUnique({
     where: { duplicatePaymentId: input.paymentId },
   });
   if (existing !== null) {
-    return { created: false };
+    return { created: false, reconciliationCase: existing };
   }
   try {
-    await tx.financialReconciliationCase.create({
+    const created = await tx.financialReconciliationCase.create({
       data: {
         type: FinancialReconciliationType.SERVICE_USERNAME_UNBOUND,
         checkoutSessionId: input.checkoutSessionId,
@@ -186,12 +187,63 @@ export async function fileServiceUsernameUnboundCase(
         safeReason: input.safeReason.slice(0, 200),
       },
     });
-    return { created: true };
+    return { created: true, reconciliationCase: created };
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      return { created: false };
+      // A concurrent settlement filed the case first — return the winner so the
+      // caller never treats a lost race as "created" (no duplicate alert).
+      const winner = await tx.financialReconciliationCase.findUnique({
+        where: { duplicatePaymentId: input.paymentId },
+      });
+      if (winner !== null) {
+        return { created: false, reconciliationCase: winner };
+      }
     }
     throw err;
+  }
+}
+
+/**
+ * Notifies the OWNER-role admins about a NEWLY created SERVICE_USERNAME_UNBOUND
+ * case (§3). Mirror of {@link notifyDuplicateSuccessCase} but with the dedicated
+ * username-reconciliation copy — it must NEVER send the duplicate-success alert.
+ * Called exactly once (the caller gates on `created === true`) AFTER the settling
+ * transaction committed, so a crashed/repeated send can never create or duplicate
+ * a case. Never throws. Carries only safe short identifiers, provider, amount and
+ * timestamp — never a raw username, note, reservation id or provider payload.
+ */
+export async function notifyServiceUsernameUnboundCase(
+  api: NotifyApi,
+  reconciliationCase: FinancialReconciliationCase,
+  settlingPayment: Payment,
+): Promise<void> {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: reconciliationCase.userId } });
+    const lines = [
+      "⚠️ مغایرت رزرو یوزرنیم سرویس",
+      "",
+      SERVICE_UNBOUND_ADMIN_TEXT,
+      "",
+      `شناسه بررسی: ${shortId(reconciliationCase.id)}`,
+      `پیش‌فاکتور: ${shortId(reconciliationCase.checkoutSessionId)}`,
+      `کاربر: ${user?.telegramId.toString() ?? "-"}`,
+      `پرداخت: ${settlingPayment.provider ?? "-"} (${shortId(settlingPayment.id)})`,
+      `مبلغ: ${reconciliationCase.expectedAmountToman.toLocaleString("en-US")} تومان`,
+      `زمان: ${reconciliationCase.createdAt.toISOString().replace("T", " ").slice(0, 16)} UTC`,
+    ].join("\n");
+    const owners = await prisma.admin.findMany({
+      where: { isActive: true, role: "OWNER" },
+      select: { telegramId: true },
+    });
+    for (const owner of owners) {
+      try {
+        await api.sendMessage(owner.telegramId.toString(), lines);
+      } catch (err) {
+        logger.warn("service-username-unbound admin alert failed", { error: errorMessage(err) });
+      }
+    }
+  } catch (err) {
+    logger.error("service-username-unbound notification crashed", { error: errorMessage(err) });
   }
 }
 
@@ -297,6 +349,9 @@ export interface ReconciliationCasePage {
       userTelegramId: string;
       primaryProvider: string;
       duplicateProvider: string;
+      /** Short id of the paid Order the settling payment created (service-username
+       * cases). Null when the payment carries no order. */
+      settlementOrderShortId: string | null;
     }
   >;
   page: number;
@@ -304,12 +359,22 @@ export interface ReconciliationCasePage {
   total: number;
 }
 
-/** Newest-first page of duplicate-success cases for the admin queue. */
-export async function listReconciliationCases(page: number): Promise<ReconciliationCasePage> {
-  const total = await prisma.financialReconciliationCase.count();
+/**
+ * Newest-first page of reconciliation cases FILTERED to one
+ * {@link FinancialReconciliationType} at the DATABASE query — the count, the page
+ * count and the rows are all type-specific, so the two queues (duplicate-success
+ * vs. service-username reconciliation) never bleed into each other's totals or
+ * pagination. Callers must always pass the type they are rendering.
+ */
+export async function listReconciliationCases(
+  type: FinancialReconciliationType,
+  page: number,
+): Promise<ReconciliationCasePage> {
+  const total = await prisma.financialReconciliationCase.count({ where: { type } });
   const pages = Math.max(1, Math.ceil(total / RECONCILIATION_PAGE_SIZE));
   const current = Math.min(Math.max(1, page), pages);
   const rows = await prisma.financialReconciliationCase.findMany({
+    where: { type },
     orderBy: { createdAt: "desc" },
     skip: (current - 1) * RECONCILIATION_PAGE_SIZE,
     take: RECONCILIATION_PAGE_SIZE,
@@ -331,7 +396,7 @@ async function enrichCase(
       : Promise.resolve(null),
     prisma.payment.findUnique({
       where: { id: row.duplicatePaymentId },
-      select: { provider: true },
+      select: { provider: true, orderId: true },
     }),
   ]);
   return {
@@ -339,6 +404,10 @@ async function enrichCase(
     userTelegramId: user?.telegramId.toString() ?? "-",
     primaryProvider: primary?.provider ?? "-",
     duplicateProvider: duplicate?.provider ?? "-",
+    settlementOrderShortId:
+      duplicate?.orderId !== undefined && duplicate.orderId !== null
+        ? duplicate.orderId.slice(0, 8)
+        : null,
   };
 }
 
@@ -364,6 +433,98 @@ export async function findCaseForDuplicatePayment(
   duplicatePaymentId: string,
 ): Promise<FinancialReconciliationCase | null> {
   return prisma.financialReconciliationCase.findUnique({ where: { duplicatePaymentId } });
+}
+
+// --- service-username retry-bind (§4) -----------------------------------------------------
+
+/** Typed outcome of an OWNER retry-bind attempt on a SERVICE_USERNAME_UNBOUND case. */
+export type RetryBindResult =
+  | { ok: true; orderId: string; userId: string }
+  | {
+      ok: false;
+      reason: "NOT_FOUND" | "WRONG_TYPE" | "NO_ORDER" | "NO_CHECKOUT" | "BIND_FAILED";
+    };
+
+/**
+ * The OWNER-only «بررسی مجدد رزرو و ادامه ساخت» action (§4). Inside ONE
+ * transaction it: locks the reconciliation case row (serializing concurrent
+ * button presses); requires it to be a SERVICE_USERNAME_UNBOUND case that is
+ * still OPEN/IN_REVIEW; reads the reservation identity ONLY from the immutable
+ * CheckoutSession snapshot; and re-runs the SAME strict
+ * {@link bindSettledReservationFromSnapshot}/attachReservationToOrder contract
+ * (exact user + checkout + panel + username + order in BOUND state, row-locked).
+ * It marks the case RESOLVED (with OWNER audit identity + timestamp) ONLY after a
+ * successful exact bind — a still-impossible bind leaves the case blocking and
+ * changes nothing. It NEVER regenerates or substitutes the username, and never
+ * marks a case resolved without a real bind. The CALLER dispatches the paid Order
+ * fulfillment once after this commits (idempotent). Already-RESOLVED is reported
+ * as NO_ORDER only if the order vanished; otherwise the caller re-dispatches.
+ */
+export async function retryBindServiceUsernameUnboundCase(
+  caseId: string,
+  adminId: string,
+): Promise<RetryBindResult> {
+  return prisma.$transaction(async (tx) => {
+    // 1. Lock the case row FOR UPDATE so concurrent retry presses serialize.
+    const locked = await tx.$queryRaw<Array<{ id: string }>>(
+      Prisma.sql`SELECT id FROM "FinancialReconciliationCase" WHERE id = ${caseId} FOR UPDATE`,
+    );
+    if (locked.length === 0) {
+      return { ok: false, reason: "NOT_FOUND" };
+    }
+    const rc = await tx.financialReconciliationCase.findUnique({ where: { id: caseId } });
+    if (rc === null) {
+      return { ok: false, reason: "NOT_FOUND" };
+    }
+    // 2. Require the exact type. Only OPEN/IN_REVIEW cases are re-bindable; an
+    //    already-RESOLVED case is idempotent — report its order so the caller can
+    //    re-dispatch fulfillment (which is itself idempotent).
+    if (rc.type !== FinancialReconciliationType.SERVICE_USERNAME_UNBOUND) {
+      return { ok: false, reason: "WRONG_TYPE" };
+    }
+    const settlingPayment = await tx.payment.findUnique({
+      where: { id: rc.duplicatePaymentId },
+    });
+    if (settlingPayment === null || settlingPayment.orderId === null) {
+      return { ok: false, reason: "NO_ORDER" };
+    }
+    if (rc.status === FinancialReconciliationStatus.RESOLVED) {
+      return { ok: true, orderId: settlingPayment.orderId, userId: rc.userId };
+    }
+    // 3. Load the exact checkout + order.
+    const checkout = await tx.checkoutSession.findUnique({
+      where: { id: rc.checkoutSessionId },
+    });
+    if (checkout === null) {
+      return { ok: false, reason: "NO_CHECKOUT" };
+    }
+    const order = await tx.order.findUnique({ where: { id: settlingPayment.orderId } });
+    if (order === null) {
+      return { ok: false, reason: "NO_ORDER" };
+    }
+    // 4-7. Reservation identity ONLY from the immutable snapshot; the SAME strict
+    //      bind (exact user/checkout/panel/username/order + BOUND, row-locked).
+    const snapshot = (checkout.productSnapshot ?? {}) as Record<string, unknown>;
+    const bind = await bindSettledReservationFromSnapshot(tx, snapshot, {
+      userId: rc.userId,
+      checkoutSessionId: rc.checkoutSessionId,
+      orderId: order.id,
+    });
+    if (!bind.bound) {
+      // 8 (negative): still impossible — do NOT resolve, do NOT provision.
+      return { ok: false, reason: "BIND_FAILED" };
+    }
+    // 8. Only after a successful EXACT bind: mark RESOLVED + OWNER audit identity.
+    await tx.financialReconciliationCase.update({
+      where: { id: rc.id },
+      data: {
+        status: FinancialReconciliationStatus.RESOLVED,
+        resolvedAt: new Date(),
+        resolvedByAdminId: adminId,
+      },
+    });
+    return { ok: true, orderId: order.id, userId: rc.userId };
+  });
 }
 
 /** Status label used by the read-only admin pages. */

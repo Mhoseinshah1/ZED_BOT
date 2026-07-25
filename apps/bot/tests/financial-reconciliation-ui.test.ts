@@ -11,6 +11,7 @@ process.env.APP_SECRET ??= "recon-ui-test-secret-recon-ui-secret-01";
 import { financeLandingKeyboard } from "../src/handlers/admin-finance/admin-finance-views.js";
 import {
   buildReconciliationDetailText,
+  buildServiceUnboundDetailText,
   reconciliationListKeyboard,
   RECON_CB,
   RECON_OWNER_ONLY_TOAST,
@@ -45,7 +46,10 @@ const EMITTED = [
   RECON_CB.root,
   RECON_CB.dup(1),
   RECON_CB.dup(9_999),
+  RECON_CB.svc(1),
+  RECON_CB.svc(9_999),
   RECON_CB.view("aabbccdd"),
+  RECON_CB.retry("aabbccdd"),
 ];
 
 describe("reconciliation pages: routing, gating and callbacks (source)", () => {
@@ -74,7 +78,7 @@ describe("reconciliation pages: routing, gating and callbacks (source)", () => {
     for (const match of handlerSrc.matchAll(/callbackQuery\(\/(\^admin:fin:recon[^/]*)\/,/g)) {
       matchers.push(new RegExp(match[1]));
     }
-    expect(matchers.length).toBe(2); // dup list + detail regex routes
+    expect(matchers.length).toBe(4); // dup list + svc list + detail + retry regex routes
     // The landing route is registered as the exact RECON_CB.root string.
     expect(handlerSrc).toContain("callbackQuery(RECON_CB.root");
     matchers.push(new RegExp(`^${RECON_CB.root}$`));
@@ -93,7 +97,7 @@ describe("reconciliation pages: routing, gating and callbacks (source)", () => {
 
   it("EVERY route is OWNER-gated; non-owners get the safe toast and no data", () => {
     const registrations = handlerSrc.split(".callbackQuery(").slice(1);
-    expect(registrations.length).toBe(3);
+    expect(registrations.length).toBe(5); // root + dup + svc + view + retry
     for (const body of registrations) {
       expect(body).toContain("if (!(await requireOwner(ctx)))");
     }
@@ -210,7 +214,7 @@ describe.runIf(hasDb)("reconciliation queue + detail text (DB)", () => {
   });
 
   it("listReconciliationCases pages newest-first with size 5 and clamps out-of-range pages", async () => {
-    const first = await listReconciliationCases(1);
+    const first = await listReconciliationCases("DUPLICATE_CHECKOUT_PAYMENT", 1);
     expect(first.page).toBe(1);
     expect(first.total).toBeGreaterThanOrEqual(8);
     expect(first.pages).toBe(Math.ceil(first.total / RECONCILIATION_PAGE_SIZE));
@@ -221,10 +225,12 @@ describe.runIf(hasDb)("reconciliation queue + detail text (DB)", () => {
       expect(typeof c.userTelegramId).toBe("string");
       expect(typeof c.primaryProvider).toBe("string");
       expect(typeof c.duplicateProvider).toBe("string");
+      // The type filter is applied at the DB query — every row is the asked type.
+      expect(c.type).toBe("DUPLICATE_CHECKOUT_PAYMENT");
     }
-    const clamped = await listReconciliationCases(9_999);
+    const clamped = await listReconciliationCases("DUPLICATE_CHECKOUT_PAYMENT", 9_999);
     expect(clamped.page).toBe(clamped.pages);
-    expect((await listReconciliationCases(0)).page).toBe(1);
+    expect((await listReconciliationCases("DUPLICATE_CHECKOUT_PAYMENT", 0)).page).toBe(1);
   });
 
   it("getReconciliationCaseByShortId resolves a unique prefix with enrichment", async () => {
@@ -275,8 +281,8 @@ describe.runIf(hasDb)("reconciliation queue + detail text (DB)", () => {
   });
 
   it("list keyboard: labeled case buttons, pagination row and back - all callbacks short", async () => {
-    const pageData = await listReconciliationCases(1);
-    const kb = reconciliationListKeyboard(pageData);
+    const pageData = await listReconciliationCases("DUPLICATE_CHECKOUT_PAYMENT", 1);
+    const kb = reconciliationListKeyboard(pageData, "dup");
     const flat = rows(kb).flat();
     const caseButtons = flat.filter((b) => b.callback_data?.startsWith("admin:fin:recon:v:"));
     expect(caseButtons.length).toBe(pageData.cases.length);
@@ -292,6 +298,149 @@ describe.runIf(hasDb)("reconciliation queue + detail text (DB)", () => {
     expect(texts).not.toContain("« قبلی");
     expect(flat.at(-1)?.text).toBe("بازگشت");
     expect(flat.at(-1)?.callback_data).toBe(RECON_CB.root);
+    for (const button of flat) {
+      expect(
+        Buffer.byteLength(button.callback_data ?? "", "utf8"),
+        button.callback_data,
+      ).toBeLessThanOrEqual(64);
+    }
+  });
+});
+
+describe.runIf(hasDb)("service-username reconciliation UI: type filter + dedicated detail (DB)", () => {
+  const svcTag = runTag + 7n;
+  const RAW_USERNAME = `svcuser_secret_${svcTag}`;
+  const RAW_NOTE = `subscription-note-secret-${svcTag}`;
+  const RESERVATION_ID = randomUUID();
+  const checkoutId = randomUUID();
+  const orderId = randomUUID();
+
+  let user: User;
+  let svcCaseId = "";
+  let dupCaseId = "";
+  let svcPaymentId = "";
+
+  beforeAll(async () => {
+    user = await prisma.user.create({
+      data: { telegramId: svcTag, firstName: "ReconSvc", group: "F" },
+    });
+    // A DUPLICATE case (must NOT appear in the service-username queue).
+    const dupPayment = await prisma.payment.create({
+      data: {
+        userId: user.id,
+        purpose: "ORDER_PAYMENT",
+        status: "APPROVED",
+        amountToman: 60_000,
+        payableAmountToman: 60_000,
+        provider: "ZARINPAL",
+      },
+    });
+    dupCaseId = (
+      await prisma.financialReconciliationCase.create({
+        data: {
+          type: "DUPLICATE_CHECKOUT_PAYMENT",
+          checkoutSessionId: randomUUID(),
+          primaryPaymentId: null,
+          duplicatePaymentId: dupPayment.id,
+          userId: user.id,
+          expectedAmountToman: 60_000,
+          safeReason: "svc-suite-dup",
+        },
+      })
+    ).id;
+    // A settled paid Order + its settling payment, then the SERVICE_USERNAME_UNBOUND case.
+    await prisma.order.create({
+      data: { id: orderId, userId: user.id, type: "SERVICE_PURCHASE", status: "PAID" },
+    });
+    const svcPayment = await prisma.payment.create({
+      data: {
+        userId: user.id,
+        purpose: "ORDER_PAYMENT",
+        status: "APPROVED",
+        amountToman: 90_000,
+        payableAmountToman: 90_000,
+        provider: "NOWPAYMENTS",
+        providerStatus: "SUCCESS",
+        orderId,
+      },
+    });
+    svcPaymentId = svcPayment.id;
+    // The safeReason deliberately carries NO username/note — but even if a caller
+    // slipped one in, the detail renderer never prints safeReason.
+    svcCaseId = (
+      await prisma.financialReconciliationCase.create({
+        data: {
+          type: "SERVICE_USERNAME_UNBOUND",
+          checkoutSessionId: checkoutId,
+          primaryPaymentId: null,
+          duplicatePaymentId: svcPayment.id,
+          userId: user.id,
+          expectedAmountToman: 90_000,
+          safeReason: "gateway settlement reservation bind failed: ORDER_BIND_NO_MATCH",
+        },
+      })
+    ).id;
+  });
+
+  afterAll(async () => {
+    await prisma.financialReconciliationCase.deleteMany({ where: { userId: user.id } });
+    await prisma.payment.deleteMany({ where: { userId: user.id } });
+    await prisma.order.deleteMany({ where: { userId: user.id } });
+    await prisma.user.delete({ where: { id: user.id } });
+    await prisma.$disconnect();
+  });
+
+  it("the two queues filter by type at the DB query with independent totals", async () => {
+    const svc = await listReconciliationCases("SERVICE_USERNAME_UNBOUND", 1);
+    const dup = await listReconciliationCases("DUPLICATE_CHECKOUT_PAYMENT", 1);
+    // Every row carries the asked type — neither queue bleeds into the other.
+    expect(svc.cases.every((c) => c.type === "SERVICE_USERNAME_UNBOUND")).toBe(true);
+    expect(dup.cases.every((c) => c.type === "DUPLICATE_CHECKOUT_PAYMENT")).toBe(true);
+    expect(svc.cases.some((c) => c.id === svcCaseId)).toBe(true);
+    expect(svc.cases.some((c) => c.id === dupCaseId)).toBe(false);
+    expect(dup.cases.some((c) => c.id === dupCaseId)).toBe(true);
+    expect(dup.cases.some((c) => c.id === svcCaseId)).toBe(false);
+    // Independent counts: filtering never shares a total across types.
+    const svcCount = await prisma.financialReconciliationCase.count({
+      where: { type: "SERVICE_USERNAME_UNBOUND" },
+    });
+    const dupCount = await prisma.financialReconciliationCase.count({
+      where: { type: "DUPLICATE_CHECKOUT_PAYMENT" },
+    });
+    expect(svc.total).toBe(svcCount);
+    expect(dup.total).toBe(dupCount);
+  });
+
+  it("service-username detail uses its dedicated title/fields and never a duplicate title", async () => {
+    const found = await getReconciliationCaseByShortId(svcCaseId.slice(0, 8));
+    expect(found).not.toBeNull();
+    if (found === null) return;
+    const text = buildServiceUnboundDetailText(found);
+    expect(text).toContain("⚠️ مغایرت رزرو یوزرنیم سرویس");
+    expect(text).toContain(`کاربر: <code>${svcTag.toString()}</code>`);
+    expect(text).toContain(`پیش‌فاکتور: <code>${checkoutId.slice(0, 8)}</code>`);
+    expect(text).toContain(`پرداخت: NOWPAYMENTS (<code>${svcPaymentId.slice(0, 8)}</code>)`);
+    expect(text).toContain(`سفارش: <code>${orderId.slice(0, 8)}</code>`);
+    expect(text).toContain("مبلغ: 90,000 تومان");
+    expect(text).toContain("وضعیت: نیازمند بررسی");
+    // NEVER a duplicate-payment title or its duplicate-specific labels.
+    expect(text).not.toContain("پرداخت موفق تکراری");
+    expect(text).not.toContain("پرداخت اصلی");
+    expect(text).not.toContain("پرداخت تکراری");
+    // NEVER a raw username, note, reservation id, full UUID or safeReason.
+    expect(text).not.toContain(RAW_USERNAME);
+    expect(text).not.toContain(RAW_NOTE);
+    expect(text).not.toContain(RESERVATION_ID);
+    expect(text).not.toContain("ORDER_BIND_NO_MATCH");
+    expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}/);
+  });
+
+  it("the service-username list keyboard routes pagination and view via the svc callbacks", async () => {
+    const pageData = await listReconciliationCases("SERVICE_USERNAME_UNBOUND", 1);
+    const kb = reconciliationListKeyboard(pageData, "svc");
+    const flat = rows(kb).flat();
+    const back = flat.at(-1);
+    expect(back?.callback_data).toBe(RECON_CB.root);
     for (const button of flat) {
       expect(
         Buffer.byteLength(button.callback_data ?? "", "utf8"),

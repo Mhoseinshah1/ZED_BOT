@@ -37,6 +37,7 @@ import {
   fileServiceUsernameUnboundCase,
   findCaseForDuplicatePayment,
   notifyDuplicateSuccessCase,
+  notifyServiceUsernameUnboundCase,
   recordDuplicateSuccess,
 } from "./financial-reconciliation.service.js";
 import { dispatchPaidOrderFulfillment } from "./order-fulfillment.service.js";
@@ -457,7 +458,18 @@ export async function recordProviderSuccessFromBot(
 // --- settlement (the exactly-once money gate) -----------------------------------------
 
 export type SettleOutcome =
-  | { kind: "settled"; payment: Payment; order: Order | null; purpose: PaymentPurpose }
+  | {
+      kind: "settled";
+      payment: Payment;
+      order: Order | null;
+      purpose: PaymentPurpose;
+      /**
+       * §2/§3: present only when THIS settlement filed (or found) a durable
+       * SERVICE_USERNAME_UNBOUND reconciliation case. `created` is true only on
+       * the filing call, so the caller sends the OWNER alert exactly once.
+       */
+      serviceUnbound?: { reconciliationCase: FinancialReconciliationCase; created: boolean };
+    }
   | { kind: "already"; payment: Payment; order: Order | null; purpose: PaymentPurpose }
   | { kind: "pending" }
   | { kind: "failed"; status: PaymentStatus }
@@ -699,6 +711,12 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
 
   const now = new Date();
   const snapshot = (checkout.productSnapshot ?? {}) as Record<string, unknown>;
+  // §3: captured inside the settlement tx when a NEW SERVICE_USERNAME_UNBOUND case
+  // is filed, so the OWNER alert fires exactly once AFTER commit (never inside the tx).
+  let serviceUnbound: {
+    reconciliationCase: FinancialReconciliationCase;
+    created: boolean;
+  } | null = null;
   try {
     const order = await prisma.$transaction(async (tx) => {
       // hotfix §7: lock the buyer's username reservation for the WHOLE settlement
@@ -851,7 +869,7 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
           orderId: order.id,
         });
         if (!bindResult.bound) {
-          await fileServiceUsernameUnboundCase(tx, {
+          serviceUnbound = await fileServiceUsernameUnboundCase(tx, {
             checkoutSessionId: checkout.id,
             paymentId: payment.id,
             userId: checkout.userId,
@@ -955,6 +973,7 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
       payment: settled ?? payment,
       order,
       purpose: payment.purpose,
+      ...(serviceUnbound !== null ? { serviceUnbound } : {}),
     };
   } catch (err) {
     if (err instanceof AbortToAlready) {
@@ -1062,6 +1081,18 @@ export async function fulfillSettledGatewayOrder(
       return;
     }
     await dispatchPaidOrderFulfillment(api, order.id, { source: "GATEWAY", user });
+    // §3: a NEWLY filed username-reconciliation case alerts the OWNER admins
+    // exactly once — AFTER the settlement committed and fulfillment ran (which
+    // already sent the user the safe hold notice and blocked provisioning). The
+    // alert send is non-blocking and never throws, so it cannot roll back the
+    // provider-success settlement or delete the durable case.
+    if (outcome.kind === "settled" && outcome.serviceUnbound?.created === true) {
+      await notifyServiceUsernameUnboundCase(
+        api,
+        outcome.serviceUnbound.reconciliationCase,
+        payment,
+      );
+    }
   } catch (err) {
     logger.error("gateway fulfillment crashed", { error: errorMessage(err) });
   }

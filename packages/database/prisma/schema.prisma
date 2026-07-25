@@ -1264,6 +1264,9 @@ model FinancialReconciliationCase {
   resolvedByAdminId String?
 
   @@index([status, createdAt])
+  // Type-filtered newest-first queue query (the admin UI lists one
+  // FinancialReconciliationType at a time with type-specific pagination).
+  @@index([type, createdAt])
   @@index([checkoutSessionId])
   @@index([primaryPaymentId])
   @@index([userId])
