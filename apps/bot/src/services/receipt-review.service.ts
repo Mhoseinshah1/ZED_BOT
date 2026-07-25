@@ -18,7 +18,10 @@ import {
 
 import { claimDiscountUsage } from "./discount.service.js";
 import { auditRepresentativeSettlementPricing } from "./representative-pricing.service.js";
-import { attachReservationToOrder } from "./service-username-selection.service.js";
+import {
+  bindSettledReservationFromSnapshot,
+  lockReservationForSettlement,
+} from "./service-username-selection.service.js";
 import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 import { WALLET_TOPUP_REASON } from "./wallet-topup.service.js";
 
@@ -248,6 +251,14 @@ export async function approveReceiptPayment(
 
   try {
     const order = await prisma.$transaction(async (tx) => {
+      // hotfix §7: lock the buyer's username reservation for the WHOLE approval
+      // transaction, BEFORE the checkout is flipped, so the concurrent cleanup
+      // sweep (FOR UPDATE ... SKIP LOCKED) skips it and can never expire a
+      // reservation that is settling. No-op when the snapshot carries no reservation.
+      const settlingReservationId = snapshotString(snapshot, "serviceUsernameReservationId");
+      if (settlingReservationId !== null) {
+        await lockReservationForSettlement(tx, settlingReservationId);
+      }
       // Compare-and-set: only the first click flips PENDING_REVIEW -> APPROVED.
       const flipped = await tx.payment.updateMany({
         where: { id: payment.id, status: PaymentStatus.PENDING_REVIEW },
@@ -328,11 +339,18 @@ export async function approveReceiptPayment(
             paidAt: now,
           },
         });
-        // Bind the buyer's username reservation to this settled order (BOUND).
-        const reservationId = snapshotString(snapshot, "serviceUsernameReservationId");
-        if (reservationId !== null) {
-          await attachReservationToOrder(tx, reservationId, order.id, checkout.id);
-        }
+        // hotfix §6: strictly bind the buyer's username reservation to this
+        // settled order (exact id + owner + checkout + panel + username in BOUND
+        // state, no foreign order). EXTERNAL-SUCCESS settlement: the card receipt
+        // was already approved, so a bind anomaly is recorded for reconciliation
+        // (privacy-safe: ids only) instead of rolling back and losing a real
+        // payment. Provisioning resolves the identity from the immutable order
+        // snapshot; the username is never regenerated post-payment.
+        await bindSettledReservationFromSnapshot(tx, snapshot, {
+          userId: checkout.userId,
+          checkoutSessionId: checkout.id,
+          orderId: order.id,
+        });
         await tx.payment.update({
           where: { id: payment.id },
           data: { orderId: order.id },

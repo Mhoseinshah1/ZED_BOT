@@ -1,4 +1,8 @@
 import type { BotContext } from "../../core/context.js";
+import { errorMessage } from "@zedbot/shared";
+
+import { logger } from "../../core/logger.js";
+import { releaseHeldReservationForDraft } from "../../services/service-username-selection.service.js";
 
 /**
  * The checkout/payment INPUT flows that are safe to abandon when the user
@@ -48,4 +52,44 @@ export function clearCheckoutState(ctx: BotContext): void {
   ctx.session.temp.extraTimeDraft = undefined;
   ctx.session.temp.walletTopupDraft = undefined;
   ctx.session.temp.paymentDraft = undefined;
+}
+
+/**
+ * THE authoritative checkout abandonment (hotfix §8). Unlike the synchronous
+ * {@link clearCheckoutState} — which only forgets the Telegram-side draft and
+ * leaves a HELD username reservation stranded in the database until the cleanup
+ * worker eventually reclaims it — this releases the draft's EXACT held username
+ * slot NOW, then clears the session state. It:
+ *   • releases ONLY the draft's own HELD reservation, matched on the full identity
+ *     (userId + draftNonce + reservationId), so it never touches a BOUND / CONSUMED
+ *     reservation protected by a durable checkout / order / service;
+ *   • is safe on failure (a release error is logged and swallowed — the sweep is
+ *     the backstop — and the session state is cleared regardless);
+ *   • logs only a safe category string (the `reason`), never a username or note.
+ *
+ * Wire this into EVERY deliberate exit from the checkout surface (menu, buy hub,
+ * Pricing escape, selecting another product / panel, explicit cancel, a command
+ * typed mid username/note entry). Do NOT scatter raw releaseReservation(id) calls.
+ */
+export async function abandonCheckoutDraft(ctx: BotContext, reason: string): Promise<void> {
+  const draft = ctx.session.temp.checkoutDraft;
+  const user = ctx.dbUser;
+  const reservationId = draft?.serviceCustomization?.reservationId;
+  if (draft !== undefined && user !== null && reservationId !== undefined) {
+    try {
+      await releaseHeldReservationForDraft({
+        userId: user.id,
+        draftNonce: draft.draftNonce ?? null,
+        reservationId,
+      });
+    } catch (err) {
+      // Never block navigation on a release failure — the cleanup sweep reclaims
+      // any HELD slot left behind. Log a SAFE category only (no username / note).
+      logger.warn("abandon checkout draft: reservation release failed", {
+        reason,
+        error: errorMessage(err),
+      });
+    }
+  }
+  clearCheckoutState(ctx);
 }

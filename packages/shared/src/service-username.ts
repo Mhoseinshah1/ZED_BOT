@@ -50,7 +50,7 @@ export const SERVICE_USERNAME_RESERVATION_STATUSES = [
 export type ServiceUsernameReservationStatus =
   (typeof SERVICE_USERNAME_RESERVATION_STATUSES)[number];
 
-/** Reservation states that still OWN the (panelId, username) uniqueness slot. */
+/** Reservation states that still OWN the global username uniqueness slot. */
 export const SERVICE_USERNAME_ACTIVE_STATUSES: readonly ServiceUsernameReservationStatus[] = [
   "HELD",
   "BOUND",

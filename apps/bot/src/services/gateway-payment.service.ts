@@ -29,7 +29,10 @@ import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { claimDiscountUsage } from "./discount.service.js";
-import { attachReservationToOrder } from "./service-username-selection.service.js";
+import {
+  bindSettledReservationFromSnapshot,
+  lockReservationForSettlement,
+} from "./service-username-selection.service.js";
 import {
   findCaseForDuplicatePayment,
   notifyDuplicateSuccessCase,
@@ -697,6 +700,14 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
   const snapshot = (checkout.productSnapshot ?? {}) as Record<string, unknown>;
   try {
     const order = await prisma.$transaction(async (tx) => {
+      // hotfix §7: lock the buyer's username reservation for the WHOLE settlement
+      // transaction, BEFORE the checkout is flipped, so the concurrent cleanup
+      // sweep (FOR UPDATE ... SKIP LOCKED) skips it and can never expire a
+      // reservation that is settling. No-op when the snapshot carries no reservation.
+      const settlingReservationId = snapshotString(snapshot, "serviceUsernameReservationId");
+      if (settlingReservationId !== null) {
+        await lockReservationForSettlement(tx, settlingReservationId);
+      }
       // (a) THE ATOMIC CROSS-PROVIDER CLAIM (P0 settlement phase): the
       // checkout - not the payment - is the financial gate. Exactly one
       // Payment can ever set settledByPaymentId (compare-and-set on NULL),
@@ -825,11 +836,16 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
         orderCreated = result.created;
       }
       if (orderCreated) {
-        // Bind the buyer's username reservation to this settled order (BOUND).
-        const reservationId = snapshotString(snapshot, "serviceUsernameReservationId");
-        if (reservationId !== null) {
-          await attachReservationToOrder(tx, reservationId, order.id, checkout.id);
-        }
+        // hotfix §6: strictly bind the buyer's username reservation to this
+        // settled order. EXTERNAL-SUCCESS settlement (Zarinpal / NOWPayments /
+        // one-shot Stars): a bind anomaly is recorded for reconciliation instead
+        // of rolling back and losing a real provider payment. Provisioning
+        // resolves the identity from the immutable order snapshot.
+        await bindSettledReservationFromSnapshot(tx, snapshot, {
+          userId: checkout.userId,
+          checkoutSessionId: checkout.id,
+          orderId: order.id,
+        });
         await tx.payment.update({
           where: { id: payment.id },
           data: { orderId: order.id },

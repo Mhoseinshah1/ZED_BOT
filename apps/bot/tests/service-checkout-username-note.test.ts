@@ -28,14 +28,22 @@ import {
 
 import {
   attachReservationToOrder,
-  bindReservationToCheckout,
+  bindSettledReservationFromSnapshot,
+  claimReservationForCheckout,
   checkServiceUsernameAvailability,
   consumeReservationForOrder,
+  releaseHeldReservationForDraft,
   releaseReservation,
   reserveRandomServiceUsername,
   reserveServiceUsername,
+  ReservationInvariantError,
 } from "../src/services/service-username-selection.service.js";
 import { resolveVpnRemoteIdentity } from "../src/services/service-naming.service.js";
+import {
+  coNonce,
+  parseCoNonceCallback,
+  shortDraftNonce,
+} from "../src/handlers/user-checkout/checkout-cb.js";
 import { runReservationCleanup } from "../../worker/src/reservations/cleanup.js";
 
 const hasDb =
@@ -239,9 +247,27 @@ describe.runIf(hasDb)("reservation lifecycle + availability (DB)", () => {
       data: { userId, panelId, panelType: PanelType.MARZBAN, username: name },
     });
 
-    const bound = await bindReservationToCheckout(prisma, id, checkout.id, userId);
-    expect(bound).toBe(true);
-    await attachReservationToOrder(prisma, id, order.id, checkout.id);
+    const claim = await claimReservationForCheckout(
+      prisma,
+      {
+        reservationId: id,
+        userId,
+        draftNonce: `${tag}-life`,
+        normalizedUsername: name,
+        mode: ServiceUsernameMode.CUSTOM,
+        panelId,
+      },
+      checkout.id,
+    );
+    expect(claim.ok).toBe(true);
+    await attachReservationToOrder(prisma, {
+      reservationId: id,
+      userId,
+      checkoutSessionId: checkout.id,
+      panelId,
+      normalizedUsername: name,
+      orderId: order.id,
+    });
     await consumeReservationForOrder(prisma, order.id, service.id, name);
 
     const row = await prisma.serviceUsernameReservation.findUniqueOrThrow({ where: { id } });
@@ -402,6 +428,257 @@ describe.runIf(hasDb)("reservation cleanup sweep (DB)", () => {
     await runReservationCleanup(new Date());
     const after = await prisma.serviceUsernameReservation.findUniqueOrThrow({ where: { id: row.id } });
     // A BOUND row with no checkoutSession link is never touched by the sweep.
+    expect(after.status).toBe(ServiceUsernameReservationStatus.BOUND);
+  });
+});
+
+// =============================================================================
+// fix/service-username-reservation-safety hotfix invariants.
+// =============================================================================
+
+describe("nonce-bound username/note callbacks (pure, §2)", () => {
+  it("builds ≤64-byte callbacks that round-trip through the ONE shared parser", () => {
+    const nonce = shortDraftNonce("11111111-2222-3333-4444-555555555555");
+    expect(nonce).toBe("111111112222");
+    const cases: Array<[string, string]> = [
+      [coNonce.unCustom(nonce), "un:c"],
+      [coNonce.unRandom(nonce), "un:r"],
+      [coNonce.unRegen(nonce), "un:g"],
+      [coNonce.unMethod(nonce), "un:m"],
+      [coNonce.unConfirm(nonce), "un:o"],
+      [coNonce.noteSkip(nonce), "nt:s"],
+      [coNonce.noteBack(nonce), "nt:b"],
+    ];
+    for (const [data, action] of cases) {
+      expect(Buffer.byteLength(data, "utf8")).toBeLessThanOrEqual(64);
+      // No username/note is ever embedded — only the action + hex nonce.
+      const parsed = parseCoNonceCallback(data);
+      expect(parsed).not.toBeNull();
+      expect(parsed?.action).toBe(action);
+      expect(parsed?.nonce).toBe(nonce);
+    }
+  });
+
+  it("rejects a callback whose nonce differs from the current draft (stale keyboard)", () => {
+    const current = shortDraftNonce("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    const stale = shortDraftNonce("00000000-0000-0000-0000-000000000000");
+    const parsed = parseCoNonceCallback(coNonce.unConfirm(stale));
+    expect(parsed).not.toBeNull();
+    // The router compares parsed.nonce to the CURRENT draft nonce and fails closed.
+    expect(parsed?.nonce).not.toBe(current);
+  });
+
+  it("returns null for non-username/note callbacks", () => {
+    expect(parseCoNonceCallback("user:co:continue")).toBeNull();
+    expect(parseCoNonceCallback("user:co:un:c:")).toBeNull();
+    expect(parseCoNonceCallback("user:co:un:z:abcdef")).toBeNull();
+  });
+});
+
+describe.runIf(hasDb)("authoritative reservation claim + strict order binding (DB, §3/§6)", () => {
+  const tag = `svchf_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  let panelId = "";
+  let panelId2 = "";
+  let userId = "";
+
+  beforeAll(async () => {
+    const [p1, p2, u] = await Promise.all([
+      prisma.panel.create({ data: { type: PanelType.MARZBAN, name: `${tag}-p1`, baseUrl: "http://x", status: "ACTIVE" } }),
+      prisma.panel.create({ data: { type: PanelType.MARZBAN, name: `${tag}-p2`, baseUrl: "http://x", status: "ACTIVE" } }),
+      prisma.user.create({ data: { telegramId: BigInt(`${Date.now()}7`) } }),
+    ]);
+    panelId = p1.id;
+    panelId2 = p2.id;
+    userId = u.id;
+    remote.getServiceAccount.mockResolvedValue({ ok: false, notFound: true });
+  });
+  afterAll(async () => {
+    await prisma.serviceUsernameReservation.deleteMany({ where: { panelId: { in: [panelId, panelId2] } } });
+    await prisma.order.deleteMany({ where: { userId } });
+    await prisma.checkoutSession.deleteMany({ where: { userId } });
+    await prisma.panel.deleteMany({ where: { id: { in: [panelId, panelId2] } } });
+    await prisma.user.deleteMany({ where: { id: userId } });
+    await prisma.$disconnect();
+  });
+
+  const uname = (): string => `u_${Math.random().toString(36).slice(2, 10)}`.slice(0, 16).padEnd(8, "z");
+  const newCheckout = async (): Promise<string> => {
+    const c = await prisma.checkoutSession.create({
+      data: { userId, purpose: "ORDER_PAYMENT", status: "PENDING", expiresAt: new Date(Date.now() + 3_600_000) },
+    });
+    return c.id;
+  };
+  const holdUsername = async (name: string, nonce: string): Promise<string> => {
+    const held = await reserveServiceUsername({
+      userId,
+      panelId,
+      mode: ServiceUsernameMode.CUSTOM,
+      normalizedUsername: name,
+      draftNonce: nonce,
+    });
+    if (held.outcome !== "AVAILABLE") throw new Error(`hold failed: ${held.outcome}`);
+    return held.reservationId;
+  };
+
+  it("claims a HELD hold once; a second claim (or a claim on a foreign panel/nonce) fails closed", async () => {
+    const name = uname();
+    const id = await holdUsername(name, `${tag}-c1`);
+    const checkoutId = await newCheckout();
+    const claim = await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-c1`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+      checkoutId,
+    );
+    expect(claim.ok).toBe(true);
+    // Already BOUND → not claimable again.
+    const again = await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-c1`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+      await newCheckout(),
+    );
+    expect(again.ok).toBe(false);
+  });
+
+  it("rejects a claim on a stale nonce / drifted panel / expired hold", async () => {
+    const name = uname();
+    const id = await holdUsername(name, `${tag}-c2`);
+    const checkoutId = await newCheckout();
+    // Wrong nonce.
+    const wrongNonce = await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-OTHER`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+      checkoutId,
+    );
+    expect(wrongNonce.ok).toBe(false);
+    // Drifted panel.
+    const drifted = await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-c2`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId: panelId2 },
+      checkoutId,
+    );
+    expect(drifted.ok).toBe(false);
+    // Still HELD (nothing consumed the slot).
+    const still = await prisma.serviceUsernameReservation.findUniqueOrThrow({ where: { id } });
+    expect(still.status).toBe(ServiceUsernameReservationStatus.HELD);
+  });
+
+  it("two concurrent claims on ONE hold bind exactly one (no double payable checkout)", async () => {
+    const name = uname();
+    const id = await holdUsername(name, `${tag}-race`);
+    const [cA, cB] = await Promise.all([newCheckout(), newCheckout()]);
+    const [rA, rB] = await Promise.all([
+      claimReservationForCheckout(
+        prisma,
+        { reservationId: id, userId, draftNonce: `${tag}-race`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+        cA,
+      ),
+      claimReservationForCheckout(
+        prisma,
+        { reservationId: id, userId, draftNonce: `${tag}-race`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+        cB,
+      ),
+    ]);
+    expect([rA.ok, rB.ok].filter(Boolean)).toHaveLength(1);
+  });
+
+  it("strict attach binds the exact order, is idempotent, and throws on a mismatch", async () => {
+    const name = uname();
+    const id = await holdUsername(name, `${tag}-att`);
+    const checkoutId = await newCheckout();
+    await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-att`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+      checkoutId,
+    );
+    const order = await prisma.order.create({ data: { userId, type: "SERVICE_PURCHASE", checkoutSessionId: checkoutId } });
+    const bind = { reservationId: id, userId, checkoutSessionId: checkoutId, panelId, normalizedUsername: name, orderId: order.id };
+    await attachReservationToOrder(prisma, bind);
+    await attachReservationToOrder(prisma, bind); // idempotent
+    const row = await prisma.serviceUsernameReservation.findUniqueOrThrow({ where: { id } });
+    expect(row.orderId).toBe(order.id);
+    // A wrong username never binds — it throws the typed invariant error.
+    await expect(
+      attachReservationToOrder(prisma, { ...bind, normalizedUsername: "different1", orderId: order.id }),
+    ).rejects.toBeInstanceOf(ReservationInvariantError);
+  });
+
+  it("external-settlement bind is a no-op-safe reconciliation (never throws) on an anomaly", async () => {
+    const name = uname();
+    const id = await holdUsername(name, `${tag}-ext`);
+    const checkoutId = await newCheckout();
+    await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-ext`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+      checkoutId,
+    );
+    const order = await prisma.order.create({ data: { userId, type: "SERVICE_PURCHASE", checkoutSessionId: checkoutId } });
+    const snapshot = { serviceUsernameReservationId: id, serviceUsername: name, panelId };
+    // Happy path binds.
+    await bindSettledReservationFromSnapshot(prisma, snapshot, { userId, checkoutSessionId: checkoutId, orderId: order.id });
+    expect((await prisma.serviceUsernameReservation.findUniqueOrThrow({ where: { id } })).orderId).toBe(order.id);
+    // Anomaly (reservation released out from under settlement) must NOT throw:
+    // the payment is real, so the bind degrades to a privacy-safe reconciliation.
+    await releaseReservation(id);
+    await expect(
+      bindSettledReservationFromSnapshot(prisma, snapshot, { userId, checkoutSessionId: checkoutId, orderId: order.id }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("exact-HELD abandonment release frees a HELD hold but never a BOUND one", async () => {
+    const heldName = uname();
+    const heldId = await holdUsername(heldName, `${tag}-rel`);
+    await releaseHeldReservationForDraft({ userId, draftNonce: `${tag}-rel`, reservationId: heldId });
+    expect((await prisma.serviceUsernameReservation.findUniqueOrThrow({ where: { id: heldId } })).status).toBe(
+      ServiceUsernameReservationStatus.RELEASED,
+    );
+    // A BOUND reservation is untouched by the HELD-only release.
+    const boundName = uname();
+    const boundId = await holdUsername(boundName, `${tag}-rel2`);
+    await claimReservationForCheckout(
+      prisma,
+      { reservationId: boundId, userId, draftNonce: `${tag}-rel2`, normalizedUsername: boundName, mode: ServiceUsernameMode.CUSTOM, panelId },
+      await newCheckout(),
+    );
+    await releaseHeldReservationForDraft({ userId, draftNonce: `${tag}-rel2`, reservationId: boundId });
+    expect((await prisma.serviceUsernameReservation.findUniqueOrThrow({ where: { id: boundId } })).status).toBe(
+      ServiceUsernameReservationStatus.BOUND,
+    );
+  });
+
+  it("cleanup reclaims a BOUND hold on an EXPIRED-but-PENDING checkout with no live order (defect 2)", async () => {
+    const name = uname();
+    const id = await holdUsername(name, `${tag}-exp`);
+    const checkout = await prisma.checkoutSession.create({
+      data: { userId, purpose: "ORDER_PAYMENT", status: "PENDING", expiresAt: new Date(Date.now() - 60_000) },
+    });
+    await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-exp`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+      checkout.id,
+    );
+    await runReservationCleanup(new Date());
+    const after = await prisma.serviceUsernameReservation.findUniqueOrThrow({ where: { id } });
+    expect(after.status).toBe(ServiceUsernameReservationStatus.EXPIRED);
+    expect(after.activeUsernameKey).toBeNull();
+  });
+
+  it("cleanup NEVER reclaims a BOUND hold whose checkout still owns a live PAID order", async () => {
+    const name = uname();
+    const id = await holdUsername(name, `${tag}-live`);
+    const checkout = await prisma.checkoutSession.create({
+      data: { userId, purpose: "ORDER_PAYMENT", status: "PENDING", expiresAt: new Date(Date.now() - 60_000) },
+    });
+    await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-live`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+      checkout.id,
+    );
+    // A live PAID order on the same checkout — a settling reservation must survive.
+    await prisma.order.create({
+      data: { userId, type: "SERVICE_PURCHASE", status: "PAID", checkoutSessionId: checkout.id },
+    });
+    await runReservationCleanup(new Date());
+    const after = await prisma.serviceUsernameReservation.findUniqueOrThrow({ where: { id } });
     expect(after.status).toBe(ServiceUsernameReservationStatus.BOUND);
   });
 });

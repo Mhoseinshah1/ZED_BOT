@@ -139,7 +139,7 @@ enum ServiceUsernameMode {
 // linked checkout/payment/order state); CONSUMED = a Service was created with this
 // username; RELEASED = explicitly given up (username change / abandonment);
 // EXPIRED = reclaimed by the bounded cleanup sweep. Only HELD/BOUND/CONSUMED hold
-// the `(panelId, activeUsernameKey)` uniqueness slot; RELEASED/EXPIRED free it.
+// the global `activeUsernameKey` uniqueness slot; RELEASED/EXPIRED free it.
 enum ServiceUsernameReservationStatus {
   HELD
   BOUND
@@ -1461,18 +1461,19 @@ model ServiceEventLog {
 // Service-checkout username selection (feat/service-checkout-username-note). The
 // DURABLE, DB-authoritative reservation of a buyer-selected REMOTE panel username
 // held from selection through provisioning. It is the ONLY authority for the
-// "one active reservation per (panelId, username)" invariant — never an in-memory
-// Set, a Redis-only lock, or Telegram-session state.
+// "one active reservation per username" invariant — never an in-memory Set, a
+// Redis-only lock, or Telegram-session state.
 //
 // `normalizedUsername` is the lower-cased, validated username (kept for audit /
 // display / lookup in EVERY state). `activeUsernameKey` mirrors it ONLY while the
 // reservation is HELD/BOUND/CONSUMED and is set to NULL on RELEASED/EXPIRED; the
-// `@@unique([panelId, activeUsernameKey])` constraint (NULLs are distinct in
-// Postgres) is therefore a FILTERED uniqueness that lets a freed username be
-// re-reserved while still forbidding two live holders — a check-then-insert race
-// surfaces as P2002, resolved by re-reading the winner. Global collisions across
-// panels are additionally guarded by Service.username @unique + a service-layer
-// availability check.
+// GLOBAL `activeUsernameKey @unique` constraint (NULLs are distinct in Postgres)
+// is therefore a FILTERED uniqueness that lets a freed username be re-reserved
+// while still forbidding two live holders — a check-then-insert race surfaces as
+// P2002, resolved by re-reading the winner. This mirrors Service.username's own
+// GLOBAL uniqueness, so an active hold blocks the same username on every panel and
+// no cross-panel provisioning collision can slip through. `panelId` is retained
+// for remote availability + provisioning routing (never for uniqueness).
 //
 // Lifecycle transitions are CAS (updateMany with a status guard), so concurrent
 // settlement / cleanup / change-username paths converge deterministically:
@@ -1490,8 +1491,12 @@ model ServiceUsernameReservation {
   // The validated, lower-cased username. Retained in every state for audit.
   normalizedUsername String
   // Mirrors normalizedUsername while HELD/BOUND/CONSUMED; NULL once RELEASED or
-  // EXPIRED so the (panelId, activeUsernameKey) slot is freed for re-use.
-  activeUsernameKey  String?
+  // EXPIRED so the slot is freed for re-use. GLOBALLY unique while non-null
+  // (feat hotfix: matches Service.username's global uniqueness — an active hold
+  // for a username on one panel now blocks the SAME username on every panel,
+  // closing the cross-panel provisioning-collision gap). NULLs stay distinct in
+  // Postgres, so any number of RELEASED/EXPIRED rows may share NULL.
+  activeUsernameKey  String?                          @unique
   mode               ServiceUsernameMode
   status             ServiceUsernameReservationStatus @default(HELD)
   // The checkout draft nonce that created/refreshed this hold. Same
@@ -1516,7 +1521,6 @@ model ServiceUsernameReservation {
   createdAt          DateTime                         @default(now())
   updatedAt          DateTime                         @updatedAt
 
-  @@unique([panelId, activeUsernameKey])
   @@index([userId])
   @@index([panelId])
   @@index([status])

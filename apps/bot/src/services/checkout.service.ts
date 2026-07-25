@@ -10,7 +10,7 @@ import { REPRESENTATIVE_PRICING_MODE } from "@zedbot/shared";
 import type { CheckoutDraft } from "../core/session.js";
 import { buildFulfillmentSnapshot } from "./other-product-profile.service.js";
 import { recordRepresentativePurchase } from "./representative.service.js";
-import { bindReservationToCheckout } from "./service-username-selection.service.js";
+import { claimReservationForCheckout } from "./service-username-selection.service.js";
 import { getSetting } from "./settings.service.js";
 import { resolveProductInboundIds } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
@@ -21,6 +21,22 @@ import type { ProductWithRelations } from "./product.service.js";
 // =============================================================================
 
 const DEFAULT_EXPIRY_MINUTES = 30;
+
+/**
+ * A SERVICE checkout could not authoritatively claim the buyer's username
+ * reservation (hotfix §3): the hold was released, expired, drifted to another
+ * panel, was re-bound to a foreign checkout, or the product lost its panel
+ * between selection and «تایید خرید». Thrown INSIDE the checkout transaction so
+ * the CheckoutSession creation AND the superseded-checkout cancellations both
+ * roll back — no payable checkout is ever left without an exact active
+ * reservation. Carries only a machine-readable reason (no username / owner id).
+ */
+export class CheckoutReservationError extends Error {
+  constructor(readonly reason: "PANEL_MISSING" | "NOT_CLAIMABLE") {
+    super(`checkout username reservation claim failed: ${reason}`);
+    this.name = "CheckoutReservationError";
+  }
+}
 
 /** Operator-configurable checkout lifetime (shared with the renewal flow). */
 export async function checkoutExpiryMinutes(): Promise<number> {
@@ -205,12 +221,34 @@ export async function createCheckoutSession(
       });
     }
 
-    // Service-checkout username selection: promote the buyer's HELD username
-    // reservation to BOUND, linked to this durable checkout. From here the hold
-    // is protected from the short HELD TTL for the whole payment window.
-    const reservationId = draft.serviceCustomization?.reservationId;
-    if (reservationId !== undefined) {
-      await bindReservationToCheckout(tx, reservationId, checkout.id, user.id);
+    // Service-checkout username selection (hotfix §3): AUTHORITATIVELY CLAIM the
+    // buyer's HELD username reservation into this durable checkout. The claim is a
+    // single atomic UPDATE that verifies the full identity — owner, draft nonce,
+    // selected username, mode, the CURRENT product panel, HELD + unexpired, and no
+    // pre-existing checkout/order/service link. A zero-row claim (stale hold, panel
+    // drift, foreign re-bind, expiry) throws, rolling back this checkout and the
+    // superseded cancellations above so a payable checkout can never exist without
+    // its exact active reservation. The result is never a silently-ignored boolean.
+    const customization = draft.serviceCustomization;
+    if (product.type === "SERVICE_PRODUCT" && customization?.completed === true) {
+      if (product.panelId === null) {
+        throw new CheckoutReservationError("PANEL_MISSING");
+      }
+      const claim = await claimReservationForCheckout(
+        tx,
+        {
+          reservationId: customization.reservationId,
+          userId: user.id,
+          draftNonce: draft.draftNonce ?? null,
+          normalizedUsername: customization.normalizedUsername,
+          mode: customization.usernameMode,
+          panelId: product.panelId,
+        },
+        checkout.id,
+      );
+      if (!claim.ok) {
+        throw new CheckoutReservationError("NOT_CLAIMABLE");
+      }
     }
 
     return checkout;

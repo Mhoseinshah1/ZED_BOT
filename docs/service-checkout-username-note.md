@@ -246,3 +246,60 @@ speculative transfer tables are added now.
 `apps/bot/tests/service-checkout-username-note.test.ts` — validation, crypto
 random, note normalization, reservation lifecycle + filtered-unique, availability
 outcomes, the naming short-circuit, and the cleanup sweep.
+
+## 17. Hotfix: reservation safety across checkout & settlement (fix/service-username-reservation-safety)
+
+A post-merge correctness pass hardened the reservation lifecycle against nine
+production defects. It does NOT alter the buyer-facing flow; it makes the
+DB-authoritative guarantees hold under drift, staleness and concurrency.
+
+- **Global active-username uniqueness.** A NEW forward-only migration
+  (`20260725120000_service_username_reservation_global_unique`) drops the old
+  `(panelId, activeUsernameKey)` composite unique and adds a GLOBAL
+  `activeUsernameKey @unique`, matching `Service.username`. An active hold now
+  blocks a username on every panel, closing the cross-panel provisioning
+  collision. A fail-closed preflight raises a privacy-safe (count-only) error and
+  documents the manual reconciliation procedure if duplicates already exist.
+- **Authoritative claim (`claimReservationForCheckout`).** One atomic conditional
+  UPDATE binds a still-HELD hold to a checkout only when the exact id + owner +
+  draft nonce + selected username + `activeUsernameKey` + mode + CURRENT product
+  panel all match, in HELD state, unexpired and unlinked. A zero-row claim is a
+  typed `NOT_CLAIMABLE` the caller must act on. `createCheckoutSession` runs the
+  claim inside its transaction and throws `CheckoutReservationError` on failure,
+  rolling back the checkout AND the superseded-checkout cancellations — a payable
+  checkout can never exist without its exact active reservation.
+- **Strict order binding (`attachReservationToOrder`).** No longer a permissive
+  no-op: it requires an exact id + owner + checkout + panel + username match in
+  BOUND state with no foreign order, returns on success (idempotent for the same
+  order) and throws `ReservationInvariantError` otherwise.
+- **Wallet defense in depth.** The wallet path claims + binds the reservation
+  inside the financial transaction (before the balance deduction). A stale /
+  drifted / incomplete customization aborts the whole payment: zero deduction, no
+  Payment/Order/WalletTransaction/Service, no reservation corruption.
+- **External-success settlements** (receipt / Zarinpal / NOWPayments / one-shot
+  Stars) bind strictly via `bindSettledReservationFromSnapshot`; a bind anomaly is
+  recorded as a privacy-safe reconciliation warning instead of rolling back and
+  losing a real payment. The username still provisions verbatim from the immutable
+  order snapshot — never regenerated post-payment.
+- **Race-safe cleanup.** Both sweep passes are single conditional UPDATEs with
+  `FOR UPDATE ... SKIP LOCKED` and complete `NOT EXISTS` liveness predicates. The
+  BOUND pass now also reclaims a hold on a PENDING checkout past its expiry (the
+  gap a never-flipped expired checkout previously leaked) but never one with a
+  settleable Payment / live Order / Service. Settlements take the reservation row
+  lock first, so a settling reservation can never become EXPIRED.
+- **Nonce-bound callbacks.** Username/note buttons carry a compact per-draft nonce
+  (`user:co:un:{c,r,g,m,o}:<nonce>`, `user:co:nt:{s,b}:<nonce>`) validated by ONE
+  shared parser. A button from a replaced draft fails closed: no reservation
+  churn, no note skip, no `currentFlow` change.
+- **Async abandonment (`abandonCheckoutDraft`).** Every deliberate exit from the
+  checkout surface releases the draft's EXACT held slot now (never a BOUND/CONSUMED
+  one), safe on failure, logging only a safe category.
+- **Note semantics.** Whitespace-only note text is invalid (re-prompt); `note=null`
+  is stored ONLY via the explicit Skip button.
+
+Tests: `apps/bot/tests/service-checkout-username-note.test.ts` adds the nonce
+parser, claim (success / stale-nonce / panel-drift / expiry / concurrent
+single-winner), strict attach (idempotent + throw), external-settlement
+reconciliation, exact-HELD release, and cleanup (PENDING-expired reclaim / live
+PAID order protection). The wallet race + gateway smoke suites were updated to
+arm the SERVICE draft with its required HELD reservation.

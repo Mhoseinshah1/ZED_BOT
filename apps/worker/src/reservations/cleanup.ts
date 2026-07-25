@@ -1,135 +1,130 @@
-import {
-  CheckoutStatus,
-  OrderStatus,
-  ServiceUsernameReservationStatus,
-  prisma,
-} from "@zedbot/database";
+import { prisma } from "@zedbot/database";
 import { createLogger, errorMessage } from "@zedbot/shared";
 
 // =============================================================================
-// Service-checkout username reservation cleanup (feat/service-checkout-username-note).
-// A bounded, idempotent, race-safe DB sweep that reclaims username slots the
-// buyer never used. The database is the sole authority: every transition is a
-// CAS updateMany with a status guard, so a concurrent settlement / provisioning
-// path can never lose a race to the sweep. Two passes:
+// Service-checkout username reservation cleanup (feat/service-checkout-username-note,
+// hardened by fix/service-username-reservation-safety §7). A bounded, idempotent,
+// RACE-SAFE DB sweep that reclaims username slots the buyer never used. The
+// database is the sole authority. Two passes, each a SINGLE conditional UPDATE
+// (no read-then-update TOCTOU): the candidate selection, the row lock and the
+// state transition all happen in one statement, so a concurrent settlement can
+// never lose a race to the sweep.
 //
-//   1. HELD past its short TTL  → EXPIRED  (abandoned pre-checkout selection)
-//   2. BOUND to a dead checkout → EXPIRED  (checkout EXPIRED/CANCELLED/refunded,
-//        no surviving PAID/PROVISIONING/COMPLETED order, no Service) — a BOUND
-//        row is NEVER reclaimed on the HELD TTL and NEVER while its durable
-//        checkout/payment/order/service is still alive.
+//   1. HELD past its short TTL          → EXPIRED  (abandoned pre-checkout pick)
+//   2. BOUND with no live durable owner → EXPIRED  where its checkout is
+//        terminally dead OR (still PENDING but past its expiry — the gap that a
+//        never-flipped expired checkout previously left the slot leaking), AND
+//        there is NO settleable Payment, NO PAID/PROVISIONING/COMPLETED Order
+//        (by checkout OR by the reservation's own orderId), and NO Service.
 //
-// CONSUMED reservations (a Service exists) are terminal-success and are never
-// touched. Work is bounded per run (SCAN_BATCH × MAX_BATCHES) and the loop is
-// safe to run on any cadence and across worker restarts. It logs only COUNTS —
-// never a username, note, reservation id, or any owner identifier.
+// Each candidate SELECT uses `FOR UPDATE ... SKIP LOCKED`, and every settlement
+// path locks the reservation row for the whole settlement transaction (see
+// lockReservationForSettlement in the reservation service). So a reservation that
+// is actively settling is SKIPPED here and is never expired out from under a
+// payment — "a successfully settling reservation can never become EXPIRED".
+//
+// CONSUMED reservations (a Service exists) are terminal-success and never touched.
+// Work is bounded per run (SCAN_BATCH × MAX_BATCHES). It logs only COUNTS — never
+// a username, note, reservation id, or any owner identifier.
 // =============================================================================
 
 const log = createLogger("worker:reservation-cleanup");
 
-/** Max rows examined per batch (bounded work — mirrors the scan-batch pattern). */
+/** Max rows expired per batch (bounded work — mirrors the scan-batch pattern). */
 const SCAN_BATCH = 500;
 /** Max batches per pass per run, so one sweep can never run unbounded. */
 const MAX_BATCHES = 20;
 /** How often the sweep runs. Idempotent, so any cadence is safe. */
 export const RESERVATION_CLEANUP_INTERVAL_MS = 5 * 60_000;
 
-/** Checkout states that mean the checkout will never settle. */
-const DEAD_CHECKOUT_STATUSES: CheckoutStatus[] = [
-  CheckoutStatus.EXPIRED,
-  CheckoutStatus.CANCELLED,
-  CheckoutStatus.FAILED_REFUNDED,
-];
-/** Order states that free a reservation (the purchase did not / no longer holds it). */
-const DEAD_ORDER_STATUSES: OrderStatus[] = [
-  OrderStatus.CANCELLED,
-  OrderStatus.FAILED,
-  OrderStatus.REFUNDED,
-];
-
 export interface ReservationCleanupResult {
   expiredHeld: number;
   expiredBound: number;
 }
 
-/** Reclaim HELD reservations whose short TTL has passed. */
+/**
+ * Reclaim HELD reservations whose short TTL has passed. Single conditional UPDATE
+ * per batch: the guard `status='HELD' AND expiresAt < now` is re-evaluated under
+ * the row lock, and `SKIP LOCKED` skips any hold a checkout claim / wallet payment
+ * is actively binding (that claim CAS-guards on `status='HELD'`, so exactly one of
+ * the two wins and the other no-ops — the slot is never double-transitioned).
+ */
 async function expireStaleHeld(now: Date): Promise<number> {
   let total = 0;
   for (let batch = 0; batch < MAX_BATCHES; batch += 1) {
-    const rows = await prisma.serviceUsernameReservation.findMany({
-      where: {
-        status: ServiceUsernameReservationStatus.HELD,
-        expiresAt: { not: null, lt: now },
-      },
-      select: { id: true },
-      take: SCAN_BATCH,
-    });
-    if (rows.length === 0) {
-      break;
-    }
-    // CAS on status=HELD: a row that BOUND since the read is skipped.
-    const updated = await prisma.serviceUsernameReservation.updateMany({
-      where: {
-        id: { in: rows.map((r) => r.id) },
-        status: ServiceUsernameReservationStatus.HELD,
-      },
-      data: {
-        status: ServiceUsernameReservationStatus.EXPIRED,
-        activeUsernameKey: null,
-        releasedAt: now,
-      },
-    });
-    total += updated.count;
-    if (rows.length < SCAN_BATCH) {
+    const affected = await prisma.$executeRaw`
+      UPDATE "ServiceUsernameReservation" AS r
+      SET status = 'EXPIRED', "activeUsernameKey" = NULL, "releasedAt" = ${now}
+      WHERE r.id IN (
+        SELECT r2.id
+        FROM "ServiceUsernameReservation" AS r2
+        WHERE r2.status = 'HELD'
+          AND r2."expiresAt" IS NOT NULL
+          AND r2."expiresAt" < ${now}
+        FOR UPDATE OF r2 SKIP LOCKED
+        LIMIT ${SCAN_BATCH}
+      )
+    `;
+    total += affected;
+    if (affected < SCAN_BATCH) {
       break;
     }
   }
   return total;
 }
 
-/** Reclaim BOUND reservations whose linked checkout/order is dead and Service-less. */
+/**
+ * Reclaim BOUND reservations whose linked checkout is dead (or a PENDING checkout
+ * that has passed its expiry) and that have no live durable owner. Single
+ * conditional UPDATE per batch with the COMPLETE liveness predicate inlined as
+ * correlated `NOT EXISTS` subqueries, so a settlement that commits before this
+ * statement acquires the lock is seen (its Order / APPROVED Payment / flipped
+ * checkout status makes the predicate false), and a settlement that is in-flight
+ * holds the reservation's `FOR UPDATE` lock — which `SKIP LOCKED` skips.
+ */
 async function expireDeadBound(now: Date): Promise<number> {
   let total = 0;
   for (let batch = 0; batch < MAX_BATCHES; batch += 1) {
-    const rows = await prisma.serviceUsernameReservation.findMany({
-      where: {
-        status: ServiceUsernameReservationStatus.BOUND,
-        // Never reclaim a reservation that already produced a Service.
-        serviceId: null,
-        // Its checkout has terminally failed / expired…
-        checkoutSession: { status: { in: DEAD_CHECKOUT_STATUSES } },
-        // …and there is no surviving order that still owns the username.
-        OR: [{ orderId: null }, { order: { status: { in: DEAD_ORDER_STATUSES } } }],
-      },
-      select: { id: true },
-      take: SCAN_BATCH,
-    });
-    if (rows.length === 0) {
-      break;
-    }
-    // CAS on status=BOUND + serviceId still null: a row consumed since the read
-    // (a Service was created) is skipped.
-    const updated = await prisma.serviceUsernameReservation.updateMany({
-      where: {
-        id: { in: rows.map((r) => r.id) },
-        status: ServiceUsernameReservationStatus.BOUND,
-        serviceId: null,
-      },
-      data: {
-        status: ServiceUsernameReservationStatus.EXPIRED,
-        activeUsernameKey: null,
-        releasedAt: now,
-      },
-    });
-    total += updated.count;
-    if (rows.length < SCAN_BATCH) {
+    const affected = await prisma.$executeRaw`
+      UPDATE "ServiceUsernameReservation" AS r
+      SET status = 'EXPIRED', "activeUsernameKey" = NULL, "releasedAt" = ${now}
+      WHERE r.id IN (
+        SELECT r2.id
+        FROM "ServiceUsernameReservation" AS r2
+        JOIN "CheckoutSession" AS c ON c.id = r2."checkoutSessionId"
+        WHERE r2.status = 'BOUND'
+          AND r2."serviceId" IS NULL
+          AND (
+            c.status IN ('EXPIRED', 'CANCELLED', 'FAILED_REFUNDED')
+            OR (c.status = 'PENDING' AND c."expiresAt" <= ${now})
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM "Payment" p
+            WHERE p."checkoutSessionId" = c.id AND p.status = 'APPROVED'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM "Order" o
+            WHERE o."checkoutSessionId" = c.id
+              AND o.status IN ('PAID', 'PROVISIONING', 'COMPLETED')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM "Order" o2
+            WHERE o2.id = r2."orderId"
+              AND o2.status IN ('PAID', 'PROVISIONING', 'COMPLETED')
+          )
+        FOR UPDATE OF r2 SKIP LOCKED
+        LIMIT ${SCAN_BATCH}
+      )
+    `;
+    total += affected;
+    if (affected < SCAN_BATCH) {
       break;
     }
   }
   return total;
 }
 
-/** One bounded, idempotent cleanup pass. Never throws to the caller's loop. */
+/** One bounded, idempotent, race-safe cleanup pass. */
 export async function runReservationCleanup(now: Date): Promise<ReservationCleanupResult> {
   const expiredHeld = await expireStaleHeld(now);
   const expiredBound = await expireDeadBound(now);

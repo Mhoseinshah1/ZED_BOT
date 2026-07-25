@@ -7,6 +7,7 @@ import {
   PaymentGatewayType,
   PaymentStatus,
   prisma,
+  ServiceUsernameMode,
   type CheckoutSession,
   type PaymentGateway as PaymentGatewayRow,
   type User,
@@ -1010,6 +1011,22 @@ describe.runIf(hasDb)("LIFECYCLE: exactly-once gateway settlement (12-19, E2E)",
 
   it("18. wallet payment still works: purchase draft settles with a PAID order (smoke)", async () => {
     const user = await createUser(PRICE * 2);
+    const draftNonce = randomUUID();
+    // A panel-backed SERVICE_PRODUCT wallet purchase carries a completed username
+    // customization whose exact HELD reservation the wallet transaction claims (§4).
+    const username = `u_gw${Math.floor(Math.random() * 1e6)}`.slice(0, 16);
+    const reservation = await prisma.serviceUsernameReservation.create({
+      data: {
+        panelId,
+        userId: user.id,
+        normalizedUsername: username,
+        activeUsernameKey: username,
+        mode: ServiceUsernameMode.CUSTOM,
+        status: "HELD",
+        draftNonce,
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    });
     const draft: CheckoutDraft = {
       productId,
       categoryId,
@@ -1018,7 +1035,15 @@ describe.runIf(hasDb)("LIFECYCLE: exactly-once gateway settlement (12-19, E2E)",
       originalPriceToman: PRICE,
       discountAmountToman: 0,
       finalPriceToman: PRICE,
-      draftNonce: randomUUID(),
+      draftNonce,
+      serviceCustomization: {
+        usernameMode: ServiceUsernameMode.CUSTOM,
+        normalizedUsername: username,
+        reservationId: reservation.id,
+        note: null,
+        usernameConfirmedAt: new Date().toISOString(),
+        completed: true,
+      },
     };
     const result = await payPurchaseDraftWithWallet(user, draft);
     expect(result.ok).toBe(true);
