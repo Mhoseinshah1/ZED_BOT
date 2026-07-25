@@ -87,6 +87,21 @@ export async function getOrCreateCheckoutInput(
   }
 }
 
+/**
+ * True when this checkout's customer-info form has been completed (SUBMITTED
+ * or CONSUMED). This is the pre-payment gate a caller combines with the frozen
+ * snapshot's `requiresCustomerInfo`: a product that requires info may not be
+ * paid for (wallet / gateway / Stars) until the buyer has confirmed the form.
+ * A COLLECTING / ABANDONED / REDACTED / missing row is NOT satisfied.
+ */
+export async function isCheckoutInputSatisfied(checkoutSessionId: string): Promise<boolean> {
+  const row = await prisma.checkoutCustomerInput.findUnique({
+    where: { checkoutSessionId },
+    select: { status: true },
+  });
+  return row !== null && (row.status === "SUBMITTED" || row.status === "CONSUMED");
+}
+
 export type SubmitCheckoutInputOutcome =
   | { ok: true; already: boolean }
   | { ok: false; error: string; fieldKey?: string };

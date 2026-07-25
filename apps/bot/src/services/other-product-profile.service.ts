@@ -7,6 +7,7 @@ import type {
 
 import {
   PERSONALIZED_AI_DEFAULT_SCHEMA,
+  PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA,
   TELEGRAM_PREMIUM_DEFAULT_SCHEMA,
   validateCustomerInputSchema,
   type CustomerInputSchema,
@@ -77,7 +78,11 @@ const KIND_PROFILES: Record<
   Exclude<OtherProductKind, "GENERIC">,
   { allowed: OtherProductFulfillmentProfile[]; fallback: OtherProductFulfillmentProfile | null }
 > = {
-  APPLE_ID: { allowed: ["STOCK_CREDENTIAL"], fallback: "STOCK_CREDENTIAL" },
+  // APPLE_ID supports ready-from-stock credentials OR a personalized manual
+  // build. The fallback is STOCK_CREDENTIAL ONLY for legacy rows whose profile
+  // column is null (pre-personalized Apple products) - the creation wizard
+  // forces an explicit choice for new products, so nothing new silently defaults.
+  APPLE_ID: { allowed: ["STOCK_CREDENTIAL", "PERSONALIZED_SERVICE"], fallback: "STOCK_CREDENTIAL" },
   AI_ACCOUNT: { allowed: ["STOCK_CREDENTIAL", "PERSONALIZED_SERVICE"], fallback: null },
   TELEGRAM_PREMIUM: { allowed: ["PERSONALIZED_SERVICE"], fallback: "PERSONALIZED_SERVICE" },
   GIFT_CARD: { allowed: ["STOCK_CODE", "MANUAL_DELIVERY"], fallback: "STOCK_CODE" },
@@ -124,6 +129,9 @@ function resolveCustomerInputSchema(
   if (kind === "AI_ACCOUNT") {
     return PERSONALIZED_AI_DEFAULT_SCHEMA;
   }
+  if (kind === "APPLE_ID") {
+    return PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA;
+  }
   return null;
 }
 
@@ -159,7 +167,10 @@ function resolveGenericProfile(product: ProfileProductFields): OtherProductFulfi
  *
  * GENERIC        -> the exact legacy derivation (see resolveGenericProfile).
  * Specialized    -> the specialized columns, with kind defaults for null:
- *   APPLE_ID         STOCK_CREDENTIAL, EMAIL_BOUNDARY parser, no info step.
+ *   APPLE_ID         STOCK_CREDENTIAL (EMAIL_BOUNDARY parser, no info step) OR
+ *                    PERSONALIZED_SERVICE (structured info form, manual build,
+ *                    no stock); a null profile resolves to STOCK_CREDENTIAL for
+ *                    legacy rows, but the wizard forces an explicit new choice.
  *   AI_ACCOUNT       profile column REQUIRED (STOCK_CREDENTIAL or
  *                    PERSONALIZED_SERVICE) - throws when missing/invalid.
  *   TELEGRAM_PREMIUM PERSONALIZED_SERVICE, info collected, collect-before-

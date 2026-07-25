@@ -224,6 +224,10 @@ export function productListKeyboard(
 
 // --- Product detail ------------------------------------------------------------------
 
+/** Shown on a personalized Apple ID product (edit screen + mode picker). */
+export const APPLE_PERSONALIZED_NOTE =
+  "این محصول پس از پرداخت وارد صف تحویل دستی می‌شود و به موجودی نیاز ندارد.";
+
 export function productDetailText(product: ProductWithRelations): string {
   const lines = [
     `🛍 <b>${escapeHtml(product.name)}</b>`,
@@ -281,6 +285,12 @@ export function productDetailText(product: ProductWithRelations): string {
     );
     if (product.otherNamingPolicy === "CUSTOM_TEMPLATE") {
       lines.push(`قالب نام‌گذاری: ${escapeHtml(product.otherNamingTemplate ?? "-")}`);
+    }
+    if (
+      product.otherProductKind === "APPLE_ID" &&
+      product.otherProductFulfillmentProfile === "PERSONALIZED_SERVICE"
+    ) {
+      lines.push("", APPLE_PERSONALIZED_NOTE);
     }
   }
 
@@ -340,15 +350,24 @@ export function productDetailKeyboard(
     }
   } else {
     // Specialized-workflows phase: kind selector + per-profile controls.
+    // Apple ID exposes an explicit fulfillment-mode toggle (تحویل آماده vs
+    // ساخت شخصی); the personalized mode hides all stock controls and shows the
+    // customer-information settings, the stock mode does the reverse. Other
+    // OTHER_PRODUCT kinds keep their existing control set exactly.
+    const isApple = product.otherProductKind === "APPLE_ID";
+    const personalized = product.otherProductFulfillmentProfile === "PERSONALIZED_SERVICE";
     kb.text("نوع محصول", pcb.pickKind(sid));
+    if (isApple) {
+      kb.text(
+        personalized ? "روش تحویل: ساخت شخصی 👤" : "روش تحویل: تحویل آماده 📦",
+        pcb.pickAppleMode(sid),
+      );
+    }
     if (isStockProfile(product.otherProductFulfillmentProfile)) {
       kb.text("فرمت موجودی", pcb.pickStockParser(sid));
     }
     kb.row();
-    if (
-      product.otherProductFulfillmentProfile === "PERSONALIZED_SERVICE" ||
-      product.requiredUserInfoEnabled
-    ) {
+    if (personalized || product.requiredUserInfoEnabled) {
       kb.text(
         product.collectInfoBeforeManualApproval === true
           ? "دریافت اطلاعات قبل از تایید رسید: فعال ✅"
@@ -357,18 +376,24 @@ export function productDetailKeyboard(
       ).row();
     }
     kb.text("پیام تکمیل سفارش", pcb.fieldEdit(sid, "cmt")).row();
-    kb.text(
-      product.requiredUserInfoEnabled ? "اطلاعات کاربر: ✅" : "اطلاعات کاربر: ❌",
-      pcb.toggleUserInfo(sid),
-    )
-      .text("متن درخواست اطلاعات", pcb.fieldEdit(sid, "ruip"))
-      .row()
-      .text("نوع تحویل", pcb.pickDelivery(sid))
+    // Customer-info settings: hidden for a ready-from-stock Apple product
+    // (تحویل آماده collects no info); shown for personalized and other kinds.
+    if (!(isApple && !personalized)) {
+      kb.text(
+        product.requiredUserInfoEnabled ? "اطلاعات کاربر: ✅" : "اطلاعات کاربر: ❌",
+        pcb.toggleUserInfo(sid),
+      )
+        .text("متن درخواست اطلاعات", pcb.fieldEdit(sid, "ruip"))
+        .row();
+    }
+    kb.text("نوع تحویل", pcb.pickDelivery(sid))
       .text("روش نام‌گذاری محصول دیگر", pcb.pickNaming(sid))
-      .row()
-      // Existing Fix B stock page - resolved by the same product short id.
-      .text("مدیریت موجودی استاک 🎟", `admin:stock:p:${sid}`)
       .row();
+    // Stock management: hidden for a personalized Apple product (no inventory).
+    if (!(isApple && personalized)) {
+      // Existing Fix B stock page - resolved by the same product short id.
+      kb.text("مدیریت موجودی استاک 🎟", `admin:stock:p:${sid}`).row();
+    }
   }
 
   kb.text(product.isActive ? "غیرفعال کردن ⚪️" : "فعال کردن 🟢", pcb.toggle(sid))

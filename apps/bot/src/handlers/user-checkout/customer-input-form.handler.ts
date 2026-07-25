@@ -9,6 +9,7 @@ import {
   CUSTOMER_INPUT_SAVED_NOTICE,
   CUSTOMER_INPUT_SCHEMA_BROKEN_TEXT,
   getOrCreateCheckoutInput,
+  isCheckoutInputSatisfied,
   submitCheckoutInput,
 } from "../../services/checkout-customer-input.service.js";
 import {
@@ -246,6 +247,43 @@ export async function maybeStartPreSettlementCustomerInput(
     return;
   }
   await startCustomerInputForm(ctx, checkout.id, snapshot.customerInputSchema);
+}
+
+/** Toast shown when a buyer tries to pay before completing the mandatory form. */
+export const CUSTOMER_INFO_REQUIRED_BEFORE_PAYMENT_TEXT =
+  "برای این محصول ابتدا باید اطلاعات سفارش را کامل و تایید کنید.";
+
+/**
+ * MANDATORY pre-payment gate (§4). For an OTHER_PRODUCT checkout whose FROZEN
+ * snapshot `requiresCustomerInfo` and that carries a structured schema, the
+ * buyer may not pay (wallet / gateway / Stars) until the form is confirmed
+ * (SUBMITTED / CONSUMED). When the info is still missing this opens/resumes the
+ * structured form and returns `true` (BLOCKED); the caller must abort the
+ * payment. Returns `false` (proceed) when info is not required, already
+ * submitted, or — for a legacy row with the flag but NO structured schema —
+ * so those keep their existing post-settlement free-text collection unchanged.
+ *
+ * Idempotent + loop-safe: a satisfied form never blocks, so after the buyer
+ * confirms the form and taps pay again the gate passes; a stale/foreign
+ * checkout resolves to no snapshot requirement and does not trap the user.
+ */
+export async function enforceCustomerInfoBeforePayment(
+  ctx: BotContext,
+  checkout: CheckoutSession,
+): Promise<boolean> {
+  if (checkout.purpose !== "ORDER_PAYMENT" || checkout.orderType !== "OTHER_PRODUCT") {
+    return false;
+  }
+  const snapshot = await readFulfillmentSnapshot(checkout);
+  if (!snapshot.requiresCustomerInfo || snapshot.customerInputSchema === null) {
+    return false;
+  }
+  if (await isCheckoutInputSatisfied(checkout.id)) {
+    return false;
+  }
+  await safeAnswerCallback(ctx, CUSTOMER_INFO_REQUIRED_BEFORE_PAYMENT_TEXT);
+  await startCustomerInputForm(ctx, checkout.id, snapshot.customerInputSchema);
+  return true;
 }
 
 // --- shared per-interaction loading --------------------------------------------------------

@@ -43,7 +43,10 @@ import { getMessageTemplate } from "../../services/text.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { clearCheckoutState } from "./checkout-state.js";
-import { maybeStartPreSettlementCustomerInput } from "./customer-input-form.handler.js";
+import {
+  enforceCustomerInfoBeforePayment,
+  maybeStartPreSettlementCustomerInput,
+} from "./customer-input-form.handler.js";
 import {
   CARD_INFO_INCOMPLETE_TEXT,
   cardToCardKeyboard,
@@ -237,6 +240,13 @@ async function startOnlineGatewayPayment(
   checkout: CheckoutSession,
   gateway: PaymentGateway,
 ): Promise<void> {
+  // §4 mandatory-input gate: a personalized OTHER_PRODUCT (e.g. a manually
+  // built Apple ID) may not be paid online until the buyer has confirmed the
+  // structured customer-information form. When blocked the gate opens the form
+  // and we abort before any gateway payment / Stars invoice is created.
+  if (await enforceCustomerInfoBeforePayment(ctx, checkout)) {
+    return;
+  }
   const result = await getOrCreateGatewayPayment(user, checkout, gateway);
   if (!result.ok) {
     await safeAnswerCallback(ctx, result.error);

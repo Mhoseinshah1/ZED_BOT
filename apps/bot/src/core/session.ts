@@ -45,6 +45,7 @@ export interface ProductAddState {
     | "category"
     | "otherKind"
     | "aiMode"
+    | "appleMode"
     | "giftMode"
     | "stockParser"
     | "formPreset"
@@ -81,7 +82,11 @@ export interface ProductAddState {
   otherProductFulfillmentProfile?: OtherProductFulfillmentProfile;
   otherProductStockParser?: OtherProductStockParser;
   collectInfoBeforeManualApproval?: boolean;
-  customerInputSchemaPreset?: "TELEGRAM_PREMIUM" | "PERSONALIZED_AI" | "NONE";
+  customerInputSchemaPreset?:
+    | "TELEGRAM_PREMIUM"
+    | "PERSONALIZED_AI"
+    | "PERSONALIZED_APPLE_ID"
+    | "NONE";
 }
 
 /**

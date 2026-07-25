@@ -35,6 +35,7 @@ import {
 } from "../../services/category.service.js";
 import {
   PERSONALIZED_AI_DEFAULT_SCHEMA,
+  PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA,
   TELEGRAM_PREMIUM_DEFAULT_SCHEMA,
 } from "../../services/customer-input-schema.service.js";
 import {
@@ -72,6 +73,7 @@ import {
   groupsKeyboard,
   isStockProfile,
   locationKeyboard,
+  APPLE_PERSONALIZED_NOTE,
   OTHER_KIND_BY_CODE,
   otherKindKeyboard,
   panelPickerKeyboard,
@@ -867,6 +869,82 @@ productHandler.callbackQuery(/^admin:prod:setkind:([^:]+):([A-Za-z]+)$/, async (
   await showProductDetail(ctx, updated);
 });
 
+// Apple ID fulfillment-mode edit: open the two-mode picker. Changing the mode
+// only affects FUTURE checkouts (existing checkouts fulfill from their frozen
+// snapshot), so this is safe to flip at any time.
+productHandler.callbackQuery(/^admin:prod:aplmode:(.+)$/, async (ctx) => {
+  const product = await resolveOtherProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  if (product.otherProductKind !== "APPLE_ID") {
+    await safeAnswerCallback(ctx, "این گزینه فقط برای اپل آیدی است.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  const sid = productShortId(product);
+  const kb = new InlineKeyboard()
+    .text("تحویل آماده 📦", pcb.setAppleMode(sid, "stock"))
+    .row()
+    .text("ساخت شخصی 👤", pcb.setAppleMode(sid, "pers"))
+    .row()
+    .text("بازگشت", pcb.view(sid));
+  await safeEditOrReply(
+    ctx,
+    ["روش تحویل اپل آیدی را انتخاب کنید:", "", APPLE_PERSONALIZED_NOTE, "", KIND_EDIT_WARNING].join(
+      "\n",
+    ),
+    kb,
+  );
+});
+
+productHandler.callbackQuery(/^admin:prod:setapl:([^:]+):([a-z]+)$/, async (ctx) => {
+  const mode = ctx.match[2];
+  if (mode !== "stock" && mode !== "pers") {
+    await safeAnswerCallback(ctx, INVALID_OPTION_TEXT);
+    return;
+  }
+  const product = await resolveOtherProduct(ctx, ctx.match[1]);
+  if (product === null) {
+    return;
+  }
+  if (product.otherProductKind !== "APPLE_ID") {
+    await safeAnswerCallback(ctx, "این گزینه فقط برای اپل آیدی است.");
+    return;
+  }
+  const update: Prisma.ProductUncheckedUpdateInput =
+    mode === "stock"
+      ? {
+          otherProductFulfillmentProfile: "STOCK_CREDENTIAL",
+          // Keep an existing parser; seed the Apple default only when unset.
+          otherProductStockParser: product.otherProductStockParser ?? "EMAIL_BOUNDARY",
+          requiredUserInfoEnabled: false,
+          requiredUserInfoPromptText: null,
+          collectInfoBeforeManualApproval: false,
+          deliveryType: "STOCK_ITEM",
+          stockEnabled: true,
+        }
+      : {
+          otherProductFulfillmentProfile: "PERSONALIZED_SERVICE",
+          otherProductStockParser: null,
+          requiredUserInfoEnabled: true,
+          collectInfoBeforeManualApproval: true,
+          deliveryType: "MANUAL_ADMIN",
+          stockEnabled: false,
+          // Seed the default structured schema only if none was set; a custom
+          // schema the admin already authored is preserved (and stays editable).
+          ...(product.customerInputSchema === null
+            ? {
+                customerInputSchema:
+                  PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA as unknown as Prisma.InputJsonValue,
+              }
+            : {}),
+        };
+  const updated = await updateProduct(product.id, update);
+  await safeAnswerCallback(ctx, "روش تحویل بروزرسانی شد ✅ (فقط سفارش‌های جدید)");
+  await showProductDetail(ctx, updated);
+});
+
 productHandler.callbackQuery(/^admin:prod:sparser:(.+)$/, async (ctx) => {
   const product = await resolveOtherProduct(ctx, ctx.match[1]);
   if (product === null) {
@@ -1196,16 +1274,19 @@ productHandler.callbackQuery(/^admin:prod:f:kind:([A-Za-z]+)$/, async (ctx) => {
   state.otherProductKind = kind;
   await safeAnswerCallback(ctx);
   switch (kind) {
-    case "APPLE_ID":
-      // Credential stock, email-boundary bulk parsing, no user info question.
-      state.otherProductFulfillmentProfile = "STOCK_CREDENTIAL";
-      state.otherProductStockParser = "EMAIL_BOUNDARY";
-      state.requiredUserInfoEnabled = false;
-      state.requiredUserInfoPromptText = null;
-      state.collectInfoBeforeManualApproval = false;
-      state.deliveryType = "STOCK_ITEM";
-      await askDurationStep(ctx, state);
+    case "APPLE_ID": {
+      // No silent default: the admin MUST choose ready-from-stock vs a
+      // personalized manual build before the product exists.
+      state.step = "appleMode";
+      const kb = new InlineKeyboard()
+        .text("تحویل آماده 📦", pcb.flowAppleMode("stock"))
+        .row()
+        .text("ساخت شخصی 👤", pcb.flowAppleMode("pers"))
+        .row()
+        .text("لغو ❌", PROD_CB.CANCEL);
+      await safeEditOrReply(ctx, "روش تحویل اپل آیدی را انتخاب کنید:", kb);
       return;
+    }
     case "AI_ACCOUNT": {
       state.step = "aiMode";
       const kb = new InlineKeyboard()
@@ -1284,6 +1365,41 @@ productHandler.callbackQuery(/^admin:prod:f:ai:([a-z]+)$/, async (ctx) => {
     .row()
     .text("لغو ❌", PROD_CB.CANCEL);
   await safeEditOrReply(ctx, "فرم اطلاعات مشتری:", kb);
+});
+
+productHandler.callbackQuery(/^admin:prod:f:apl:([a-z]+)$/, async (ctx) => {
+  const mode = ctx.match[1];
+  if (mode !== "stock" && mode !== "pers") {
+    await safeAnswerCallback(ctx, INVALID_OPTION_TEXT);
+    return;
+  }
+  const state = addState(ctx, "appleMode");
+  if (state === null) {
+    await safeAnswerCallback(ctx, "این مرحله معتبر نیست.");
+    return;
+  }
+  await safeAnswerCallback(ctx);
+  if (mode === "stock") {
+    // تحویل آماده: ready credentials from inventory, email-boundary parsing,
+    // no customer-info question.
+    state.otherProductFulfillmentProfile = "STOCK_CREDENTIAL";
+    state.otherProductStockParser = "EMAIL_BOUNDARY";
+    state.requiredUserInfoEnabled = false;
+    state.requiredUserInfoPromptText = null;
+    state.collectInfoBeforeManualApproval = false;
+    state.deliveryType = "STOCK_ITEM";
+    await askDurationStep(ctx, state);
+    return;
+  }
+  // ساخت شخصی: personalized manual build — no stock, mandatory structured
+  // customer-information form (the Apple ID default schema).
+  state.otherProductFulfillmentProfile = "PERSONALIZED_SERVICE";
+  state.otherProductStockParser = undefined;
+  state.requiredUserInfoEnabled = true;
+  state.collectInfoBeforeManualApproval = true;
+  state.deliveryType = "MANUAL_ADMIN";
+  state.customerInputSchemaPreset = "PERSONALIZED_APPLE_ID";
+  await askDurationStep(ctx, state);
 });
 
 productHandler.callbackQuery(/^admin:prod:f:gc:([a-z]+)$/, async (ctx) => {
@@ -1454,7 +1570,9 @@ productHandler.callbackQuery("admin:prod:f:save", async (ctx) => {
       ? TELEGRAM_PREMIUM_DEFAULT_SCHEMA
       : state.customerInputSchemaPreset === "PERSONALIZED_AI"
         ? PERSONALIZED_AI_DEFAULT_SCHEMA
-        : null;
+        : state.customerInputSchemaPreset === "PERSONALIZED_APPLE_ID"
+          ? PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA
+          : null;
   try {
     const product = await createProductAtOrder(
       {
