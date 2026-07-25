@@ -72,6 +72,13 @@ export const OPS_EVENTS = {
   // channel DB id, a normalized error class and the isPrivate flag — never the
   // Telegram chat id, the invite link, or the raw Telegram response (§4.11, T6).
   FORCE_JOIN_CHANNEL_UNVERIFIABLE: "force_join.channel_unverifiable",
+  // Mandatory channel membership: an active channel stayed unverifiable past the
+  // failure threshold AND the sustained window, so it was automatically
+  // deactivated. When it was the last active channel while force join was on,
+  // the master switch was disabled in the same transaction (metadata
+  // forceJoinDisabled) so the bot is never enabled with nothing enforceable.
+  // Same privacy envelope as the alert above: channel DB id + flags only.
+  FORCE_JOIN_CHANNEL_RETIRED: "force_join.channel_auto_deactivated",
 } as const;
 export type OpsEventType = (typeof OPS_EVENTS)[keyof typeof OPS_EVENTS];
 

@@ -95,9 +95,18 @@ export type ForceJoinGateResolution =
 export async function resolveForceJoinGate(
   ctx: BotContext,
   userTelegramId: bigint,
-  opts: { bypassNegativeCache: boolean },
+  opts: {
+    bypassNegativeCache: boolean;
+    /**
+     * An already-loaded active-channel snapshot. Callers that must inspect the
+     * snapshot before deciding whether to check at all (the "بررسی عضویت"
+     * callback) pass theirs so the set is still read exactly ONCE per request
+     * (§4.13) instead of twice.
+     */
+    channels?: ForceJoinChannel[];
+  },
 ): Promise<ForceJoinGateResolution> {
-  const channels = await listActiveChannels();
+  const channels = opts.channels ?? (await listActiveChannels());
   if (channels.length === 0) {
     return { pass: true }; // D4: enabled + zero active valid channels → everyone passes
   }

@@ -1,3 +1,5 @@
+import { randomInt } from "node:crypto";
+
 import { type ForceJoinChannel } from "@zedbot/database";
 import { parseForceJoinLink } from "@zedbot/shared";
 import { Composer, InlineKeyboard, Keyboard } from "grammy";
@@ -7,7 +9,6 @@ import type { BotContext } from "../../core/context.js";
 import { logger } from "../../core/logger.js";
 import {
   createOrRebindChannel,
-  countActiveChannels,
   deleteChannel,
   disableForceJoin,
   disableForceJoinAndDeactivate,
@@ -15,14 +16,13 @@ import {
   enableForceJoin,
   FORCE_JOIN_ENABLED_KEY,
   getChannelById,
-  listAllChannels,
+  listChannelsPage,
   rebindChannelIdentity,
   recordValidationError,
   recordValidationSuccess,
   reorderChannel,
   resolveChannelByShortId,
   setChannelActive,
-  updateChannelJoinUrl,
   validateBotChannelAccess,
   type BotAccessErrorCode,
   type BotAccessTarget,
@@ -103,6 +103,10 @@ export const FORCE_JOIN_ADMIN_BUTTON_FALLBACKS: Record<string, string> = {
 // --- fixed message / toast strings -------------------------------------------
 const ADD_PROMPT = "لینک کانال (عمومی یا لینک دعوت خصوصی) را ارسال کنید:";
 const EDIT_PROMPT = "لینک جدید عضویت را ارسال کنید:";
+// A private channel's link and identity are replaced together, so the prompt
+// says up-front that a channel selection follows the link.
+const PRIVATE_EDIT_PROMPT =
+  "لینک دعوت جدید را ارسال کنید؛ سپس همان کانال را از لیست انتخاب کنید:";
 const PRIVATE_PICK_PROMPT = "کانال خصوصی را از لیست انتخاب کنید:";
 const PRIVATE_PICK_BUTTON = "انتخاب کانال 📢";
 const CANCEL_LABEL = "انصراف";
@@ -205,9 +209,19 @@ function fjButton(key: string): Promise<string> {
   return getButtonText(key, FORCE_JOIN_ADMIN_BUTTON_FALLBACKS[key]);
 }
 
-/** Deterministic, session-stable request_id for the private picker (T3 verify). */
-function pickRequestId(fromId: number): number {
-  return (Math.abs(fromId) % 1_000_000) + 1;
+/**
+ * A fresh, cryptographically random positive 32-bit `request_id` for EVERY new
+ * picker operation (T3).
+ *
+ * It must never be derived from the sender id: a value anyone can compute lets a
+ * `chat_shared` payload be crafted or replayed to satisfy a picker the OWNER did
+ * not arm, and a per-user-constant value means an old response still matches a
+ * newly armed flow. A random id per operation makes the armed draft the only
+ * thing that can answer it — combined with the admin binding, the expiry, and
+ * clearing the draft on success/failure/cancel, every response is single-use.
+ */
+function newPickRequestId(): number {
+  return randomInt(1, 2_147_483_647);
 }
 
 /**
@@ -372,19 +386,27 @@ async function overviewKeyboard(
  * overflow the Telegram message / keyboard limits.
  */
 async function renderOverview(ctx: BotContext, toast?: string, page = 0): Promise<void> {
-  const [channels, activeCount, enabled] = await Promise.all([
-    listAllChannels(),
-    countActiveChannels(),
+  const requested = Number.isFinite(page) ? Math.max(0, Math.trunc(page)) : 0;
+  // Paginated in the DATABASE: only this page's rows are ever loaded, so an
+  // unbounded inactive tail costs nothing to render.
+  const [firstPass, enabled] = await Promise.all([
+    listChannelsPage(requested * OVERVIEW_PAGE_SIZE, OVERVIEW_PAGE_SIZE),
     getBooleanSetting(FORCE_JOIN_ENABLED_KEY, false),
   ]);
-  const view = overviewPageBounds(channels.length, page);
-  const pageChannels = channels.slice(view.start, view.end);
+  let view = overviewPageBounds(firstPass.total, requested);
+  let pageData = firstPass;
+  // The requested page can be past the end (rows deleted since the keyboard was
+  // drawn); re-fetch the clamped page rather than rendering an empty list.
+  if (view.page !== requested) {
+    pageData = await listChannelsPage(view.start, OVERVIEW_PAGE_SIZE);
+    view = overviewPageBounds(pageData.total, view.page);
+  }
   await safeAnswerCallback(ctx, toast);
   const prefix = toast !== undefined && ctx.callbackQuery === undefined ? `${toast}\n\n` : "";
   await safeEditOrReply(
     ctx,
-    prefix + overviewText(pageChannels, channels.length, activeCount, enabled, view),
-    await overviewKeyboard(pageChannels, enabled, view),
+    prefix + overviewText(pageData.rows, pageData.total, pageData.activeCount, enabled, view),
+    await overviewKeyboard(pageData.rows, enabled, view),
   );
   ctx.session.lastMenu = FJ_CB.root;
 }
@@ -515,58 +537,50 @@ forceJoinAdminHandler.callbackQuery(FJ_CB.add, async (ctx) => {
 
 // --- edit link (arms the edit-link text flow) --------------------------------
 
-forceJoinAdminHandler.callbackQuery(/^admin:force_join:edit:([0-9a-f-]{4,36})$/, async (ctx) => {
-  if (!(await ownerGuard(ctx))) return;
-  const channel = await resolveOrStale(ctx, ctx.match[1]);
-  if (channel === null) return;
+/**
+ * Arms the link-entry step. For a PUBLIC channel the new link is resolved and
+ * applied directly; for a PRIVATE channel it is only the FIRST half of the
+ * combined operation — the text step stores the validated link and then opens a
+ * fresh channel picker, and nothing is persisted until both halves are known.
+ */
+async function startEditLinkFlow(ctx: BotContext, channel: ForceJoinChannel): Promise<void> {
+  // A private edit ends in a request_chat picker, which Telegram only allows in
+  // a private chat. Refuse up-front instead of stranding the flow later.
+  if (channel.isPrivate && !isPrivateChat(ctx)) {
+    await safeAnswerCallback(ctx, PRIVATE_CHAT_REQUIRED_TEXT);
+    return;
+  }
   ctx.session.temp.forceJoin = { editChannelId: channel.id };
   ctx.session.currentFlow = FLOW_EDIT_LINK;
   await safeAnswerCallback(ctx);
   await safeEditOrReply(
     ctx,
-    EDIT_PROMPT,
+    channel.isPrivate ? PRIVATE_EDIT_PROMPT : EDIT_PROMPT,
     new InlineKeyboard().text(CANCEL_LABEL, FJ_CB.detail(channel.id.slice(0, 8))),
   );
-});
+}
 
-// --- rebind (private re-pick via request_chat) -------------------------------
-
-forceJoinAdminHandler.callbackQuery(/^admin:force_join:rebind:([0-9a-f-]{4,36})$/, async (ctx) => {
+forceJoinAdminHandler.callbackQuery(/^admin:force_join:edit:([0-9a-f-]{4,36})$/, async (ctx) => {
   if (!(await ownerGuard(ctx))) return;
-  const admin = ctx.admin;
-  if (admin === null) return;
-  const from = ctx.from;
-  if (from === undefined) return;
   const channel = await resolveOrStale(ctx, ctx.match[1]);
   if (channel === null) return;
-  // request_chat keyboards are private-chat-only — do not arm the picker (or
-  // switch the flow) from a group context (§4.2).
-  if (!isPrivateChat(ctx)) {
-    await safeAnswerCallback(ctx, PRIVATE_CHAT_REQUIRED_TEXT);
-    return;
-  }
-  const requestId = pickRequestId(from.id);
-  ctx.session.temp.forceJoin = {
-    rebindChannelId: channel.id,
-    privatePick: {
-      requestId,
-      joinUrl: channel.joinUrl,
-      normalizedLink: channel.normalizedLink,
-      inviteHash: "",
-      adminId: admin.id,
-      expiresAtMs: Date.now() + 5 * 60_000,
-    },
-  };
-  ctx.session.currentFlow = FLOW_PRIVATE_PICK;
-  await safeAnswerCallback(ctx);
-  await safeReplyWithMarkup(
-    ctx,
-    PRIVATE_PICK_PROMPT,
-    new Keyboard()
-      .requestChat(PRIVATE_PICK_BUTTON, requestId, { chat_is_channel: true, bot_is_member: true })
-      .resized()
-      .oneTime(),
-  );
+  await startEditLinkFlow(ctx, channel);
+});
+
+// --- rebind (private re-pick) ------------------------------------------------
+
+/**
+ * «انتخاب مجدد کانال» for a PRIVATE channel. It does NOT jump straight to the
+ * picker: re-picking the channel while keeping the stored invite link would
+ * leave the row advertising the OLD link for a NEW channel. Instead it starts
+ * the same combined flow as «ویرایش لینک» — a fresh invite link first, then the
+ * picker — so identity and link are always replaced together (§4.2).
+ */
+forceJoinAdminHandler.callbackQuery(/^admin:force_join:rebind:([0-9a-f-]{4,36})$/, async (ctx) => {
+  if (!(await ownerGuard(ctx))) return;
+  const channel = await resolveOrStale(ctx, ctx.match[1]);
+  if (channel === null) return;
+  await startEditLinkFlow(ctx, channel);
 });
 
 // --- test bot access (§4.3) --------------------------------------------------
@@ -801,7 +815,7 @@ async function handleAddLink(ctx: BotContext, text: string, adminId: string): Pr
     await safeReply(ctx, PRIVATE_CHAT_REQUIRED_TEXT);
     return;
   }
-  const requestId = pickRequestId(from.id);
+  const requestId = newPickRequestId();
   ctx.session.temp.forceJoin = {
     privatePick: {
       requestId,
@@ -823,8 +837,12 @@ async function handleAddLink(ctx: BotContext, text: string, adminId: string): Pr
   );
 }
 
-/** Handles the edit-link text: same kind as the row, re-validated for public. */
-async function handleEditLink(ctx: BotContext, text: string): Promise<void> {
+/**
+ * Handles the edit-link text. The new link must be the same KIND as the row.
+ * Public: re-validated and applied together with the authoritative identity.
+ * Private: held in the session and paired with a freshly picked channel.
+ */
+async function handleEditLink(ctx: BotContext, text: string, adminId: string): Promise<void> {
   const channelId = ctx.session.temp.forceJoin?.editChannelId;
   if (channelId === undefined) {
     await clearForceJoinAdminState(ctx);
@@ -853,17 +871,48 @@ async function handleEditLink(ctx: BotContext, text: string): Promise<void> {
     return; // keep armed
   }
 
-  let updated: MutateResult;
   if (channel.isPrivate) {
-    // Private: only the invite URL changes; the chatId identity is unchanged (an
-    // invite link is not a resolvable identity — re-identifying a private channel
-    // only happens through the request_chat picker).
-    updated = await updateChannelJoinUrl(
-      channel.id,
-      parsed.value.joinUrl,
-      parsed.value.normalizedLink,
+    // A private invite link carries NO verifiable identity: nothing in it proves
+    // which channel it opens. Writing it alone would let the row advertise
+    // channel B while the gate keeps verifying channel A. So the link is only
+    // held in the session, and the OWNER must now select the matching channel —
+    // both halves are then written together on chat_shared (§4.2).
+    const from = ctx.from;
+    if (from === undefined) {
+      await clearForceJoinAdminState(ctx);
+      return;
+    }
+    if (!isPrivateChat(ctx)) {
+      await clearForceJoinAdminState(ctx);
+      await safeReply(ctx, PRIVATE_CHAT_REQUIRED_TEXT);
+      return;
+    }
+    const requestId = newPickRequestId();
+    ctx.session.temp.forceJoin = {
+      rebindChannelId: channel.id,
+      privatePick: {
+        requestId,
+        joinUrl: parsed.value.joinUrl,
+        normalizedLink: parsed.value.normalizedLink,
+        inviteHash: parsed.value.inviteHash ?? "",
+        adminId: adminId,
+        expiresAtMs: Date.now() + 5 * 60_000,
+      },
+    };
+    ctx.session.currentFlow = FLOW_PRIVATE_PICK;
+    await safeReplyWithMarkup(
+      ctx,
+      PRIVATE_PICK_PROMPT,
+      new Keyboard()
+        .requestChat(PRIVATE_PICK_BUTTON, requestId, { chat_is_channel: true, bot_is_member: true })
+        .resized()
+        .oneTime(),
     );
-  } else {
+    return;
+  }
+
+  let updated: MutateResult;
+  {
     // Public: re-validate bot-admin access and adopt the AUTHORITATIVE identity —
     // but ONLY when the link resolves to the SAME channel. A link resolving to a
     // different chatId is a different channel; updating only the URL while keeping
@@ -929,7 +978,7 @@ forceJoinAdminTextHandler.on("message:text", async (ctx, next) => {
     await handleAddLink(ctx, text, admin.id);
     return;
   }
-  await handleEditLink(ctx, text);
+  await handleEditLink(ctx, text, admin.id);
 });
 
 // A command (`/start`, `/ping`, `/paysupport`, `/admin`, …) sent while a
@@ -988,16 +1037,26 @@ forceJoinChatSharedHandler.on("message:chat_shared", async (ctx, next) => {
 
   const rebindChannelId = ctx.session.temp.forceJoin?.rebindChannelId;
   if (rebindChannelId !== undefined) {
+    // Identity AND link in one write: the link comes from the draft the OWNER
+    // just submitted in THIS session-bound operation, the identity from the
+    // channel they just picked and the bot just re-validated. There is no path
+    // that keeps the old link with a new channel, or vice versa (§4.2).
     const rebind = await rebindChannelIdentity(rebindChannelId, {
       chatId: result.chatId,
       title: result.title || "کانال خصوصی",
       isPrivate: true,
       publicUsername: null,
+      joinUrl: draft.joinUrl,
+      normalizedLink: draft.normalizedLink,
     });
     if (!rebind.ok) {
       await clearForceJoinAdminState(
         ctx,
-        rebind.code === "DUPLICATE_CHANNEL" ? DUPLICATE_CHANNEL_TOAST : STALE_TOAST,
+        rebind.code === "DUPLICATE_CHANNEL"
+          ? DUPLICATE_CHANNEL_TOAST
+          : rebind.code === "LINK_CONFLICT"
+            ? ALREADY_ADDED_TOAST
+            : STALE_TOAST,
       );
       await renderOverview(ctx);
       return;

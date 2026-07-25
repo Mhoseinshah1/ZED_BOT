@@ -32,19 +32,45 @@ configuration flow, the runtime membership gate, and the operational behaviour.
 | `createdByAdminId` | soft reference |
 | `lastValidatedAt`, `lastValidationErrorCode` | last bot-access validation result (normalized error class only) |
 
+Health columns (migration `20260726120000_force_join_link_unique_and_health`):
+`healthFailureCount`, `healthFailureFirstAt`, `healthFailureLastAt`,
+`unhealthyAt` — see [Unhealthy-channel lifecycle](#unhealthy-channel-lifecycle-411).
+
 Constraints:
 
 - `chatId` is **globally unique** — re-adding the same channel updates the
   existing row rather than inserting a duplicate (D5).
-- `normalizedLink` is unique **only among public rows** via a partial unique
-  index `WHERE "isPrivate" = false` (D6). Private invite links are never
-  uniqueness-constrained.
+- `normalizedLink` is **globally unique across public AND private rows**
+  (migration `20260726120000_force_join_link_unique_and_health` replaced the
+  original public-only partial index). Two rows may never advertise the same
+  join target: a user shown one link must map to exactly one configuration row,
+  otherwise the channel they join and the channel the gate verifies can differ.
 - Ordering is deterministic: `(sortOrder ASC, createdAt ASC, id ASC)`. There is
   no `UNIQUE(sortOrder)`; reordering renumbers `sortOrder` contiguously.
 
-The migration is additive and forward-only. Existing installs keep the
-`force_join_enabled` Setting, the `force_join_text` template, and
-`User.forceJoinBypass`.
+Both migrations are forward-only; the original
+`20260725190000_force_join_channels` is never modified. The link-uniqueness
+migration runs a **privacy-safe preflight** first: it counts duplicated
+`normalizedLink` groups and aborts with only that COUNT in the error message —
+never a link, invite hash, chat id or row id, because migration errors surface
+in deployment logs. Existing installs keep the `force_join_enabled` Setting, the
+`force_join_text` template, and `User.forceJoinBypass`.
+
+### Serialized configuration mutations
+
+Every mutation that reads-then-writes the active set, the 10-active cap, the
+`sortOrder` allocation or the master switch first takes ONE dedicated
+transaction-level advisory lock (`pg_advisory_xact_lock(hashtext(
+'zedbot-force-join-config'))`): create/rebind, link+identity update,
+activate/deactivate, delete, enable/disable and the combined D3 actions,
+and reorder.
+
+A row lock on the active set (`… WHERE "isActive" = true FOR UPDATE`) cannot
+serialize these, because when the active set is **empty** it locks no rows at
+all — two concurrent "create the first channel" or "enable" transactions would
+both observe zero and both commit. The advisory lock exists independently of any
+row and releases on commit/rollback. `force-join-concurrency.test.ts` drives real
+parallel transactions and fails without it.
 
 ## Link parsing (no SSRF)
 
@@ -83,8 +109,40 @@ bot is `administrator` or `creator` (D1). On failure it returns exactly:
   works there, not on an inline keyboard — T1/T2), the admin selects the channel,
   and the bot re-validates the resulting `chat_shared` via `getChat` +
   `getChatMember` before pairing it with the stored invite link. The
-  `request_chat` `request_id` is session-bound, single-use, sender-checked, and
-  time-limited (T3).
+  `request_chat` `request_id` is a **cryptographically random positive 32-bit
+  integer generated per picker operation** (`randomInt`), session-bound,
+  single-use, sender-checked and time-limited (T3). It is never derived from the
+  sender id: a predictable value could be replayed or crafted to satisfy a
+  picker the OWNER did not arm, and a per-user-constant value would let an old
+  `chat_shared` answer a newly armed flow.
+
+### Private link and identity are inseparable
+
+For a private channel the invite link proves nothing about which channel it
+opens, so the service exposes **no primitive that moves one without the other**.
+`rebindChannelIdentity` takes the identity *and* the link as required parameters
+and writes them in a single statement; there is no "update just the link".
+
+Both «ویرایش لینک» and «انتخاب مجدد کانال» therefore run the same combined,
+session-bound operation on a private row:
+
+1. the OWNER submits a **fresh invite link** — validated and held in session,
+   nothing persisted yet;
+2. a **fresh `request_chat` picker** opens (new random `request_id`);
+3. the OWNER selects the channel;
+4. the bot re-validates `getChat` + `getChatMember` and asserts admin/creator;
+5. identity (`chatId`/title/private flags) **and** `joinUrl`/`normalizedLink`
+   are written atomically;
+6. a duplicate identity is refused as `DUPLICATE_CHANNEL`, a duplicate link as
+   `LINK_CONFLICT`.
+
+This makes all three broken states unreachable, each covered by a test: link A
+with identity B, an old invite link with a newly rebound channel, and a newly
+edited link with the old channel identity.
+
+For a **public** row the link resolves to an identity, so the edit is applied
+directly — but only when it resolves to the SAME channel; a link pointing at a
+different channel is rejected (use «افزودن کانال» instead).
 
 ## Admin UI
 
@@ -101,8 +159,10 @@ getChat → getChatMember) and refuses the transition if the bot is no longer an
 admin, so the overview can never advertise a required channel that membership
 evaluation would silently exclude as unverifiable. A successful **تست دسترسی
 ربات ♻️** clears any previously-recorded validation error. The overview is
-**paginated** (8 rows per page) so a long inactive list can never overflow
-Telegram's message / keyboard limits.
+**paginated in the database** (`skip`/`take`, 8 rows per page, with the page rows
+and both counts read in one transaction). Only ACTIVE channels are capped, so the
+inactive tail is unbounded: it must never be loaded into memory to render a page,
+nor be allowed to overflow Telegram's message / keyboard limits.
 
 Text entry uses session-bound flows; `انصراف`, `/admin`, `/start`, `/ping`,
 `/paysupport`, and navigation unwind the flow safely and remove any temporary
@@ -134,6 +194,22 @@ Tapping `بررسی عضویت ✅` re-checks live membership (bypassing the neg
 debounced per user. On success it answers `عضویت شما تایید شد ✅` and shows the
 normal menu — nothing about balance, orders, referral, or payment state changes.
 
+### Stale check keyboards
+
+The check button lives on a message that can be arbitrarily old, so before the
+handler spends anything it re-derives the current world, in order:
+
+1. `ensureUserAccess` — registers/loads the user and applies maintenance →
+   blocked → terms (it deliberately skips its own force-join gate for this
+   callback, which is what the handler is performing);
+2. the `force_join_enabled` master switch and the per-user `forceJoinBypass`;
+3. the live active-channel snapshot (read once, reused by the gate — §4.13).
+
+If force join is off, the user is bypassed, or there are zero active channels,
+the tap makes **no Redis call, takes no debounce slot and issues no
+`getChatMember`** — the user is simply returned to the normal menu. Only a tap
+that genuinely still requires verification reaches Telegram.
+
 ### Membership status rule (§4.8)
 
 Joined: `creator`, `administrator`, `member`, and `restricted` **only when**
@@ -153,14 +229,67 @@ membership.
 
 ## Failure taxonomy & alerts (§4.11)
 
-A membership check distinguishes: user-not-a-member, bot-lacks-access,
-Telegram temporary/network failure, and channel-deleted/renamed. A channel the
-bot can no longer verify is **excluded** from gating (so users are never bricked)
-and raises a durable, privacy-safe OWNER alert (`writeSystemLog`, event
+`classifyMemberCheckError` is ordered so the **safe** answer always wins. Only
+`NOT_JOINED` blocks a real user, so it is the one verdict that is never guessed:
+
+1. **`TEMP`** — 429, 5xx, and any error without an API code (network / timeout /
+   abort). Fails closed without lying (D2).
+2. **`UNVERIFIABLE`** — bot removed / demoted / kicked, `member list is
+   inaccessible`, `chat not found`, `not enough rights`, `CHANNEL_PRIVATE`,
+   `PEER_ID_INVALID`, any `Forbidden:`. Checked **before** any user-absence
+   match, because several of these descriptions also mention the
+   member/participant and must never be read as "this user did not join".
+3. **`NOT_JOINED`** — only a narrow, explicit user-not-a-participant wording:
+   `USER_NOT_PARTICIPANT`, `user is not a participant`,
+   `PARTICIPANT_ID_INVALID`.
+4. **anything else 4xx → `UNVERIFIABLE`** (fail safe).
+
+Deliberately *not* treated as user-absence: the bare substring `participant`
+(it matches access errors) and `user not found` (Telegram not knowing an account
+is not proof they left the channel). Both fail safe instead of locking out a
+genuine member.
+
+An unverifiable channel is **excluded** from gating (users are never bricked) and
+raises a durable, privacy-safe OWNER alert (`writeSystemLog`, event
 `force_join.channel_unverifiable`, SYSTEM topic), deduplicated per channel per
 rolling window (Redis, with a process-local fallback). Logs carry only the
 channel DB id, a normalized error class, and the `isPrivate` flag — never the
 chat id, invite link, API token, or raw Telegram response.
+
+## Unhealthy-channel lifecycle (§4.11)
+
+Excluding a broken channel forever would leave the admin panel advertising a
+required channel that is not actually enforced. So permanent failures are counted
+durably and the channel is eventually retired — bounded, and never at the cost of
+locking users out.
+
+| Rule | Value |
+| --- | --- |
+| Failure threshold | **5** consecutive permanent unverifiable results (`FORCE_JOIN_HEALTH_FAILURE_THRESHOLD`) |
+| Sustained window | **10 minutes** — the failures must also have persisted this long (`FORCE_JOIN_HEALTH_MIN_WINDOW_MS`) |
+| Window restart | a failure **more than 60 min** after the previous one starts a fresh window (`FORCE_JOIN_HEALTH_RESET_MS`) |
+| Count debounce | at most one increment per channel per **5 s** (`FORCE_JOIN_HEALTH_COUNT_DEBOUNCE_MS`) |
+
+- **Transient** (`TEMP`) results never mutate configuration and never count.
+- Each **permanent** result increments the durable counter (write-debounced, so a
+  broken channel costs O(1) writes per interval rather than one per gated user).
+- Once the count reaches the threshold **and** the window has elapsed, the
+  channel is atomically deactivated (`isActive = false`, `unhealthyAt` set).
+- If it was the **last active channel while force join was enabled**, the master
+  switch is disabled in the **same transaction** — the bot is never left switched
+  on with nothing enforceable.
+- Retirement emits `force_join.channel_auto_deactivated` (SYSTEM topic, ERROR)
+  carrying only the channel DB id, `isPrivate`, `forceJoinDisabled`, and the
+  threshold/window values. The recurring unverifiable alert stays deduplicated;
+  the one-shot retirement alert is not.
+
+**Recovery.** Re-grant the bot admin rights in the channel, then either press
+«تست دسترسی ربات ♻️» or re-activate the channel — both re-validate, and any
+success clears `healthFailureCount`/`healthFailureFirstAt`/`unhealthyAt`, so a
+repaired outage can never combine with a later one to cross the threshold.
+Activation additionally refuses to turn a still-inaccessible channel back on.
+A successful membership check clears the window on its own (guarded on the
+in-memory snapshot, so healthy channels cost no extra writes).
 
 ## Caching (§4.12)
 

@@ -556,6 +556,124 @@ describe.runIf(hasDb)("force-join OWNER admin UI (§6)", () => {
     expect(removal).toBeDefined();
   });
 
+  // --- private link/identity can never diverge (P1-A) ------------------------
+
+  /** Seeds a private channel row and returns it. */
+  async function seedPrivate(hash: string, chatId: bigint) {
+    const created = await createOrRebindChannel({
+      chatId,
+      title: `Priv ${hash}`,
+      joinUrl: `https://t.me/+${hash}`,
+      normalizedLink: `https://t.me/+${hash}`,
+      isPrivate: true,
+      publicUsername: null,
+      createdByAdminId: OWNER.id,
+    });
+    if (!created.ok) throw new Error("setup");
+    return created.channel;
+  }
+
+  it("editing a private link alone persists NOTHING until a channel is picked", async () => {
+    const row = await seedPrivate("origlink", -2001n);
+    const session = initialSession();
+    await runCb(callbackCtx(`admin:force_join:edit:${row.id.slice(0, 8)}`, OWNER, session));
+    expect(session.currentFlow).toBe("force_join:edit_link");
+
+    // The OWNER submits a NEW invite link.
+    const t = textCtx("https://t.me/+brandnewlink", OWNER, session);
+    await runText(t);
+
+    // Nothing is written yet — the row still holds the ORIGINAL link and id.
+    const unchanged = await getChannelById(row.id);
+    expect(unchanged?.joinUrl).toBe("https://t.me/+origlink");
+    expect(unchanged?.chatId).toBe(-2001n);
+    // Instead the picker is armed, carrying the new link in the draft.
+    expect(session.currentFlow).toBe("force_join:private_pick");
+    expect(session.temp.forceJoin?.rebindChannelId).toBe(row.id);
+    expect(session.temp.forceJoin?.privatePick?.joinUrl).toBe("https://t.me/+brandnewlink");
+  });
+
+  it("completing the private edit moves link AND identity together — never link A + identity B", async () => {
+    const row = await seedPrivate("linkA", -2002n);
+    const session = initialSession();
+    await runCb(callbackCtx(`admin:force_join:edit:${row.id.slice(0, 8)}`, OWNER, session));
+    await runText(textCtx("https://t.me/+linkB", OWNER, session));
+    const requestId = session.temp.forceJoin?.privatePick?.requestId as number;
+
+    const newChatId = -2099;
+    const cs = chatSharedCtx({ request_id: requestId, chat_id: newChatId }, OWNER, session, {
+      getChat: { id: newChatId, type: "channel", title: "Channel B" },
+      botStatus: "administrator",
+    });
+    await runShared(cs);
+
+    const after = await getChannelById(row.id);
+    // BOTH halves are the new ones. The forbidden combinations —
+    // (old link + new identity) and (new link + old identity) — are absent.
+    expect(after?.joinUrl).toBe("https://t.me/+linkB");
+    expect(after?.normalizedLink).toBe("https://t.me/+linkB");
+    expect(after?.chatId).toBe(BigInt(newChatId));
+    expect(after?.title).toBe("Channel B");
+    expect(session.currentFlow).toBeNull();
+  });
+
+  it("«انتخاب مجدد کانال» demands a fresh link instead of re-picking with the old one", async () => {
+    const row = await seedPrivate("keepme", -2003n);
+    const session = initialSession();
+    const c = callbackCtx(`admin:force_join:rebind:${row.id.slice(0, 8)}`, OWNER, session);
+    await runCb(c);
+
+    // It does NOT jump to the picker (which would pair a NEW channel with the
+    // OLD invite link); it asks for the new link first.
+    expect(session.currentFlow).toBe("force_join:edit_link");
+    expect(session.temp.forceJoin?.privatePick).toBeUndefined();
+    const armedPicker = c.rec.sent.some((s) =>
+      Array.isArray((s.other?.reply_markup as { keyboard?: unknown })?.keyboard),
+    );
+    expect(armedPicker).toBe(false);
+  });
+
+  it("a rebind onto a channel already configured elsewhere is refused", async () => {
+    const a = await seedPrivate("dup_a", -2004n);
+    await seedPrivate("dup_b", -2005n);
+    const session = initialSession();
+    await runCb(callbackCtx(`admin:force_join:edit:${a.id.slice(0, 8)}`, OWNER, session));
+    await runText(textCtx("https://t.me/+dupattempt", OWNER, session));
+    const requestId = session.temp.forceJoin?.privatePick?.requestId as number;
+
+    // Pick the channel that the OTHER row already owns.
+    const cs = chatSharedCtx({ request_id: requestId, chat_id: -2005 }, OWNER, session, {
+      getChat: { id: -2005, type: "channel", title: "B" },
+      botStatus: "administrator",
+    });
+    await runShared(cs);
+
+    expect(allText(cs.rec)).toContain("قبلاً ثبت شده");
+    const untouched = await getChannelById(a.id);
+    expect(untouched?.chatId).toBe(-2004n);
+    expect(untouched?.joinUrl).toBe("https://t.me/+dup_a");
+  });
+
+  // --- request_id randomness (P1-D) ------------------------------------------
+
+  it("issues a different, cryptographically random request_id for each new picker flow", async () => {
+    const seen = new Set<number>();
+    for (let i = 0; i < 4; i += 1) {
+      const session = initialSession();
+      await runCb(callbackCtx("admin:force_join:add", OWNER, session));
+      await runText(textCtx(`https://t.me/+seq${i}`, OWNER, session));
+      const id = session.temp.forceJoin?.privatePick?.requestId as number;
+      // A positive 32-bit integer, never derived from the sender id.
+      expect(Number.isInteger(id)).toBe(true);
+      expect(id).toBeGreaterThan(0);
+      expect(id).toBeLessThanOrEqual(2_147_483_647);
+      seen.add(id);
+    }
+    // Two sequential flows from the SAME owner must not reuse an id, so an old
+    // chat_shared can never satisfy a newly armed picker.
+    expect(seen.size).toBe(4);
+  });
+
   it("the command escape passes ordinary text through without clearing an armed flow (Codex P2)", async () => {
     const session = initialSession();
     await runCb(callbackCtx("admin:force_join:add", OWNER, session));
