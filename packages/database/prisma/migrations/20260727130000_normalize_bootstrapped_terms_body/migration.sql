@@ -29,6 +29,14 @@
 
 DO $$
 DECLARE
+    -- ECMAScript WhiteSpace + LineTerminator, spelled out because PostgreSQL's
+    -- [[:space:]] and one-argument btrim() are NARROWER than JavaScript's
+    -- .trim() / \s — neither of them matches NBSP (U+00A0), U+2028/29 or the
+    -- U+2000-200A spaces. Using the POSIX class would leave an invisible NBSP
+    -- looking like content to this migration while the application treats the
+    -- very same body as blank.
+    ws CONSTANT TEXT :=
+        U&'[\0009\000A\000B\000C\000D\0020\00A0\1680\2000-\200A\2028\2029\202F\205F\3000\FEFF]';
     bootstrapped RECORD;
     normalized TEXT;
     utf16_length INTEGER;
@@ -72,9 +80,9 @@ BEGIN
                 ),
                 U&'[\0001-\0008\000B-\001F\007F-\009F]', '', 'g'
             ),
-            '^[[:space:]]+', ''
+            '^' || ws || '+', ''
         ),
-        '[[:space:]]+$', ''
+        ws || '+$', ''
     );
 
     -- The application measures its 3,500 limit with JavaScript `.length`, i.e.
@@ -110,7 +118,7 @@ BEGIN
     -- invisible joiner is left.
     IF regexp_replace(
            translate(normalized, U&'\200C\200D', ''),
-           '[[:space:]]', '', 'g'
+           ws, '', 'g'
        ) = '' THEN
         RAISE NOTICE 'Versioned terms: bootstrapped version 1 held no meaningful content once normalized; archived and nothing published.';
         RETURN;

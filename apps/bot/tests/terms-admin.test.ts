@@ -13,6 +13,7 @@ import {
 import { clearSettingsCache, getBooleanSettingFresh } from "../src/services/settings.service.js";
 import {
   createTermsDraft,
+  enableTermsRequirement,
   getDraftTerms,
   getPublishedTerms,
   publishTermsDraft,
@@ -275,6 +276,7 @@ describe.runIf(hasDb)("terms admin — overview + buttons (§8)", () => {
   it("A05 the overview reports enforcement, version, date, draft state and counts", async () => {
     const id = await publish("متن قوانین منتشرشده");
     const user = await makeUser();
+    await enableTermsRequirement();
     await recordTermsAcceptance(user, id);
     await runCallback("admin:terms:enable", OWNER);
 
@@ -294,6 +296,7 @@ describe.runIf(hasDb)("terms admin — overview + buttons (§8)", () => {
     const id = await publish("قوانین");
     const userId = await makeUser();
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    await enableTermsRequirement();
     await recordTermsAcceptance(userId, id);
 
     const { rec } = await runCallback("admin:terms:root", OWNER);
@@ -306,6 +309,7 @@ describe.runIf(hasDb)("terms admin — overview + buttons (§8)", () => {
     const id = await publish("قوانین");
     const userId = await makeUser();
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    await enableTermsRequirement();
     await recordTermsAcceptance(userId, id);
 
     const { rec } = await runCallback("admin:terms:stats", OWNER);

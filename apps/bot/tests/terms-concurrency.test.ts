@@ -61,6 +61,10 @@ async function publish(body: string): Promise<string> {
   const id = await makeDraft(body);
   const result = await publishTermsDraft(id, null);
   if (!result.ok) throw new Error(`publish failed: ${result.code}`);
+  // Enforcement is switched ON here because that is the only world in which
+  // an acceptance is meaningful: recordTermsAcceptance refuses to write once
+  // the master switch is off (a keyboard rendered before it was disabled).
+  await enableTermsRequirement();
   return result.document.id;
 }
 
@@ -258,6 +262,28 @@ describe.runIf(hasDb)("versioned terms — concurrency (§10)", () => {
     expect(await prisma.termsAcceptance.count({ where: { termsDocumentId: id } })).toBe(
       users.length,
     );
+  });
+
+  it("C10b 100 different users accepting at once each land exactly one row", async () => {
+    // Publishing re-gates the whole user base at once, so a burst on this scale
+    // is the NORMAL case, not an edge case. It is also why the acceptance path
+    // does not take the configuration advisory lock: 100 serialized writers each
+    // holding a pooled connection would starve the rest of the bot.
+    const id = await publish("قوانین");
+    const users = await Promise.all(Array.from({ length: 100 }, () => makeUser()));
+
+    const results = await Promise.all(users.map((u) => recordTermsAcceptance(u, id)));
+
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(await prisma.termsAcceptance.count({ where: { termsDocumentId: id } })).toBe(100);
+    // Every row names the same document and version — no partial/duplicate writes.
+    const rows = await prisma.termsAcceptance.findMany({ where: { termsDocumentId: id } });
+    expect(new Set(rows.map((r) => r.userId)).size).toBe(100);
+    expect(rows.every((r) => r.termsVersion === 1)).toBe(true);
+    // And every one of them got their legacy timestamp stamped.
+    expect(
+      await prisma.user.count({ where: { id: { in: users }, termsAcceptedAt: { not: null } } }),
+    ).toBe(100);
   });
 
   it("C11 edit racing publish never changes a published body", async () => {

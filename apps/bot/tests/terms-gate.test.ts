@@ -150,6 +150,10 @@ async function publish(body: string): Promise<{ id: string; version: number }> {
   if (!updated.ok) throw new Error(`body failed: ${updated.code}`);
   const published = await publishTermsDraft(updated.draft.id, null);
   if (!published.ok) throw new Error(`publish failed: ${published.code}`);
+  // Enforcement is switched ON here because that is the only world in which
+  // an acceptance is meaningful: recordTermsAcceptance refuses to write once
+  // the master switch is off (a keyboard rendered before it was disabled).
+  await enableTermsRequirement();
   return { id: published.document.id, version: published.document.version ?? -1 };
 }
 

@@ -13,10 +13,12 @@ import {
   parseTermsAcceptCallback,
   TERMS_ACCEPT_ROUTE_PATTERN,
 } from "../services/terms/terms-callbacks.js";
+import { getBooleanSettingFresh } from "../services/settings.service.js";
 import {
   getPublishedTerms,
   recordTermsAcceptance,
   resolveTermsDocumentByShortId,
+  TERMS_REQUIRED_KEY,
 } from "../services/terms/terms-document.service.js";
 import {
   buildTermsScreen,
@@ -99,7 +101,7 @@ termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
     }
 
     const result = await recordTermsAcceptance(ctx.dbUser.id, document.id);
-    if (!result.ok) {
+    if (!result.ok && result.code !== "DISABLED") {
       // STALE: a newer version was published between render and press (or the
       // button was for an archived version). NOT_FOUND: nothing is published.
       // Neither records an acceptance of the current version.
@@ -107,12 +109,19 @@ termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
       return;
     }
 
-    // Re-read the user so the freshly stamped termsAcceptedAt is in context.
-    ctx.dbUser = await registerOrUpdateUser(from);
-    await safeAnswerCallback(
-      ctx,
-      await getMessageTemplate("terms_accepted_toast", TERMS_ACCEPTED_TOAST_FALLBACK),
-    );
+    if (result.ok) {
+      // Re-read the user so the freshly stamped termsAcceptedAt is in context.
+      ctx.dbUser = await registerOrUpdateUser(from);
+      await safeAnswerCallback(
+        ctx,
+        await getMessageTemplate("terms_accepted_toast", TERMS_ACCEPTED_TOAST_FALLBACK),
+      );
+    } else {
+      // DISABLED: enforcement was switched off after this keyboard was rendered.
+      // Nothing is owed and nothing was written — acknowledge without claiming
+      // an acceptance was recorded, then continue through the access path.
+      await safeAnswerCallback(ctx);
+    }
   } catch (err) {
     logger.error("accepting terms failed", { error: errorMessage(err) });
     await safeAnswerCallback(ctx);
@@ -135,7 +144,26 @@ termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
  * current button, which is precisely what the user needs to proceed.
  */
 termsHandler.callbackQuery(CB.TERMS_ACCEPT, async (ctx) => {
+  // Same preflight as the versioned button: maintenance mode and account status
+  // decide whether this user gets any answer at all. It records nothing either
+  // way, but a blocked user or a bot in maintenance must not be handed a terms
+  // screen instead of the message that explains why they are stopped.
+  if (!(await ensurePreTermsAccess(ctx))) {
+    return;
+  }
+
   try {
+    // Respect the CURRENT switch. If enforcement was turned off since this
+    // keyboard was sent there is nothing to accept, so re-drawing the terms
+    // would strand the user on a screen the bot no longer requires.
+    if (!(await getBooleanSettingFresh(TERMS_REQUIRED_KEY, false))) {
+      await safeAnswerCallback(ctx);
+      if (await ensureUserAccess(ctx)) {
+        await showUserMenu(ctx);
+      }
+      return;
+    }
+
     await redrawCurrentTerms(
       ctx,
       await getMessageTemplate("terms_stale_text", TERMS_STALE_TEXT_FALLBACK),

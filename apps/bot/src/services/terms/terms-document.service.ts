@@ -440,7 +440,7 @@ export async function disableTermsRequirement(): Promise<void> {
 
 export type AcceptResult =
   | { ok: true; version: number; alreadyAccepted: boolean }
-  | { ok: false; code: "STALE" | "NOT_FOUND" };
+  | { ok: false; code: "STALE" | "NOT_FOUND" | "DISABLED" };
 
 /**
  * Records a user's acceptance of ONE EXACT document.
@@ -481,6 +481,19 @@ export async function recordTermsAcceptance(
   // Duplicate acceptances are impossible regardless, because of the
   // (userId, termsDocumentId) unique index — handled below.
   return prisma.$transaction(async (tx) => {
+    // Enforcement may have been switched OFF after this keyboard was rendered.
+    // Nothing is owed once it is, so pressing an old button must not write an
+    // acceptance row or stamp the legacy timestamp. Read through `tx` rather
+    // than the cached settings helper: the cache can lag behind a disable by
+    // its TTL, and this decides whether we mutate.
+    const requiredSetting = await tx.setting.findUnique({
+      where: { key: TERMS_REQUIRED_KEY },
+      select: { value: true },
+    });
+    if (requiredSetting?.value !== "true") {
+      return { ok: false as const, code: "DISABLED" as const };
+    }
+
     const published = await tx.termsDocument.findFirst({
       where: { status: TermsDocumentStatus.PUBLISHED },
     });
@@ -493,39 +506,38 @@ export async function recordTermsAcceptance(
       return { ok: false as const, code: "STALE" as const };
     }
 
-    const existing = await tx.termsAcceptance.findUnique({
-      where: { userId_termsDocumentId: { userId, termsDocumentId: published.id } },
-      select: { id: true },
-    });
-    if (existing !== null) {
-      // Already accepted: history is never rewritten. Still refresh the legacy
-      // timestamp only if it is missing, so an old row cannot leave it null.
-      await tx.user.updateMany({
-        where: { id: userId, termsAcceptedAt: null },
-        data: { termsAcceptedAt: new Date() },
-      });
-      return { ok: true as const, version: published.version, alreadyAccepted: true };
-    }
-
     const acceptedAt = new Date();
-    try {
-      await tx.termsAcceptance.create({
-        data: {
+    // `skipDuplicates` compiles to INSERT … ON CONFLICT DO NOTHING, which is the
+    // only safe way to absorb a duplicate INSIDE a transaction. Letting the
+    // unique index raise 23505 and catching it in JavaScript does not work here:
+    // PostgreSQL marks the whole transaction ABORTED, so every later statement
+    // fails with 25P02 and the COMMIT silently degrades to a ROLLBACK — the
+    // "already accepted" answer would be returned from a transaction that can
+    // never commit. ON CONFLICT keeps the transaction alive and usable.
+    const inserted = await tx.termsAcceptance.createMany({
+      data: [
+        {
           userId,
           termsDocumentId: published.id,
           termsVersion: published.version,
           acceptedAt,
           source,
         },
+      ],
+      skipDuplicates: true,
+    });
+
+    if (inserted.count === 0) {
+      // Already accepted — either long ago or by a press that landed a moment
+      // earlier. History is never rewritten; only a MISSING legacy timestamp is
+      // filled in, so an older row cannot leave it null.
+      await tx.user.updateMany({
+        where: { id: userId, termsAcceptedAt: null },
+        data: { termsAcceptedAt: acceptedAt },
       });
-    } catch (err) {
-      // Two presses landing together: the unique index picks one winner. The
-      // loser is an idempotent success, never an error and never a second row.
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-        return { ok: true as const, version: published.version, alreadyAccepted: true };
-      }
-      throw err;
+      return { ok: true as const, version: published.version, alreadyAccepted: true };
     }
+
     await tx.user.update({ where: { id: userId }, data: { termsAcceptedAt: acceptedAt } });
     return { ok: true as const, version: published.version, alreadyAccepted: false };
   });
@@ -533,66 +545,3 @@ export async function recordTermsAcceptance(
 
 // --- legacy bootstrap (§11) ---------------------------------------------------
 
-export type BootstrapResult =
-  | { ok: true; created: false; reason: "DOCUMENT_EXISTS" | "NO_LEGACY_TEXT" }
-  | { ok: true; created: true; backfilled: number };
-
-/**
- * Idempotent safety net for the one-time legacy bootstrap that
- * `20260727120000_versioned_mandatory_terms` performs in SQL.
- *
- * The migration covers every ordinary upgrade. This function exists for the
- * installs the migration cannot help: one whose `terms_text` was seeded AFTER
- * the migration ran (a fresh database is migrated before it is seeded), or one
- * restored from a partial backup. It creates published version 1 from the
- * configured legacy text and backfills acceptances for users who had already
- * accepted, carrying their ORIGINAL timestamps — so nobody is asked to accept
- * again. It does nothing at all once any document exists.
- *
- * Returns COUNTS only; the legacy body is never logged or returned.
- */
-export async function bootstrapLegacyTermsDocument(): Promise<BootstrapResult> {
-  return prisma.$transaction(async (tx) => {
-    await lockTermsConfig(tx);
-
-    const anyDocument = await tx.termsDocument.findFirst({ select: { id: true } });
-    if (anyDocument !== null) {
-      return { ok: true as const, created: false as const, reason: "DOCUMENT_EXISTS" as const };
-    }
-
-    const legacy = await tx.messageTemplate.findUnique({ where: { key: "terms_text" } });
-    const body = legacy === null ? "" : normalizeTermsBody(legacy.currentContent);
-    if (!isMeaningfulTermsBody(body)) {
-      return { ok: true as const, created: false as const, reason: "NO_LEGACY_TEXT" as const };
-    }
-
-    const document = await tx.termsDocument.create({
-      data: {
-        version: 1,
-        body,
-        status: TermsDocumentStatus.PUBLISHED,
-        contentHash: termsContentHash(body),
-        publishedAt: new Date(),
-      },
-    });
-
-    const accepted = await tx.user.findMany({
-      where: { termsAcceptedAt: { not: null } },
-      select: { id: true, termsAcceptedAt: true },
-    });
-    if (accepted.length > 0) {
-      await tx.termsAcceptance.createMany({
-        data: accepted.map((u) => ({
-          userId: u.id,
-          termsDocumentId: document.id,
-          termsVersion: 1,
-          // Non-null by the query filter; keep their ORIGINAL acceptance time.
-          acceptedAt: u.termsAcceptedAt as Date,
-          source: "MIGRATION",
-        })),
-        skipDuplicates: true,
-      });
-    }
-    return { ok: true as const, created: true as const, backfilled: accepted.length };
-  });
-}

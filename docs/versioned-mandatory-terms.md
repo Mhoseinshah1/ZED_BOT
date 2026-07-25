@@ -381,14 +381,17 @@ alone, and anything an operator published through the bot was already normalized
 on the way in. Existing acceptance rows are never modified — they keep pointing
 at the exact document, and the exact text, that was accepted.
 
-`bootstrapLegacyTermsDocument()` is an idempotent safety net for installs the
-migration cannot help — one restored from a partial backup, for example. It does
-nothing once any document exists.
+There is deliberately **no programmatic bootstrap helper**. An earlier revision
+carried `bootstrapLegacyTermsDocument()` as a "safety net" for installs the
+migration could not reach, but nothing invoked it — not startup, not seeding, not
+the admin panel — so it was unreachable code that could silently fabricate a
+version 1 if some future caller ever wired it up carelessly.
 
-> It has **no automatic caller**: nothing invokes it at startup or during
-> seeding, because on a fresh install there is nothing to bootstrap and
-> fabricating a version 1 from the seeded default would be wrong. It is a
-> programmatic/operator tool, exercised by the test suite.
+For the one case the migration genuinely cannot cover (a `terms_text` that only
+appears *after* the migration ran), the OWNER already has a first-class,
+audited path: `ایجاد پیش‌نویس جدید ➕` followed by `انتشار نسخه جدید 🚀`. That
+publishes a real version with a real author recorded, which is strictly better
+than a background helper inventing one.
 
 ### Verified upgrade paths
 

@@ -4,7 +4,6 @@ import { prisma, TermsDocumentStatus } from "@zedbot/database";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
-  bootstrapLegacyTermsDocument,
   createTermsDraft,
   deleteTermsDraft,
   disableTermsRequirement,
@@ -75,6 +74,10 @@ async function publish(body: string): Promise<{ id: string; version: number }> {
   if (!updated.ok) throw new Error(`draft update failed: ${updated.code}`);
   const published = await publishTermsDraft(updated.draft.id, null);
   if (!published.ok) throw new Error(`publish failed: ${published.code}`);
+  // Enforcement is switched ON here because that is the only world in which
+  // an acceptance is meaningful: recordTermsAcceptance refuses to write once
+  // the master switch is off (a keyboard rendered before it was disabled).
+  await enableTermsRequirement();
   return { id: published.document.id, version: published.document.version ?? -1 };
 }
 
@@ -287,6 +290,44 @@ describe.runIf(hasDb)("versioned terms — acceptance (§3, §6, §10)", () => {
     await prisma.$disconnect();
   });
 
+  it("T25a records NOTHING once enforcement has been switched off", async () => {
+    // The keyboard was rendered while terms were required; the OWNER disabled
+    // them before the user pressed it. Nothing is owed, so nothing may be
+    // written — not the acceptance row, not the legacy timestamp.
+    const { id } = await publish("قوانین");
+    await enableTermsRequirement();
+    const userId = await makeUser();
+    await disableTermsRequirement();
+
+    const result = await recordTermsAcceptance(userId, id);
+
+    expect(result).toEqual({ ok: false, code: "DISABLED" });
+    expect(await prisma.termsAcceptance.count({ where: { userId } })).toBe(0);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).termsAcceptedAt).
+      toBeNull();
+  });
+
+  it("T25b a duplicate acceptance leaves the transaction usable (ON CONFLICT, not a caught 23505)", async () => {
+    // A raised unique violation would ABORT the transaction, so the legacy
+    // timestamp written after it could never commit. Proving the write lands is
+    // proving the insert used ON CONFLICT DO NOTHING rather than a caught error.
+    const { id } = await publish("قوانین");
+    await enableTermsRequirement();
+    const userId = await makeUser();
+
+    await recordTermsAcceptance(userId, id);
+    // Clear the legacy stamp so the second call has something to write.
+    await prisma.user.update({ where: { id: userId }, data: { termsAcceptedAt: null } });
+
+    const second = await recordTermsAcceptance(userId, id);
+
+    expect(second).toMatchObject({ ok: true, alreadyAccepted: true });
+    expect(await prisma.termsAcceptance.count({ where: { userId } })).toBe(1);
+    // The post-insert statement committed — impossible in an aborted transaction.
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).termsAcceptedAt).
+      not.toBeNull();
+  });
+
   it("T26 accepting records the exact version and stamps the legacy timestamp", async () => {
     const { id, version } = await publish("قوانین");
     const userId = await makeUser();
@@ -336,9 +377,17 @@ describe.runIf(hasDb)("versioned terms — acceptance (§3, §6, §10)", () => {
   });
 
   it("T30 accepting with nothing published accepts nothing", async () => {
+    // Enforcement ON but the published document gone — the misconfiguration the
+    // gate steps aside for. Publishing first is what makes enabling legal; the
+    // document is then removed to reach the state under test.
+    const { id } = await publish("قوانین");
     const userId = await makeUser();
-    const result = await recordTermsAcceptance(userId, "00000000-0000-0000-0000-000000000000");
+    await prisma.termsDocument.delete({ where: { id } });
+
+    const result = await recordTermsAcceptance(userId, id);
+
     expect(result).toEqual({ ok: false, code: "NOT_FOUND" });
+    expect(await prisma.termsAcceptance.count({ where: { userId } })).toBe(0);
   });
 
   it("T31 acceptance history survives publishing a new version", async () => {
@@ -493,87 +542,6 @@ describe.runIf(hasDb)("versioned terms — enable/disable safety (§7)", () => {
   });
 });
 
-describe.runIf(hasDb)("versioned terms — legacy bootstrap (§11)", () => {
-  beforeEach(resetTermsState);
-  afterAll(async () => {
-    await resetTermsState();
-    await prisma.$disconnect();
-  });
-
-  it("T40 does nothing when no legacy terms text exists", async () => {
-    expect(await bootstrapLegacyTermsDocument()).toEqual({
-      ok: true,
-      created: false,
-      reason: "NO_LEGACY_TEXT",
-    });
-    expect(await prisma.termsDocument.count()).toBe(0);
-  });
-
-  it("T41 does nothing when the legacy text is only whitespace", async () => {
-    await prisma.messageTemplate.create({
-      data: {
-        key: "terms_text",
-        title: "متن قوانین",
-        category: "general",
-        defaultContent: "x",
-        currentContent: "   \n\u200b ",
-      },
-    });
-    expect(await bootstrapLegacyTermsDocument()).toMatchObject({ created: false });
-    expect(await prisma.termsDocument.count()).toBe(0);
-  });
-
-  it("T42 creates version 1 and backfills existing acceptances with original timestamps", async () => {
-    const acceptedAt = new Date("2026-01-15T10:20:30.000Z");
-    const accepted = await prisma.user.create({
-      data: { telegramId: nextTelegramId(), status: "ACTIVE", termsAcceptedAt: acceptedAt },
-    });
-    createdUserIds.push(accepted.id);
-    const never = await makeUser();
-
-    await prisma.messageTemplate.create({
-      data: {
-        key: "terms_text",
-        title: "متن قوانین",
-        category: "general",
-        defaultContent: "x",
-        currentContent: "قوانین قدیمی سرویس",
-      },
-    });
-
-    const result = await bootstrapLegacyTermsDocument();
-    expect(result).toMatchObject({ ok: true, created: true });
-
-    const published = await getPublishedTerms();
-    expect(published?.version).toBe(1);
-    expect(published?.body).toBe("قوانین قدیمی سرویس");
-
-    // The previously-accepting user is NOT asked to accept again, and keeps
-    // their original timestamp.
-    const row = await prisma.termsAcceptance.findFirstOrThrow({ where: { userId: accepted.id } });
-    expect(row.acceptedAt.getTime()).toBe(acceptedAt.getTime());
-    expect(row.source).toBe("MIGRATION");
-    expect(await hasAcceptedTermsDocument(accepted.id, published?.id ?? "")).toBe(true);
-    // Someone who never accepted still has to.
-    expect(await hasAcceptedTermsDocument(never, published?.id ?? "")).toBe(false);
-  });
-
-  it("T43 is idempotent — a second run creates nothing", async () => {
-    await prisma.messageTemplate.create({
-      data: {
-        key: "terms_text",
-        title: "متن قوانین",
-        category: "general",
-        defaultContent: "x",
-        currentContent: "قوانین قدیمی",
-      },
-    });
-    await bootstrapLegacyTermsDocument();
-    const again = await bootstrapLegacyTermsDocument();
-    expect(again).toEqual({ ok: true, created: false, reason: "DOCUMENT_EXISTS" });
-    expect(await prisma.termsDocument.count()).toBe(1);
-  });
-});
 
 // =============================================================================
 // The 20260727130000 repair migration, executed as the real file (§11).
