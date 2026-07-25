@@ -34,11 +34,13 @@ import {
   lockReservationForSettlement,
 } from "./service-username-selection.service.js";
 import {
+  blockedServiceUnboundCheckoutIds,
   fileServiceUsernameUnboundCase,
   findCaseForDuplicatePayment,
   notifyDuplicateSuccessCase,
   notifyServiceUsernameUnboundCase,
   recordDuplicateSuccess,
+  sweepUnnotifiedServiceUnboundCases,
 } from "./financial-reconciliation.service.js";
 import { dispatchPaidOrderFulfillment } from "./order-fulfillment.service.js";
 import { type DeliverySendApi } from "./other-product-delivery.service.js";
@@ -1157,6 +1159,13 @@ export async function runGatewaySettlementSweep(api: DeliverySendApi): Promise<v
     }
 
     const cutoff = new Date(Date.now() - UNFULFILLED_ORDER_MIN_AGE_MS);
+    // Codex P1 fix: a SERVICE order whose username reservation could not be bound
+    // is deliberately held PAID behind an OPEN/IN_REVIEW reconciliation case.
+    // EXCLUDE those checkouts from the recovery batch so they are neither
+    // re-notified on every one-minute sweep nor allowed to starve the bounded
+    // batch and block genuinely unfulfilled orders. The case is resolved (and the
+    // order provisioned) only via the OWNER retry-bind action.
+    const blockedCheckoutIds = await blockedServiceUnboundCheckoutIds();
     const unfulfilled = await prisma.payment.findMany({
       where: {
         provider: { in: ONLINE_PROVIDER_TYPES },
@@ -1167,6 +1176,9 @@ export async function runGatewaySettlementSweep(api: DeliverySendApi): Promise<v
             status: OrderStatus.PAID,
             updatedAt: { lt: cutoff },
             otherProductOrder: { is: null },
+            ...(blockedCheckoutIds.length > 0
+              ? { checkoutSessionId: { notIn: blockedCheckoutIds } }
+              : {}),
           },
         },
       },
@@ -1198,6 +1210,11 @@ export async function runGatewaySettlementSweep(api: DeliverySendApi): Promise<v
     if (expired.count > 0) {
       logger.info("expired stale gateway payments", { count: expired.count });
     }
+
+    // Codex P2 fix: durably retry OWNER alerts for any SERVICE_USERNAME_UNBOUND
+    // case that was committed but never notified (crash between commit and push,
+    // or a transient send failure). Idempotent — each case is marked delivered.
+    await sweepUnnotifiedServiceUnboundCases(api);
   } catch (err) {
     logger.error("gateway settlement sweep failed", { error: errorMessage(err) });
   }

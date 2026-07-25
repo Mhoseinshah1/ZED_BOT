@@ -1262,6 +1262,11 @@ model FinancialReconciliationCase {
   updatedAt         DateTime  @updatedAt
   resolvedAt        DateTime?
   resolvedByAdminId String?
+  // Durable OWNER-alert delivery marker (set once the alert has been dispatched).
+  // NULL means the alert has not been sent yet; the settlement sweep retries any
+  // still-null OPEN/IN_REVIEW case so a crash between case commit and the push
+  // notification never permanently loses the alert.
+  ownerNotifiedAt   DateTime?
 
   @@index([status, createdAt])
   // Type-filtered newest-first queue query (the admin UI lists one

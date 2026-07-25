@@ -13,11 +13,13 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 process.env.APP_SECRET ??= "svc-recon-tests-secret-svc-recon-0001";
 
 import {
+  blockedServiceUnboundCheckoutIds,
   fileServiceUsernameUnboundCase,
   hasBlockingServiceUsernameUnboundCase,
   notifyServiceUsernameUnboundCase,
   retryBindServiceUsernameUnboundCase,
   SERVICE_UNBOUND_ADMIN_TEXT,
+  sweepUnnotifiedServiceUnboundCases,
 } from "../src/services/financial-reconciliation.service.js";
 import { provisionPaidOrder } from "../src/services/provisioning.service.js";
 
@@ -384,6 +386,54 @@ describe.runIf(hasDb)("SERVICE_USERNAME_UNBOUND reconciliation (DB)", () => {
     expect(after.status).not.toBe("COMPLETED");
     expect(after.status).not.toBe("PROVISIONING");
     await prisma.panel.deleteMany({ where: { id: otherPanel.id } });
+  });
+
+  it("notify durably marks ownerNotifiedAt so the OWNER alert is delivered once (Codex P2)", async () => {
+    const built = await buildCase({ reservationStatus: ServiceUsernameReservationStatus.BOUND });
+    const reconciliationCase = await prisma.financialReconciliationCase.findUniqueOrThrow({
+      where: { id: built.caseId },
+    });
+    // A freshly-filed case has not been pushed to any OWNER yet.
+    expect(reconciliationCase.ownerNotifiedAt).toBeNull();
+    const payment = await prisma.payment.findUniqueOrThrow({ where: { id: built.paymentId } });
+    const api = { sendMessage: vi.fn(async () => ({})) };
+    await notifyServiceUsernameUnboundCase(api, reconciliationCase, payment);
+    expect(api.sendMessage).toHaveBeenCalled();
+    // Delivery is durably recorded so the alert is neither lost nor re-sent forever.
+    const after = await prisma.financialReconciliationCase.findUniqueOrThrow({ where: { id: built.caseId } });
+    expect(after.ownerNotifiedAt).not.toBeNull();
+  });
+
+  it("the settlement alert sweep retries an un-notified case, then never re-sends it (Codex P2)", async () => {
+    const built = await buildCase({ reservationStatus: ServiceUsernameReservationStatus.BOUND });
+    const shortCaseId = built.caseId.slice(0, 8);
+    const sent: string[] = [];
+    const api = {
+      sendMessage: vi.fn(async (_chatId: string | number, text: string) => {
+        sent.push(text);
+        return {};
+      }),
+    };
+    // The case was committed but never notified → the sweep picks it up and pushes it.
+    await sweepUnnotifiedServiceUnboundCases(api);
+    expect(sent.some((t) => t.includes(shortCaseId))).toBe(true);
+    const after = await prisma.financialReconciliationCase.findUniqueOrThrow({ where: { id: built.caseId } });
+    expect(after.ownerNotifiedAt).not.toBeNull();
+    // A second sweep no longer re-sends the same case — the marker makes it converge.
+    sent.length = 0;
+    await sweepUnnotifiedServiceUnboundCases(api);
+    expect(sent.some((t) => t.includes(shortCaseId))).toBe(false);
+  });
+
+  it("blockedServiceUnboundCheckoutIds gates recovery until the case resolves (Codex P1)", async () => {
+    const built = await buildCase({ reservationStatus: ServiceUsernameReservationStatus.BOUND });
+    const checkoutId = await orderCheckout(built.orderId);
+    // While the case is OPEN, its checkout is excluded from the recovery settlement sweep.
+    expect(await blockedServiceUnboundCheckoutIds()).toContain(checkoutId);
+    // A real exact bind resolves the case → recovery may proceed for that checkout again.
+    const result = await retryBindServiceUsernameUnboundCase(built.caseId, adminIds[0]);
+    expect(result.ok).toBe(true);
+    expect(await blockedServiceUnboundCheckoutIds()).not.toContain(checkoutId);
   });
 
   async function orderCheckout(orderId: string): Promise<string> {

@@ -658,6 +658,52 @@ describe.runIf(hasDb)("authoritative reservation claim + strict order binding (D
     expect(await hasForeignActiveReservationForUsername(name, otherOrder.id)).toBe(true);
   });
 
+  it("a same-username BOUND hold is NOT reusable — reserve returns RESERVED (Codex P2)", async () => {
+    const name = uname();
+    const id = await holdUsername(name, `${tag}-boundreuse`);
+    await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-boundreuse`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+      await newCheckout(),
+    );
+    // The hold is now BOUND to a committed checkout. Re-selecting the same
+    // username on the same draft must NOT return it as AVAILABLE (that would trap
+    // the buyer on a HELD-only claim that always fails).
+    const again = await reserveServiceUsername({
+      userId,
+      panelId,
+      mode: ServiceUsernameMode.CUSTOM,
+      normalizedUsername: name,
+      draftNonce: `${tag}-boundreuse`,
+    });
+    expect(again.outcome).toBe("RESERVED");
+  });
+
+  it("idempotent attach rejects a row bound to a DIFFERENT checkout or panel (Codex P2)", async () => {
+    const name = uname();
+    const id = await holdUsername(name, `${tag}-idbind`);
+    const checkoutA = await newCheckout();
+    await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-idbind`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+      checkoutA,
+    );
+    const order = await prisma.order.create({
+      data: { userId, type: "SERVICE_PURCHASE", checkoutSessionId: checkoutA },
+    });
+    const bind = { reservationId: id, userId, checkoutSessionId: checkoutA, panelId, normalizedUsername: name, orderId: order.id };
+    await attachReservationToOrder(prisma, bind);
+    // Same order + username, but a DIFFERENT checkout → the idempotent re-check
+    // must NOT accept it (it now asserts the full checkout+panel identity).
+    await expect(
+      attachReservationToOrder(prisma, { ...bind, checkoutSessionId: await newCheckout() }),
+    ).rejects.toBeInstanceOf(ReservationInvariantError);
+    // A different panel is likewise rejected.
+    await expect(
+      attachReservationToOrder(prisma, { ...bind, panelId: panelId2 }),
+    ).rejects.toBeInstanceOf(ReservationInvariantError);
+  });
+
   it("strict attach binds the exact order, is idempotent, and throws on a mismatch", async () => {
     const name = uname();
     const id = await holdUsername(name, `${tag}-att`);

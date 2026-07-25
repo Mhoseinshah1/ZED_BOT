@@ -256,10 +256,18 @@ export async function reserveServiceUsername(args: {
       panelId,
       status: { in: REBINDABLE_STATUSES },
     },
-    select: { id: true, normalizedUsername: true },
+    select: { id: true, normalizedUsername: true, status: true },
   });
   const sameUsernameHold = priorActive.find((r) => r.normalizedUsername === normalizedUsername);
   if (sameUsernameHold !== undefined) {
+    // Codex P2 fix: ONLY a HELD hold is a reusable draft hold. A same-username
+    // BOUND row is already claimed to a committed checkout — returning it as
+    // AVAILABLE would trap the buyer (the later HELD-only claim always fails,
+    // re-prompting the same choice forever). Surface it as RESERVED so the flow
+    // stops looping; the durable checkout is the thing to resume.
+    if (sameUsernameHold.status !== ServiceUsernameReservationStatus.HELD) {
+      return { outcome: "RESERVED" };
+    }
     await prisma.serviceUsernameReservation.updateMany({
       where: { id: sameUsernameHold.id, status: ServiceUsernameReservationStatus.HELD },
       data: { expiresAt: new Date(Date.now() + RESERVATION_HELD_TTL_MS) },
@@ -290,11 +298,16 @@ export async function reserveServiceUsername(args: {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`zedbot-service-username-draft:${userId}:${draftNonce ?? ""}`}))`;
       const currentActive = await tx.serviceUsernameReservation.findMany({
         where: { userId, draftNonce, panelId, status: { in: REBINDABLE_STATUSES } },
-        select: { id: true, normalizedUsername: true },
+        select: { id: true, normalizedUsername: true, status: true },
       });
-      // A concurrent replacement may have already established THIS exact
+      // A concurrent replacement may have already established THIS exact HELD
       // username under the lock — reuse it instead of stacking a second hold.
-      const existingSame = currentActive.find((r) => r.normalizedUsername === normalizedUsername);
+      // (A BOUND same-username row was handled as RESERVED before the tx.)
+      const existingSame = currentActive.find(
+        (r) =>
+          r.normalizedUsername === normalizedUsername &&
+          r.status === ServiceUsernameReservationStatus.HELD,
+      );
       if (existingSame !== undefined) {
         await tx.serviceUsernameReservation.updateMany({
           where: { id: existingSame.id, status: ServiceUsernameReservationStatus.HELD },
@@ -517,6 +530,14 @@ export async function attachReservationToOrder(
     where: {
       id: args.reservationId,
       userId: args.userId,
+      // Codex P2 fix: the idempotent re-check must assert the FULL immutable
+      // identity — including checkoutSessionId and panelId — so a historical row
+      // that carries this order+username but was bound to a DIFFERENT checkout or
+      // panel (possible under the old permissive rebinding) is NOT accepted as a
+      // clean bind. Otherwise retry-bind could resolve a case + unblock
+      // provisioning against a reservation that does not match the snapshot.
+      checkoutSessionId: args.checkoutSessionId,
+      panelId: args.panelId,
       orderId: args.orderId,
       normalizedUsername: args.normalizedUsername,
       status: {

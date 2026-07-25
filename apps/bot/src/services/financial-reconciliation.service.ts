@@ -235,15 +235,66 @@ export async function notifyServiceUsernameUnboundCase(
       where: { isActive: true, role: "OWNER" },
       select: { telegramId: true },
     });
+    let delivered = false;
     for (const owner of owners) {
       try {
         await api.sendMessage(owner.telegramId.toString(), lines);
+        delivered = true;
       } catch (err) {
         logger.warn("service-username-unbound admin alert failed", { error: errorMessage(err) });
       }
     }
+    // Codex P2 fix: durably record delivery so the alert is not lost on a crash
+    // and not re-sent forever. Mark notified when at least one OWNER received it,
+    // or when there is no active OWNER to notify (nothing to retry). A total send
+    // failure leaves ownerNotifiedAt NULL so the settlement sweep retries it.
+    if (delivered || owners.length === 0) {
+      await prisma.financialReconciliationCase.updateMany({
+        where: { id: reconciliationCase.id, ownerNotifiedAt: null },
+        data: { ownerNotifiedAt: new Date() },
+      });
+    }
   } catch (err) {
     logger.error("service-username-unbound notification crashed", { error: errorMessage(err) });
+  }
+}
+
+/**
+ * Codex P2 fix: retry OWNER alerts for SERVICE_USERNAME_UNBOUND cases that were
+ * committed but never successfully notified (a crash between commit and the push,
+ * or a transient send failure). Bounded, newest-first, called from the settlement
+ * sweep. `notifyServiceUsernameUnboundCase` sets the durable `ownerNotifiedAt`
+ * marker on success, so a case is retried at most until it is delivered.
+ */
+export async function sweepUnnotifiedServiceUnboundCases(api: NotifyApi): Promise<void> {
+  try {
+    const cases = await prisma.financialReconciliationCase.findMany({
+      where: {
+        type: FinancialReconciliationType.SERVICE_USERNAME_UNBOUND,
+        ownerNotifiedAt: null,
+        status: {
+          in: [FinancialReconciliationStatus.OPEN, FinancialReconciliationStatus.IN_REVIEW],
+        },
+      },
+      orderBy: { createdAt: "asc" },
+      take: 20,
+    });
+    for (const reconciliationCase of cases) {
+      const payment = await prisma.payment.findUnique({
+        where: { id: reconciliationCase.duplicatePaymentId },
+      });
+      if (payment === null) {
+        // No settling payment to describe — mark notified so it never loops.
+        await prisma.financialReconciliationCase.updateMany({
+          where: { id: reconciliationCase.id, ownerNotifiedAt: null },
+          data: { ownerNotifiedAt: new Date() },
+        });
+        continue;
+      }
+      await notifyServiceUsernameUnboundCase(api, reconciliationCase, payment);
+    }
+  } catch (err) {
+    logger.error("service-username-unbound alert sweep crashed", { error: errorMessage(err) });
   }
 }
 
@@ -433,6 +484,26 @@ export async function findCaseForDuplicatePayment(
   duplicatePaymentId: string,
 ): Promise<FinancialReconciliationCase | null> {
   return prisma.financialReconciliationCase.findUnique({ where: { duplicatePaymentId } });
+}
+
+/**
+ * Codex P1 fix: every checkoutSessionId with an OPEN/IN_REVIEW
+ * SERVICE_USERNAME_UNBOUND case. The gateway settlement recovery sweep EXCLUDES
+ * these so a reconciliation-blocked PAID order is neither re-notified on every
+ * pass (its order deliberately stays PAID) nor allowed to occupy the bounded
+ * recovery batch and starve genuinely unfulfilled orders.
+ */
+export async function blockedServiceUnboundCheckoutIds(): Promise<string[]> {
+  const rows = await prisma.financialReconciliationCase.findMany({
+    where: {
+      type: FinancialReconciliationType.SERVICE_USERNAME_UNBOUND,
+      status: {
+        in: [FinancialReconciliationStatus.OPEN, FinancialReconciliationStatus.IN_REVIEW],
+      },
+    },
+    select: { checkoutSessionId: true },
+  });
+  return rows.map((r) => r.checkoutSessionId);
 }
 
 // --- service-username retry-bind (§4) -----------------------------------------------------

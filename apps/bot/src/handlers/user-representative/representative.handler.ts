@@ -42,6 +42,7 @@ import {
 } from "../../services/representative.service.js";
 import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
+import { abandonCheckoutDraft } from "../user-checkout/checkout-state.js";
 import { renderPreInvoice } from "../user-checkout/checkout.handler.js";
 
 // =============================================================================
@@ -842,7 +843,9 @@ representativeHandler.callbackQuery(new RegExp(`^${RC.PRODUCT}([a-f0-9]{8})$`), 
   const rep = await getRepresentativeByUserId(user.id);
   if (rep !== null && (rep.status === "TERMINATED" || !isRepresentativeStatus(rep.status))) {
     await safeAnswerCallback(ctx);
-    ctx.session.temp.checkoutDraft = undefined;
+    // Codex P2 fix: release any existing retail SERVICE draft's HELD username
+    // reservation (authoritative abandonment) instead of just forgetting the draft.
+    await abandonCheckoutDraft(ctx, "REPRESENTATIVE_TERMINATED");
     await renderTerminated(ctx);
     return;
   }
@@ -858,7 +861,7 @@ representativeHandler.callbackQuery(new RegExp(`^${RC.PRODUCT}([a-f0-9]{8})$`), 
     product.type !== "SERVICE_PRODUCT" ||
     !isProductVisible(product, user.group)
   ) {
-    ctx.session.temp.checkoutDraft = undefined;
+    await abandonCheckoutDraft(ctx, "REPRESENTATIVE_PRODUCT_UNSELLABLE");
     await safeAnswerCallback(ctx, "این محصول در حال حاضر قابل خرید نیست.");
     await renderLanding(ctx);
     return;
@@ -873,12 +876,16 @@ representativeHandler.callbackQuery(new RegExp(`^${RC.PRODUCT}([a-f0-9]{8})$`), 
     mode: "PREVIEW",
   });
   if (effective.pricingMode !== "REPRESENTATIVE") {
-    ctx.session.temp.checkoutDraft = undefined;
+    await abandonCheckoutDraft(ctx, "REPRESENTATIVE_PRICE_INELIGIBLE");
     await safeAnswerCallback(ctx, "این محصول با قیمت نمایندگی در دسترس نیست.");
     await renderLanding(ctx);
     return;
   }
   await safeAnswerCallback(ctx);
+  // Codex P2 fix: releasing the PRIOR draft's HELD username reservation before
+  // overwriting it with the reseller draft, so switching from a retail SERVICE
+  // draft never orphans its globally-unique username until TTL.
+  await abandonCheckoutDraft(ctx, "REPRESENTATIVE_PRODUCT_SWITCH");
   // Seed the shared checkout draft with the FROZEN reseller-pricing agreement.
   ctx.session.currentFlow = null;
   ctx.session.temp.repApplicationDraft = undefined;
