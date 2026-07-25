@@ -41,6 +41,12 @@ import {
   deleteSetting,
   setSetting,
 } from "../src/services/settings.service.js";
+import {
+  createTermsDraft,
+  publishTermsDraft,
+  updateTermsDraftBody,
+} from "../src/services/terms/terms-document.service.js";
+import { termsAcceptCallback } from "../src/services/terms/terms-callbacks.js";
 import { clearTextCache } from "../src/services/text.service.js";
 
 // =============================================================================
@@ -626,6 +632,16 @@ describe.runIf(hasDb)("return to user menu from the admin panel", () => {
   });
 
   it("31. the terms gate blocks the return until accepted", async () => {
+    // Terms are versioned: enforcement needs a PUBLISHED version to point at,
+    // and the accept button carries that version's identity rather than a
+    // static id. Publishing one here exercises the real gate.
+    const draft = await createTermsDraft(null);
+    if (!draft.ok) throw new Error("terms draft creation failed");
+    const withBody = await updateTermsDraftBody(draft.draft.id, "قوانین استفاده");
+    if (!withBody.ok) throw new Error("terms draft body failed");
+    const published = await publishTermsDraft(withBody.draft.id, null);
+    if (!published.ok) throw new Error("terms publish failed");
+
     await setSetting(TERMS_KEY, "true", "BOOLEAN");
     await setUserMenuMode("INLINE");
     clearSettingsCache();
@@ -633,13 +649,16 @@ describe.runIf(hasDb)("return to user menu from the admin panel", () => {
     const ctx = fakeCallbackCtx(user.telegramId, CB.USER_MENU, { admin: owner, user });
     await gatedUserArea().middleware()(ctx.ctx, async () => {});
     expect(ctx.session.lastMenu).not.toBe("user_main");
-    // The accept button is offered instead of the user menu.
+    // The accept button for THIS published version is offered instead of the menu.
     const flat = inlineRows(
       markupOf(ctx.sent.at(-1) as SentMessage) as {
         inline_keyboard: Array<Array<Record<string, unknown>>>;
       },
     ).flat();
-    expect(flat.map((b) => b.callback)).toContain(CB.TERMS_ACCEPT);
+    expect(flat.map((b) => b.callback)).toContain(termsAcceptCallback(published.document.id));
+
+    await prisma.termsAcceptance.deleteMany({});
+    await prisma.termsDocument.deleteMany({});
   });
 
   it("32. the force-join gate blocks the return until joined", async () => {
