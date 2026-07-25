@@ -86,7 +86,37 @@ export async function getBooleanSettingFresh(key: string, fallback: boolean): Pr
   if (raw === "") {
     return fallback;
   }
-  return raw === "true" || raw === "1" || raw === "yes";
+  return isTruthySettingValue(raw);
+}
+
+/**
+ * Uncached boolean read that reports whether the read ACTUALLY HAPPENED.
+ *
+ * `getBooleanSettingFresh` returns its fallback on a database error, which is
+ * correct for advisory reads and wrong for a guard that must fail closed: a
+ * transient error becomes indistinguishable from "the switch is off", and the
+ * guard waves through exactly the request it exists to stop. Callers that
+ * precede a WRITE use this and refuse the action when `ok` is false.
+ *
+ * A missing row is a successful read of "not set" (`value` is the fallback),
+ * not a failure — only the query itself failing yields `{ ok: false }`.
+ */
+export async function tryGetBooleanSettingFresh(
+  key: string,
+  fallback: boolean,
+): Promise<{ ok: true; value: boolean } | { ok: false }> {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key } });
+    const value = row?.value ?? null;
+    cache.set(key, { value, at: Date.now() });
+    return { ok: true, value: value === null ? fallback : isTruthySettingValue(value) };
+  } catch (err) {
+    logger.warn("fresh setting lookup failed; caller must fail closed", {
+      key,
+      error: errorMessage(err),
+    });
+    return { ok: false };
+  }
 }
 
 /**

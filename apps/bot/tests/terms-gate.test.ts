@@ -25,6 +25,7 @@ import {
   createTermsDraft,
   disableTermsRequirement,
   enableTermsRequirement,
+  getPublishedTerms,
   publishTermsDraft,
   recordTermsAcceptance,
   TERMS_REQUIRED_KEY,
@@ -632,6 +633,57 @@ describe.runIf(hasDb)("versioned terms — access gate (§1, §6, §7)", () => {
     expect(await prisma.termsAcceptance.count({ where: { userId: user.id } })).toBe(0);
     expect((ctx.session as { lastMenu?: string }).lastMenu).toBe("user_main");
     expect(sent.some((m) => m.text === TERMS_UNAVAILABLE_TEXT_FALLBACK)).toBe(false);
+  });
+
+  it("G30 a FAILED maintenance lookup records nothing instead of assuming 'off'", async () => {
+    // The ordinary fresh reader swallows database errors and returns its
+    // fallback, so a transient failure read exactly like "maintenance is off"
+    // and this guard — whose entire job is to run before the write — waved the
+    // acceptance through. Worse, the cache is left untouched on failure, so the
+    // later gate could still say `true` and block the user AFTER the row landed.
+    const { id } = await publish("قوانین");
+    const user = await makeUser();
+
+    // Fail only the FIRST Setting read of the flow: the maintenance precheck.
+    const findUnique = vi
+      .spyOn(prisma.setting, "findUnique")
+      .mockRejectedValueOnce(new Error("connection terminated"));
+    try {
+      const { ctx, sent } = fakeCtx(user, termsAcceptCallback(id));
+      await termsHandler.middleware()(ctx, async () => {});
+
+      expect(findUnique).toHaveBeenCalled();
+      // The point of the guard: no write happened.
+      expect(await prisma.termsAcceptance.count({ where: { userId: user.id } })).toBe(0);
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+      expect(row.termsAcceptedAt).toBeNull();
+      // ...and the user was told something rather than left hanging.
+      expect(sent.length).toBeGreaterThan(0);
+      expect((ctx.session as { lastMenu?: string }).lastMenu).toBeUndefined();
+    } finally {
+      findUnique.mockRestore();
+    }
+  });
+
+  it("G31 an UNRESOLVABLE accept payload honours a switch that is now OFF", async () => {
+    // Disabling enforcement deliberately does NOT unpublish the current version
+    // (G19 depends on that), so `getPublishedTerms` still returns a document and
+    // the stale-button redraw happily re-showed terms the bot no longer
+    // requires. The versioned path with a VALID id is already safe — the service
+    // returns DISABLED — but an unresolvable id never reaches the service, so
+    // this branch has to check the switch itself, as the legacy route does.
+    const { id } = await publish("قوانین");
+    const user = await makeUser();
+    await disableTermsRequirement();
+    // The document is still published; only the requirement is gone.
+    expect(await getPublishedTerms()).not.toBeNull();
+
+    const { ctx, sent } = fakeCtx(user, "user:terms:accept:zzz");
+    await termsHandler.middleware()(ctx, async () => {});
+
+    expect((ctx.session as { lastMenu?: string }).lastMenu).toBe("user_main");
+    expect(sent.flatMap((m) => callbacksOf(m.keyboard)).some(isTermsAcceptCallback)).toBe(false);
+    expect(sent.every((m) => !m.text.includes(id.slice(0, 8)))).toBe(true);
   });
 
   it("G21 the legacy terms:accept callback is NOT treated as a versioned accept", async () => {

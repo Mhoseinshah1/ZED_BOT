@@ -7,7 +7,7 @@ import type { BotContext } from "../core/context.js";
 import { GENERIC_ERROR_TEXT } from "../core/errors.js";
 import { logger } from "../core/logger.js";
 import { resolveForceJoinGate } from "../services/force-join/force-join-gate.js";
-import { getBooleanSetting, getBooleanSettingFresh } from "../services/settings.service.js";
+import { getBooleanSetting, tryGetBooleanSettingFresh } from "../services/settings.service.js";
 import { OPS_EVENTS, writeSystemLog } from "../services/system-log.service.js";
 import { isTermsAcceptCallback } from "../services/terms/terms-callbacks.js";
 import {
@@ -188,7 +188,20 @@ export async function ensurePreTermsAccess(ctx: BotContext): Promise<boolean> {
   // deployment for longer — which is exactly the window in which an operator
   // has just declared an emergency, so this one precondition pays for a real
   // read rather than trusting the cache.
-  if (await getBooleanSettingFresh("maintenance_mode", false)) {
+  //
+  // And it FAILS CLOSED. The ordinary fresh reader returns its fallback when
+  // the query errors, so a transient database failure would read exactly like
+  // "maintenance is off" and this guard would wave through the write it exists
+  // to stop — while the later cached gate could still say `true` and block the
+  // user, after the acceptance had already been recorded. "We could not read
+  // the switch" is not "the switch is off".
+  const maintenance = await tryGetBooleanSettingFresh("maintenance_mode", false);
+  if (!maintenance.ok) {
+    await safeAnswerCallback(ctx);
+    await safeReply(ctx, GENERIC_ERROR_TEXT);
+    return false;
+  }
+  if (maintenance.value) {
     await safeAnswerCallback(ctx);
     await safeReply(ctx, await getMessageTemplate("bot_off_text"));
     return false;

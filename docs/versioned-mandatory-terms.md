@@ -191,6 +191,31 @@ three re-enter the access path when there is no current version to draw, and
 none of them reports the absence to the user — a message about a
 misconfiguration only the OWNER can fix is a dead end, not an answer.
 
+Both of those id-less paths also read the master switch **fresh** before
+drawing anything. Disabling enforcement deliberately does not unpublish the
+current version, so a published document still exists to draw; without the
+check the user would be re-shown terms the bot no longer requires and would
+need a second press to get past them. A button carrying a valid document id
+needs no such check — `recordTermsAcceptance` reads the switch inside the
+acceptance transaction and answers `DISABLED`.
+
+## 5b. Reads that precede a write fail closed
+
+`ensurePreTermsAccess` is the one guard that runs *before* a mutation, so it
+does not use the ordinary fresh reader: that helper returns its fallback when
+the query errors, making a transient database failure indistinguishable from
+"maintenance is off". `tryGetBooleanSettingFresh` reports whether the read
+actually happened, and the guard refuses the action when it did not. A missing
+row is still a successful read of "not set" — only the query failing is
+treated as unknown.
+
+This matters because the failure is asymmetric: the cache is left untouched on
+error, so the later cached gate could still read `true` and block the user
+*after* the acceptance row had already been written. Every other
+`getBooleanSettingFresh` caller gates a read or a redraw rather than a write,
+and falling back there degrades to "let the normal gate decide", which writes
+nothing.
+
 For `DISABLED` the handler also drops `terms_required` from **this process's**
 30-second settings cache before re-entering the gate. The acceptance transaction
 decided `DISABLED` against the database; the gate reads the cache. Without the

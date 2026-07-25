@@ -119,8 +119,19 @@ termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
     const shortId = parseTermsAcceptCallback(ctx.callbackQuery.data);
     const document = shortId === null ? null : await resolveTermsDocumentByShortId(shortId);
     if (document === null) {
-      // ...unless nothing is published, in which case there is no current
-      // button to point at and the access path takes over.
+      // No document id to hand to the service, so its authoritative switch
+      // check never runs — this branch has to make it itself, exactly as the
+      // legacy route does. Disabling enforcement does NOT unpublish the current
+      // version, so without this the user would be re-shown terms the bot no
+      // longer requires and would need a second press to get past them.
+      //
+      // ...and if enforcement IS on but nothing is published, there is no
+      // current button to point at either. Both ways out are the access path.
+      const stillRequired = await getBooleanSettingFresh(TERMS_REQUIRED_KEY, false);
+      if (!stillRequired) {
+        await continueThroughAccessPath(ctx);
+        return;
+      }
       if (await redrawCurrentTerms(ctx, staleNotice)) {
         return;
       }
