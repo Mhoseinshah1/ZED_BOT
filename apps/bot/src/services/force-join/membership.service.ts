@@ -36,6 +36,8 @@ const JOINED_TTL_S = 90;
 const NOT_JOINED_TTL_S = 10;
 /** One unverifiable-channel alert per channel per this rolling window (§4.11). */
 const ALERT_WINDOW_S = 3_600;
+/** Per-user debounce on the explicit "بررسی عضویت" re-check (§4.9). */
+const CHECK_DEBOUNCE_S = 4;
 
 let client: Redis | null = null;
 let clientFingerprint = "";
@@ -154,6 +156,34 @@ async function emitUnverifiableAlert(channel: ForceJoinChannel, errorClass: stri
     metadata: { channelId: channel.id, errorClass, isPrivate: channel.isPrivate },
     topicKey: "SYSTEM",
   });
+}
+
+// --- per-user re-check debounce (§4.9) ---------------------------------------
+
+/**
+ * Rate-limits the explicit "بررسی عضویت" re-check per user (a few seconds), so a
+ * user tapping repeatedly cannot hammer the Telegram API. Returns true when the
+ * caller may proceed with a check, false while still within the debounce window.
+ * Redis down → returns true (no debounce, but the check still runs — D8); it
+ * NEVER produces a false "not joined".
+ */
+export async function acquireForceJoinCheckSlot(userTelegramId: bigint): Promise<boolean> {
+  const redis = getClient();
+  if (redis === null) {
+    return true;
+  }
+  try {
+    const res = await redis.set(
+      `fj:debounce:${userTelegramId.toString()}`,
+      "1",
+      "EX",
+      CHECK_DEBOUNCE_S,
+      "NX",
+    );
+    return res === "OK";
+  } catch {
+    return true;
+  }
 }
 
 // --- per-channel membership check --------------------------------------------
