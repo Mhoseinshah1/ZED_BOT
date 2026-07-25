@@ -2498,6 +2498,67 @@ model AuditLog {
 }
 
 // =============================================================================
+// Mandatory channel membership / Force Join
+// (feat/mandatory-channel-membership). Additive & forward-only: existing
+// installs keep the `force_join_enabled` Setting and the `force_join_text`
+// message template, and `User.forceJoinBypass` keeps bypassing the whole check.
+// When force join is enabled a user must be a LIVE member of EVERY active
+// channel before the normal handler runs. The Telegram identity is resolved
+// INTERNALLY from an admin-supplied public/private LINK — the admin is never
+// asked to type a numeric chat id. `chatId` is stored as BigInt and is NEVER
+// surfaced to users, admin list pages, callback data, or logs (serialize to
+// string only where a value is unavoidable, e.g. cache keys — T6). Invite-link
+// secrets are never written to logs or analytics.
+// =============================================================================
+
+model ForceJoinChannel {
+  id String @id @default(uuid())
+
+  // Visible channel title captured at resolution time (getChat / chat_shared).
+  // Safe to render on the user join screen and admin pages.
+  title String
+
+  // Buyer-facing join URL rendered on the user's join button. Public channels:
+  // the normalized `https://t.me/<username>`. Private channels: the
+  // admin-supplied invite link, preserved verbatim.
+  joinUrl String
+
+  // Normalized dedup / identity key. Public: `https://t.me/<lowercased-username>`
+  // (the same value as joinUrl). Private: the preserved invite link. A partial
+  // UNIQUE index enforces uniqueness ONLY among public rows (D6) — declared via
+  // raw SQL in the migration because Prisma cannot express a filtered unique.
+  normalizedLink String
+
+  // Internal Telegram peer id (the `-100…` form). Globally unique across ALL
+  // rows, active or not (D5) — rebinding a channel UPDATES this row instead of
+  // inserting a second one. BigInt per repo convention.
+  chatId BigInt @unique
+
+  // Lower-cased public username without the leading '@' (public channels only).
+  publicUsername String?
+
+  isPrivate Boolean @default(false)
+  isActive  Boolean @default(false)
+
+  // Deterministic ordering is (sortOrder ASC, createdAt ASC, id ASC) — T7. There
+  // is intentionally NO UNIQUE(sortOrder); duplicate positions are tolerated and
+  // tie-broken by createdAt then id, so reordering never needs a fragile swap.
+  sortOrder Int @default(0)
+
+  createdByAdminId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Last bot-access validation attempt + its normalized error class (never a raw
+  // Telegram response / token / invite secret).
+  lastValidatedAt         DateTime?
+  lastValidationErrorCode String?
+
+  @@index([isActive, sortOrder, createdAt, id])
+}
+
+// =============================================================================
 // Settings (flexible global configuration)
 // =============================================================================
 

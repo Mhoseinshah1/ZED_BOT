@@ -6,6 +6,7 @@ export * from "./logger.js";
 export * from "./ops.js";
 export * from "./backup-crypto.js";
 export * from "./log-group-target.js";
+export * from "./force-join.js";
 export * from "./notifications.js";
 export * from "./checkout-notifications.js";
 export * from "./winback.js";
