@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { errorMessage, normalizeServiceNote, validateServiceUsername } from "@zedbot/shared";
-import { type CheckoutSession, ServiceUsernameMode, type User } from "@zedbot/database";
+import { type CheckoutSession, prisma, ServiceUsernameMode, type User } from "@zedbot/database";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -48,6 +48,7 @@ import {
 } from "../../services/wallet-payment.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { abandonCheckoutDraft, clearCheckoutState } from "./checkout-state.js";
+import { enforceCustomerInfoBeforePayment } from "./customer-input-form.handler.js";
 import {
   ccb,
   CO_CB,
@@ -757,6 +758,26 @@ checkoutHandler.callbackQuery(CO_CB.WALLET_CONFIRM, async (ctx) => {
   try {
     const result = await payPurchaseDraftWithWallet(user, draft);
     if (!result.ok) {
+      if ("needsCustomerInfo" in result) {
+        // §4 mandatory-input gate: a personalized OTHER_PRODUCT (e.g. a manually
+        // built Apple ID) materialized a PENDING checkout — remember it on the
+        // draft (a re-tap reuses it) and open the structured form. No money moved.
+        draft.otherProductCheckoutId = result.checkoutId;
+        const pending = await prisma.checkoutSession.findUnique({
+          where: { id: result.checkoutId },
+        });
+        if (pending !== null) {
+          // Resume hint: after the form the buyer taps «پرداخت با کیف پول ✅»,
+          // which re-runs WALLET_CONFIRM against the same draft (its
+          // otherProductCheckoutId now satisfied) and settles this checkout.
+          await enforceCustomerInfoBeforePayment(ctx, pending, {
+            resumePayment: { label: "پرداخت با کیف پول ✅", callback: CO_CB.WALLET_CONFIRM },
+          });
+        } else {
+          await safeAnswerCallback(ctx);
+        }
+        return;
+      }
       await safeAnswerCallback(ctx, result.error);
       await renderPreInvoice(ctx, true);
       return;

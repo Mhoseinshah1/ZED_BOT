@@ -9,6 +9,7 @@ import {
   validateFieldValue,
   type CustomerInputSchema,
 } from "./customer-input-schema.service.js";
+import { readFulfillmentSnapshot } from "./other-product-profile.service.js";
 import { getSetting } from "./settings.service.js";
 
 // =============================================================================
@@ -85,6 +86,55 @@ export async function getOrCreateCheckoutInput(
     }
     throw err;
   }
+}
+
+/**
+ * True when this checkout's customer-info form has been completed (SUBMITTED
+ * or CONSUMED). This is the pre-payment gate a caller combines with the frozen
+ * snapshot's `requiresCustomerInfo`: a product that requires info may not be
+ * paid for (wallet / gateway / Stars) until the buyer has confirmed the form.
+ * A COLLECTING / ABANDONED / REDACTED / missing row is NOT satisfied.
+ */
+export async function isCheckoutInputSatisfied(checkoutSessionId: string): Promise<boolean> {
+  const row = await prisma.checkoutCustomerInput.findUnique({
+    where: { checkoutSessionId },
+    select: { status: true },
+  });
+  return row !== null && (row.status === "SUBMITTED" || row.status === "CONSUMED");
+}
+
+/**
+ * SETTLEMENT-boundary fail-closed gate (§4/§6). True when this checkout is a
+ * personalized OTHER_PRODUCT whose FROZEN fulfillment snapshot requires a
+ * structured customer-information form that has NOT been submitted+confirmed.
+ *
+ * Unlike the UI-side `enforceCustomerInfoBeforePayment` (which OPENS the form),
+ * this is the pure service-level predicate every money-moving / order-creating
+ * / fulfillment path consults to REFUSE settlement when the form is missing -
+ * so a direct settle, a webhook, a Stars update, a receipt approval, or a
+ * recovery-worker retry can never bypass the form. Reads only the frozen
+ * snapshot (immutable), never the live product, so a mid-flow mode flip cannot
+ * relax the gate. Non-OTHER_PRODUCT / stock / info-not-required checkouts, and
+ * legacy rows with the flag but no structured schema, are never blocked here.
+ */
+export async function isMandatoryCustomerInfoMissing(checkout: {
+  id: string;
+  purpose: string;
+  orderType: string | null;
+  otherProductFulfillmentSnapshot: unknown;
+  productSnapshot: unknown;
+}): Promise<boolean> {
+  if (checkout.purpose !== "ORDER_PAYMENT" || checkout.orderType !== "OTHER_PRODUCT") {
+    return false;
+  }
+  const snapshot = await readFulfillmentSnapshot(checkout);
+  // Only the pre-payment collection policy (Apple ID build) fails settlement
+  // closed. Post-payment kinds (Premium / AI / legacy manual) collect info in
+  // the WAITING_USER_INFO queue AFTER settlement and are never blocked here.
+  if (!snapshot.requireInfoBeforeSettlement || snapshot.customerInputSchema === null) {
+    return false;
+  }
+  return !(await isCheckoutInputSatisfied(checkout.id));
 }
 
 export type SubmitCheckoutInputOutcome =

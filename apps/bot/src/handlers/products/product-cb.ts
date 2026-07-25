@@ -60,6 +60,9 @@ export const pcb = {
   pickStockParser: (sid: string): string => `admin:prod:sparser:${sid}`,
   setStockParser: (sid: string, code: string): string => `admin:prod:setsp:${sid}:${code}`,
   toggleCollectBefore: (sid: string): string => `admin:prod:cba:${sid}`,
+  // Apple ID fulfillment-mode toggle on the edit screen (stock vs personalized).
+  pickAppleMode: (sid: string): string => `admin:prod:aplmode:${sid}`,
+  setAppleMode: (sid: string, m: string): string => `admin:prod:setapl:${sid}:${m}`,
 
   // Add-wizard step callbacks
   flowPanel: (panelSid: string): string => `admin:prod:f:pnl:${panelSid}`,
@@ -74,6 +77,7 @@ export const pcb = {
   // Specialized-workflows phase: OTHER_PRODUCT kind branching steps.
   flowKind: (k: string): string => `admin:prod:f:kind:${k}`,
   flowAiMode: (m: string): string => `admin:prod:f:ai:${m}`,
+  flowAppleMode: (m: string): string => `admin:prod:f:apl:${m}`,
   flowGiftMode: (m: string): string => `admin:prod:f:gc:${m}`,
   flowStockParser: (p: string): string => `admin:prod:f:sp:${p}`,
   flowFormPreset: (p: string): string => `admin:prod:f:fp:${p}`,

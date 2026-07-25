@@ -45,6 +45,7 @@ export interface ProductAddState {
     | "category"
     | "otherKind"
     | "aiMode"
+    | "appleMode"
     | "giftMode"
     | "stockParser"
     | "formPreset"
@@ -81,7 +82,11 @@ export interface ProductAddState {
   otherProductFulfillmentProfile?: OtherProductFulfillmentProfile;
   otherProductStockParser?: OtherProductStockParser;
   collectInfoBeforeManualApproval?: boolean;
-  customerInputSchemaPreset?: "TELEGRAM_PREMIUM" | "PERSONALIZED_AI" | "NONE";
+  customerInputSchemaPreset?:
+    | "TELEGRAM_PREMIUM"
+    | "PERSONALIZED_AI"
+    | "PERSONALIZED_APPLE_ID"
+    | "NONE";
 }
 
 /**
@@ -137,6 +142,15 @@ export interface CheckoutDraft {
    * pre-invoice: a SERVICE pre-invoice never renders until it is true.
    */
   serviceCustomization?: ServiceCustomizationDraft;
+  /**
+   * §4 wallet mandatory-input gate: for an OTHER_PRODUCT whose fulfillment
+   * requires a structured customer-information form (e.g. a personalized Apple
+   * ID), the wallet path materializes a PENDING checkout the buyer fills the
+   * form against, then settles THAT checkout after the form is confirmed. This
+   * carries that materialized checkout's id so a re-tap reuses it (no duplicate
+   * checkout) and the wallet charge is enforced against a persisted checkout.
+   */
+  otherProductCheckoutId?: string;
 }
 
 /**

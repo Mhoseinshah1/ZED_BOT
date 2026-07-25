@@ -144,13 +144,27 @@ describe.runIf(hasDb)("specialized product wizard (§13)", () => {
     expect(addState(session)?.step).toBe("otherKind");
   });
 
-  it("APPLE_ID: stock credentials, EMAIL_BOUNDARY, stock on, no info question", async () => {
+  it("APPLE_ID asks the fulfillment-mode question (تحویل آماده / ساخت شخصی) after the kind step", async () => {
+    const session = initialSession();
+    const name = `spw-apple-mode-${runTag}`;
+    await driveToKindStep(session, name);
+    const { sent } = await dispatchCb(session, "admin:prod:f:kind:APPLE");
+    // APPLE_ID no longer defaults silently to stock: it forces an explicit
+    // pick between ready-from-stock and personalized manual build.
+    expect(addState(session)?.step).toBe("appleMode");
+    const codes = flatButtons(sent.at(-1)).map((b) => b.callback_data);
+    expect(codes).toContain("admin:prod:f:apl:stock");
+    expect(codes).toContain("admin:prod:f:apl:pers");
+  });
+
+  it("APPLE_ID + تحویل آماده: stock credentials, EMAIL_BOUNDARY, stock on, no info question", async () => {
     const session = initialSession();
     const name = `spw-apple-${runTag}`;
     await driveToKindStep(session, name);
     await dispatchCb(session, "admin:prod:f:kind:APPLE");
+    await dispatchCb(session, "admin:prod:f:apl:stock");
     const { sent: invoiceStep } = await driveDurationPriceInvoice(session);
-    // No legacy user-info question for APPLE_ID - straight to the order step.
+    // Ready-from-stock Apple: no user-info question - straight to the order step.
     expect(invoiceStep.at(-1)?.text).toBe(ORDER_QUESTION_TEXT);
     const product = await driveOrderAndSave(session, name);
     expect(product.otherProductKind).toBe("APPLE_ID");
@@ -161,6 +175,32 @@ describe.runIf(hasDb)("specialized product wizard (§13)", () => {
     expect(product.requiredUserInfoEnabled).toBe(false);
     expect(product.collectInfoBeforeManualApproval).toBe(false);
     expect(product.customerInputSchema).toBeNull();
+  });
+
+  it("APPLE_ID + ساخت شخصی: personalized manual build, structured schema, no stock", async () => {
+    const session = initialSession();
+    const name = `spw-apple-pers-${runTag}`;
+    await driveToKindStep(session, name);
+    await dispatchCb(session, "admin:prod:f:kind:APPLE");
+    await dispatchCb(session, "admin:prod:f:apl:pers");
+    const { sent: invoiceStep } = await driveDurationPriceInvoice(session);
+    // Personalized Apple: no legacy user-info question either (the structured
+    // schema is seeded automatically) - straight to the order step.
+    expect(invoiceStep.at(-1)?.text).toBe(ORDER_QUESTION_TEXT);
+    const product = await driveOrderAndSave(session, name);
+    expect(product.otherProductKind).toBe("APPLE_ID");
+    expect(product.otherProductFulfillmentProfile).toBe("PERSONALIZED_SERVICE");
+    expect(product.otherProductStockParser).toBeNull();
+    expect(product.stockEnabled).toBe(false);
+    expect(product.deliveryType).toBe("MANUAL_ADMIN");
+    expect(product.requiredUserInfoEnabled).toBe(true);
+    expect(product.collectInfoBeforeManualApproval).toBe(true);
+    // The Apple ID default structured schema is seeded on save.
+    const schema = product.customerInputSchema as { fields?: Array<{ key: string }> } | null;
+    expect(schema).not.toBeNull();
+    const keys = (schema?.fields ?? []).map((f) => f.key);
+    expect(keys).toContain("first_name");
+    expect(keys).toContain("recovery_email");
   });
 
   it("AI_ACCOUNT ready: stock credentials with the admin-picked parser", async () => {

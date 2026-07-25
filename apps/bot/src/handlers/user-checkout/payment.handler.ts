@@ -43,7 +43,10 @@ import { getMessageTemplate } from "../../services/text.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { clearCheckoutState } from "./checkout-state.js";
-import { maybeStartPreSettlementCustomerInput } from "./customer-input-form.handler.js";
+import {
+  enforceCustomerInfoBeforePayment,
+  maybeStartPreSettlementCustomerInput,
+} from "./customer-input-form.handler.js";
 import {
   CARD_INFO_INCOMPLETE_TEXT,
   cardToCardKeyboard,
@@ -179,6 +182,22 @@ paymentHandler.callbackQuery(/^user:pay:g:([0-9a-f-]+):([0-9a-f-]+)$/, async (ct
     return;
   }
 
+  // §4 mandatory-input gate for CARD_TO_CARD: a personalized OTHER_PRODUCT must
+  // complete the structured customer-information form BEFORE the card is exposed
+  // or a receipt is accepted. Without this the card path bypasses the online
+  // gate entirely (and receipt approval would settle without the info). The
+  // resume hint returns the buyer to the payment-method screen after the form.
+  if (
+    await enforceCustomerInfoBeforePayment(ctx, checkout, {
+      resumePayment: {
+        label: "ادامه پرداخت 💳",
+        callback: `user:pay:m:${checkoutShortId(checkout)}`,
+      },
+    })
+  ) {
+    return;
+  }
+
   const pending = await getPendingReviewPayment(checkout.id);
   if (pending !== null) {
     await safeAnswerCallback(ctx);
@@ -237,6 +256,21 @@ async function startOnlineGatewayPayment(
   checkout: CheckoutSession,
   gateway: PaymentGateway,
 ): Promise<void> {
+  // §4 mandatory-input gate: a personalized OTHER_PRODUCT (e.g. a manually
+  // built Apple ID) may not be paid online until the buyer has confirmed the
+  // structured customer-information form. When blocked the gate opens the form
+  // and we abort before any gateway payment / Stars invoice is created. The
+  // resume hint returns the buyer to the payment-method screen after the form.
+  if (
+    await enforceCustomerInfoBeforePayment(ctx, checkout, {
+      resumePayment: {
+        label: "ادامه پرداخت 💳",
+        callback: `user:pay:m:${checkoutShortId(checkout)}`,
+      },
+    })
+  ) {
+    return;
+  }
   const result = await getOrCreateGatewayPayment(user, checkout, gateway);
   if (!result.ok) {
     await safeAnswerCallback(ctx, result.error);

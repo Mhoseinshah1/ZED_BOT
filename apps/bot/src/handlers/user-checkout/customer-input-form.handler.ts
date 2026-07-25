@@ -1,14 +1,16 @@
-import { prisma, type CheckoutSession } from "@zedbot/database";
+import { CheckoutStatus, prisma, type CheckoutSession } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
+import { CO_CB } from "./checkout-cb.js";
 import { logger } from "../../core/logger.js";
 import {
   CUSTOMER_INPUT_SAVED_NOTICE,
   CUSTOMER_INPUT_SCHEMA_BROKEN_TEXT,
   getOrCreateCheckoutInput,
+  isCheckoutInputSatisfied,
   submitCheckoutInput,
 } from "../../services/checkout-customer-input.service.js";
 import {
@@ -60,6 +62,14 @@ interface CustomerInputFormDraft {
   fieldIndex: number;
   answers: Record<string, string>;
   reviewing?: boolean;
+  /**
+   * §4 payment continuation: when the form was opened as the MANDATORY
+   * pre-payment gate, the entry point records how the buyer resumes payment
+   * after submitting (so they are never stranded on a menu-only screen). The
+   * caller supplies a button label + callback; the form handler stays decoupled
+   * from the wallet/gateway callback formats.
+   */
+  resumePayment?: { label: string; callback: string };
 }
 
 function menuKeyboard(): InlineKeyboard {
@@ -177,7 +187,7 @@ export async function startCustomerInputForm(
   ctx: BotContext,
   checkoutSessionId: string,
   schema: CustomerInputSchema,
-  opts?: { orderId?: string },
+  opts?: { orderId?: string; resumePayment?: { label: string; callback: string } },
 ): Promise<boolean> {
   const user = ctx.dbUser;
   if (user === null) {
@@ -205,6 +215,7 @@ export async function startCustomerInputForm(
   const draft: CustomerInputFormDraft = {
     checkoutSessionId,
     ...(opts?.orderId !== undefined ? { orderId: opts.orderId } : {}),
+    ...(opts?.resumePayment !== undefined ? { resumePayment: opts.resumePayment } : {}),
     fieldIndex: 0,
     answers: {},
   };
@@ -233,6 +244,11 @@ export async function maybeStartPreSettlementCustomerInput(
   if (!snapshot.requiresCustomerInfo || !snapshot.collectInfoBeforeManualApproval) {
     return;
   }
+  // Already completed (e.g. the mandatory pre-payment gate collected it before
+  // the card was shown): do not re-prompt after receipt registration.
+  if (await isCheckoutInputSatisfied(checkout.id)) {
+    return;
+  }
   if (snapshot.customerInputSchema === null) {
     // Pre-collection is enabled but there is no structured schema (legacy
     // GENERIC row with the toggle on). Do NOT invent a schema - send the
@@ -246,6 +262,49 @@ export async function maybeStartPreSettlementCustomerInput(
     return;
   }
   await startCustomerInputForm(ctx, checkout.id, snapshot.customerInputSchema);
+}
+
+/** Toast shown when a buyer tries to pay before completing the mandatory form. */
+export const CUSTOMER_INFO_REQUIRED_BEFORE_PAYMENT_TEXT =
+  "برای این محصول ابتدا باید اطلاعات سفارش را کامل و تایید کنید.";
+
+/**
+ * MANDATORY pre-payment gate (§4). For an OTHER_PRODUCT checkout whose FROZEN
+ * snapshot `requiresCustomerInfo` and that carries a structured schema, the
+ * buyer may not pay (wallet / gateway / Stars) until the form is confirmed
+ * (SUBMITTED / CONSUMED). When the info is still missing this opens/resumes the
+ * structured form and returns `true` (BLOCKED); the caller must abort the
+ * payment. Returns `false` (proceed) when info is not required, already
+ * submitted, or — for a legacy row with the flag but NO structured schema —
+ * so those keep their existing post-settlement free-text collection unchanged.
+ *
+ * Idempotent + loop-safe: a satisfied form never blocks, so after the buyer
+ * confirms the form and taps pay again the gate passes; a stale/foreign
+ * checkout resolves to no snapshot requirement and does not trap the user.
+ */
+export async function enforceCustomerInfoBeforePayment(
+  ctx: BotContext,
+  checkout: CheckoutSession,
+  opts?: { resumePayment?: { label: string; callback: string } },
+): Promise<boolean> {
+  if (checkout.purpose !== "ORDER_PAYMENT" || checkout.orderType !== "OTHER_PRODUCT") {
+    return false;
+  }
+  const snapshot = await readFulfillmentSnapshot(checkout);
+  // Only the pre-payment collection policy (Apple ID build) blocks payment.
+  // Post-payment kinds (Premium / AI / legacy manual) keep collecting info in
+  // the manual queue AFTER settlement, so this gate never opens for them.
+  if (!snapshot.requireInfoBeforeSettlement || snapshot.customerInputSchema === null) {
+    return false;
+  }
+  if (await isCheckoutInputSatisfied(checkout.id)) {
+    return false;
+  }
+  await safeAnswerCallback(ctx, CUSTOMER_INFO_REQUIRED_BEFORE_PAYMENT_TEXT);
+  await startCustomerInputForm(ctx, checkout.id, snapshot.customerInputSchema, {
+    ...(opts?.resumePayment !== undefined ? { resumePayment: opts.resumePayment } : {}),
+  });
+  return true;
 }
 
 // --- shared per-interaction loading --------------------------------------------------------
@@ -358,6 +417,7 @@ customerInputFormHandler.callbackQuery(/^cinput:start:([0-9a-f-]{4,32})$/, async
     return;
   }
   const checkout = matches[0];
+  const snapshot = await readFulfillmentSnapshot(checkout);
   // Prefer the frozen schema of an existing input row (the form the buyer
   // already saw); otherwise the checkout's fulfillment snapshot decides.
   let schema: CustomerInputSchema | null = null;
@@ -373,7 +433,6 @@ customerInputFormHandler.callbackQuery(/^cinput:start:([0-9a-f-]{4,32})$/, async
     schema = parsed.ok ? parsed.schema : null;
   }
   if (schema === null) {
-    const snapshot = await readFulfillmentSnapshot(checkout);
     schema = snapshot.customerInputSchema;
   }
   if (schema === null) {
@@ -381,7 +440,27 @@ customerInputFormHandler.callbackQuery(/^cinput:start:([0-9a-f-]{4,32})$/, async
     return;
   }
   await safeAnswerCallback(ctx);
-  await startCustomerInputForm(ctx, checkout.id, schema);
+  // Reconstruct the payment continuation so a cancel-then-resume buyer of a
+  // mandatory pre-payment form (still-unpaid Apple ID build) is not stranded
+  // after submitting. When THIS checkout is the one the active session draft
+  // materialized for a WALLET payment, restore the wallet continuation (a
+  // re-tap of «پرداخت با کیف پول ✅» settles the now-satisfied checkout) —
+  // otherwise return to the payment-method screen for gateway/card. This keeps
+  // wallet-only deployments (where the method screen lists no gateways) usable.
+  let opts: { resumePayment: { label: string; callback: string } } | undefined;
+  if (checkout.status === CheckoutStatus.PENDING && snapshot.requireInfoBeforeSettlement) {
+    const walletDraft = ctx.session.temp.checkoutDraft;
+    opts =
+      walletDraft?.otherProductCheckoutId === checkout.id
+        ? { resumePayment: { label: "پرداخت با کیف پول ✅", callback: CO_CB.WALLET_CONFIRM } }
+        : {
+            resumePayment: {
+              label: "ادامه پرداخت 💳",
+              callback: `user:pay:m:${checkout.id.slice(0, 8)}`,
+            },
+          };
+  }
+  await startCustomerInputForm(ctx, checkout.id, schema, opts);
 });
 
 // SELECT option picked (index-addressed; option text never rides callbacks).
@@ -528,16 +607,17 @@ customerInputFormHandler.callbackQuery("cinput:confirm", async (ctx) => {
     return;
   }
   const checkoutSessionId = draft.checkoutSessionId;
+  const resumePayment = draft.resumePayment;
   clearFormState(ctx);
   await safeAnswerCallback(ctx);
 
   // Post-submit dispatch: when the checkout already settled into a paid
   // order (info was completed AFTER payment approval), hand off to the
   // fulfillment pipeline - it consumes the submission, advances the order
-  // and notifies exactly once. Otherwise (pre-approval collection) just
-  // acknowledge; settlement will consume the row later. A hand-off failure
-  // is only logged: the row stays SUBMITTED and the fulfillment side
-  // retries consumption idempotently.
+  // and notifies exactly once. Otherwise (pre-approval / pre-payment
+  // collection) route the buyer back to payment. A hand-off failure is only
+  // logged: the row stays SUBMITTED and the fulfillment side retries
+  // consumption idempotently.
   let handedOff = false;
   try {
     const order = await prisma.order.findUnique({
@@ -556,7 +636,20 @@ customerInputFormHandler.callbackQuery("cinput:confirm", async (ctx) => {
     });
   }
   if (!handedOff) {
-    await safeEditOrReply(ctx, CUSTOMER_INPUT_SAVED_NOTICE, menuKeyboard());
+    // §4 continuation: the form was the MANDATORY pre-payment gate and the
+    // checkout is still unpaid - offer the buyer the exact button that resumes
+    // payment (wallet re-tap settles the now-satisfied checkout; gateway/card
+    // returns to the payment-method screen). Without this the buyer would be
+    // stranded on a menu-only acknowledgement and could never complete the
+    // purchase they started.
+    const keyboard =
+      resumePayment !== undefined
+        ? new InlineKeyboard()
+            .text(resumePayment.label, resumePayment.callback)
+            .row()
+            .text("منوی اصلی", CB.USER_MENU)
+        : menuKeyboard();
+    await safeEditOrReply(ctx, CUSTOMER_INPUT_SAVED_NOTICE, keyboard);
   }
 });
 

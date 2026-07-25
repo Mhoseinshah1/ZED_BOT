@@ -16,6 +16,7 @@ import {
   type WalletTransaction,
 } from "@zedbot/database";
 
+import { isMandatoryCustomerInfoMissing } from "./checkout-customer-input.service.js";
 import { claimDiscountUsage } from "./discount.service.js";
 import { auditRepresentativeSettlementPricing } from "./representative-pricing.service.js";
 import {
@@ -52,6 +53,12 @@ const NO_CHECKOUT = "پیش‌فاکتور این پرداخت یافت نشد؛
 const CHECKOUT_NOT_PENDING = "وضعیت پیش‌فاکتور برای تایید معتبر نیست.";
 const AMOUNT_MISMATCH = "مبلغ رسید با پیش‌فاکتور هم‌خوانی ندارد.";
 const NO_PENDING_RECEIPT = "رسید در انتظار بررسی برای این پرداخت وجود ندارد.";
+// §4 settlement-boundary gate: a personalized OTHER_PRODUCT (e.g. a manually
+// built Apple ID) whose mandatory customer-info form is not yet submitted may
+// not be approved into a PAID order. Card money is not captured, so the receipt
+// simply stays reviewable until the buyer completes the form.
+const CUSTOMER_INFO_REQUIRED =
+  "اطلاعات سفارش مشتری هنوز ثبت نشده است؛ ابتدا باید فرم اطلاعات تکمیل شود.";
 // hotfix §2: the paid SERVICE order could not bind its exact username reservation.
 // A card receipt has no captured provider money to preserve, so the safest durable
 // state is to NOT finalize approval — the receipt stays PENDING_REVIEW (reviewable).
@@ -253,6 +260,16 @@ export async function approveReceiptPayment(
 
   const snapshot = (checkout.productSnapshot ?? {}) as Record<string, unknown>;
   const orderType = resolveOrderType(checkout, snapshot);
+
+  // §4 mandatory customer-info gate at the SETTLEMENT boundary. A personalized
+  // OTHER_PRODUCT whose FROZEN fulfillment requires a structured form may not be
+  // approved into a PAID order until the buyer submitted+confirmed it. This runs
+  // BEFORE the transaction (no PAID flip, no Order) - card money is not captured,
+  // so refusing is a clean pre-money fail-closed against a receipt slipping past
+  // the pre-payment UI gate.
+  if (await isMandatoryCustomerInfoMissing(checkout)) {
+    return { ok: false, error: CUSTOMER_INFO_REQUIRED };
+  }
 
   try {
     const order = await prisma.$transaction(async (tx) => {

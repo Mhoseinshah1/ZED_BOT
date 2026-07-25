@@ -7,6 +7,7 @@ import type {
 
 import {
   PERSONALIZED_AI_DEFAULT_SCHEMA,
+  PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA,
   TELEGRAM_PREMIUM_DEFAULT_SCHEMA,
   validateCustomerInputSchema,
   type CustomerInputSchema,
@@ -42,6 +43,20 @@ export interface OtherProductFulfillmentSnapshot {
   stockParser: OtherProductStockParser | null;
   requiresCustomerInfo: boolean;
   collectInfoBeforeManualApproval: boolean;
+  /**
+   * §4: when true, the structured customer-info form is MANDATORY BEFORE any
+   * payment/settlement (wallet deduct, gateway/Stars invoice, card receipt
+   * approval all fail closed until it is submitted+confirmed). Used by the
+   * personalized Apple ID build, where the buyer's details are needed to
+   * create the account before money is taken. When false (the default, and
+   * every legacy snapshot that predates this field), info is collected AFTER
+   * payment in the manual queue (WAITING_USER_INFO) exactly as before - so
+   * TELEGRAM_PREMIUM / AI_ACCOUNT / legacy MANUAL keep their post-payment
+   * collection. Distinguishes Apple's pre-payment policy from the identical
+   * PERSONALIZED_SERVICE profile of other kinds WITHOUT touching any stock
+   * gate (§6 is about stock decisions only).
+   */
+  requireInfoBeforeSettlement: boolean;
   customerInputSchema: CustomerInputSchema | null;
   promptText: string | null;
   completionMessageTemplate: string | null;
@@ -77,7 +92,11 @@ const KIND_PROFILES: Record<
   Exclude<OtherProductKind, "GENERIC">,
   { allowed: OtherProductFulfillmentProfile[]; fallback: OtherProductFulfillmentProfile | null }
 > = {
-  APPLE_ID: { allowed: ["STOCK_CREDENTIAL"], fallback: "STOCK_CREDENTIAL" },
+  // APPLE_ID supports ready-from-stock credentials OR a personalized manual
+  // build. The fallback is STOCK_CREDENTIAL ONLY for legacy rows whose profile
+  // column is null (pre-personalized Apple products) - the creation wizard
+  // forces an explicit choice for new products, so nothing new silently defaults.
+  APPLE_ID: { allowed: ["STOCK_CREDENTIAL", "PERSONALIZED_SERVICE"], fallback: "STOCK_CREDENTIAL" },
   AI_ACCOUNT: { allowed: ["STOCK_CREDENTIAL", "PERSONALIZED_SERVICE"], fallback: null },
   TELEGRAM_PREMIUM: { allowed: ["PERSONALIZED_SERVICE"], fallback: "PERSONALIZED_SERVICE" },
   GIFT_CARD: { allowed: ["STOCK_CODE", "MANUAL_DELIVERY"], fallback: "STOCK_CODE" },
@@ -124,6 +143,9 @@ function resolveCustomerInputSchema(
   if (kind === "AI_ACCOUNT") {
     return PERSONALIZED_AI_DEFAULT_SCHEMA;
   }
+  if (kind === "APPLE_ID") {
+    return PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA;
+  }
   return null;
 }
 
@@ -146,6 +168,8 @@ function resolveGenericProfile(product: ProfileProductFields): OtherProductFulfi
     profile: stockDelivery ? "STOCK_CREDENTIAL" : "MANUAL_DELIVERY",
     stockParser: stockDelivery ? "SINGLE_LINE" : null,
     requiresCustomerInfo: product.requiredUserInfoEnabled,
+    // Legacy GENERIC keeps post-payment collection.
+    requireInfoBeforeSettlement: false,
     collectInfoBeforeManualApproval:
       product.requiredUserInfoEnabled && product.collectInfoBeforeManualApproval,
     customerInputSchema: null,
@@ -159,7 +183,10 @@ function resolveGenericProfile(product: ProfileProductFields): OtherProductFulfi
  *
  * GENERIC        -> the exact legacy derivation (see resolveGenericProfile).
  * Specialized    -> the specialized columns, with kind defaults for null:
- *   APPLE_ID         STOCK_CREDENTIAL, EMAIL_BOUNDARY parser, no info step.
+ *   APPLE_ID         STOCK_CREDENTIAL (EMAIL_BOUNDARY parser, no info step) OR
+ *                    PERSONALIZED_SERVICE (structured info form, manual build,
+ *                    no stock); a null profile resolves to STOCK_CREDENTIAL for
+ *                    legacy rows, but the wizard forces an explicit new choice.
  *   AI_ACCOUNT       profile column REQUIRED (STOCK_CREDENTIAL or
  *                    PERSONALIZED_SERVICE) - throws when missing/invalid.
  *   TELEGRAM_PREMIUM PERSONALIZED_SERVICE, info collected, collect-before-
@@ -208,6 +235,9 @@ export function resolveEffectiveProfile(
   const collectInfoBeforeManualApproval =
     requiresCustomerInfo &&
     (kind === "TELEGRAM_PREMIUM" ? true : product.collectInfoBeforeManualApproval);
+  // §4: only the personalized Apple ID build gates payment on the form. Every
+  // other personalized kind keeps its established post-payment collection.
+  const requireInfoBeforeSettlement = requiresCustomerInfo && kind === "APPLE_ID";
 
   return {
     version: 1,
@@ -216,6 +246,7 @@ export function resolveEffectiveProfile(
     stockParser,
     requiresCustomerInfo,
     collectInfoBeforeManualApproval,
+    requireInfoBeforeSettlement,
     customerInputSchema: requiresCustomerInfo
       ? resolveCustomerInputSchema(kind, product.customerInputSchema)
       : null,
@@ -301,6 +332,10 @@ function parseStoredSnapshot(value: unknown): OtherProductFulfillmentSnapshot | 
     stockParser: (raw.stockParser ?? null) as OtherProductStockParser | null,
     requiresCustomerInfo: raw.requiresCustomerInfo,
     collectInfoBeforeManualApproval: raw.collectInfoBeforeManualApproval,
+    // Additive field: legacy snapshots frozen before it existed default to
+    // false (post-payment collection), so no old checkout/order changes
+    // behavior or becomes unfulfillable.
+    requireInfoBeforeSettlement: raw.requireInfoBeforeSettlement === true,
     customerInputSchema,
     promptText: normalizeText(promptText),
     completionMessageTemplate: normalizeText(completionMessageTemplate),
@@ -363,6 +398,8 @@ export async function readFulfillmentSnapshot(
     stockParser: stockDelivery ? "SINGLE_LINE" : null,
     requiresCustomerInfo: requiredUserInfoEnabled,
     collectInfoBeforeManualApproval: false,
+    // Legacy GENERIC fallback keeps post-payment collection.
+    requireInfoBeforeSettlement: false,
     customerInputSchema: null,
     promptText: normalizeText(requiredUserInfoPromptText),
     completionMessageTemplate: null,
