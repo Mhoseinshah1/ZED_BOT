@@ -191,6 +191,32 @@ export async function checkServiceUsernameAvailability(args: {
   }
 }
 
+/**
+ * Codex P1 fix (cross-path namespace): true when the remote username is held by
+ * an ACTIVE ServiceUsernameReservation that does NOT belong to `exceptOrderId` —
+ * i.e. a foreign in-progress/settled hold (HELD/BOUND/CONSUMED). The strategy
+ * naming path only checked `Service.username`; a normal purchase or free trial
+ * could therefore pick a username a paid buyer is actively holding, and the
+ * holder would then collide at provisioning despite owning the reservation. This
+ * makes the reservation table an authoritative part of the remote-username
+ * namespace for BOTH paths. Read-only.
+ */
+export async function hasForeignActiveReservationForUsername(
+  normalizedUsername: string,
+  exceptOrderId: string,
+): Promise<boolean> {
+  const row = await prisma.serviceUsernameReservation.findFirst({
+    where: {
+      normalizedUsername,
+      status: { in: ACTIVE_STATUSES },
+      // Foreign = unbound to any order, or bound to a DIFFERENT order.
+      OR: [{ orderId: null }, { orderId: { not: exceptOrderId } }],
+    },
+    select: { id: true },
+  });
+  return row !== null;
+}
+
 // -----------------------------------------------------------------------------
 // Reserve (HELD)
 // -----------------------------------------------------------------------------
@@ -240,7 +266,6 @@ export async function reserveServiceUsername(args: {
     });
     return { outcome: "AVAILABLE", reservationId: sameUsernameHold.id, normalizedUsername, mode };
   }
-  const priorToRelease = priorActive.map((r) => r.id);
 
   const availability = await checkServiceUsernameAvailability({
     panel,
@@ -253,6 +278,30 @@ export async function reserveServiceUsername(args: {
 
   try {
     const created = await prisma.$transaction(async (tx) => {
+      // Codex P2 fix: serialize replacement holds PER DRAFT. Two concurrent
+      // custom submissions / random regenerations for the same (userId,
+      // draftNonce) could otherwise each read the same prior-active set, pick
+      // DIFFERENT available usernames (so the global activeUsernameKey unique
+      // never conflicts), each insert a new HELD row, and each release only the
+      // stale ids it captured — leaving TWO active holds and one orphan that
+      // blocks its username until TTL. The advisory xact lock forces the second
+      // transaction to wait, then RE-READ the current active holds so it
+      // releases the first replacement too.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`zedbot-service-username-draft:${userId}:${draftNonce ?? ""}`}))`;
+      const currentActive = await tx.serviceUsernameReservation.findMany({
+        where: { userId, draftNonce, panelId, status: { in: REBINDABLE_STATUSES } },
+        select: { id: true, normalizedUsername: true },
+      });
+      // A concurrent replacement may have already established THIS exact
+      // username under the lock — reuse it instead of stacking a second hold.
+      const existingSame = currentActive.find((r) => r.normalizedUsername === normalizedUsername);
+      if (existingSame !== undefined) {
+        await tx.serviceUsernameReservation.updateMany({
+          where: { id: existingSame.id, status: ServiceUsernameReservationStatus.HELD },
+          data: { expiresAt: new Date(Date.now() + RESERVATION_HELD_TTL_MS) },
+        });
+        return { id: existingSame.id };
+      }
       const row = await tx.serviceUsernameReservation.create({
         data: {
           panelId,
@@ -266,9 +315,12 @@ export async function reserveServiceUsername(args: {
         },
         select: { id: true },
       });
-      if (priorToRelease.length > 0) {
+      // Release EVERY prior active hold for this draft (re-read under the lock),
+      // so no superseded hold is ever left active/orphaned.
+      const toRelease = currentActive.map((r) => r.id);
+      if (toRelease.length > 0) {
         await tx.serviceUsernameReservation.updateMany({
-          where: { id: { in: priorToRelease }, status: { in: REBINDABLE_STATUSES } },
+          where: { id: { in: toRelease }, status: { in: REBINDABLE_STATUSES } },
           data: {
             status: ServiceUsernameReservationStatus.RELEASED,
             activeUsernameKey: null,

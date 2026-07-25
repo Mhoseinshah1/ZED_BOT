@@ -14,6 +14,7 @@ import {
 } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
+import { hasForeignActiveReservationForUsername } from "./service-username-selection.service.js";
 
 // =============================================================================
 // Central service naming (naming phase): the ONE place VPN remote identities
@@ -369,7 +370,14 @@ export async function resolveVpnRemoteIdentity(
       };
     }
     const clash = await prisma.service.findUnique({ where: { username: userSelected } });
-    if (clash !== null && clash.orderId !== order.id) {
+    // Codex P1 fix: the remote-username namespace spans BOTH Service.username and
+    // active ServiceUsernameReservation.activeUsernameKey. A foreign active hold
+    // on this name (another buyer's reservation) is a collision even with no
+    // Service row yet — never provision over someone else's held username.
+    if (
+      (clash !== null && clash.orderId !== order.id) ||
+      (await hasForeignActiveReservationForUsername(userSelected, order.id))
+    ) {
       return {
         ok: false,
         error: "user-selected username collision",
@@ -419,13 +427,21 @@ export async function resolveVpnRemoteIdentity(
   const raw = buildRawName(config, parts);
   let normalized = normalizeRemoteUsername(raw, orderShort);
 
-  // Bounded collision policy: a same-name Service from ANOTHER order gets a
-  // deterministic order-derived suffix; a second collision is a safe error.
+  // Bounded collision policy: a same-name Service from ANOTHER order, OR a
+  // foreign active username reservation (Codex P1: the strategy path must honor
+  // the reservation namespace too, or a normal/trial purchase can steal a paid
+  // buyer's held username), gets a deterministic order-derived suffix; a second
+  // collision is a safe error.
   const existing = await prisma.service.findUnique({ where: { username: normalized } });
-  if (existing !== null && existing.orderId !== order.id) {
+  const takenByService = existing !== null && existing.orderId !== order.id;
+  if (takenByService || (await hasForeignActiveReservationForUsername(normalized, order.id))) {
     normalized = normalizeRemoteUsername(`${raw}_${orderShort}`, orderShort);
     const stillTaken = await prisma.service.findUnique({ where: { username: normalized } });
-    if (stillTaken !== null && stillTaken.orderId !== order.id) {
+    const stillTakenByService = stillTaken !== null && stillTaken.orderId !== order.id;
+    if (
+      stillTakenByService ||
+      (await hasForeignActiveReservationForUsername(normalized, order.id))
+    ) {
       return {
         ok: false,
         error: `naming collision for strategy ${config.strategy}`,

@@ -98,6 +98,7 @@ describe.runIf(hasDb)("SERVICE_USERNAME_UNBOUND reconciliation (DB)", () => {
     await prisma.serviceUsernameReservation.deleteMany({ where: { panelId: panel.id } });
     await prisma.financialReconciliationCase.deleteMany({ where: { userId: { in: userIds } } });
     await prisma.service.deleteMany({ where: { panelId: panel.id } });
+    await prisma.walletTransaction.deleteMany({ where: { userId: { in: userIds } } });
     await prisma.payment.deleteMany({ where: { userId: { in: userIds } } });
     await prisma.order.deleteMany({ where: { userId: { in: userIds } } });
     await prisma.checkoutSession.deleteMany({ where: { userId: { in: userIds } } });
@@ -337,6 +338,53 @@ describe.runIf(hasDb)("SERVICE_USERNAME_UNBOUND reconciliation (DB)", () => {
       expect(order.status).toBe("PAID");
     },
   );
+
+  it("provisioning fails closed on post-checkout panel drift and creates no service (Codex P1)", async () => {
+    // The product lives on `panel`, but the checkout froze a DIFFERENT panel
+    // (an admin reassigned the product's panel after checkout). Provisioning must
+    // NOT create the account on the live panel where availability was never
+    // checked — it fails closed instead.
+    const otherPanel = await prisma.panel.create({
+      data: {
+        type: "MARZBAN",
+        name: `svc-recon-drift-${runTag}-${++seq}`,
+        baseUrl: "http://127.0.0.1:1",
+        status: "ACTIVE",
+        isVisible: true,
+        username: "admin",
+        passwordEncrypted: "enc",
+        templateUsername: "tpl",
+        provisioningReady: true,
+      },
+    });
+    const checkout = await prisma.checkoutSession.create({
+      data: {
+        userId: user.id,
+        purpose: "ORDER_PAYMENT",
+        status: "PAID",
+        expiresAt: new Date(Date.now() + 3_600_000),
+        productSnapshot: { panelId: otherPanel.id },
+      },
+    });
+    const order = await prisma.order.create({
+      data: {
+        userId: user.id,
+        productId: product.id,
+        type: "SERVICE_PURCHASE",
+        status: "PAID",
+        checkoutSessionId: checkout.id,
+        finalPriceToman: 90_000,
+      },
+    });
+    const outcome = await provisionPaidOrder(order.id);
+    expect(outcome.ok).toBe(false);
+    const service = await prisma.service.findFirst({ where: { orderId: order.id } });
+    expect(service).toBeNull();
+    const after = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.status).not.toBe("COMPLETED");
+    expect(after.status).not.toBe("PROVISIONING");
+    await prisma.panel.deleteMany({ where: { id: otherPanel.id } });
+  });
 
   async function orderCheckout(orderId: string): Promise<string> {
     const order = await prisma.order.findUniqueOrThrow({

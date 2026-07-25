@@ -32,6 +32,7 @@ import {
   claimReservationForCheckout,
   checkServiceUsernameAvailability,
   consumeReservationForOrder,
+  hasForeignActiveReservationForUsername,
   releaseHeldReservationForDraft,
   releaseReservation,
   reserveRandomServiceUsername,
@@ -590,6 +591,71 @@ describe.runIf(hasDb)("authoritative reservation claim + strict order binding (D
       ),
     ]);
     expect([rA.ok, rB.ok].filter(Boolean)).toHaveLength(1);
+  });
+
+  it("two concurrent replacement holds for one draft leave exactly ONE active hold (Codex P2)", async () => {
+    const nonce = `${tag}-replace`;
+    const [a, b] = await Promise.all([
+      reserveServiceUsername({
+        userId,
+        panelId,
+        mode: ServiceUsernameMode.CUSTOM,
+        normalizedUsername: uname(),
+        draftNonce: nonce,
+      }),
+      reserveServiceUsername({
+        userId,
+        panelId,
+        mode: ServiceUsernameMode.CUSTOM,
+        normalizedUsername: uname(),
+        draftNonce: nonce,
+      }),
+    ]);
+    expect(a.outcome === "AVAILABLE" && b.outcome === "AVAILABLE").toBe(true);
+    // The advisory lock + under-lock re-read guarantee exactly ONE active hold
+    // survives for this (userId, draftNonce); the superseded one is RELEASED, so
+    // no orphaned hold blocks its username until TTL cleanup.
+    const active = await prisma.serviceUsernameReservation.count({
+      where: {
+        userId,
+        draftNonce: nonce,
+        status: {
+          in: [ServiceUsernameReservationStatus.HELD, ServiceUsernameReservationStatus.BOUND],
+        },
+      },
+    });
+    expect(active).toBe(1);
+  });
+
+  it("a foreign active reservation makes a username taken across the naming namespace (Codex P1)", async () => {
+    const name = uname();
+    const id = await holdUsername(name, `${tag}-foreign`); // HELD, not yet bound to any order
+    const otherOrder = await prisma.order.create({
+      data: { userId, type: "SERVICE_PURCHASE" },
+    });
+    // A HELD (unbound) reservation is foreign to EVERY order — the strategy
+    // naming path must never provision over it.
+    expect(await hasForeignActiveReservationForUsername(name, otherOrder.id)).toBe(true);
+    // Bind it to its own order: no longer foreign to THAT order, still foreign to others.
+    const checkoutId = await newCheckout();
+    await claimReservationForCheckout(
+      prisma,
+      { reservationId: id, userId, draftNonce: `${tag}-foreign`, normalizedUsername: name, mode: ServiceUsernameMode.CUSTOM, panelId },
+      checkoutId,
+    );
+    const ownOrder = await prisma.order.create({
+      data: { userId, type: "SERVICE_PURCHASE", checkoutSessionId: checkoutId },
+    });
+    await attachReservationToOrder(prisma, {
+      reservationId: id,
+      userId,
+      checkoutSessionId: checkoutId,
+      panelId,
+      normalizedUsername: name,
+      orderId: ownOrder.id,
+    });
+    expect(await hasForeignActiveReservationForUsername(name, ownOrder.id)).toBe(false);
+    expect(await hasForeignActiveReservationForUsername(name, otherOrder.id)).toBe(true);
   });
 
   it("strict attach binds the exact order, is idempotent, and throws on a mismatch", async () => {
