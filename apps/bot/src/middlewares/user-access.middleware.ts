@@ -64,7 +64,22 @@ export function resetTermsMisconfigAlertForTests(): void {
  * Returns true when the user may proceed. Sends the blocking message itself
  * otherwise. Also guarantees ctx.dbUser is set for downstream handlers.
  */
-export async function ensureUserAccess(ctx: BotContext): Promise<boolean> {
+export interface EnsureAccessOptions {
+  /**
+   * Normally the terms step skips itself for the accept action, so pressing
+   * accept is not gated into the very screen it is trying to satisfy. AFTER the
+   * acceptance is recorded that skip becomes wrong: if a newer version was
+   * published in between, the user still owes it, and keeping the skip would
+   * walk them past the gate into the menu. The accept handler therefore re-runs
+   * the gate with this set.
+   */
+  enforceTerms?: boolean;
+}
+
+export async function ensureUserAccess(
+  ctx: BotContext,
+  options: EnsureAccessOptions = {},
+): Promise<boolean> {
   const from = ctx.from;
   if (from === undefined || from.is_bot) {
     return false;
@@ -107,7 +122,7 @@ export async function ensureUserAccess(ctx: BotContext): Promise<boolean> {
   //    acceptance row for version 4, so publishing a new version re-gates
   //    everyone without touching a single user row.
   if (
-    !isTermsAcceptCallback(callbackData) &&
+    (options.enforceTerms === true || !isTermsAcceptCallback(callbackData)) &&
     (await getBooleanSetting(TERMS_REQUIRED_KEY, false))
   ) {
     const published = await getPublishedTerms();

@@ -328,6 +328,42 @@ describe.runIf(hasDb)("versioned terms — acceptance (§3, §6, §10)", () => {
       not.toBeNull();
   });
 
+  it("T25c honours every truthy setting representation, not just the literal 'true'", async () => {
+    // getBooleanSetting accepts "true"/"1"/"yes" case-insensitively, so the gate
+    // considers an install storing "1" ENABLED. If this path disagreed it would
+    // refuse to record, the gate would re-show the same screen, and the user
+    // could never get past it.
+    const { id } = await publish("قوانین");
+    const userId = await makeUser();
+
+    for (const raw of ["1", "yes", "TRUE", "True"]) {
+      await prisma.termsAcceptance.deleteMany({ where: { userId } });
+      await prisma.setting.update({ where: { key: TERMS_REQUIRED_KEY }, data: { value: raw } });
+      clearSettingsCache();
+
+      const result = await recordTermsAcceptance(userId, id);
+
+      expect(result, `value ${raw} must be treated as enabled`).toMatchObject({ ok: true });
+    }
+  });
+
+  it("T25d never moves the legacy timestamp backwards", async () => {
+    // Two acceptances can interleave without the configuration lock; the older
+    // one resuming last must not drag `termsAcceptedAt` back in time.
+    const { id } = await publish("قوانین");
+    const userId = await makeUser();
+    await recordTermsAcceptance(userId, id);
+
+    const future = new Date(Date.now() + 60_000);
+    await prisma.user.update({ where: { id: userId }, data: { termsAcceptedAt: future } });
+    await prisma.termsAcceptance.deleteMany({ where: { userId } });
+
+    await recordTermsAcceptance(userId, id);
+
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    expect(after.termsAcceptedAt?.getTime()).toBe(future.getTime());
+  });
+
   it("T26 accepting records the exact version and stamps the legacy timestamp", async () => {
     const { id, version } = await publish("قوانین");
     const userId = await makeUser();

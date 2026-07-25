@@ -42,13 +42,23 @@ export async function getSetting(key: string, fallback = ""): Promise<string> {
 /** The exact truthy set getBooleanSetting accepts (case-insensitive). */
 const TRUTHY_SETTING_VALUES = ["true", "1", "yes"];
 
+/**
+ * THE boolean interpretation for settings, exported so that callers which read
+ * a Setting row directly — e.g. inside a transaction, where the cached helpers
+ * cannot be used — agree with the gate exactly. An installation storing `1` or
+ * `yes` must not look enabled to one reader and disabled to another.
+ */
+export function isTruthySettingValue(raw: string | null | undefined): boolean {
+  return raw !== null && raw !== undefined && TRUTHY_SETTING_VALUES.includes(raw.toLowerCase());
+}
+
 /** Boolean settings: "true" / "1" / "yes" are truthy (case-insensitive). */
 export async function getBooleanSetting(key: string, fallback: boolean): Promise<boolean> {
   const raw = (await getSetting(key, "")).toLowerCase();
   if (raw === "") {
     return fallback;
   }
-  return raw === "true" || raw === "1" || raw === "yes";
+  return isTruthySettingValue(raw);
 }
 
 /**

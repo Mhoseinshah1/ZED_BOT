@@ -129,9 +129,12 @@ termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
     return;
   }
 
-  // Re-run the FULL access path: maintenance, account status and force join all
-  // still apply, in that order, before the menu is shown.
-  if (await ensureUserAccess(ctx)) {
+  // Re-run the FULL access path with the terms step ENFORCED. The default skip
+  // exists so the accept action is not gated into its own screen, but the
+  // acceptance has now been recorded — and if a newer version was published
+  // while this callback was in flight, the user owes that one and must see it
+  // rather than the menu.
+  if (await ensureUserAccess(ctx, { enforceTerms: true })) {
     await showUserMenu(ctx);
   }
 });

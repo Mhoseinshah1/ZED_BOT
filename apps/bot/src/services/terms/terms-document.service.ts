@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { Prisma, prisma, TermsDocumentStatus, type TermsDocument } from "@zedbot/database";
 
-import { clearSettingCacheKeys } from "../settings.service.js";
+import { clearSettingCacheKeys, isTruthySettingValue } from "../settings.service.js";
 
 // =============================================================================
 // Versioned mandatory Terms & Conditions: the document SERVICE.
@@ -486,11 +486,20 @@ export async function recordTermsAcceptance(
     // acceptance row or stamp the legacy timestamp. Read through `tx` rather
     // than the cached settings helper: the cache can lag behind a disable by
     // its TTL, and this decides whether we mutate.
-    const requiredSetting = await tx.setting.findUnique({
-      where: { key: TERMS_REQUIRED_KEY },
-      select: { value: true },
-    });
-    if (requiredSetting?.value !== "true") {
+    // FOR SHARE, not a plain read. `disableTermsRequirement` UPDATEs this row,
+    // which needs an exclusive row lock, so the two transactions now have a
+    // DEFINED order: either the disable commits first and we observe it, or we
+    // hold the share lock and the disable waits for our write to land. A plain
+    // SELECT would let an in-flight acceptance that already read `true` insert
+    // AFTER the disable committed. Share locks are mutually compatible, so
+    // acceptances still do not serialize against each other.
+    const lockedSetting = await tx.$queryRaw<{ value: string }[]>`
+      SELECT "value" FROM "Setting" WHERE "key" = ${TERMS_REQUIRED_KEY} FOR SHARE
+    `;
+    // Same interpretation as the gate: an install storing "1" or "yes" is
+    // enabled there, so it must be enabled here too — otherwise the gate would
+    // keep showing terms this function refuses to record, forever.
+    if (!isTruthySettingValue(lockedSetting[0]?.value)) {
       return { ok: false as const, code: "DISABLED" as const };
     }
 
@@ -538,7 +547,18 @@ export async function recordTermsAcceptance(
       return { ok: true as const, version: published.version, alreadyAccepted: true };
     }
 
-    await tx.user.update({ where: { id: userId }, data: { termsAcceptedAt: acceptedAt } });
+    // `termsAcceptedAt` means "most recent acceptance", so only move it FORWARD.
+    // Without the configuration lock two acceptances can interleave: a slow
+    // version-N transaction resuming after a version-N+1 acceptance committed
+    // would otherwise drag the timestamp backwards, even though both history
+    // rows are individually correct.
+    await tx.user.updateMany({
+      where: {
+        id: userId,
+        OR: [{ termsAcceptedAt: null }, { termsAcceptedAt: { lt: acceptedAt } }],
+      },
+      data: { termsAcceptedAt: acceptedAt },
+    });
     return { ok: true as const, version: published.version, alreadyAccepted: false };
   });
 }
