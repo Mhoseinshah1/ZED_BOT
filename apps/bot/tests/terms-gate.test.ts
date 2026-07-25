@@ -9,7 +9,11 @@ import {
   ensureUserAccess,
   resetTermsMisconfigAlertForTests,
 } from "../src/middlewares/user-access.middleware.js";
-import { clearSettingsCache, setSetting } from "../src/services/settings.service.js";
+import {
+  clearSettingsCache,
+  getBooleanSetting,
+  setSetting,
+} from "../src/services/settings.service.js";
 import {
   isTermsAcceptCallback,
   parseTermsAcceptCallback,
@@ -30,6 +34,7 @@ import {
   buildTermsScreen,
   TELEGRAM_MESSAGE_LIMIT,
   TERMS_TITLE_MAX_LENGTH,
+  TERMS_UNAVAILABLE_TEXT_FALLBACK,
   toPersianDigits,
 } from "../src/services/terms/terms-views.js";
 import { clearTextCache } from "../src/services/text.service.js";
@@ -104,6 +109,10 @@ function fakeCtx(
     from,
     chat,
     dbUser,
+    // Present so the accept handler's fall-through into the real access path
+    // can render the actual user menu instead of dying on an undefined session.
+    session: { temp: {} },
+    admin: null,
     callbackQuery,
     update: callbackQuery === undefined ? { update_id: 1 } : { update_id: 1, callback_query: callbackQuery },
     reply: vi.fn(async (text: string, other?: { reply_markup?: InlineKeyboard }) => {
@@ -514,6 +523,56 @@ describe.runIf(hasDb)("versioned terms — access gate (§1, §6, §7)", () => {
     // Answered with the CURRENT terms and the CURRENT button; nothing accepted.
     expect(callbacksOf(sent.at(-1)?.keyboard)).toEqual([termsAcceptCallback(id)]);
     expect(await prisma.termsAcceptance.count({ where: { userId: user.id } })).toBe(0);
+  });
+
+  it("G25 pressing accept while NOTHING is published continues the access path", async () => {
+    // Enforcement on with no published document is the state the gate itself
+    // deliberately treats as a recoverable misconfiguration (only the OWNER can
+    // publish, so blocking would be a lockout with no user-side recovery). It
+    // is reachable in production: the v1 repair migration archives a version 1
+    // whose body is unrenderable or over the limit and publishes nothing.
+    // The accept action must agree with the gate rather than parking the user
+    // on the "unavailable" message, which no button can ever satisfy.
+    const { id } = await publish("قوانین");
+    const user = await makeUser();
+    await prisma.termsDocument.update({
+      where: { id },
+      data: { status: TermsDocumentStatus.ARCHIVED },
+    });
+
+    const { ctx, sent } = fakeCtx(user, termsAcceptCallback(id));
+    await termsHandler.middleware()(ctx, async () => {});
+
+    // Nothing was accepted — there was nothing to accept.
+    expect(await prisma.termsAcceptance.count({ where: { userId: user.id } })).toBe(0);
+    // ...and the user reached the menu instead of the dead-end message.
+    expect((ctx.session as { lastMenu?: string }).lastMenu).toBe("user_main");
+    expect(sent.some((m) => m.text === TERMS_UNAVAILABLE_TEXT_FALLBACK)).toBe(false);
+  });
+
+  it("G26 a DISABLED result drops this worker's cached switch before re-gating", async () => {
+    // Multi-process deployment: another worker turns enforcement off while this
+    // one still holds `terms_required=true` in its 30s settings cache.
+    // recordTermsAcceptance reads the DATABASE and correctly returns DISABLED,
+    // but the re-entered access gate reads the CACHE. Without invalidation it
+    // re-draws the very screen the switch just retired — and pressing accept
+    // again returns DISABLED again, forever.
+    const { id } = await publish("قوانین");
+    const user = await makeUser();
+
+    // Warm this worker's cache with the pre-disable value...
+    expect(await getBooleanSetting(TERMS_REQUIRED_KEY, false)).toBe(true);
+    // ...then flip the row the way another process would: straight to the
+    // database, leaving this process's cache stale on purpose.
+    await prisma.setting.update({ where: { key: TERMS_REQUIRED_KEY }, data: { value: "false" } });
+
+    const { ctx, sent } = fakeCtx(user, termsAcceptCallback(id));
+    await termsHandler.middleware()(ctx, async () => {});
+
+    expect(await prisma.termsAcceptance.count({ where: { userId: user.id } })).toBe(0);
+    expect((ctx.session as { lastMenu?: string }).lastMenu).toBe("user_main");
+    // No message in the whole exchange carried an accept button.
+    expect(sent.flatMap((m) => callbacksOf(m.keyboard)).some(isTermsAcceptCallback)).toBe(false);
   });
 
   it("G21 the legacy terms:accept callback is NOT treated as a versioned accept", async () => {

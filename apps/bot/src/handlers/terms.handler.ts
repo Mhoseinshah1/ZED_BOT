@@ -13,7 +13,10 @@ import {
   parseTermsAcceptCallback,
   TERMS_ACCEPT_ROUTE_PATTERN,
 } from "../services/terms/terms-callbacks.js";
-import { getBooleanSettingFresh } from "../services/settings.service.js";
+import {
+  clearSettingCacheKeys,
+  getBooleanSettingFresh,
+} from "../services/settings.service.js";
 import {
   getPublishedTerms,
   recordTermsAcceptance,
@@ -37,9 +40,14 @@ import { showUserMenu } from "./menu.handler.js";
 // One invariant governs this whole file: a user can accept ONLY the exact
 // document body that was rendered with the button they pressed. The button
 // carries a document id, the service refuses any id that is not the currently
-// published document, and a refusal re-draws the CURRENT terms rather than
-// accepting anything. There is no code path from a stale button to an
-// acceptance.
+// published document, and a refusal records nothing. There is no code path
+// from a stale button to an acceptance.
+//
+// A refusal re-draws the CURRENT terms only when there IS a current version to
+// show (STALE). When the refusal says the requirement itself is gone —
+// enforcement switched off (DISABLED) or nothing published at all (NOT_FOUND) —
+// re-drawing would strand the user on a screen no acceptance can ever satisfy,
+// so the access path runs instead and decides where they belong.
 //
 // After a successful acceptance the full access path is re-run, so the user
 // continues to the force-join screen or the normal menu exactly as the gate
@@ -101,10 +109,10 @@ termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
     }
 
     const result = await recordTermsAcceptance(ctx.dbUser.id, document.id);
-    if (!result.ok && result.code !== "DISABLED") {
-      // STALE: a newer version was published between render and press (or the
-      // button was for an archived version). NOT_FOUND: nothing is published.
-      // Neither records an acceptance of the current version.
+    if (!result.ok && result.code === "STALE") {
+      // A newer version was published between render and press (or the button
+      // was for an archived version). No acceptance of the current version was
+      // recorded, so the user is shown the version they actually owe.
       await redrawCurrentTerms(ctx, staleNotice);
       return;
     }
@@ -118,8 +126,21 @@ termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
       );
     } else {
       // DISABLED: enforcement was switched off after this keyboard was rendered.
-      // Nothing is owed and nothing was written — acknowledge without claiming
-      // an acceptance was recorded, then continue through the access path.
+      // NOT_FOUND: enforcement is on but nothing is published — the same
+      // "unreachable misconfiguration" state the access gate deliberately steps
+      // aside for (only the OWNER can publish, so blocking would be a lockout
+      // with no user-side recovery). Both wrote nothing, so acknowledge without
+      // claiming an acceptance and let the access path decide what comes next.
+      //
+      // DISABLED was decided against the DATABASE inside the acceptance
+      // transaction, but `ensureUserAccess` reads the switch through the 30s
+      // settings cache. If another worker flipped it off, this worker's cache
+      // can still say `true` and would re-draw the very screen the switch just
+      // retired — an unacceptable loop, since pressing accept again returns
+      // DISABLED again. Drop the cached entry so the re-entry re-reads it.
+      if (result.code === "DISABLED") {
+        clearSettingCacheKeys([TERMS_REQUIRED_KEY]);
+      }
       await safeAnswerCallback(ctx);
     }
   } catch (err) {

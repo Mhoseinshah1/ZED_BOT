@@ -145,6 +145,9 @@ current terms and the current button, which is exactly what the user needs.
 `recordTermsAcceptance(userId, documentId)`:
 
 - rejects anything that is not the currently published document (`STALE`),
+- refuses to write when enforcement is switched off (`DISABLED`) or when nothing
+  at all is published (`NOT_FOUND`) — both read the *database*, not a cache, so
+  a switch flipped by another process is honoured immediately,
 - is **idempotent** — a second press returns the original row; `acceptedAt` is
   never overwritten and no duplicate row appears (a concurrent double-press is
   resolved by the unique index and reported as an idempotent success),
@@ -170,6 +173,23 @@ which is historically valid and still does not satisfy the gate).
 After a successful acceptance the handler answers `قوانین تایید شد ✅` and
 re-runs the **full** access path, so the user continues to the force-join screen
 or the normal menu according to the gate order.
+
+A refusal re-draws the terms screen only for `STALE`, because that is the only
+code for which a document the user still owes actually exists. `DISABLED` and
+`NOT_FOUND` both mean the requirement itself is gone, so the handler falls
+through to the **same** access path instead — re-drawing would park the user on
+a screen no press can ever satisfy (pressing again returns the same code). This
+keeps the accept action consistent with §4: enforcement enabled with nothing
+published is a recoverable misconfiguration the gate steps aside for, and the
+state is reachable in production whenever the `20260727130000` repair migration
+archives an unrenderable version 1 without publishing a replacement.
+
+For `DISABLED` the handler also drops `terms_required` from **this process's**
+30-second settings cache before re-entering the gate. The acceptance transaction
+decided `DISABLED` against the database; the gate reads the cache. Without the
+invalidation a worker whose cache still said `true` would immediately re-draw
+the retired screen, and every subsequent press would loop through the same pair
+of decisions.
 
 ---
 
