@@ -269,3 +269,26 @@ function okPrivate(canonicalUrl: string, hash: string): ParseForceJoinLinkResult
     },
   };
 }
+
+// --- membership status evaluation (§4.8) -------------------------------------
+
+/**
+ * Pure §4.8 membership rule over a getChatMember result. JOINED for `creator`,
+ * `administrator`, `member`, and `restricted` ONLY when `is_member === true`.
+ * NOT joined for `left`, `kicked`, `restricted` without is_member, and any
+ * unknown status. A pending join request is reported by Telegram as `left`, so
+ * it correctly resolves to NOT joined here. Shared so the gate and any other
+ * consumer reach an identical verdict.
+ */
+export function isForceJoinMembershipActive(status: string, isMember?: boolean): boolean {
+  switch (status) {
+    case "creator":
+    case "administrator":
+    case "member":
+      return true;
+    case "restricted":
+      return isMember === true;
+    default:
+      return false;
+  }
+}
