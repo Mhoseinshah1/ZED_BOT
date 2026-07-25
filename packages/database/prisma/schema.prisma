@@ -242,6 +242,12 @@ enum PaymentSettlementStatus {
 
 enum FinancialReconciliationType {
   DUPLICATE_CHECKOUT_PAYMENT
+  // hotfix (fix/service-username-reservation-safety §2): an external-success
+  // settlement (receipt / gateway / one-shot Stars) whose paid SERVICE order
+  // could not be bound to its exact BOUND username reservation. Provider success
+  // is preserved, the order is NOT dispatched to provisioning, and this durable
+  // case drives operator reconciliation. Never carries a raw username / note.
+  SERVICE_USERNAME_UNBOUND
 }
 
 enum FinancialReconciliationStatus {

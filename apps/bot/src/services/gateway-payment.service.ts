@@ -34,6 +34,7 @@ import {
   lockReservationForSettlement,
 } from "./service-username-selection.service.js";
 import {
+  fileServiceUsernameUnboundCase,
   findCaseForDuplicatePayment,
   notifyDuplicateSuccessCase,
   recordDuplicateSuccess,
@@ -836,16 +837,28 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
         orderCreated = result.created;
       }
       if (orderCreated) {
-        // hotfix §6: strictly bind the buyer's username reservation to this
+        // hotfix §2/§6: strictly bind the buyer's username reservation to this
         // settled order. EXTERNAL-SUCCESS settlement (Zarinpal / NOWPayments /
-        // one-shot Stars): a bind anomaly is recorded for reconciliation instead
-        // of rolling back and losing a real provider payment. Provisioning
-        // resolves the identity from the immutable order snapshot.
-        await bindSettledReservationFromSnapshot(tx, snapshot, {
+        // one-shot Stars): the provider already captured real money, so a bind
+        // anomaly must NOT roll back. Instead file a DURABLE reconciliation case
+        // (committed atomically with this paid Order); the order-fulfillment
+        // dispatcher refuses to provision any SERVICE order that has such an open
+        // case, so provider SUCCESS is preserved but no service is created and the
+        // username is never regenerated. Idempotent by the settling payment id.
+        const bindResult = await bindSettledReservationFromSnapshot(tx, snapshot, {
           userId: checkout.userId,
           checkoutSessionId: checkout.id,
           orderId: order.id,
         });
+        if (!bindResult.bound) {
+          await fileServiceUsernameUnboundCase(tx, {
+            checkoutSessionId: checkout.id,
+            paymentId: payment.id,
+            userId: checkout.userId,
+            expectedAmountToman: checkout.finalPriceToman,
+            safeReason: `gateway settlement reservation bind failed: ${bindResult.reason}`,
+          });
+        }
         await tx.payment.update({
           where: { id: payment.id },
           data: { orderId: order.id },

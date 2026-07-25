@@ -42,6 +42,43 @@ export interface ReservationCleanupResult {
   expiredBound: number;
 }
 
+// =============================================================================
+// THE shared "settleable payment" definition (hotfix §1). A reservation must be
+// treated as live while ANY linked payment can still legitimately settle, not
+// only an already-APPROVED one. A payment is settleable when it is in a
+// non-terminal local status, OR its provider already confirmed SUCCESS but local
+// settlement has not completed (awaiting settlement recovery / reconciliation),
+// OR it is under duplicate-success review. Terminal-dead statuses (REJECTED,
+// FAILED, EXPIRED, CANCELLED, DELETED) with no provider success are NOT settleable.
+//
+// This is the SINGLE source of truth used by both the cleanup SQL below and the
+// cleanup tests (which import these to build/assert states). Keep the SQL fragment
+// and the status list in lock-step.
+// =============================================================================
+
+/** Non-terminal local PaymentStatus values that can still settle. */
+export const SETTLEABLE_PAYMENT_STATUSES = [
+  "PENDING",
+  "PENDING_REVIEW",
+  "PROCESSING",
+  "APPROVED",
+] as const;
+
+/**
+ * SQL predicate (Postgres) for a settleable payment `p` linked to checkout `c`.
+ * Kept identical in meaning to {@link SETTLEABLE_PAYMENT_STATUSES} plus the
+ * provider-success-awaiting-settlement and duplicate-success-review cases. Uses
+ * only static literals (no user input), so it is embedded verbatim.
+ */
+export const SETTLEABLE_PAYMENT_SQL = `
+  p."checkoutSessionId" = c.id
+  AND (
+    p.status IN ('PENDING', 'PENDING_REVIEW', 'PROCESSING', 'APPROVED')
+    OR (p."providerStatus" = 'SUCCESS' AND p."settlementStatus" <> 'SETTLED')
+    OR p."settlementStatus" = 'DUPLICATE_SUCCESS_REVIEW'
+  )
+`;
+
 /**
  * Reclaim HELD reservations whose short TTL has passed. Single conditional UPDATE
  * per batch: the guard `status='HELD' AND expiresAt < now` is re-evaluated under
@@ -85,6 +122,10 @@ async function expireStaleHeld(now: Date): Promise<number> {
 async function expireDeadBound(now: Date): Promise<number> {
   let total = 0;
   for (let batch = 0; batch < MAX_BATCHES; batch += 1) {
+    // The `NOT EXISTS (settleable payment)` clause below is SETTLEABLE_PAYMENT_SQL
+    // inlined (Prisma tagged templates cannot interpolate a raw SQL fragment
+    // without parameterizing it; the fragment is static). It MUST stay identical
+    // to SETTLEABLE_PAYMENT_SQL — a payment that can still settle keeps its slot.
     const affected = await prisma.$executeRaw`
       UPDATE "ServiceUsernameReservation" AS r
       SET status = 'EXPIRED', "activeUsernameKey" = NULL, "releasedAt" = ${now}
@@ -100,7 +141,12 @@ async function expireDeadBound(now: Date): Promise<number> {
           )
           AND NOT EXISTS (
             SELECT 1 FROM "Payment" p
-            WHERE p."checkoutSessionId" = c.id AND p.status = 'APPROVED'
+            WHERE p."checkoutSessionId" = c.id
+              AND (
+                p.status IN ('PENDING', 'PENDING_REVIEW', 'PROCESSING', 'APPROVED')
+                OR (p."providerStatus" = 'SUCCESS' AND p."settlementStatus" <> 'SETTLED')
+                OR p."settlementStatus" = 'DUPLICATE_SUCCESS_REVIEW'
+              )
           )
           AND NOT EXISTS (
             SELECT 1 FROM "Order" o

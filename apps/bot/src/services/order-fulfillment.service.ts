@@ -11,6 +11,10 @@ import {
 } from "../handlers/user-services/service-views.js";
 import { isConnectionGuideEntryVisible } from "./connection-guide.service.js";
 import {
+  hasBlockingServiceUsernameUnboundCase,
+  SERVICE_UNBOUND_USER_TEXT,
+} from "./financial-reconciliation.service.js";
+import {
   deliverConfigQrCodes,
   deliverSubscriptionQr,
   type QrPhotoSender,
@@ -453,6 +457,19 @@ async function dispatchPaidOrderFulfillmentInner(
     const chatId = user.telegramId.toString();
 
     if (order.type === OrderType.SERVICE_PURCHASE) {
+      // hotfix §2: never provision a SERVICE order whose username reservation
+      // could not be bound at settlement. An OPEN reconciliation case is the
+      // single durable gate consulted by BOTH the direct settlement dispatch and
+      // the background settlement sweep — provider SUCCESS + the PAID Order are
+      // preserved, but no service is created and the username is never
+      // regenerated until an operator resolves the case.
+      if (
+        order.checkoutSessionId !== null &&
+        (await hasBlockingServiceUsernameUnboundCase(order.checkoutSessionId))
+      ) {
+        await sendSafe(api, chatId, SERVICE_UNBOUND_USER_TEXT);
+        return { kind: "NONE", reason: "service username reservation reconciliation pending" };
+      }
       const result = await provisionPaidOrder(order.id);
       if (result.ok) {
         await sendSafe(api, chatId, buildServiceInfoMessage(result.service), {

@@ -133,6 +133,90 @@ export async function recordDuplicateSuccess(
   return result;
 }
 
+// --- service-username reservation-bind reconciliation (hotfix §2) -------------------------
+
+/** Telegram-facing user notice when a paid SERVICE could not bind its username. */
+export const SERVICE_UNBOUND_USER_TEXT =
+  "پرداخت شما با موفقیت ثبت شد، اما به دلیل یک مغایرت در رزرو نام کاربری، ساخت سرویس نیاز به بررسی دارد.\n\n" +
+  "این مورد برای بررسی ثبت شد و نتیجه از طریق ربات اطلاع‌رسانی می‌شود.";
+
+/** Admin-facing safe message when a settlement is held for username reconciliation. */
+export const SERVICE_UNBOUND_ADMIN_TEXT =
+  "این پرداخت به دلیل مغایرت در رزرو نام کاربری سرویس، برای بررسی نگه داشته شد و به‌صورت خودکار سرویس ساخته نشد.";
+
+export interface ServiceUsernameUnboundInput {
+  checkoutSessionId: string;
+  /** The settling payment — occupies the unique idempotency slot. */
+  paymentId: string;
+  userId: string;
+  expectedAmountToman: number;
+  /** Short SAFE English marker — never a username / note / raw provider data. */
+  safeReason: string;
+}
+
+/**
+ * Files ONE durable reconciliation case (§2) for an external-success settlement
+ * whose paid SERVICE order could not be bound to its exact BOUND username
+ * reservation. Runs INSIDE the settlement transaction (uses `tx`) so the case
+ * commits atomically with the paid Order: provider SUCCESS is preserved and the
+ * order is deliberately left un-provisioned. Idempotent — the settling payment id
+ * occupies the `duplicatePaymentId @unique` slot, so duplicate callbacks / sweeps /
+ * retries converge on ONE case. Carries only ids + amount + a SAFE reason, never a
+ * username or note.
+ */
+export async function fileServiceUsernameUnboundCase(
+  tx: Prisma.TransactionClient,
+  input: ServiceUsernameUnboundInput,
+): Promise<{ created: boolean }> {
+  const existing = await tx.financialReconciliationCase.findUnique({
+    where: { duplicatePaymentId: input.paymentId },
+  });
+  if (existing !== null) {
+    return { created: false };
+  }
+  try {
+    await tx.financialReconciliationCase.create({
+      data: {
+        type: FinancialReconciliationType.SERVICE_USERNAME_UNBOUND,
+        checkoutSessionId: input.checkoutSessionId,
+        primaryPaymentId: null,
+        duplicatePaymentId: input.paymentId,
+        userId: input.userId,
+        expectedAmountToman: input.expectedAmountToman,
+        safeReason: input.safeReason.slice(0, 200),
+      },
+    });
+    return { created: true };
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return { created: false };
+    }
+    throw err;
+  }
+}
+
+/**
+ * True when an OPEN or IN_REVIEW SERVICE_USERNAME_UNBOUND case exists for this
+ * checkout. The order-fulfillment dispatcher consults this before provisioning a
+ * SERVICE order, so neither the direct settlement dispatch nor the background
+ * settlement sweep can provision an order whose username reservation is unresolved.
+ */
+export async function hasBlockingServiceUsernameUnboundCase(
+  checkoutSessionId: string,
+): Promise<boolean> {
+  const row = await prisma.financialReconciliationCase.findFirst({
+    where: {
+      checkoutSessionId,
+      type: FinancialReconciliationType.SERVICE_USERNAME_UNBOUND,
+      status: {
+        in: [FinancialReconciliationStatus.OPEN, FinancialReconciliationStatus.IN_REVIEW],
+      },
+    },
+    select: { id: true },
+  });
+  return row !== null;
+}
+
 // --- notifications ------------------------------------------------------------------------
 
 interface NotifyApi {

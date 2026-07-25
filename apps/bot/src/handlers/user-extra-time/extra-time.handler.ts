@@ -29,7 +29,7 @@ import {
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { CO_CB } from "../user-checkout/checkout-cb.js";
 import { walletConfirmText, walletPayAvailable } from "../user-checkout/checkout-views.js";
-import { clearCheckoutState } from "../user-checkout/checkout-state.js";
+import { abandonCheckoutDraft, clearCheckoutState } from "../user-checkout/checkout-state.js";
 import { showPaymentMethods } from "../user-checkout/payment.handler.js";
 import {
   eligibleTimeListKeyboard,
@@ -64,7 +64,7 @@ async function renderEligibleList(ctx: BotContext, page: number): Promise<void> 
   if (user === null) {
     return;
   }
-  clearCheckoutState(ctx);
+  await abandonCheckoutDraft(ctx, "EXTRA_TIME");
   const pageData = await listExtraTimeServices(user.id, page);
   await safeAnswerCallback(ctx);
   if (pageData.total === 0) {
@@ -95,7 +95,7 @@ extraTimeHandler.callbackQuery(/^user:et:svc:([0-9a-f-]+)$/, async (ctx) => {
   if (user === null) {
     return;
   }
-  clearCheckoutState(ctx);
+  await abandonCheckoutDraft(ctx, "EXTRA_TIME");
   const service = await getExtraTimeServiceByShortId(ctx.match[1], user.id);
   if (service === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);

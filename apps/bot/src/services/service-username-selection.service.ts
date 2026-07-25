@@ -377,6 +377,38 @@ export async function claimReservationForCheckout(
   return res.count === 1 ? { ok: true } : { ok: false, reason: "NOT_CLAIMABLE" };
 }
 
+/**
+ * Read-only mirror of the {@link claimReservationForCheckout} accepted state (§4):
+ * true iff the exact HELD reservation is still claimable RIGHT NOW (same id +
+ * owner + draft nonce + selected username + activeUsernameKey + mode + CURRENT
+ * panel, HELD, unexpired, and unlinked). Used by the wallet callback layers to
+ * fail closed BEFORE showing a confirmation screen or moving money for a stale /
+ * drifted / incomplete SERVICE draft. It does not mutate anything.
+ */
+export async function isReservationClaimable(
+  args: ReservationClaimArgs,
+  now: Date = new Date(),
+): Promise<boolean> {
+  const row = await prisma.serviceUsernameReservation.findFirst({
+    where: {
+      id: args.reservationId,
+      userId: args.userId,
+      draftNonce: args.draftNonce,
+      normalizedUsername: args.normalizedUsername,
+      activeUsernameKey: args.normalizedUsername,
+      mode: args.mode,
+      panelId: args.panelId,
+      status: ServiceUsernameReservationStatus.HELD,
+      expiresAt: { gt: now },
+      checkoutSessionId: null,
+      orderId: null,
+      serviceId: null,
+    },
+    select: { id: true },
+  });
+  return row !== null;
+}
+
 /** The identity an order-binding must match EXACTLY against the BOUND reservation. */
 export interface ReservationOrderBindArgs {
   reservationId: string;
@@ -450,28 +482,35 @@ export async function attachReservationToOrder(
   throw new ReservationInvariantError("ORDER_BIND_NO_MATCH");
 }
 
+/** Typed outcome of an external-settlement reservation bind (§2/§6). */
+export type SettledReservationBindResult =
+  | { bound: true }
+  | { bound: false; reason: string };
+
 /**
- * External-success settlement binding (§6): read the reservation identity from the
- * immutable checkout snapshot and strictly bind it to the settled order. Used by
- * the receipt-approval and gateway (Zarinpal / NOWPayments / one-shot Stars)
- * settlements, where the money has ALREADY moved externally. A strict-bind failure
- * must therefore NOT roll the settlement back and lose a real payment: it records a
- * privacy-safe reconciliation warning (order/checkout ids + reason only — never a
- * username, note, or owner id) and returns. The username identity still provisions
- * verbatim from the order's immutable naming snapshot (never regenerated), and the
- * cleanup/reconciliation sweep is the durable backstop. A no-op when the snapshot
- * carries no reservation (OTHER_PRODUCT, legacy panel-less service).
+ * External-success settlement binding (§2/§6): read the reservation identity from
+ * the immutable checkout snapshot and strictly bind it to the settled order. Used
+ * by the receipt-approval and gateway (Zarinpal / NOWPayments / one-shot Stars)
+ * settlements, where the money has ALREADY moved externally. It returns a TYPED
+ * result — it never logs-and-swallows and never rolls a real payment back. The
+ * CALLER makes the durable settlement/reconciliation decision:
+ *   • `{ bound: true }`  → the exact reservation is now recorded on the order (or
+ *     there was nothing to bind: OTHER_PRODUCT / legacy panel-less service);
+ *   • `{ bound: false, reason }` → the exact reservation could NOT be bound (a
+ *     privacy-safe machine reason — never a username / note / owner id). The
+ *     caller MUST open a durable reconciliation case, must NOT dispatch the order
+ *     to provisioning, and must preserve provider-success truth.
  */
 export async function bindSettledReservationFromSnapshot(
   tx: Db,
   snapshot: Record<string, unknown>,
   args: { userId: string; checkoutSessionId: string; orderId: string },
-): Promise<void> {
+): Promise<SettledReservationBindResult> {
   const reservationId = snapshotStr(snapshot, "serviceUsernameReservationId");
   const normalizedUsername = snapshotStr(snapshot, "serviceUsername");
   const panelId = snapshotStr(snapshot, "panelId");
   if (reservationId === null || normalizedUsername === null || panelId === null) {
-    return;
+    return { bound: true };
   }
   try {
     await attachReservationToOrder(tx, {
@@ -482,14 +521,10 @@ export async function bindSettledReservationFromSnapshot(
       normalizedUsername,
       orderId: args.orderId,
     });
+    return { bound: true };
   } catch (err) {
     if (err instanceof ReservationInvariantError) {
-      logger.warn("service username reservation bind anomaly at external settlement", {
-        reason: err.reason,
-        orderId: args.orderId,
-        checkoutId: args.checkoutSessionId,
-      });
-      return;
+      return { bound: false, reason: err.reason };
     }
     throw err;
   }

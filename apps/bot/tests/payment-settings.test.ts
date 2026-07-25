@@ -34,6 +34,7 @@ import {
   createWalletTopupCheckout,
   walletTopupLimits,
 } from "../src/services/wallet-topup.service.js";
+import { armServiceDraft } from "./helpers/service-checkout-fixture.js";
 
 // =============================================================================
 // Phase 22 wallet/payment settings integration tests. These mutate GLOBAL
@@ -159,7 +160,12 @@ describe.runIf(hasDb)("payment/wallet settings (Phase 22)", () => {
     });
 
     await setWalletPaymentEnabled(false);
-    const blocked = await payPurchaseDraftWithWallet(user, draft());
+    // The wallet-disabled guard is DOWNSTREAM of the reservation guard, so the
+    // draft must be armed (completed customization + HELD reservation) to reach it.
+    const blocked = await payPurchaseDraftWithWallet(
+      user,
+      await armServiceDraft(draft(), { userId: user.id, panelId: panel.id }),
+    );
     expect(!blocked.ok && blocked.error === WALLET_PAYMENT_DISABLED_TEXT).toBe(true);
     // No financial rows were written while disabled.
     expect(await prisma.payment.count({ where: { userId: user.id } })).toBe(0);
@@ -171,7 +177,10 @@ describe.runIf(hasDb)("payment/wallet settings (Phase 22)", () => {
 
     // Re-enabling restores the untouched Phase 15 path (atomic fix intact).
     await setWalletPaymentEnabled(true);
-    const paid = await payPurchaseDraftWithWallet(user, draft());
+    const paid = await payPurchaseDraftWithWallet(
+      user,
+      await armServiceDraft(draft(), { userId: user.id, panelId: panel.id }),
+    );
     expect(paid.ok).toBe(true);
     expect(
       (await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).balanceToman,

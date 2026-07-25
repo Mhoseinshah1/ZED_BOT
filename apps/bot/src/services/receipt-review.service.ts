@@ -52,6 +52,11 @@ const NO_CHECKOUT = "پیش‌فاکتور این پرداخت یافت نشد؛
 const CHECKOUT_NOT_PENDING = "وضعیت پیش‌فاکتور برای تایید معتبر نیست.";
 const AMOUNT_MISMATCH = "مبلغ رسید با پیش‌فاکتور هم‌خوانی ندارد.";
 const NO_PENDING_RECEIPT = "رسید در انتظار بررسی برای این پرداخت وجود ندارد.";
+// hotfix §2: the paid SERVICE order could not bind its exact username reservation.
+// A card receipt has no captured provider money to preserve, so the safest durable
+// state is to NOT finalize approval — the receipt stays PENDING_REVIEW (reviewable).
+const RESERVATION_RECONCILE_REQUIRED =
+  "تایید این رسید ممکن نیست: رزرو نام کاربری سرویس معتبر نیست و باید بررسی شود. رسید در وضعیت بررسی باقی می‌ماند.";
 const DISCOUNT_CLAIM_FAILED_ADMIN =
   "کد تخفیف این پرداخت دیگر معتبر نیست (سقف استفاده تکمیل یا منقضی شده است). تایید انجام نشد؛ در صورت نیاز رسید را رد کنید.";
 const SUBMITTED_AFTER_EXPIRY = "رسید بعد از انقضای پیش‌فاکتور ثبت شده و قابل تایید نیست.";
@@ -339,18 +344,21 @@ export async function approveReceiptPayment(
             paidAt: now,
           },
         });
-        // hotfix §6: strictly bind the buyer's username reservation to this
+        // hotfix §2/§6: strictly bind the buyer's username reservation to this
         // settled order (exact id + owner + checkout + panel + username in BOUND
-        // state, no foreign order). EXTERNAL-SUCCESS settlement: the card receipt
-        // was already approved, so a bind anomaly is recorded for reconciliation
-        // (privacy-safe: ids only) instead of rolling back and losing a real
-        // payment. Provisioning resolves the identity from the immutable order
-        // snapshot; the username is never regenerated post-payment.
-        await bindSettledReservationFromSnapshot(tx, snapshot, {
+        // state, no foreign order). A card receipt has no captured provider money,
+        // so on a bind anomaly we ABORT the approval (rolling the whole tx back):
+        // the receipt stays PENDING_REVIEW (a durable, reviewable state), no
+        // un-bound SERVICE order is created or provisioned, and the admin sees a
+        // safe reconciliation message. The username is never regenerated.
+        const bindResult = await bindSettledReservationFromSnapshot(tx, snapshot, {
           userId: checkout.userId,
           checkoutSessionId: checkout.id,
           orderId: order.id,
         });
+        if (!bindResult.bound) {
+          throw new ReviewAbortError(RESERVATION_RECONCILE_REQUIRED);
+        }
         await tx.payment.update({
           where: { id: payment.id },
           data: { orderId: order.id },

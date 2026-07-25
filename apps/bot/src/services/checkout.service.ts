@@ -32,7 +32,7 @@ const DEFAULT_EXPIRY_MINUTES = 30;
  * reservation. Carries only a machine-readable reason (no username / owner id).
  */
 export class CheckoutReservationError extends Error {
-  constructor(readonly reason: "PANEL_MISSING" | "NOT_CLAIMABLE") {
+  constructor(readonly reason: "CUSTOMIZATION_INCOMPLETE" | "NOT_CLAIMABLE") {
     super(`checkout username reservation claim failed: ${reason}`);
     this.name = "CheckoutReservationError";
   }
@@ -221,18 +221,24 @@ export async function createCheckoutSession(
       });
     }
 
-    // Service-checkout username selection (hotfix §3): AUTHORITATIVELY CLAIM the
-    // buyer's HELD username reservation into this durable checkout. The claim is a
-    // single atomic UPDATE that verifies the full identity — owner, draft nonce,
-    // selected username, mode, the CURRENT product panel, HELD + unexpired, and no
-    // pre-existing checkout/order/service link. A zero-row claim (stale hold, panel
-    // drift, foreign re-bind, expiry) throws, rolling back this checkout and the
-    // superseded cancellations above so a payable checkout can never exist without
-    // its exact active reservation. The result is never a silently-ignored boolean.
-    const customization = draft.serviceCustomization;
-    if (product.type === "SERVICE_PRODUCT" && customization?.completed === true) {
-      if (product.panelId === null) {
-        throw new CheckoutReservationError("PANEL_MISSING");
+    // Service-checkout username selection (hotfix §3/§5): a PANEL-BACKED SERVICE
+    // checkout MUST carry a completed username customization whose exact HELD
+    // reservation this transaction authoritatively CLAIMS — even if a handler-layer
+    // guard was forgotten. This service is the fail-closed authority:
+    //   • missing / incomplete customization → typed error (nothing committed);
+    //   • claim affects zero rows (stale hold, panel drift, foreign re-bind,
+    //     expiry) → typed error.
+    // The claim is one atomic UPDATE verifying owner + draft nonce + selected
+    // username + mode + the CURRENT product panel + HELD + unexpired + unlinked;
+    // throwing rolls back this checkout AND the superseded cancellations above, so
+    // a payable SERVICE checkout can never exist without its exact active
+    // reservation. Panel-less legacy SERVICE products (product.panelId === null)
+    // carry no reservation and are handled explicitly by the branch condition;
+    // OTHER_PRODUCT is untouched.
+    if (product.type === "SERVICE_PRODUCT" && product.panelId !== null) {
+      const customization = draft.serviceCustomization;
+      if (customization?.completed !== true) {
+        throw new CheckoutReservationError("CUSTOMIZATION_INCOMPLETE");
       }
       const claim = await claimReservationForCheckout(
         tx,

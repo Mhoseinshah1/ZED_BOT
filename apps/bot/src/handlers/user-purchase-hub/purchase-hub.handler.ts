@@ -5,7 +5,7 @@ import type { BotContext } from "../../core/context.js";
 import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
 import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
 import { boundPlainText } from "../user-pricing/pricing-bounds.js";
-import { clearCheckoutState } from "../user-checkout/checkout-state.js";
+import { abandonCheckoutDraft } from "../user-checkout/checkout-state.js";
 
 // =============================================================================
 // Purchase hub (feat/admin-controlled-unified-purchase-menu, §7/§8). The
@@ -61,7 +61,7 @@ export async function renderPurchaseHub(ctx: BotContext): Promise<void> {
   if (user === null) {
     return;
   }
-  clearCheckoutState(ctx);
+  await abandonCheckoutDraft(ctx, "PURCHASE_HUB");
   await safeAnswerCallback(ctx);
   const [intro, vpnLabel, otherLabel] = await Promise.all([
     getMessageTemplate("purchase_hub_intro"),

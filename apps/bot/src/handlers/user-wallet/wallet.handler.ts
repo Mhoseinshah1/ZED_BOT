@@ -20,7 +20,7 @@ import {
   listWalletTransactions,
 } from "../../services/wallet.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
-import { clearCheckoutState } from "../user-checkout/checkout-state.js";
+import { abandonCheckoutDraft, clearCheckoutState } from "../user-checkout/checkout-state.js";
 import { showPaymentMethods } from "../user-checkout/payment.handler.js";
 import {
   formatToman,
@@ -109,7 +109,7 @@ walletHandler.callbackQuery(WALLET_CB.TOPUP, async (ctx) => {
     await safeEditOrReply(ctx, WALLET_TOPUP_DISABLED_TEXT, walletMainKeyboard());
     return;
   }
-  clearCheckoutState(ctx);
+  await abandonCheckoutDraft(ctx, "WALLET_TOPUP");
   ctx.session.currentFlow = "wallet:topup:amount";
   ctx.session.temp.walletTopupDraft = {};
   await safeAnswerCallback(ctx);
