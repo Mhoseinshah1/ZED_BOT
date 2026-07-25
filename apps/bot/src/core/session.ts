@@ -482,6 +482,12 @@ export interface SessionData {
         expiresAtMs: number;
       };
     };
+    // Versioned mandatory terms admin (feat/versioned-mandatory-terms, §9). The
+    // OWNER's in-progress draft edit: `documentId` names the TermsDocument row
+    // the next admin text message replaces the body of. Holding the id (never
+    // the body) means a stale flow can only ever target a row that still exists
+    // and is still a DRAFT — the service re-checks both before writing.
+    termsDraft?: { documentId: string };
     // Device connection guides admin (feat/device-connection-guides). The
     // create-wizard accumulator + the single-field editor target. Holds only
     // operator-authored content in progress (never a Service secret); the app

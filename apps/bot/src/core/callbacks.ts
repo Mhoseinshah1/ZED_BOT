@@ -48,6 +48,13 @@ export const CB = {
 
   // Common / gates
   COMMON_BACK: "common:back",
+  /**
+   * LEGACY terms-accept identity. Versioned terms bind acceptance to ONE
+   * document (`user:terms:accept:<short-id>`, see services/terms/
+   * terms-callbacks.ts), so this static id no longer accepts anything: it only
+   * survives so keyboards sent before the upgrade are answered with the current
+   * terms instead of silently doing nothing. NEVER render it on a new keyboard.
+   */
   TERMS_ACCEPT: "terms:accept",
   FORCE_JOIN_CHECK: "force_join:check",
 } as const;

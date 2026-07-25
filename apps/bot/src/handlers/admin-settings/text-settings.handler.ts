@@ -173,6 +173,10 @@ export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     // re-checks); literal callback avoids importing the admin handler here.
     .text("عضویت اجباری 📢", "admin:force_join:root")
     .row()
+    // Versioned mandatory terms (feat/versioned-mandatory-terms). OWNER-only
+    // (handler re-checks); literal callback avoids importing the admin handler here.
+    .text("قوانین و شرایط 📜", "admin:terms:root")
+    .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
   await safeEditOrReply(ctx, "تنظیمات عمومی ⚙️\n\nیک بخش را انتخاب کنید:", kb);
 }
