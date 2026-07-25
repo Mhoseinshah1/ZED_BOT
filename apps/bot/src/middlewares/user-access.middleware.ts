@@ -1,6 +1,6 @@
 import { UserStatus } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
-import { InlineKeyboard, type MiddlewareFn } from "grammy";
+import { type MiddlewareFn } from "grammy";
 
 import { CB } from "../core/callbacks.js";
 import type { BotContext } from "../core/context.js";
@@ -8,13 +8,51 @@ import { GENERIC_ERROR_TEXT } from "../core/errors.js";
 import { logger } from "../core/logger.js";
 import { resolveForceJoinGate } from "../services/force-join/force-join-gate.js";
 import { getBooleanSetting } from "../services/settings.service.js";
+import { OPS_EVENTS, writeSystemLog } from "../services/system-log.service.js";
+import { isTermsAcceptCallback } from "../services/terms/terms-callbacks.js";
+import {
+  getPublishedTerms,
+  hasAcceptedTermsDocument,
+  TERMS_REQUIRED_KEY,
+} from "../services/terms/terms-document.service.js";
+import { buildTermsScreen } from "../services/terms/terms-views.js";
 import { getMessageTemplate } from "../services/text.service.js";
 import { registerOrUpdateUser } from "../services/user.service.js";
 import { safeAnswerCallback, safeReply } from "../utils/safe-reply.js";
 
 export const ACCESS_DENIED_TEXT =
   "حساب کاربری شما مسدود شده است. برای بررسی بیشتر با پشتیبانی تماس بگیرید.";
-const TERMS_TEXT_FALLBACK = "برای استفاده از ربات، ابتدا قوانین را مطالعه و تایید کنید.";
+
+/**
+ * "Terms enforcement is on with no published document" is unreachable through
+ * the bot, so alerting on every gated request would be noise if it ever did
+ * happen. One alert per process per interval is enough to reach the OWNER.
+ */
+const TERMS_MISCONFIG_ALERT_INTERVAL_MS = 10 * 60_000;
+let lastTermsMisconfigAlertAt = 0;
+
+async function reportTermsMisconfiguration(): Promise<void> {
+  const now = Date.now();
+  if (now - lastTermsMisconfigAlertAt < TERMS_MISCONFIG_ALERT_INTERVAL_MS) {
+    return;
+  }
+  lastTermsMisconfigAlertAt = now;
+  logger.warn("terms enforcement enabled with no published document; gate skipped");
+  await writeSystemLog({
+    level: "WARN",
+    eventType: OPS_EVENTS.TERMS_ENFORCEMENT_MISCONFIGURED,
+    message:
+      "Terms enforcement is enabled but no terms version is published; the terms gate is being skipped.",
+    // Counts/flags only — no user identity and no terms content.
+    metadata: { publishedVersions: 0 },
+    topicKey: "SYSTEM",
+  });
+}
+
+/** Test hook: forgets the alert de-duplication window. */
+export function resetTermsMisconfigAlertForTests(): void {
+  lastTermsMisconfigAlertAt = 0;
+}
 
 /**
  * User access gate, in spec order:
@@ -61,16 +99,32 @@ export async function ensureUserAccess(ctx: BotContext): Promise<boolean> {
     return false;
   }
 
-  // 3. Terms placeholder (skipped for the accept action itself).
+  // 3. Versioned mandatory terms (skipped for the accept action itself, which
+  //    records the acceptance and then re-enters this gate).
+  //
+  //    Acceptance is keyed to the PUBLISHED DOCUMENT, never to the legacy
+  //    `termsAcceptedAt` timestamp: a user who accepted version 3 has no
+  //    acceptance row for version 4, so publishing a new version re-gates
+  //    everyone without touching a single user row.
   if (
-    callbackData !== CB.TERMS_ACCEPT &&
-    user.termsAcceptedAt === null &&
-    (await getBooleanSetting("terms_required", false))
+    !isTermsAcceptCallback(callbackData) &&
+    (await getBooleanSetting(TERMS_REQUIRED_KEY, false))
   ) {
-    await safeAnswerCallback(ctx);
-    const text = await getMessageTemplate("terms_text", TERMS_TEXT_FALLBACK);
-    await safeReply(ctx, text, new InlineKeyboard().text("تایید قوانین ✅", CB.TERMS_ACCEPT));
-    return false;
+    const published = await getPublishedTerms();
+    if (published === null) {
+      // Enforcement is on but nothing is published. The admin UI and the
+      // service both refuse to reach this state, so it means external/manual
+      // tampering or a partial restore. Blocking here would deny every user
+      // access with NO action they could take to recover (only the OWNER can
+      // publish), so — as with an unverifiable force-join channel — the gate
+      // steps aside and raises a durable OWNER alert instead of bricking the bot.
+      await reportTermsMisconfiguration();
+    } else if (!(await hasAcceptedTermsDocument(user.id, published.id))) {
+      await safeAnswerCallback(ctx);
+      const screen = await buildTermsScreen(published);
+      await safeReply(ctx, screen.text, screen.keyboard);
+      return false;
+    }
   }
 
   // 4. Mandatory channel membership (force join). Skipped for the check action

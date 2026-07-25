@@ -185,5 +185,17 @@ _Labels only — callback routing never depends on an editable label._
 | `pricing_buy_service` | خرید این پلن 🛒 | Service detail CTA (retail). |
 | `pricing_buy_other` | خرید این محصول 🛒 | Other detail CTA (retail). |
 | `pricing_back` | بازگشت به تعرفه‌ها | Back to the pricing root. |
+| `terms_accept` | دکمه پذیرش قوانین | قوانین را می‌پذیرم ✅ | yes |
+| `terms_admin_enable` | دکمه فعال سازی قوانین | فعال‌سازی تایید قوانین ✅ | yes |
+| `terms_admin_disable` | دکمه غیرفعال سازی قوانین | غیرفعال‌سازی تایید قوانین ❌ | yes |
+| `terms_admin_draft_new` | دکمه ایجاد پیش‌نویس | ایجاد پیش‌نویس جدید ➕ | yes |
+| `terms_admin_draft_edit` | دکمه ویرایش پیش‌نویس | ویرایش پیش‌نویس ✏️ | yes |
+| `terms_admin_preview` | دکمه پیش‌نمایش قوانین | پیش‌نمایش 👁 | yes |
+| `terms_admin_publish` | دکمه انتشار نسخه جدید | انتشار نسخه جدید 🚀 | yes |
+| `terms_admin_publish_confirm` | دکمه تایید انتشار قوانین | انتشار و الزام پذیرش مجدد 🚀 | yes |
+| `terms_admin_draft_delete` | دکمه حذف پیش‌نویس | حذف پیش‌نویس 🗑 | yes |
+| `terms_admin_history` | دکمه تاریخچه نسخه‌ها | تاریخچه نسخه‌ها 📚 | yes |
+| `terms_admin_stats` | دکمه آمار پذیرش | آمار پذیرش 📊 | yes |
+| `terms_admin_back` | دکمه بازگشت قوانین | بازگشت | yes |
 
 _Labels only — callback routing never depends on an editable label._

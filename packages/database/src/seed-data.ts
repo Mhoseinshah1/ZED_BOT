@@ -93,6 +93,39 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     allowedVariables: [],
   },
   // Mandatory channel membership (Force Join): user + admin messages (spec 4.15).
+  // Versioned mandatory terms (feat/versioned-mandatory-terms, §12). `terms_text`
+  // above is retained as the LEGACY single-text template that seeds published
+  // version 1 on upgrade; the live terms body now lives in TermsDocument and is
+  // edited from the admin panel, not here.
+  {
+    key: "terms_page_title",
+    title: "عنوان صفحه قوانین",
+    category: "general",
+    defaultContent: "📜 قوانین و شرایط استفاده",
+    allowedVariables: [],
+  },
+  {
+    key: "terms_accepted_toast",
+    title: "پیام تایید قوانین",
+    category: "general",
+    defaultContent: "قوانین تایید شد ✅",
+    allowedVariables: [],
+  },
+  {
+    key: "terms_stale_text",
+    title: "پیام نسخه قدیمی قوانین",
+    category: "general",
+    defaultContent:
+      "نسخه جدیدی از قوانین منتشر شده است. لطفاً نسخه جدید را مطالعه و تایید کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "terms_unavailable_text",
+    title: "پیام نبود متن قوانین",
+    category: "general",
+    defaultContent: "متن قوانین در دسترس نیست. لطفاً بعداً دوباره تلاش کنید.",
+    allowedVariables: [],
+  },
   {
     key: "force_join_page",
     title: "صفحه عضویت اجباری",
@@ -1175,6 +1208,26 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "force_join_admin_down", title: "دکمه انتقال به پایین", text: "انتقال به پایین ⬇️" },
   { key: "force_join_admin_delete", title: "دکمه حذف کانال", text: "حذف کانال 🗑" },
   { key: "force_join_admin_back", title: "دکمه بازگشت", text: "بازگشت" },
+  // Versioned mandatory terms (feat/versioned-mandatory-terms, §12). The user
+  // accept button plus the OWNER admin-page buttons. Every one of these labels
+  // is operator-editable and NONE of them drives routing: callbacks bind to the
+  // stable `user:terms:accept:<id>` / `admin:terms:*` contracts instead.
+  { key: "terms_accept", title: "دکمه پذیرش قوانین", text: "قوانین را می‌پذیرم ✅" },
+  { key: "terms_admin_enable", title: "دکمه فعال سازی قوانین", text: "فعال‌سازی تایید قوانین ✅" },
+  { key: "terms_admin_disable", title: "دکمه غیرفعال سازی قوانین", text: "غیرفعال‌سازی تایید قوانین ❌" },
+  { key: "terms_admin_draft_new", title: "دکمه ایجاد پیش‌نویس", text: "ایجاد پیش‌نویس جدید ➕" },
+  { key: "terms_admin_draft_edit", title: "دکمه ویرایش پیش‌نویس", text: "ویرایش پیش‌نویس ✏️" },
+  { key: "terms_admin_preview", title: "دکمه پیش‌نمایش قوانین", text: "پیش‌نمایش 👁" },
+  { key: "terms_admin_publish", title: "دکمه انتشار نسخه جدید", text: "انتشار نسخه جدید 🚀" },
+  { key: "terms_admin_draft_delete", title: "دکمه حذف پیش‌نویس", text: "حذف پیش‌نویس 🗑" },
+  { key: "terms_admin_history", title: "دکمه تاریخچه نسخه‌ها", text: "تاریخچه نسخه‌ها 📚" },
+  { key: "terms_admin_stats", title: "دکمه آمار پذیرش", text: "آمار پذیرش 📊" },
+  { key: "terms_admin_back", title: "دکمه بازگشت قوانین", text: "بازگشت" },
+  {
+    key: "terms_admin_publish_confirm",
+    title: "دکمه تایید انتشار قوانین",
+    text: "انتشار و الزام پذیرش مجدد 🚀",
+  },
   { key: "buy_subscription", title: "خرید اشتراک", text: "خرید اشتراک 🔐" },
   { key: "renew_service", title: "تمدید سرویس", text: "تمدید سرویس ♻️" },
   { key: "extra_volume", title: "خرید حجم اضافه", text: "خرید حجم اضافه ➕" },

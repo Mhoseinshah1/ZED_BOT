@@ -630,6 +630,10 @@ model User {
   representativePurchases     RepresentativePurchase[]
   // Service-checkout username selection: this user's buyer-username reservations.
   serviceUsernameReservations ServiceUsernameReservation[]
+  // Versioned mandatory terms: one row per accepted TermsDocument. `termsAcceptedAt`
+  // above stays as the LATEST-acceptance timestamp for backwards compatibility and
+  // is written atomically together with the row here.
+  termsAcceptances            TermsAcceptance[]
 
   @@index([status])
   @@index([group])
@@ -2570,6 +2574,85 @@ model ForceJoinChannel {
   unhealthyAt          DateTime?
 
   @@index([isActive, sortOrder, createdAt, id])
+}
+
+// =============================================================================
+// Versioned mandatory Terms & Conditions
+// (feat/versioned-mandatory-terms). Replaces the single operator-editable
+// `terms_text` template with an auditable document history: exactly one
+// PUBLISHED document at a time, monotonic versions, and a per-user acceptance
+// row per document. Editing a DRAFT never touches users; publishing assigns the
+// next version, archives the previous published document and thereby requires
+// every user to accept again. A published document is NEVER modified in place.
+// =============================================================================
+
+enum TermsDocumentStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model TermsDocument {
+  id String @id @default(uuid())
+
+  /// Monotonic, gap-free-by-construction public version number. NULL only while
+  /// the document is a DRAFT — the version is assigned atomically at publish
+  /// time under the terms advisory lock, so two concurrent publishes can never
+  /// mint the same number. Unique across all rows that have one.
+  version Int? @unique
+
+  /// The exact body rendered to users. Plain text; never HTML/Markdown-parsed on
+  /// the user screen, so operator copy can never inject formatting or entities.
+  body String
+
+  status TermsDocumentStatus @default(DRAFT)
+
+  /// Optional integrity aid: a SHA-256 hex digest of `body`, computed at publish
+  /// time. Safe to log/compare — it carries no user data.
+  contentHash String?
+
+  createdByAdminId   String?
+  publishedByAdminId String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  publishedAt DateTime?
+
+  acceptances TermsAcceptance[]
+
+  /// Overview/history reads are ordered by version desc, and the "current
+  /// published document" lookup filters on status.
+  @@index([status, version])
+  @@index([status, createdAt])
+}
+
+model TermsAcceptance {
+  id String @id @default(uuid())
+
+  userId          String
+  termsDocumentId String
+
+  /// Denormalized copy of TermsDocument.version at acceptance time so history
+  /// stays readable even if a document row is ever archived away from the hot
+  /// path. Never rewritten.
+  termsVersion Int
+
+  acceptedAt DateTime @default(now())
+
+  /// Provenance of the acceptance, e.g. "BOT" for the in-bot button and
+  /// "MIGRATION" for the one-time legacy backfill. Intentionally coarse: no IP
+  /// address, no device fingerprint and no Telegram update payload is stored.
+  source String?
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document TermsDocument @relation(fields: [termsDocumentId], references: [id], onDelete: Cascade)
+
+  /// Idempotency: accepting the same document twice is a no-op, never a
+  /// duplicate row and never an overwrite of the original timestamp.
+  @@unique([userId, termsDocumentId])
+  /// Backs the "how many users accepted the current version" aggregate.
+  @@index([termsDocumentId, acceptedAt])
+  @@index([userId, termsVersion])
 }
 
 // =============================================================================

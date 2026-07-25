@@ -112,6 +112,11 @@ import {
   forceJoinCommandEscapeHandler,
 } from "./handlers/admin-settings/force-join-admin.handler.js";
 import {
+  termsAdminHandler,
+  termsAdminTextHandler,
+  termsCommandEscapeHandler,
+} from "./handlers/admin-settings/terms-admin.handler.js";
+import {
   adminRepresentativeHandler,
   adminRepresentativeTextHandler,
 } from "./handlers/admin-representative/admin-representative.handler.js";
@@ -218,6 +223,12 @@ export function createBot(token: string): Bot<BotContext> {
   // channel link. Passes through untouched for non-command messages.
   bot.use(forceJoinCommandEscapeHandler);
 
+  // Versioned mandatory terms: same reason and same ordering requirement —
+  // a command sent while the OWNER is typing a terms draft must unwind that
+  // flow BEFORE the command composers below consume the update, otherwise the
+  // next ordinary text would be mis-read as the terms body.
+  bot.use(termsCommandEscapeHandler);
+
   // Gate-free basics.
   bot.use(pingHandler);
 
@@ -285,6 +296,11 @@ export function createBot(token: string): Bot<BotContext> {
   // admin page (admin:force_join:*) — master switch, channel add/edit/rebind,
   // per-channel test/reorder/delete. Never renders/logs the Telegram chatId.
   adminArea.use(forceJoinAdminHandler);
+  // Versioned mandatory terms (feat/versioned-mandatory-terms): OWNER-only
+  // «قوانین و شرایط 📜» admin page (admin:terms:*) — master switch, draft
+  // create/edit/delete, publish, history and aggregate acceptance counts.
+  // Never renders a user identity and never deletes a published version.
+  adminArea.use(termsAdminHandler);
   adminArea.use(adminRepresentativeHandler);
   adminArea.use(deviceGuidesHandler);
   adminArea.use(diagnosticsAdminHandler);
@@ -339,6 +355,9 @@ export function createBot(token: string): Bot<BotContext> {
   // "force_join:edit_link"). Self-gates on currentFlow, so every other admin flow
   // passes through untouched.
   adminFlowText.use(forceJoinAdminTextHandler);
+  // Versioned mandatory terms: the draft-body text input ("terms:draft_body").
+  // Self-gates on currentFlow, so every other admin flow passes through.
+  adminFlowText.use(termsAdminTextHandler);
   // Checkout-payment reminders (Phase 2): numeric config input for the two
   // checkout rule pages ("admin_ntf_co:cfg"). Self-gates on currentFlow.
   adminFlowText.use(adminNotificationsTextHandler);
