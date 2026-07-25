@@ -642,6 +642,29 @@ describe.runIf(hasDb)("terms admin — history + preview (§8)", () => {
     expect(allText(rec)).toContain(`نسخه ${toPersianDigits(1)}`);
   });
 
+  it("A32b an absurd page number is clamped to the last real page", async () => {
+    for (let i = 1; i <= 3; i += 1) await publish(`نسخه ${i}`);
+    // The callback regex accepts any digit run; unclamped this became an
+    // out-of-range Prisma `skip` and rendered "page 99999999 of 1".
+    const { rec } = await runCallback("admin:terms:history:99999999", OWNER);
+    const text = allText(rec);
+    expect(text).toContain(`نسخه ${toPersianDigits(3)}`);
+    expect(text).toContain(`صفحه ${toPersianDigits(1)} از ${toPersianDigits(1)}`);
+  });
+
+  it("A33b the preview stays inside Telegram's limit with a large published+draft pair", async () => {
+    // A new draft is SEEDED from the published body, so both are large at once.
+    await publish("ب".repeat(3000));
+    const draft = await createTermsDraft(null);
+    if (!draft.ok) throw new Error("draft failed");
+
+    const { rec } = await runCallback("admin:terms:preview", OWNER);
+    for (const sent of rec.sent) {
+      expect(sent.text.length).toBeLessThanOrEqual(4096);
+    }
+    expect(rec.sent.length).toBeGreaterThan(0);
+  });
+
   it("A33 preview shows the published version and the draft side by side", async () => {
     await publish("متن منتشرشده");
     const draft = await createTermsDraft(null);

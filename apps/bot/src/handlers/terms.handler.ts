@@ -5,10 +5,13 @@ import { CB } from "../core/callbacks.js";
 import type { BotContext } from "../core/context.js";
 import { GENERIC_ERROR_TEXT } from "../core/errors.js";
 import { logger } from "../core/logger.js";
-import { ensureUserAccess } from "../middlewares/user-access.middleware.js";
+import {
+  ensurePreTermsAccess,
+  ensureUserAccess,
+} from "../middlewares/user-access.middleware.js";
 import {
   parseTermsAcceptCallback,
-  TERMS_ACCEPT_PATTERN,
+  TERMS_ACCEPT_ROUTE_PATTERN,
 } from "../services/terms/terms-callbacks.js";
 import {
   getPublishedTerms,
@@ -59,9 +62,21 @@ async function redrawCurrentTerms(ctx: BotContext, notice: string): Promise<void
   await safeReply(ctx, screen.text, screen.keyboard);
 }
 
-termsHandler.callbackQuery(TERMS_ACCEPT_PATTERN, async (ctx) => {
+// Routed on the PREFIX, not the strict payload shape: a malformed short id must
+// reach this handler and be told the button is stale. Binding the strict pattern
+// here would let `user:terms:accept:zzz` fall through unanswered while the access
+// gate had already skipped itself for it.
+termsHandler.callbackQuery(TERMS_ACCEPT_ROUTE_PATTERN, async (ctx) => {
   const from = ctx.from;
   if (from === undefined) {
+    return;
+  }
+
+  // Maintenance mode and account status apply BEFORE anything is recorded: a
+  // blocked user pressing a stale accept button must not write an acceptance
+  // row. (The terms and force-join steps are deliberately NOT applied here —
+  // this action is the terms step, and force join must stay after it.)
+  if (!(await ensurePreTermsAccess(ctx))) {
     return;
   }
 

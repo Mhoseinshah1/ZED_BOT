@@ -32,6 +32,15 @@ export const TERMS_ACCEPT_CALLBACK_MAX_BYTES = 64;
 
 export const TERMS_ACCEPT_PATTERN = /^user:terms:accept:([0-9a-f]{4,36})$/i;
 
+/**
+ * ROUTING pattern: matches the prefix and anything after it. The handler binds
+ * this rather than the strict pattern above so a MALFORMED short id still
+ * reaches it and is answered with "this button is stale" — the access gate has
+ * already skipped itself for the same prefix, so a stricter route would leave
+ * such a payload silently unanswered.
+ */
+export const TERMS_ACCEPT_ROUTE_PATTERN = /^user:terms:accept:/;
+
 /** Builds the accept callback for ONE specific document. */
 export function termsAcceptCallback(documentId: string): string {
   return `${TERMS_ACCEPT_PREFIX}${documentId.slice(0, SHORT_ID_LENGTH)}`;

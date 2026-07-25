@@ -146,10 +146,26 @@ current terms and the current button, which is exactly what the user needs.
 
 - rejects anything that is not the currently published document (`STALE`),
 - is **idempotent** — a second press returns the original row; `acceptedAt` is
-  never overwritten and no duplicate row appears,
+  never overwritten and no duplicate row appears (a concurrent double-press is
+  resolved by the unique index and reported as an idempotent success),
 - writes the acceptance row and `User.termsAcceptedAt` in **one transaction**,
 - touches **nothing else**: no balance, order, referral, checkout, payment,
   force-join bypass, role or account status.
+
+Maintenance mode and account status are applied **before** anything is recorded
+(`ensurePreTermsAccess`), so a blocked user pressing a stale accept button
+writes no row at all. The terms and force-join steps are deliberately not
+applied there — this action *is* the terms step, and force join must stay after
+it.
+
+This path deliberately does **not** take the configuration advisory lock.
+Publishing re-gates the whole user base at once, which is exactly when a burst
+of acceptances arrives; serializing all of them behind the OWNER's lock would
+queue every user while each held a pooled connection. Correctness does not need
+it: the published document is re-read inside the transaction, so a publish
+committing meanwhile either makes this read return the NEW document (stale
+button rejected) or leaves it unchanged (an acceptance of the OLD document,
+which is historically valid and still does not satisfy the gate).
 
 After a successful acceptance the handler answers `قوانین تایید شد ✅` and
 re-runs the **full** access path, so the user continues to the force-join screen
@@ -247,13 +263,34 @@ simply retype. `/start`, `/admin` and any other command unwind the flow first �
 
 ---
 
+## 8b. Rendering bounds
+
+Telegram rejects a text message over 4,096 characters, `safeReply` swallows the
+400, and the gate still blocks — so an oversized terms screen would leave a user
+unable to proceed *and* unable to see why, forever. Bodies are capped at 3,500,
+but the title is an operator-editable template and an upgraded install can carry
+a large legacy body, so the composed screens are bounded explicitly:
+
+- `buildTermsScreen` reserves the header and truncates the **displayed** body to
+  fit; the stored document is never modified.
+- The admin preview splits its budget between the published document and the
+  draft. A new draft is seeded from the published body, so both are large at the
+  same time — rendering 3,500 of each broke the message for any document over
+  ~2,000 characters.
+- The migration normalizes and truncates the legacy body to the same 3,500
+  limit, so an upgraded install can never publish an over-limit version 1.
+
 ## 9. Privacy
 
 - Stored per acceptance: user id, document id, version, timestamp, and a coarse
   source string. **No IP address, no device fingerprint, no Telegram update
   payload.**
 - The admin overview and stats page expose **aggregate counts only** — no user
-  id, Telegram id, name or acceptance time reaches any page.
+  id, Telegram id, name or acceptance time reaches any page. The two counts are
+  read in one transaction so they cannot straddle a concurrent registration.
+  Read them as "ACTIVE users holding an acceptance row for the current version"
+  and "every other ACTIVE user" — the latter includes long-dormant accounts, and
+  the former includes acceptances backfilled by the upgrade.
 - The whole section is OWNER-only, so acceptance data is never shown to
   non-OWNER admins.
 - The migration and the bootstrap service report **counts only**; the terms body
@@ -285,9 +322,13 @@ fresh database (which is migrated *before* it is seeded, so the registry is
 still empty) fabricates nothing.
 
 `bootstrapLegacyTermsDocument()` is an idempotent safety net for installs the
-migration cannot help — one whose `terms_text` was seeded after the migration
-ran, or one restored from a partial backup. It does nothing once any document
-exists.
+migration cannot help — one restored from a partial backup, for example. It does
+nothing once any document exists.
+
+> It has **no automatic caller**: nothing invokes it at startup or during
+> seeding, because on a fresh install there is nothing to bootstrap and
+> fabricating a version 1 from the seeded default would be wrong. It is a
+> programmatic/operator tool, exercised by the test suite.
 
 ### Verified upgrade paths
 

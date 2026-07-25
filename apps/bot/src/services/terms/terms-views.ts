@@ -39,6 +39,18 @@ export function formatTermsDate(date: Date): string {
   }
 }
 
+/**
+ * Telegram's hard cap on a text message. The BODY is capped at 3,500, but the
+ * title is an operator-editable template with its own (much larger) limit, and
+ * an upgraded install can carry a legacy body right up to the template limit —
+ * so the composed screen must be bounded here rather than assumed safe.
+ *
+ * Exceeding it is not a cosmetic bug: sendMessage returns 400, safeReply
+ * swallows it, and the gate still blocks — leaving the user unable to proceed
+ * AND unable to see why, on every update, forever.
+ */
+export const TELEGRAM_MESSAGE_LIMIT = 4096;
+
 export interface TermsScreen {
   text: string;
   keyboard: InlineKeyboard;
@@ -62,10 +74,17 @@ export async function buildTermsScreen(document: TermsDocument): Promise<TermsSc
   if (document.publishedAt !== null) {
     lines.push(`تاریخ انتشار: ${formatTermsDate(document.publishedAt)}`);
   }
-  lines.push("", document.body);
+  // Reserve room for the header, then fit the body into what is left. The body
+  // is truncated for DISPLAY only; the stored document is never modified.
+  const header = lines.join("\n");
+  const available = TELEGRAM_MESSAGE_LIMIT - header.length - 2;
+  const body =
+    document.body.length <= available
+      ? document.body
+      : `${document.body.slice(0, Math.max(0, available - 1))}…`;
 
   return {
-    text: lines.join("\n"),
+    text: `${header}\n\n${body}`,
     keyboard: new InlineKeyboard().text(acceptLabel, termsAcceptCallback(document.id)),
   };
 }

@@ -204,13 +204,18 @@ export interface TermsAcceptanceStats {
  * so the overview cannot leak who has or has not accepted.
  */
 export async function getTermsAcceptanceStats(documentId: string | null): Promise<TermsAcceptanceStats> {
-  const activeUsers = await prisma.user.count({ where: { status: "ACTIVE" } });
   if (documentId === null) {
-    return { accepted: 0, pending: activeUsers };
+    const activeOnly = await prisma.user.count({ where: { status: "ACTIVE" } });
+    return { accepted: 0, pending: activeOnly };
   }
-  const accepted = await prisma.termsAcceptance.count({
-    where: { termsDocumentId: documentId, user: { status: "ACTIVE" } },
-  });
+  // ONE snapshot: read both counts in a single transaction so a registration or
+  // acceptance landing between them cannot skew the pair.
+  const [activeUsers, accepted] = await prisma.$transaction([
+    prisma.user.count({ where: { status: "ACTIVE" } }),
+    prisma.termsAcceptance.count({
+      where: { termsDocumentId: documentId, user: { status: "ACTIVE" } },
+    }),
+  ]);
   return { accepted, pending: Math.max(0, activeUsers - accepted) };
 }
 
@@ -446,9 +451,22 @@ export async function recordTermsAcceptance(
   documentId: string,
   source = "BOT",
 ): Promise<AcceptResult> {
+  // NOTE: this path deliberately does NOT take the configuration lock.
+  //
+  // Publishing a new version re-gates the entire user base at once, which is
+  // precisely when a burst of acceptances arrives. Serializing all of them on
+  // the same lock the OWNER's publish uses would queue every user behind one
+  // another while each holds a pooled connection, starving unrelated bot work.
+  //
+  // The lock is not needed for correctness here. The invariant "never mark the
+  // NEW version accepted" is enforced by re-reading the published document
+  // inside this transaction and comparing ids: a publish that commits meanwhile
+  // can only make this read return the NEW document (so the stale button is
+  // rejected) or leave it unchanged (so an acceptance of the OLD document is
+  // recorded, which is historically valid and still does not satisfy the gate).
+  // Duplicate acceptances are impossible regardless, because of the
+  // (userId, termsDocumentId) unique index — handled below.
   return prisma.$transaction(async (tx) => {
-    await lockTermsConfig(tx);
-
     const published = await tx.termsDocument.findFirst({
       where: { status: TermsDocumentStatus.PUBLISHED },
     });
@@ -476,15 +494,24 @@ export async function recordTermsAcceptance(
     }
 
     const acceptedAt = new Date();
-    await tx.termsAcceptance.create({
-      data: {
-        userId,
-        termsDocumentId: published.id,
-        termsVersion: published.version,
-        acceptedAt,
-        source,
-      },
-    });
+    try {
+      await tx.termsAcceptance.create({
+        data: {
+          userId,
+          termsDocumentId: published.id,
+          termsVersion: published.version,
+          acceptedAt,
+          source,
+        },
+      });
+    } catch (err) {
+      // Two presses landing together: the unique index picks one winner. The
+      // loser is an idempotent success, never an error and never a second row.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        return { ok: true as const, version: published.version, alreadyAccepted: true };
+      }
+      throw err;
+    }
     await tx.user.update({ where: { id: userId }, data: { termsAcceptedAt: acceptedAt } });
     return { ok: true as const, version: published.version, alreadyAccepted: false };
   });

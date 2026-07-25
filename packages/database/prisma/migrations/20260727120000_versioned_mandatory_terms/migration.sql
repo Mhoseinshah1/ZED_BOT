@@ -128,6 +128,34 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Normalize exactly as the application does before storing, and bound the
+    -- length to the same 3,500-character limit the app enforces. Without this a
+    -- legacy `terms_text` could publish a 4,000-character version 1 containing
+    -- bidi overrides and control characters — permanently, since published
+    -- documents are never modified in place — and the rendered terms screen
+    -- would exceed Telegram's message limit.
+    legacy_body := btrim(
+        regexp_replace(
+            translate(
+                legacy_body,
+                U&'\200B\200E\200F\202A\202B\202C\202D\202E\2066\2067\2068\2069\FEFF',
+                ''
+            ),
+            U&'[\0001-\0008\000B-\001F\007F-\009F]', '', 'g'
+        )
+    );
+    IF length(legacy_body) > 3500 THEN
+        legacy_body := left(legacy_body, 3500);
+        RAISE NOTICE 'Versioned terms: legacy terms text truncated to the 3500-character limit.';
+    END IF;
+
+    -- Re-check after normalization: a body of nothing but invisible characters
+    -- is not meaningful content.
+    IF legacy_body = '' THEN
+        RAISE NOTICE 'Versioned terms: legacy terms text is not meaningful after normalization, skipping bootstrap.';
+        RETURN;
+    END IF;
+
     new_document_id := gen_random_uuid()::TEXT;
 
     INSERT INTO "TermsDocument" (

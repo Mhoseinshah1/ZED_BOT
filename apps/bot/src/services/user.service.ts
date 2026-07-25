@@ -51,7 +51,3 @@ export async function getUserByTelegramId(telegramId: bigint): Promise<User | nu
 export async function touchLastSeen(userId: string): Promise<void> {
   await prisma.user.update({ where: { id: userId }, data: { lastSeenAt: new Date() } });
 }
-
-export async function acceptTerms(userId: string): Promise<User> {
-  return prisma.user.update({ where: { id: userId }, data: { termsAcceptedAt: new Date() } });
-}

@@ -151,6 +151,44 @@ export async function ensureUserAccess(ctx: BotContext): Promise<boolean> {
   return true;
 }
 
+/**
+ * Gate steps 1-2 ONLY: maintenance mode and account status.
+ *
+ * The terms-accept action needs these applied BEFORE it records anything — a
+ * blocked user pressing a stale accept button must not write an acceptance row,
+ * and maintenance mode must not admit database writes. It cannot simply call
+ * `ensureUserAccess` first, because that would run the FORCE-JOIN step ahead of
+ * terms and invert the documented gate order. Returns true when the caller may
+ * proceed; sends its own message otherwise.
+ */
+export async function ensurePreTermsAccess(ctx: BotContext): Promise<boolean> {
+  const from = ctx.from;
+  if (from === undefined || from.is_bot) {
+    return false;
+  }
+  if (ctx.dbUser === null) {
+    try {
+      ctx.dbUser = await registerOrUpdateUser(from);
+    } catch (err) {
+      logger.error("user registration failed", { error: errorMessage(err) });
+      await safeAnswerCallback(ctx);
+      await safeReply(ctx, GENERIC_ERROR_TEXT);
+      return false;
+    }
+  }
+  if (await getBooleanSetting("maintenance_mode", false)) {
+    await safeAnswerCallback(ctx);
+    await safeReply(ctx, await getMessageTemplate("bot_off_text"));
+    return false;
+  }
+  if (ctx.dbUser.status !== UserStatus.ACTIVE) {
+    await safeAnswerCallback(ctx);
+    await safeReply(ctx, await getMessageTemplate("blocked_text", ACCESS_DENIED_TEXT));
+    return false;
+  }
+  return true;
+}
+
 /** Middleware form of ensureUserAccess for user-facing composers. */
 export function userAccessMiddleware(): MiddlewareFn<BotContext> {
   return async (ctx, next) => {

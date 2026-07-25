@@ -3,6 +3,7 @@ import type { InlineKeyboard } from "grammy";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CB } from "../src/core/callbacks.js";
+import { termsHandler } from "../src/handlers/terms.handler.js";
 import type { BotContext } from "../src/core/context.js";
 import {
   ensureUserAccess,
@@ -25,7 +26,11 @@ import {
   TERMS_REQUIRED_KEY,
   updateTermsDraftBody,
 } from "../src/services/terms/terms-document.service.js";
-import { buildTermsScreen, toPersianDigits } from "../src/services/terms/terms-views.js";
+import {
+  buildTermsScreen,
+  TELEGRAM_MESSAGE_LIMIT,
+  toPersianDigits,
+} from "../src/services/terms/terms-views.js";
 import { clearTextCache } from "../src/services/text.service.js";
 
 // =============================================================================
@@ -58,10 +63,27 @@ function fakeCtx(
 ): FakeCtx {
   const sent: Sent[] = [];
   const answers: (string | undefined)[] = [];
+  const chat = { id: 42, type: "private" };
+  const from = { id: 42, is_bot: false, first_name: "T" };
+  // A full callback_query + update pair: grammY's composer filters read
+  // ctx.update, so a bare `callbackQuery` is enough for calling the gate
+  // directly but NOT for routing a real update through termsHandler.
+  const callbackQuery =
+    callbackData === undefined
+      ? undefined
+      : {
+          id: "cbq",
+          chat_instance: "ci",
+          from,
+          data: callbackData,
+          message: { message_id: 1, date: 0, chat },
+        };
   const ctx = {
-    from: { id: 42, is_bot: false, first_name: "T" },
+    from,
+    chat,
     dbUser,
-    callbackQuery: callbackData === undefined ? undefined : { data: callbackData },
+    callbackQuery,
+    update: callbackQuery === undefined ? { update_id: 1 } : { update_id: 1, callback_query: callbackQuery },
     reply: vi.fn(async (text: string, other?: { reply_markup?: InlineKeyboard }) => {
       sent.push({ text, keyboard: other?.reply_markup });
     }),
@@ -193,6 +215,34 @@ describe.runIf(hasDb)("versioned terms — user screen (§5)", () => {
     // is unrepresentable because both come from one document object.
     expect(callbacksOf(screen2.keyboard)).toEqual([termsAcceptCallback(second.id)]);
     expect(callbacksOf(screen1.keyboard)).not.toEqual(callbacksOf(screen2.keyboard));
+  });
+
+  it("G05b the rendered screen never exceeds Telegram's message limit", async () => {
+    // A body at the cap PLUS a long operator-edited title used to overflow 4096.
+    // Overflowing is not cosmetic: sendMessage 400s, safeReply swallows it, and
+    // the gate still blocks — the user is stuck with no message at all.
+    const { id } = await publish("ب".repeat(3500));
+    await prisma.messageTemplate.upsert({
+      where: { key: "terms_page_title" },
+      update: { currentContent: "ت".repeat(900) },
+      create: {
+        key: "terms_page_title",
+        title: "عنوان صفحه قوانین",
+        category: "general",
+        defaultContent: "📜 قوانین و شرایط استفاده",
+        currentContent: "ت".repeat(900),
+      },
+    });
+    clearTextCache();
+
+    const document = await prisma.termsDocument.findUniqueOrThrow({ where: { id } });
+    const screen = await buildTermsScreen(document);
+    expect(screen.text.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+    // The button still names the same document even when the body is truncated.
+    expect(callbacksOf(screen.keyboard)).toEqual([termsAcceptCallback(id)]);
+
+    await prisma.messageTemplate.deleteMany({ where: { key: "terms_page_title" } });
+    clearTextCache();
   });
 
   it("G07 the publication date is rendered when present", async () => {
@@ -367,6 +417,57 @@ describe.runIf(hasDb)("versioned terms — access gate (§1, §6, §7)", () => {
     const { ctx, sent } = fakeCtx(user);
     expect(await ensureUserAccess(ctx)).toBe(false);
     expect(callbacksOf(sent[0].keyboard)).toEqual([termsAcceptCallback(id)]);
+  });
+
+  it("G22 a BLOCKED user pressing accept records NOTHING", async () => {
+    // The accept action used to record first and gate afterwards, so a blocked
+    // user with a stale button wrote a real acceptance row and had
+    // termsAcceptedAt stamped before being told their account was blocked.
+    const { id } = await publish("قوانین");
+    await enableTermsRequirement();
+    const user = await makeUser("BLOCKED");
+
+    const { ctx, sent } = fakeCtx(user, termsAcceptCallback(id));
+    await termsHandler.middleware()(ctx, async () => {});
+
+    expect(await prisma.termsAcceptance.count({ where: { userId: user.id } })).toBe(0);
+    const row = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(row.termsAcceptedAt).toBeNull();
+    // And they were told why.
+    expect(sent.length).toBeGreaterThan(0);
+  });
+
+  it("G23 maintenance mode stops the accept action before it records", async () => {
+    const { id } = await publish("قوانین");
+    await enableTermsRequirement();
+    const user = await makeUser();
+    await setSetting("maintenance_mode", "true", "BOOLEAN");
+    clearSettingsCache();
+
+    const { ctx } = fakeCtx(user, termsAcceptCallback(id));
+    await termsHandler.middleware()(ctx, async () => {});
+
+    expect(await prisma.termsAcceptance.count({ where: { userId: user.id } })).toBe(0);
+  });
+
+  it("G24 a MALFORMED accept payload reaches the handler and is answered", async () => {
+    // The gate skips itself for anything with the accept prefix, so the handler
+    // must route on the prefix too — otherwise such a payload is silently
+    // unanswered and the documented "stale button" behaviour never happens.
+    const { id } = await publish("قوانین");
+    await enableTermsRequirement();
+    const user = await makeUser();
+
+    const { ctx, sent } = fakeCtx(user, "user:terms:accept:zzz");
+    let fellThrough = false;
+    await termsHandler.middleware()(ctx, async () => {
+      fellThrough = true;
+    });
+
+    expect(fellThrough).toBe(false);
+    // Answered with the CURRENT terms and the CURRENT button; nothing accepted.
+    expect(callbacksOf(sent.at(-1)?.keyboard)).toEqual([termsAcceptCallback(id)]);
+    expect(await prisma.termsAcceptance.count({ where: { userId: user.id } })).toBe(0);
   });
 
   it("G21 the legacy terms:accept callback is NOT treated as a versioned accept", async () => {

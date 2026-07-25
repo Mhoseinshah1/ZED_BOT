@@ -388,6 +388,18 @@ describe.runIf(hasDb)("versioned terms — acceptance (§3, §6, §10)", () => {
     expect((await getPublishedTerms())?.id).toBe(id);
   });
 
+  it("T33c stats are a single snapshot and exclude non-active users", async () => {
+    const { id } = await publish("قوانین");
+    const baseline = await activeUserCount();
+    const blocked = await makeUser("BLOCKED");
+    await recordTermsAcceptance(blocked, id);
+
+    const stats = await getTermsAcceptanceStats(id);
+    // A BLOCKED user's acceptance counts on neither side.
+    expect(stats.accepted).toBe(0);
+    expect(stats.pending).toBe(baseline);
+  });
+
   it("T33 acceptance stats are aggregates over ACTIVE users only", async () => {
     const { id } = await publish("قوانین");
     const baselineActive = await activeUserCount();
