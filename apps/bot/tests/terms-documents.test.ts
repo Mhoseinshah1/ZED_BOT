@@ -41,11 +41,17 @@ function nextTelegramId(): bigint {
   return 8_000_000_000_000n + RUN_TAG * 1000n + seq;
 }
 
-/** Telegram ids allocated by this file, so cleanup can target exactly them. */
-const TELEGRAM_ID_BASE = 8_000_000_000_000n;
+/**
+ * Users created by THIS file, tracked by id. Cleanup deletes exactly these
+ * rows: a telegramId-range delete would also hit users created by other
+ * suites in the shared test database, and those may own Orders whose
+ * foreign key then refuses the delete.
+ */
+const createdUserIds: string[] = [];
 
 async function makeUser(status: "ACTIVE" | "BLOCKED" = "ACTIVE"): Promise<string> {
   const row = await prisma.user.create({ data: { telegramId: nextTelegramId(), status } });
+  createdUserIds.push(row.id);
   return row.id;
 }
 
@@ -73,8 +79,10 @@ async function publish(body: string): Promise<{ id: string; version: number }> {
 async function resetTermsState(): Promise<void> {
   await prisma.termsAcceptance.deleteMany({});
   await prisma.termsDocument.deleteMany({});
-  // Users this file created (their acceptances cascade away with them).
-  await prisma.user.deleteMany({ where: { telegramId: { gte: TELEGRAM_ID_BASE } } });
+  if (createdUserIds.length > 0) {
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    createdUserIds.length = 0;
+  }
   await prisma.setting.deleteMany({ where: { key: TERMS_REQUIRED_KEY } });
   await prisma.messageTemplate.deleteMany({ where: { key: "terms_text" } });
   clearSettingsCache();
@@ -506,6 +514,7 @@ describe.runIf(hasDb)("versioned terms — legacy bootstrap (§11)", () => {
     const accepted = await prisma.user.create({
       data: { telegramId: nextTelegramId(), status: "ACTIVE", termsAcceptedAt: acceptedAt },
     });
+    createdUserIds.push(accepted.id);
     const never = await makeUser();
 
     await prisma.messageTemplate.create({

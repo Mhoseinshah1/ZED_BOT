@@ -32,11 +32,20 @@ const TELEGRAM_ID_BASE = 8_100_000_000_000n;
 const RUN_TAG = BigInt(Date.now() % 1_000_000_000);
 let seq = 0n;
 
+/**
+ * Users created by THIS file, tracked by id. Cleanup deletes exactly these
+ * rows: a telegramId-range delete would also hit users created by other
+ * suites in the shared test database, and those may own Orders whose
+ * foreign key then refuses the delete.
+ */
+const createdUserIds: string[] = [];
+
 async function makeUser(): Promise<string> {
   seq += 1n;
   const row = await prisma.user.create({
     data: { telegramId: TELEGRAM_ID_BASE + RUN_TAG * 1000n + seq, status: "ACTIVE" },
   });
+  createdUserIds.push(row.id);
   return row.id;
 }
 
@@ -70,7 +79,10 @@ async function seedRawDrafts(count: number): Promise<string[]> {
 async function resetTermsState(): Promise<void> {
   await prisma.termsAcceptance.deleteMany({});
   await prisma.termsDocument.deleteMany({});
-  await prisma.user.deleteMany({ where: { telegramId: { gte: TELEGRAM_ID_BASE } } });
+  if (createdUserIds.length > 0) {
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    createdUserIds.length = 0;
+  }
   await prisma.setting.deleteMany({ where: { key: TERMS_REQUIRED_KEY } });
   clearSettingsCache();
 }

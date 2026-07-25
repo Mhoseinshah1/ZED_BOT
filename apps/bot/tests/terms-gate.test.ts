@@ -78,6 +78,14 @@ function fakeCtx(
   return { ctx, sent, answers };
 }
 
+/**
+ * Users created by THIS file, tracked by id. Cleanup deletes exactly these
+ * rows: a telegramId-range delete would also hit users created by other
+ * suites in the shared test database, and those may own Orders whose
+ * foreign key then refuses the delete.
+ */
+const createdUserIds: string[] = [];
+
 async function makeUser(status: "ACTIVE" | "BLOCKED" = "ACTIVE"): Promise<{
   id: string;
   telegramId: bigint;
@@ -87,6 +95,7 @@ async function makeUser(status: "ACTIVE" | "BLOCKED" = "ACTIVE"): Promise<{
   const row = await prisma.user.create({
     data: { telegramId: TELEGRAM_ID_BASE + RUN_TAG * 1000n + seq, status },
   });
+  createdUserIds.push(row.id);
   return { id: row.id, telegramId: row.telegramId, status: row.status };
 }
 
@@ -108,7 +117,10 @@ function callbacksOf(keyboard: InlineKeyboard | undefined): string[] {
 async function resetAll(): Promise<void> {
   await prisma.termsAcceptance.deleteMany({});
   await prisma.termsDocument.deleteMany({});
-  await prisma.user.deleteMany({ where: { telegramId: { gte: TELEGRAM_ID_BASE } } });
+  if (createdUserIds.length > 0) {
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    createdUserIds.length = 0;
+  }
   await prisma.setting.deleteMany({
     where: { key: { in: [TERMS_REQUIRED_KEY, "maintenance_mode", "force_join_enabled"] } },
   });
