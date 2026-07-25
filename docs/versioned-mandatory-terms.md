@@ -305,10 +305,11 @@ a large legacy body, so the composed screens are bounded explicitly:
 
 ## 10. Migration and existing installs
 
-Forward-only migration `20260727120000_versioned_mandatory_terms`. No existing
-migration is edited and no existing column is dropped.
+Two forward-only migrations. No existing migration is edited and no existing
+column is dropped.
 
-Its tail performs the one-time legacy bootstrap:
+`20260727120000_versioned_mandatory_terms` creates the tables, indexes and
+database-level invariants. Its tail performs the one-time legacy bootstrap:
 
 1. If any `TermsDocument` already exists → do nothing (re-run safe).
 2. Read `MessageTemplate.currentContent` for `terms_text`. If absent, or
@@ -320,6 +321,24 @@ Its tail performs the one-time legacy bootstrap:
 So an upgrade never silently forces the whole user base to accept again, and a
 fresh database (which is migrated *before* it is seeded, so the registry is
 still empty) fabricates nothing.
+
+`20260727130000_normalize_bootstrapped_terms_body` then repairs what that
+bootstrap could not: it copied the legacy body **verbatim**, so a `terms_text`
+carrying bidi overrides, direction marks, isolates, zero-width space, a BOM or
+control characters — or simply running past 3,500 characters — would have become
+a version 1 the admin UI itself could never produce, rendering a screen past
+Telegram's message limit. The repair normalizes and bounds that body exactly as
+the application does (ZWNJ and ZWJ are preserved — they are ordinary Persian
+letters) and recomputes the content hash.
+
+It touches **only** the still-published version 1 written by the bootstrap
+(no admin author on either side). An archived version 1 is history and is left
+alone, and anything an operator published through the bot was already normalized
+on the way in. Acceptance rows are never touched: they key on the document id
+and version, both unchanged, so nobody is asked to accept again. In the extreme
+case where nothing meaningful survives normalization the document is archived
+rather than emptied — history and acceptances are kept, and with no published
+document enforcement simply cannot be switched on until a real version exists.
 
 `bootstrapLegacyTermsDocument()` is an idempotent safety net for installs the
 migration cannot help — one restored from a partial backup, for example. It does
@@ -365,6 +384,7 @@ of what each user accepted stays intact.
 | ---- | ---- |
 | `packages/database/prisma/schema.prisma` | `TermsDocument`, `TermsAcceptance`, `TermsDocumentStatus` |
 | `packages/database/prisma/migrations/20260727120000_versioned_mandatory_terms/` | Forward-only migration + legacy bootstrap |
+| `packages/database/prisma/migrations/20260727130000_normalize_bootstrapped_terms_body/` | Forward-only repair: normalizes the bootstrapped version 1 |
 | `apps/bot/src/services/terms/terms-document.service.ts` | All reads/mutations, advisory lock, validation, bootstrap |
 | `apps/bot/src/services/terms/terms-callbacks.ts` | Versioned callback identity contract |
 | `apps/bot/src/services/terms/terms-views.ts` | The user terms screen |
