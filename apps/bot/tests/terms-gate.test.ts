@@ -525,6 +525,28 @@ describe.runIf(hasDb)("versioned terms — access gate (§1, §6, §7)", () => {
     expect(await prisma.termsAcceptance.count({ where: { userId: user.id } })).toBe(0);
   });
 
+  it("G27 enforceTerms re-gates an accept callback that no longer satisfies the terms", async () => {
+    // The gate skips its terms step for accept callbacks (G15) so pressing
+    // accept is not gated into the screen it is trying to satisfy. AFTER the
+    // acceptance is recorded that skip is wrong: if a newer version was
+    // published while the callback was in flight, the user owes THAT one, and
+    // keeping the skip would walk them straight into the menu. This is the
+    // option the accept handler re-enters with.
+    const first = await publish("نسخه یک");
+    const user = await makeUser();
+    await recordTermsAcceptance(user.id, first.id);
+    // A publication lands between the acceptance and the re-entry.
+    const second = await publish("نسخه دو");
+
+    // Default (the skip): the callback walks past the terms step.
+    expect(await ensureUserAccess(fakeCtx(user, termsAcceptCallback(first.id)).ctx)).toBe(true);
+
+    // Enforced: the same callback is stopped and shown the version it owes.
+    const { ctx, sent } = fakeCtx(user, termsAcceptCallback(first.id));
+    expect(await ensureUserAccess(ctx, { enforceTerms: true })).toBe(false);
+    expect(callbacksOf(sent.at(-1)?.keyboard)).toEqual([termsAcceptCallback(second.id)]);
+  });
+
   it("G25 pressing accept while NOTHING is published continues the access path", async () => {
     // Enforcement on with no published document is the state the gate itself
     // deliberately treats as a recoverable misconfiguration (only the OWNER can

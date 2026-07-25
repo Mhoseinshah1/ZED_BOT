@@ -751,6 +751,23 @@ describe.runIf(hasDb)("versioned terms — bootstrap repair migration (§11)", (
     expect(await getPublishedTerms()).toBeNull();
   });
 
+  it("M11 treats an NBSP-only body as blank, as JavaScript trim() does", async () => {
+    // PostgreSQL's `[[:space:]]` and one-argument btrim() do NOT match U+00A0,
+    // but JavaScript `.trim()` and `\s` do. The RLO is what let this body past
+    // the original bootstrap's emptiness test; once stripped, a check written
+    // in POSIX whitespace would call the remaining invisible NBSP meaningful
+    // and republish a blank screen with a live accept button.
+    const v1 = await seedBootstrappedV1("‮ ");
+
+    await runRepairMigration();
+
+    expect(isMeaningfulTermsBody(" ")).toBe(false);
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    expect(await getPublishedTerms()).toBeNull();
+  });
+
   it("M10 folds a lone carriage return to a newline instead of deleting it", async () => {
     // Stripping CR as a control character would run two clauses together.
     await seedBootstrappedV1("‮بند الف\rبند ب");
