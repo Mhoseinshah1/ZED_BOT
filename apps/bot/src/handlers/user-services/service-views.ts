@@ -187,10 +187,13 @@ export function serviceListKeyboard(pageData: ServiceListPage): InlineKeyboard {
 }
 
 /**
- * Detail text - the Service row's values only (never note/failureReason/raw
- * panel data). With the live-sync phase the row is refreshed from the panel
- * BEFORE rendering; staleNotice carries the safe Persian fallback line when
- * that refresh could not deliver live data (stored values stay on screen).
+ * Detail text - the Service row's safe values only. The INTERNAL `note` marker
+ * (zedbot order:... tg:...), failureReason and raw panel data are NEVER shown;
+ * the buyer-facing `userNote` (feat/service-checkout-username-note) IS shown,
+ * HTML-escaped. The username appears as the «نام سرویس» header. Reservation ids,
+ * naming-snapshot JSON, tokens and db ids are never rendered. With the live-sync
+ * phase the row is refreshed from the panel BEFORE rendering; staleNotice carries
+ * the safe Persian fallback line when that refresh could not deliver live data.
  */
 export function serviceDetailText(service: Service, staleNotice: string | null = null): string {
   const days = remainingDays(service.expiresAt);
@@ -235,6 +238,14 @@ export function serviceDetailText(service: Service, staleNotice: string | null =
   if (service.lastSubscriptionUpdateAt !== null) {
     lines.push(`آخرین بروزرسانی: ${formatDate(service.lastSubscriptionUpdateAt)}`);
   }
+  // Service-checkout username selection: the buyer's optional subscription note,
+  // HTML-escaped. Shown as «ندارد» when absent. Never the internal panel marker.
+  lines.push(
+    "",
+    service.userNote !== null && service.userNote !== ""
+      ? `یادداشت: ${escapeHtml(service.userNote)}`
+      : "یادداشت: ندارد",
+  );
   if (!serviceSupportsGlobalLifecycle(service)) {
     // Legacy per-inbound XUI service: says WHY the mutating buttons are
     // hidden (renew/extras/toggle/regenerate need the global-client model).

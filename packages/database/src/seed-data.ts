@@ -1058,6 +1058,45 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
     defaultContent: "نوع محصول موردنظر خود را انتخاب کنید.",
     allowedVariables: [],
   },
+  // --- service checkout: username + optional note (feat/service-checkout-username-note) ---
+  {
+    key: "svc_username_method",
+    title: "خرید سرویس - انتخاب روش یوزرنیم",
+    category: "checkout",
+    defaultContent:
+      "👤 <b>انتخاب یوزرنیم سرویس</b>\n" +
+      "\n" +
+      "یوزرنیم، نام کاربری واقعی حساب شما روی پنل است و پس از ساخت سرویس ثابت می‌ماند.\n" +
+      "\n" +
+      "• بین ۸ تا ۱۶ کاراکتر\n" +
+      "• فقط حروف کوچک انگلیسی، عدد و زیرخط (_)\n" +
+      "• شروع با یک حرف کوچک انگلیسی\n" +
+      "\n" +
+      "می‌توانید خودتان یوزرنیم را انتخاب کنید یا یک یوزرنیم تصادفی امن دریافت کنید.",
+    allowedVariables: [],
+  },
+  {
+    key: "svc_username_custom_prompt",
+    title: "خرید سرویس - درخواست یوزرنیم دلخواه",
+    category: "checkout",
+    defaultContent:
+      "یوزرنیم دلخواه خود را ارسال کنید:\n" +
+      "\n" +
+      "• بین ۸ تا ۱۶ کاراکتر\n" +
+      "• فقط حروف کوچک انگلیسی، عدد و زیرخط (_)، شروع با حرف",
+    allowedVariables: [],
+  },
+  {
+    key: "svc_note_prompt",
+    title: "خرید سرویس - درخواست یادداشت اختیاری",
+    category: "checkout",
+    defaultContent:
+      "📝 <b>یادداشت سرویس (اختیاری)</b>\n" +
+      "\n" +
+      "می‌توانید یک یادداشت کوتاه برای این سرویس ثبت کنید (مثلاً نام دستگاه یا کاربر).\n" +
+      "حداکثر ۱۲۰ کاراکتر. برای رد شدن، دکمه زیر را بزنید.",
+    allowedVariables: [],
+  },
 ];
 
 export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
@@ -1236,4 +1275,11 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "support_service_ticket", title: "سرویس: پشتیبانی این سرویس", text: "پشتیبانی این سرویس 🎫" },
   { key: "support_view_attachment", title: "تیکت: مشاهده ضمیمه", text: "مشاهده ضمیمه 📎" },
   { key: "support_view_service", title: "تیکت: مشاهده سرویس", text: "مشاهده سرویس 🛍" },
+  // --- service checkout: username + optional note (feat/service-checkout-username-note) ---
+  { key: "svc_username_custom", title: "خرید: یوزرنیم دلخواه", text: "✍️ انتخاب یوزرنیم دلخواه" },
+  { key: "svc_username_random", title: "خرید: یوزرنیم تصادفی", text: "🎲 یوزرنیم تصادفی" },
+  { key: "svc_username_regen", title: "خرید: تولید مجدد یوزرنیم", text: "🎲 تولید مجدد" },
+  { key: "svc_username_method_back", title: "خرید: انتخاب روش دیگر یوزرنیم", text: "↩️ انتخاب روش دیگر" },
+  { key: "svc_username_confirm", title: "خرید: تأیید یوزرنیم", text: "✅ تأیید و ادامه" },
+  { key: "svc_note_skip", title: "خرید: رد کردن یادداشت", text: "رد کردن (بدون یادداشت)" },
 ];

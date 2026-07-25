@@ -18,6 +18,7 @@ import {
 
 import { claimDiscountUsage } from "./discount.service.js";
 import { auditRepresentativeSettlementPricing } from "./representative-pricing.service.js";
+import { attachReservationToOrder } from "./service-username-selection.service.js";
 import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 import { WALLET_TOPUP_REASON } from "./wallet-topup.service.js";
 
@@ -322,9 +323,16 @@ export async function approveReceiptPayment(
             locationSnapshot:
               snapshot.allLocations === true ? "ALL" : snapshotString(snapshot, "serviceLocation"),
             categorySnapshot: snapshotString(snapshot, "categoryName"),
+            // Service-checkout username selection: the buyer's optional note.
+            serviceNoteSnapshot: snapshotString(snapshot, "serviceUserNote"),
             paidAt: now,
           },
         });
+        // Bind the buyer's username reservation to this settled order (BOUND).
+        const reservationId = snapshotString(snapshot, "serviceUsernameReservationId");
+        if (reservationId !== null) {
+          await attachReservationToOrder(tx, reservationId, order.id, checkout.id);
+        }
         await tx.payment.update({
           where: { id: payment.id },
           data: { orderId: order.id },

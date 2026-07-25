@@ -38,6 +38,7 @@ import {
   serviceProvisioningLockKey,
   type ServiceLock,
 } from "./service-lock.service.js";
+import { consumeReservationForOrder } from "./service-username-selection.service.js";
 
 // =============================================================================
 // Provisioning (Phase 9): turns a PAID SERVICE_PURCHASE Order into a panel
@@ -134,6 +135,17 @@ export function checkoutNamingCapture(
       typeof record.namingRepresentativePrefix === "string"
         ? record.namingRepresentativePrefix
         : null,
+    // Service-checkout username selection (feat/service-checkout-username-note):
+    // a buyer-chosen username captured at checkout is used verbatim by the naming
+    // resolver (no panel strategy / counter is run). Absent on legacy checkouts.
+    userSelectedUsername:
+      typeof record.serviceUsername === "string" ? record.serviceUsername : null,
+    userSelectionSource:
+      record.serviceUsernameSelectionSource === "USER_RANDOM"
+        ? "USER_RANDOM"
+        : record.serviceUsernameSelectionSource === "USER_CUSTOM"
+          ? "USER_CUSTOM"
+          : null,
   };
 }
 
@@ -478,6 +490,11 @@ async function provisionPaidOrderUnlocked(
           panelType: panel.type,
           username: created.username ?? username,
           note,
+          // Service-checkout username selection (feat/service-checkout-username-note):
+          // the buyer's optional subscription note, copied from the immutable order
+          // snapshot (null when skipped / legacy). Distinct from `note` above (the
+          // internal recovery marker) and never pushed to the remote panel.
+          userNote: order.serviceNoteSnapshot,
           // Naming phase: how this username was resolved (strategy, version,
           // resolved values). Lifecycle ops always use the stored username.
           namingStrategySnapshot: {
@@ -509,6 +526,11 @@ async function provisionPaidOrderUnlocked(
             : {}),
         },
       });
+      // Service-checkout username selection: mark the buyer's reservation
+      // CONSUMED in the SAME transaction (matched by orderId + the exact
+      // username, so a foreign/mismatched reservation is never consumed). A
+      // no-op for legacy / strategy-named orders that carry no reservation.
+      await consumeReservationForOrder(tx, order.id, row.id, row.username);
       await tx.order.updateMany({
         where: { id: order.id, status: OrderStatus.PROVISIONING },
         data: { status: OrderStatus.COMPLETED, completedAt: now },

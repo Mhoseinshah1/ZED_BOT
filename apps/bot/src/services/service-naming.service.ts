@@ -8,6 +8,10 @@ import {
   type Panel,
   type User,
 } from "@zedbot/database";
+import {
+  validateServiceUsername,
+  type ServiceUsernameSelectionSource,
+} from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 
@@ -144,6 +148,16 @@ export interface NamingConfigSnapshot {
   customText: string | null;
   randomLength: number | null;
   representativePrefix: string | null;
+  /**
+   * Service-checkout username selection (feat/service-checkout-username-note):
+   * when the buyer chose their own remote username, it is captured here and used
+   * VERBATIM as the resolved identity — the panel strategy/counter is NOT run and
+   * no sequence/random is consumed. `null`/absent = fall back to the panel
+   * strategy (legacy behaviour, unchanged).
+   */
+  userSelectedUsername?: string | null;
+  /** How the buyer chose it (USER_CUSTOM | USER_RANDOM). Absent for STRATEGY. */
+  userSelectionSource?: ServiceUsernameSelectionSource | null;
 }
 
 export function namingConfigFromPanel(
@@ -241,6 +255,15 @@ export interface ResolvedVpnIdentity {
   version: number;
   resolvedRemoteUsername: string;
   resolvedDisplayName: string;
+  /**
+   * Service-checkout username selection (feat/service-checkout-username-note):
+   * the ORIGIN of resolvedRemoteUsername. "STRATEGY" (or absent, for legacy
+   * snapshots) = the panel pattern produced it; "USER_CUSTOM" / "USER_RANDOM" =
+   * the buyer chose it during checkout. Never recomputed on retry/recovery.
+   */
+  selectionSource?: ServiceUsernameSelectionSource;
+  /** ISO timestamp the username was resolved (buyer selection or strategy run). */
+  selectedAt?: string;
   sources: {
     telegramId: string;
     telegramUsername: string | null;
@@ -330,6 +353,47 @@ export async function resolveVpnRemoteIdentity(
   panelId: string,
   config: NamingConfigSnapshot,
 ): Promise<ResolveIdentityResult> {
+  // Service-checkout username selection (feat/service-checkout-username-note):
+  // a buyer-chosen username is used VERBATIM as the identity — the panel strategy
+  // and its sequence/random counter are NOT run. The username was reserved before
+  // payment; a collision here means an external actor claimed it since, which is a
+  // safe failure (the provisioning caller turns it into a refund + notification).
+  const userSelected = (config.userSelectedUsername ?? "").trim();
+  if (userSelected !== "") {
+    const v = validateServiceUsername(userSelected);
+    if (!v.ok || v.normalized !== userSelected) {
+      return {
+        ok: false,
+        error: "user-selected username failed re-validation",
+        safeUserMessage: NAMING_FAILED_USER_TEXT,
+      };
+    }
+    const clash = await prisma.service.findUnique({ where: { username: userSelected } });
+    if (clash !== null && clash.orderId !== order.id) {
+      return {
+        ok: false,
+        error: "user-selected username collision",
+        safeUserMessage: NAMING_FAILED_USER_TEXT,
+      };
+    }
+    return {
+      ok: true,
+      identity: {
+        strategy: config.strategy,
+        version: NAMING_STRATEGY_VERSION,
+        resolvedRemoteUsername: userSelected,
+        resolvedDisplayName: userSelected,
+        selectionSource: config.userSelectionSource ?? "USER_CUSTOM",
+        selectedAt: new Date().toISOString(),
+        sources: {
+          telegramId: user.telegramId.toString(),
+          telegramUsername: user.username ?? null,
+          orderShort: orderShortId(order.id),
+        },
+      },
+    };
+  }
+
   const validation = validateNamingConfig(config);
   if (!validation.ok) {
     return {
@@ -377,6 +441,8 @@ export async function resolveVpnRemoteIdentity(
       version: NAMING_STRATEGY_VERSION,
       resolvedRemoteUsername: normalized,
       resolvedDisplayName: raw,
+      selectionSource: "STRATEGY",
+      selectedAt: new Date().toISOString(),
       sources: {
         telegramId: parts.telegramId,
         telegramUsername: user.username ?? null,

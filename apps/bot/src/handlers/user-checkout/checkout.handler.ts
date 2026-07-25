@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
-import { errorMessage } from "@zedbot/shared";
-import type { CheckoutSession } from "@zedbot/database";
+import { errorMessage, normalizeServiceNote, validateServiceUsername } from "@zedbot/shared";
+import { type CheckoutSession, ServiceUsernameMode } from "@zedbot/database";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -36,6 +36,11 @@ import {
 } from "../../services/service-naming.service.js";
 import { dispatchPaidOrderFulfillment } from "../../services/order-fulfillment.service.js";
 import {
+  releaseReservation,
+  reserveRandomServiceUsername,
+  reserveServiceUsername,
+} from "../../services/service-username-selection.service.js";
+import {
   payPurchaseDraftWithWallet,
   WALLET_PAYMENT_DONE_TEXT,
 } from "../../services/wallet-payment.service.js";
@@ -57,6 +62,17 @@ import {
   preInvoiceKeyboard,
   preInvoiceText,
   productListKeyboard,
+  serviceNotePromptKeyboard,
+  serviceNotePromptText,
+  serviceNoteRejectText,
+  serviceUsernameConfirmKeyboard,
+  serviceUsernameConfirmText,
+  serviceUsernameCustomPromptKeyboard,
+  serviceUsernameCustomPromptText,
+  serviceUsernameMethodKeyboard,
+  serviceUsernameMethodText,
+  serviceUsernameRejectText,
+  serviceUsernameUnavailableText,
   walletConfirmText,
   walletPayAvailable,
 } from "./checkout-views.js";
@@ -74,6 +90,23 @@ function backKeyboard(backCb: string): InlineKeyboard {
   return new InlineKeyboard().text("بازگشت", backCb);
 }
 
+// Service-checkout username selection (feat/service-checkout-username-note).
+const SVC_USERNAME_FLOW = "checkout:service_username";
+const SVC_NOTE_FLOW = "checkout:service_note";
+
+/**
+ * True when this draft must run the SERVICE username/note steps before its
+ * pre-invoice renders: a SERVICE_PRODUCT that provisions a normal VPN account
+ * (has a panel). OTHER_PRODUCT and panel-less drafts skip it entirely.
+ */
+function draftNeedsServiceCustomization(draft: CheckoutDraft): boolean {
+  return draft.flowType === "SERVICE_PRODUCT" && draft.panelId !== undefined;
+}
+
+function serviceCustomizationComplete(draft: CheckoutDraft): boolean {
+  return draft.serviceCustomization?.completed === true;
+}
+
 export async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {
   const draft = ctx.session.temp.checkoutDraft;
   const user = ctx.dbUser;
@@ -85,6 +118,14 @@ export async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<
   if (product === null || product.id !== draft.productId || !isProductVisible(product, user.group)) {
     clearCheckoutState(ctx);
     await safeEditOrReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard(CB.USER_MENU));
+    return;
+  }
+  // THE single gate: a SERVICE checkout never shows its pre-invoice until the
+  // buyer has chosen a username and entered/skipped the optional note. This one
+  // check covers ALL entry paths (retail, pricing, representative) because they
+  // all converge on renderPreInvoice.
+  if (draftNeedsServiceCustomization(draft) && !serviceCustomizationComplete(draft)) {
+    await renderServiceUsernameEntry(ctx, draft, edit);
     return;
   }
   const text = preInvoiceText(product, user, draft);
@@ -113,6 +154,10 @@ export async function startRetailPreInvoice(
   product: ProductWithRelations,
   origin: CheckoutOrigin,
 ): Promise<void> {
+  // Selecting a different product abandons any in-progress username reservation
+  // from the previous draft: release its HELD hold now so the username frees up
+  // immediately (the cleanup worker is only the backstop).
+  await releaseDraftReservationBestEffort(ctx.session.temp.checkoutDraft);
   clearCheckoutState(ctx);
   ctx.session.currentFlow = null;
   const draft: CheckoutDraft = {
@@ -327,6 +372,157 @@ checkoutHandler.callbackQuery(/^user:op:p:([0-9a-f-]+)$/, async (ctx) => {
   await startRetailPreInvoice(ctx, product, { kind: "RETAIL_CATALOG" });
 });
 
+// =============================================================================
+// Service username + optional note (feat/service-checkout-username-note).
+// Inserted BEFORE the pre-invoice for every paid SERVICE checkout. Flow:
+//   method page → (custom text | random) → confirm → optional note → pre-invoice
+// The durable authority is the DB reservation; the session draft only drives UI.
+// =============================================================================
+
+/** Best-effort release of a draft's HELD username reservation (fire safe). */
+async function releaseDraftReservationBestEffort(
+  draft: CheckoutDraft | undefined,
+): Promise<void> {
+  const reservationId = draft?.serviceCustomization?.reservationId;
+  if (reservationId === undefined) {
+    return;
+  }
+  try {
+    await releaseReservation(reservationId);
+  } catch (err) {
+    logger.warn("release username reservation failed", { error: errorMessage(err) });
+  }
+}
+
+/** Route to the method page (no choice yet) or the confirm page (username held). */
+async function renderServiceUsernameEntry(
+  ctx: BotContext,
+  draft: CheckoutDraft,
+  edit: boolean,
+): Promise<void> {
+  let text: string;
+  let keyboard: InlineKeyboard;
+  if (draft.serviceCustomization === undefined) {
+    text = await serviceUsernameMethodText();
+    keyboard = await serviceUsernameMethodKeyboard();
+  } else {
+    const isRandom = draft.serviceCustomization.usernameMode === ServiceUsernameMode.RANDOM;
+    text = serviceUsernameConfirmText(draft.serviceCustomization.normalizedUsername, isRandom);
+    keyboard = await serviceUsernameConfirmKeyboard(isRandom);
+  }
+  if (edit) {
+    await safeEditOrReply(ctx, text, keyboard, HTML);
+  } else {
+    await safeReply(ctx, text, keyboard, HTML);
+  }
+}
+
+/** Reserve an opaque random username (also handles regenerate) and show confirm. */
+async function reserveRandomAndShow(ctx: BotContext, draft: CheckoutDraft): Promise<void> {
+  const user = ctx.dbUser;
+  if (user === null || draft.panelId === undefined) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  const result = await reserveRandomServiceUsername({
+    userId: user.id,
+    panelId: draft.panelId,
+    draftNonce: draft.draftNonce ?? null,
+  });
+  if (result.outcome !== "AVAILABLE") {
+    await safeAnswerCallback(ctx, serviceUsernameUnavailableText(result.outcome));
+    return;
+  }
+  draft.serviceCustomization = {
+    usernameMode: ServiceUsernameMode.RANDOM,
+    normalizedUsername: result.normalizedUsername,
+    reservationId: result.reservationId,
+    note: null,
+    usernameConfirmedAt: new Date().toISOString(),
+    completed: false,
+  };
+  ctx.session.currentFlow = null;
+  await safeAnswerCallback(ctx);
+  await renderServiceUsernameEntry(ctx, draft, true);
+}
+
+// Pick "type my own username": arm the bounded text-input flow.
+checkoutHandler.callbackQuery(CO_CB.UN_CUSTOM, async (ctx) => {
+  const draft = ctx.session.temp.checkoutDraft;
+  if (draft === undefined || !draftNeedsServiceCustomization(draft)) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  ctx.session.currentFlow = SVC_USERNAME_FLOW;
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(
+    ctx,
+    await serviceUsernameCustomPromptText(),
+    serviceUsernameCustomPromptKeyboard(),
+    HTML,
+  );
+});
+
+// Pick "generate a random username".
+checkoutHandler.callbackQuery(CO_CB.UN_RANDOM, async (ctx) => {
+  const draft = ctx.session.temp.checkoutDraft;
+  if (draft === undefined || !draftNeedsServiceCustomization(draft)) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  await reserveRandomAndShow(ctx, draft);
+});
+
+// Regenerate a fresh random username (releases the prior hold via same-nonce reserve).
+checkoutHandler.callbackQuery(CO_CB.UN_REGEN, async (ctx) => {
+  const draft = ctx.session.temp.checkoutDraft;
+  if (draft === undefined || draft.serviceCustomization === undefined) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  await reserveRandomAndShow(ctx, draft);
+});
+
+// Back to the method-choice page: release the current hold.
+checkoutHandler.callbackQuery(CO_CB.UN_METHOD, async (ctx) => {
+  const draft = ctx.session.temp.checkoutDraft;
+  if (draft === undefined || !draftNeedsServiceCustomization(draft)) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  await releaseDraftReservationBestEffort(draft);
+  draft.serviceCustomization = undefined;
+  ctx.session.currentFlow = null;
+  await safeAnswerCallback(ctx);
+  await renderServiceUsernameEntry(ctx, draft, true);
+});
+
+// Confirm the chosen username → move to the optional-note step.
+checkoutHandler.callbackQuery(CO_CB.UN_CONFIRM, async (ctx) => {
+  const draft = ctx.session.temp.checkoutDraft;
+  if (draft === undefined || draft.serviceCustomization === undefined) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  ctx.session.currentFlow = SVC_NOTE_FLOW;
+  await safeAnswerCallback(ctx);
+  await safeEditOrReply(ctx, await serviceNotePromptText(), await serviceNotePromptKeyboard(), HTML);
+});
+
+// Skip the optional note (stores null) → render the pre-invoice.
+checkoutHandler.callbackQuery(CO_CB.NOTE_SKIP, async (ctx) => {
+  const draft = ctx.session.temp.checkoutDraft;
+  if (draft === undefined || draft.serviceCustomization === undefined) {
+    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  draft.serviceCustomization.note = null;
+  draft.serviceCustomization.completed = true;
+  ctx.session.currentFlow = null;
+  await safeAnswerCallback(ctx);
+  await renderPreInvoice(ctx, true);
+});
+
 // --- Discount code ---------------------------------------------------------------------
 
 checkoutHandler.callbackQuery(CO_CB.DISCOUNT, async (ctx) => {
@@ -458,6 +654,15 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
     return;
   }
 
+  // Defense in depth: a SERVICE checkout must have a confirmed username + note
+  // before it can create a CheckoutSession. The pre-invoice gate already enforces
+  // this, so this only catches a stale «تایید خرید» callback — re-render the step.
+  if (draftNeedsServiceCustomization(draft) && !serviceCustomizationComplete(draft)) {
+    await safeAnswerCallback(ctx);
+    await renderPreInvoice(ctx, true);
+    return;
+  }
+
   // Re-validate pricing + discount at click time (price/code may have changed).
   if (draft.representative !== undefined) {
     // Representative purchase (§16): re-resolve the reseller price from live data
@@ -584,10 +789,24 @@ checkoutHandler.callbackQuery(/^user:co:view:([0-9a-f-]+)$/, async (ctx) => {
 export const checkoutTextHandler = new Composer<BotContext>();
 
 checkoutTextHandler.on("message:text", async (ctx, next) => {
-  if (ctx.session.currentFlow !== "checkout:discount") {
-    return next();
+  const flow = ctx.session.currentFlow;
+  if (flow === "checkout:discount") {
+    return handleDiscountText(ctx, next);
   }
-  const text = ctx.message.text;
+  if (flow === SVC_USERNAME_FLOW) {
+    return handleServiceUsernameText(ctx, next);
+  }
+  if (flow === SVC_NOTE_FLOW) {
+    return handleServiceNoteText(ctx, next);
+  }
+  return next();
+});
+
+async function handleDiscountText(
+  ctx: BotContext,
+  next: () => Promise<void>,
+): Promise<void> {
+  const text = ctx.message?.text ?? "";
   // Commands cancel the discount entry (and the draft) and continue normally.
   if (text.startsWith("/")) {
     clearCheckoutState(ctx);
@@ -618,4 +837,82 @@ checkoutTextHandler.on("message:text", async (ctx, next) => {
     logger.error("discount validation failed", { error: errorMessage(err) });
     await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.");
   }
-});
+}
+
+// Custom-username text step (feat/service-checkout-username-note). On an invalid
+// or unavailable name the flow stays armed so the buyer can simply retype.
+async function handleServiceUsernameText(
+  ctx: BotContext,
+  next: () => Promise<void>,
+): Promise<void> {
+  const text = ctx.message?.text ?? "";
+  if (text.startsWith("/")) {
+    await releaseDraftReservationBestEffort(ctx.session.temp.checkoutDraft);
+    clearCheckoutState(ctx);
+    return next();
+  }
+  const draft = ctx.session.temp.checkoutDraft;
+  const user = ctx.dbUser;
+  if (draft === undefined || user === null || !draftNeedsServiceCustomization(draft) || draft.panelId === undefined) {
+    ctx.session.currentFlow = null;
+    await safeReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard(CB.USER_MENU));
+    return;
+  }
+  const validation = validateServiceUsername(text);
+  if (!validation.ok) {
+    await safeReply(ctx, serviceUsernameRejectText(validation.reason), serviceUsernameCustomPromptKeyboard());
+    return;
+  }
+  const result = await reserveServiceUsername({
+    userId: user.id,
+    panelId: draft.panelId,
+    mode: ServiceUsernameMode.CUSTOM,
+    normalizedUsername: validation.normalized,
+    draftNonce: draft.draftNonce ?? null,
+  });
+  if (result.outcome !== "AVAILABLE") {
+    await safeReply(
+      ctx,
+      serviceUsernameUnavailableText(result.outcome),
+      serviceUsernameCustomPromptKeyboard(),
+    );
+    return;
+  }
+  draft.serviceCustomization = {
+    usernameMode: ServiceUsernameMode.CUSTOM,
+    normalizedUsername: result.normalizedUsername,
+    reservationId: result.reservationId,
+    note: null,
+    usernameConfirmedAt: new Date().toISOString(),
+    completed: false,
+  };
+  ctx.session.currentFlow = null;
+  await renderServiceUsernameEntry(ctx, draft, false);
+}
+
+// Optional-note text step. An invalid note keeps the flow armed for a retry.
+async function handleServiceNoteText(
+  ctx: BotContext,
+  next: () => Promise<void>,
+): Promise<void> {
+  const text = ctx.message?.text ?? "";
+  if (text.startsWith("/")) {
+    clearCheckoutState(ctx);
+    return next();
+  }
+  const draft = ctx.session.temp.checkoutDraft;
+  if (draft === undefined || draft.serviceCustomization === undefined) {
+    ctx.session.currentFlow = null;
+    await safeReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard(CB.USER_MENU));
+    return;
+  }
+  const normalized = normalizeServiceNote(text);
+  if (!normalized.ok) {
+    await safeReply(ctx, serviceNoteRejectText(normalized.reason), await serviceNotePromptKeyboard());
+    return;
+  }
+  draft.serviceCustomization.note = normalized.normalized.length > 0 ? normalized.normalized : null;
+  draft.serviceCustomization.completed = true;
+  ctx.session.currentFlow = null;
+  await renderPreInvoice(ctx, false);
+}

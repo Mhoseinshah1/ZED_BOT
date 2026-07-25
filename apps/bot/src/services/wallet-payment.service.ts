@@ -23,6 +23,7 @@ import { logger } from "../core/logger.js";
 import type { CheckoutDraft, ExtraTimeDraft, ExtraVolumeDraft, RenewalDraft } from "../core/session.js";
 import { isProductVisible } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
+import { attachReservationToOrder } from "./service-username-selection.service.js";
 import { claimDiscountUsage, validateDiscountCode } from "./discount.service.js";
 import { resolveEffectiveProductPrice } from "./representative-pricing.service.js";
 import {
@@ -264,9 +265,17 @@ async function executeWalletOrderPayment(
               ? "ALL"
               : snapshotString(snapshotRecord, "serviceLocation"),
           categorySnapshot: snapshotString(snapshotRecord, "categoryName"),
+          // Service-checkout username selection: the buyer's optional note,
+          // frozen from the checkout snapshot (null when skipped / not a SERVICE).
+          serviceNoteSnapshot: snapshotString(snapshotRecord, "serviceUserNote"),
           paidAt: now,
         },
       });
+      // Bind the buyer's username reservation to this settled order (BOUND).
+      const reservationId = snapshotString(snapshotRecord, "serviceUsernameReservationId");
+      if (reservationId !== null) {
+        await attachReservationToOrder(tx, reservationId, order.id, checkout.id);
+      }
       const settledPayment = await tx.payment.update({
         where: { id: payment.id },
         data: { orderId: order.id },

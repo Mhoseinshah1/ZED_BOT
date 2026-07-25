@@ -13,6 +13,16 @@ export const CO_CB = {
   // Phase 15: pay the pre-invoice from the wallet balance.
   WALLET: "user:co:wallet",
   WALLET_CONFIRM: "user:co:wallet:yes",
+  // Service-checkout username selection (feat/service-checkout-username-note).
+  // Routing binds to these stable strings, never a Persian label. All are far
+  // below Telegram's 64-byte callback limit and carry no per-draft data (the
+  // draft nonce + reservation live in the session/DB, not the callback).
+  UN_CUSTOM: "user:co:un:custom", // pick "type my own username"
+  UN_RANDOM: "user:co:un:rand", // pick "generate a random username"
+  UN_REGEN: "user:co:un:regen", // regenerate a new random username
+  UN_METHOD: "user:co:un:method", // back to the method-choice page
+  UN_CONFIRM: "user:co:un:ok", // confirm username → optional-note step
+  NOTE_SKIP: "user:co:note:skip", // skip the optional note (stores null)
 } as const;
 
 export const ccb = {

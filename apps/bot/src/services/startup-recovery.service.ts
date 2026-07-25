@@ -22,6 +22,7 @@ import {
   type OrderForProvisioning,
 } from "./provisioning.service.js";
 import { parseNamingSnapshot } from "./service-naming.service.js";
+import { consumeReservationForOrder } from "./service-username-selection.service.js";
 import {
   acquireServiceLock,
   isLockBackendAvailable,
@@ -238,9 +239,9 @@ async function adoptPanelAccount(
         : null;
 
   await prisma.$transaction(async (tx) => {
-    const duplicate = await tx.service.findFirst({ where: { orderId: order.id } });
-    if (duplicate === null) {
-      await tx.service.create({
+    let service = await tx.service.findFirst({ where: { orderId: order.id } });
+    if (service === null) {
+      service = await tx.service.create({
         data: {
           userId: order.userId,
           orderId: order.id,
@@ -249,6 +250,9 @@ async function adoptPanelAccount(
           panelType: panel.type,
           username,
           note: `zedbot order:${order.id.slice(0, 8)} tg:${order.user.telegramId}`,
+          // Service-checkout username selection: recover the buyer's optional
+          // note from the immutable order snapshot (never recomputed).
+          userNote: order.serviceNoteSnapshot,
           status: ServiceStatus.ACTIVE,
           productNameSnapshot: order.productNameSnapshot ?? product.name,
           panelNameSnapshot: order.panelNameSnapshot ?? panel.name,
@@ -271,6 +275,9 @@ async function adoptPanelAccount(
         },
       });
     }
+    // Mark the buyer's username reservation CONSUMED under the original owner
+    // (matched by orderId + username). No-op for legacy / strategy-named orders.
+    await consumeReservationForOrder(tx, order.id, service.id, username);
     await tx.order.updateMany({
       where: { id: order.id, status: OrderStatus.PROVISIONING },
       data: { status: OrderStatus.COMPLETED, completedAt: now },

@@ -380,7 +380,13 @@ export function createBot(token: string): Bot<BotContext> {
       await receiptReviewTextHandler.middleware()(ctx, next);
       return;
     }
-    if (flow === "checkout:discount") {
+    // Checkout text flows: discount code + the SERVICE username/note steps
+    // (feat/service-checkout-username-note). One handler self-gates on each flow.
+    if (
+      flow === "checkout:discount" ||
+      flow === "checkout:service_username" ||
+      flow === "checkout:service_note"
+    ) {
       await checkoutTextHandler.middleware()(ctx, next);
       return;
     }
