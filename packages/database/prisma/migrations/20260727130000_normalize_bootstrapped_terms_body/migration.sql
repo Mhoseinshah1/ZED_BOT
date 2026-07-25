@@ -6,25 +6,32 @@
 -- C0/C1 control characters) and bounds it to the same 3,500-character limit the
 -- admin UI enforces. A legacy template carrying any of those would therefore
 -- have been published as a version 1 the admin UI itself could never produce,
--- and a 4,000-character one would render a terms screen past Telegram's
--- message limit.
+-- and an over-long one renders a terms screen past Telegram's message limit —
+-- which the user-facing view now refuses to offer for acceptance at all.
 --
 -- The previous migration is already released, so it is left byte-for-byte
--- untouched and the repair lands here instead. ZWNJ (U+200C) and ZWJ (U+200D)
--- are deliberately NOT stripped - they are ordinary letters in Persian.
+-- untouched and the repair lands here instead.
 --
--- Scope is deliberately narrow: only the still-PUBLISHED version 1 written by
--- the bootstrap (no admin author on either side) is touched. An archived
--- version 1 is history and stays exactly as it was, and any version an operator
--- published through the bot was already normalized on the way in.
+-- VERSION 1 IS NEVER REWRITTEN. The bootstrap backfilled an acceptance row for
+-- every user who had already accepted the legacy terms, and those rows point at
+-- version 1 by id. Editing that body in place would leave the audit trail
+-- claiming those users accepted wording they never saw. So a body that needs
+-- repair makes version 1 ARCHIVED — history and its acceptances intact — and
+-- the corrected text is PUBLISHED as a new version that users accept afresh.
 --
--- Acceptance rows are never touched. They key on the document id and its
--- version, both unchanged here, so nobody is asked to accept again.
+-- ZWNJ (U+200C) and ZWJ (U+200D) are deliberately NOT stripped: they are
+-- ordinary letters in Persian.
+--
+-- Scope is narrow by design: only the still-PUBLISHED version 1 written by the
+-- bootstrap (no admin author on either side) is considered. An archived version
+-- 1 is history, and any version an operator published through the bot was
+-- already normalized on the way in.
 
 DO $$
 DECLARE
     bootstrapped RECORD;
     normalized TEXT;
+    next_version INTEGER;
 BEGIN
     IF to_regclass('"TermsDocument"') IS NULL THEN
         RETURN;
@@ -53,35 +60,50 @@ BEGIN
         )
     );
 
-    IF length(normalized) > 3500 THEN
-        normalized := left(normalized, 3500);
-        RAISE NOTICE 'Versioned terms: bootstrapped version 1 truncated to the 3500-character limit.';
-    END IF;
-
     IF normalized = bootstrapped.body THEN
+        -- Already clean and within limits: nothing to repair, nobody disturbed.
         RETURN;
     END IF;
 
-    IF normalized = '' THEN
-        -- The legacy text was nothing but invisible characters, which the
-        -- bootstrap's emptiness test did not catch. Archiving keeps the row and
-        -- every acceptance pointing at it while leaving NO published document,
-        -- so enforcement cannot be switched on until a real version is
-        -- published - the safe state, and the one the enable guard expects.
-        UPDATE "TermsDocument"
-        SET "status" = 'ARCHIVED',
-            "updatedAt" = CURRENT_TIMESTAMP
-        WHERE "id" = bootstrapped.id;
-        RAISE NOTICE 'Versioned terms: bootstrapped version 1 held no meaningful content once normalized and was archived.';
-        RETURN;
-    END IF;
-
+    -- Archive version 1 either way. The partial unique index permits only one
+    -- PUBLISHED row, so this must happen before anything new is published.
     UPDATE "TermsDocument"
-    SET "body" = normalized,
-        "contentHash" = encode(sha256(convert_to(normalized, 'UTF8')), 'hex'),
+    SET "status" = 'ARCHIVED',
         "updatedAt" = CURRENT_TIMESTAMP
     WHERE "id" = bootstrapped.id;
 
-    RAISE NOTICE 'Versioned terms: normalized the bootstrapped version 1 body.';
+    -- "Meaningful" must match the application's test, which ignores ALL
+    -- whitespace. One-argument btrim only strips SPACES, so a body of, say, a
+    -- bidi override wrapped in tabs and newlines would survive as whitespace
+    -- and be published as an effectively blank screen.
+    IF regexp_replace(normalized, '[[:space:]]', '', 'g') = '' THEN
+        RAISE NOTICE 'Versioned terms: bootstrapped version 1 held no meaningful content once normalized; archived and nothing published.';
+        RETURN;
+    END IF;
+
+    -- Refuse to publish text this migration had to CUT. Truncating terms of
+    -- service and then requiring acceptance of the remainder would drop real
+    -- clauses; leaving nothing published is the honest outcome. The gate treats
+    -- "enforcement on with nothing published" as a misconfiguration, steps
+    -- aside and alerts the OWNER, so no user is locked out meanwhile.
+    IF length(normalized) > 3500 THEN
+        RAISE NOTICE 'Versioned terms: bootstrapped version 1 exceeds the 3500-character limit; archived and nothing published - publish a new version from the admin panel.';
+        RETURN;
+    END IF;
+
+    SELECT coalesce(max("version"), 1) + 1 INTO next_version FROM "TermsDocument";
+
+    INSERT INTO "TermsDocument" (
+        "id", "version", "body", "status", "contentHash",
+        "createdByAdminId", "publishedByAdminId",
+        "createdAt", "updatedAt", "publishedAt"
+    ) VALUES (
+        gen_random_uuid()::TEXT, next_version, normalized, 'PUBLISHED',
+        encode(sha256(convert_to(normalized, 'UTF8')), 'hex'),
+        NULL, NULL,
+        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+    );
+
+    RAISE NOTICE 'Versioned terms: archived the unnormalized version 1 and published version % with the cleaned text.', next_version;
 END
 $$;

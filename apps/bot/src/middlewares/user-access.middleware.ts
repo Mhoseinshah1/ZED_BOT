@@ -7,7 +7,7 @@ import type { BotContext } from "../core/context.js";
 import { GENERIC_ERROR_TEXT } from "../core/errors.js";
 import { logger } from "../core/logger.js";
 import { resolveForceJoinGate } from "../services/force-join/force-join-gate.js";
-import { getBooleanSetting } from "../services/settings.service.js";
+import { getBooleanSetting, getBooleanSettingFresh } from "../services/settings.service.js";
 import { OPS_EVENTS, writeSystemLog } from "../services/system-log.service.js";
 import { isTermsAcceptCallback } from "../services/terms/terms-callbacks.js";
 import {
@@ -166,6 +166,18 @@ export async function ensurePreTermsAccess(ctx: BotContext): Promise<boolean> {
   if (from === undefined || from.is_bot) {
     return false;
   }
+  // Maintenance FIRST, and read FRESH. registerOrUpdateUser is itself a write
+  // (it upserts the user and touches profile / last-seen), so checking after it
+  // would let the very scenario this guard exists to stop through. The cached
+  // reader can serve a stale `false` for its TTL — and in a multi-process
+  // deployment for longer — which is exactly the window in which an operator
+  // has just declared an emergency, so this one precondition pays for a real
+  // read rather than trusting the cache.
+  if (await getBooleanSettingFresh("maintenance_mode", false)) {
+    await safeAnswerCallback(ctx);
+    await safeReply(ctx, await getMessageTemplate("bot_off_text"));
+    return false;
+  }
   if (ctx.dbUser === null) {
     try {
       ctx.dbUser = await registerOrUpdateUser(from);
@@ -175,11 +187,6 @@ export async function ensurePreTermsAccess(ctx: BotContext): Promise<boolean> {
       await safeReply(ctx, GENERIC_ERROR_TEXT);
       return false;
     }
-  }
-  if (await getBooleanSetting("maintenance_mode", false)) {
-    await safeAnswerCallback(ctx);
-    await safeReply(ctx, await getMessageTemplate("bot_off_text"));
-    return false;
   }
   if (ctx.dbUser.status !== UserStatus.ACTIVE) {
     await safeAnswerCallback(ctx);

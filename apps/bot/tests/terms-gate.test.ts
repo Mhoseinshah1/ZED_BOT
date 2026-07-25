@@ -1,4 +1,4 @@
-import { prisma } from "@zedbot/database";
+import { prisma, TermsDocumentStatus } from "@zedbot/database";
 import type { InlineKeyboard } from "grammy";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -29,6 +29,7 @@ import {
 import {
   buildTermsScreen,
   TELEGRAM_MESSAGE_LIMIT,
+  TERMS_TITLE_MAX_LENGTH,
   toPersianDigits,
 } from "../src/services/terms/terms-views.js";
 import { clearTextCache } from "../src/services/text.service.js";
@@ -45,6 +46,27 @@ const hasDb = typeof process.env.DATABASE_URL === "string" && process.env.DATABA
 const TELEGRAM_ID_BASE = 8_200_000_000_000n;
 const RUN_TAG = BigInt(Date.now() % 1_000_000_000);
 let seq = 0n;
+
+/** Overrides the operator-editable terms title, as an admin edit would. */
+async function setTitleTemplate(content: string): Promise<void> {
+  await prisma.messageTemplate.upsert({
+    where: { key: "terms_page_title" },
+    update: { currentContent: content },
+    create: {
+      key: "terms_page_title",
+      title: "عنوان صفحه قوانین",
+      category: "general",
+      defaultContent: "📜 قوانین و شرایط استفاده",
+      currentContent: content,
+    },
+  });
+  clearTextCache();
+}
+
+async function clearTitleTemplate(): Promise<void> {
+  await prisma.messageTemplate.deleteMany({ where: { key: "terms_page_title" } });
+  clearTextCache();
+}
 
 interface Sent {
   text: string;
@@ -217,32 +239,52 @@ describe.runIf(hasDb)("versioned terms — user screen (§5)", () => {
     expect(callbacksOf(screen1.keyboard)).not.toEqual(callbacksOf(screen2.keyboard));
   });
 
-  it("G05b the rendered screen never exceeds Telegram's message limit", async () => {
+  it("G05b a long operator title is clamped so the WHOLE body still renders", async () => {
     // A body at the cap PLUS a long operator-edited title used to overflow 4096.
     // Overflowing is not cosmetic: sendMessage 400s, safeReply swallows it, and
     // the gate still blocks — the user is stuck with no message at all.
-    const { id } = await publish("ب".repeat(3500));
-    await prisma.messageTemplate.upsert({
-      where: { key: "terms_page_title" },
-      update: { currentContent: "ت".repeat(900) },
-      create: {
-        key: "terms_page_title",
-        title: "عنوان صفحه قوانین",
-        category: "general",
-        defaultContent: "📜 قوانین و شرایط استفاده",
-        currentContent: "ت".repeat(900),
-      },
-    });
-    clearTextCache();
+    //
+    // The fix must not be "shorten the body": the button accepts the WHOLE
+    // document, so hiding clauses behind an ellipsis would record acceptance of
+    // text the user never saw (§4). The decoration is what gets clamped.
+    const body = "ب".repeat(3500);
+    const { id } = await publish(body);
+    await setTitleTemplate("ت".repeat(900));
 
     const document = await prisma.termsDocument.findUniqueOrThrow({ where: { id } });
     const screen = await buildTermsScreen(document);
+
     expect(screen.text.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
-    // The button still names the same document even when the body is truncated.
+    // Every character of the body is present — nothing was elided.
+    expect(screen.text).toContain(body);
+    expect(screen.text).not.toContain("…");
+    // The title was the thing that gave way.
+    expect(screen.text).not.toContain("ت".repeat(TERMS_TITLE_MAX_LENGTH + 1));
     expect(callbacksOf(screen.keyboard)).toEqual([termsAcceptCallback(id)]);
 
-    await prisma.messageTemplate.deleteMany({ where: { key: "terms_page_title" } });
-    clearTextCache();
+    await clearTitleTemplate();
+  });
+
+  it("G05c a body too long to render offers NO accept button at all", async () => {
+    // Legacy bodies predate the 3,500 cap (migration 20260727130000 repairs
+    // them). Until then the screen must fail CLOSED: showing a partial document
+    // beside a working accept button is the one thing §4 forbids, so the button
+    // is what disappears — never part of the text.
+    const oversized = "ک".repeat(4500);
+    const document = await prisma.termsDocument.create({
+      data: {
+        version: 1,
+        body: oversized,
+        status: TermsDocumentStatus.PUBLISHED,
+        publishedAt: new Date(),
+      },
+    });
+
+    const screen = await buildTermsScreen(document);
+
+    expect(callbacksOf(screen.keyboard)).toEqual([]);
+    expect(screen.text).not.toContain(oversized.slice(0, 200));
+    expect(screen.text.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
   });
 
   it("G07 the publication date is rendered when present", async () => {

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { prisma, TermsDocumentStatus } from "@zedbot/database";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -570,5 +572,147 @@ describe.runIf(hasDb)("versioned terms — legacy bootstrap (§11)", () => {
     const again = await bootstrapLegacyTermsDocument();
     expect(again).toEqual({ ok: true, created: false, reason: "DOCUMENT_EXISTS" });
     expect(await prisma.termsDocument.count()).toBe(1);
+  });
+});
+
+// =============================================================================
+// The 20260727130000 repair migration, executed as the real file (§11).
+//
+// The bootstrap in 20260727120000 copied the legacy body VERBATIM. This
+// migration repairs that — but version 1 already carries backfilled acceptance
+// rows, so it must never be rewritten: an acceptance that keeps pointing at a
+// changed body would claim the user accepted wording they never saw. A body
+// needing repair is therefore ARCHIVED and the clean text published as a NEW
+// version, and text that would have to be CUT is never republished at all.
+// =============================================================================
+
+const REPAIR_MIGRATION_SQL = readFileSync(
+  new URL(
+    "../../../packages/database/prisma/migrations/20260727130000_normalize_bootstrapped_terms_body/migration.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
+
+/** Writes a bootstrapped-looking published version 1 (no admin author). */
+async function seedBootstrappedV1(body: string): Promise<string> {
+  const row = await prisma.termsDocument.create({
+    data: {
+      version: 1,
+      body,
+      status: TermsDocumentStatus.PUBLISHED,
+      contentHash: termsContentHash(body),
+      publishedAt: new Date(),
+    },
+  });
+  return row.id;
+}
+
+async function runRepairMigration(): Promise<void> {
+  await prisma.$executeRawUnsafe(REPAIR_MIGRATION_SQL);
+}
+
+describe.runIf(hasDb)("versioned terms — bootstrap repair migration (§11)", () => {
+  beforeEach(resetTermsState);
+  afterAll(async () => {
+    await resetTermsState();
+    await prisma.$disconnect();
+  });
+
+  it("M1 archives the dirty version 1 and publishes the cleaned text as a new version", async () => {
+    const dirty = `‮قوانین‌استفاده\nخط دوم\tتب`;
+    const v1 = await seedBootstrappedV1(dirty);
+
+    await runRepairMigration();
+
+    const original = await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } });
+    expect(original.status).toBe(TermsDocumentStatus.ARCHIVED);
+    // Byte-for-byte untouched: this is what the acceptance rows refer to.
+    expect(original.body).toBe(dirty);
+
+    const published = await getPublishedTerms();
+    expect(published?.version).toBe(2);
+    expect(published?.body).toBe("قوانین‌استفاده\nخط دوم\tتب");
+    expect(published?.contentHash).toBe(termsContentHash(published?.body ?? ""));
+    // ZWNJ survives — it is a Persian letter, not formatting.
+    expect(published?.body).toContain("‌");
+  });
+
+  it("M2 leaves NOTHING published when the body is only invisible characters", async () => {
+    // btrim() alone strips spaces but not tabs or newlines, so the emptiness
+    // test has to ignore all whitespace or this body survives as a blank screen.
+    const v1 = await seedBootstrappedV1("\t‮\n");
+
+    await runRepairMigration();
+
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    expect(await getPublishedTerms()).toBeNull();
+  });
+
+  it("M3 refuses to republish a body it would have to truncate", async () => {
+    const v1 = await seedBootstrappedV1(`‮${"پ".repeat(4000)}`);
+
+    await runRepairMigration();
+
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    // Cutting terms of service and demanding acceptance of the remainder would
+    // drop real clauses; publishing nothing is the honest outcome.
+    expect(await getPublishedTerms()).toBeNull();
+    expect(await prisma.termsDocument.count()).toBe(1);
+  });
+
+  it("M4 leaves an already-clean version 1 completely alone", async () => {
+    const clean = "قوانین‌تمیز";
+    const v1 = await seedBootstrappedV1(clean);
+    const before = await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } });
+
+    await runRepairMigration();
+
+    const after = await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } });
+    expect(after.status).toBe(TermsDocumentStatus.PUBLISHED);
+    expect(after.body).toBe(clean);
+    expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+    expect(await prisma.termsDocument.count()).toBe(1);
+  });
+
+  it("M5 preserves every existing acceptance, still pointing at version 1", async () => {
+    const v1 = await seedBootstrappedV1(`‮متن قانونی`);
+    const userId = await makeUser();
+    await prisma.termsAcceptance.create({
+      data: { userId, termsDocumentId: v1, termsVersion: 1, source: "MIGRATION" },
+    });
+
+    await runRepairMigration();
+
+    const acceptance = await prisma.termsAcceptance.findUniqueOrThrow({
+      where: { userId_termsDocumentId: { userId, termsDocumentId: v1 } },
+    });
+    expect(acceptance.termsVersion).toBe(1);
+    // The document it refers to still holds exactly the text that was accepted.
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).body).toBe(
+      "‮متن قانونی",
+    );
+    // ...and the user now owes an acceptance of the republished version.
+    const published = await getPublishedTerms();
+    expect(published?.version).toBe(2);
+    expect(await hasAcceptedTermsDocument(userId, published?.id ?? "")).toBe(false);
+  });
+
+  it("M6 is idempotent — running it twice changes nothing further", async () => {
+    await seedBootstrappedV1(`‮قوانین`);
+
+    await runRepairMigration();
+    const afterFirst = await prisma.termsDocument.findMany({ orderBy: { createdAt: "asc" } });
+    await runRepairMigration();
+    const afterSecond = await prisma.termsDocument.findMany({ orderBy: { createdAt: "asc" } });
+
+    expect(afterSecond).toHaveLength(afterFirst.length);
+    expect(afterSecond.map((d) => `${d.version}:${d.status}:${d.body}`)).toEqual(
+      afterFirst.map((d) => `${d.version}:${d.status}:${d.body}`),
+    );
   });
 });

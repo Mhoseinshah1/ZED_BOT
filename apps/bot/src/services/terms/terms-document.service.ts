@@ -208,14 +208,23 @@ export async function getTermsAcceptanceStats(documentId: string | null): Promis
     const activeOnly = await prisma.user.count({ where: { status: "ACTIVE" } });
     return { accepted: 0, pending: activeOnly };
   }
-  // ONE snapshot: read both counts in a single transaction so a registration or
-  // acceptance landing between them cannot skew the pair.
-  const [activeUsers, accepted] = await prisma.$transaction([
-    prisma.user.count({ where: { status: "ACTIVE" } }),
-    prisma.termsAcceptance.count({
-      where: { termsDocumentId: documentId, user: { status: "ACTIVE" } },
-    }),
-  ]);
+  // ONE statement, deliberately. Wrapping two counts in `$transaction([...])`
+  // would NOT have given them one snapshot: at PostgreSQL's default READ
+  // COMMITTED isolation every statement takes a fresh snapshot, so a
+  // registration or acceptance landing between them could still skew the pair.
+  // A single aggregate query is atomic by construction and needs no isolation
+  // level to be correct.
+  const [row] = await prisma.$queryRaw<{ active: bigint; accepted: bigint }[]>`
+    SELECT
+      count(*) AS active,
+      count(a."id") AS accepted
+    FROM "User" u
+    LEFT JOIN "TermsAcceptance" a
+      ON a."userId" = u."id" AND a."termsDocumentId" = ${documentId}
+    WHERE u."status" = 'ACTIVE'
+  `;
+  const activeUsers = Number(row?.active ?? 0n);
+  const accepted = Number(row?.accepted ?? 0n);
   return { accepted, pending: Math.max(0, activeUsers - accepted) };
 }
 

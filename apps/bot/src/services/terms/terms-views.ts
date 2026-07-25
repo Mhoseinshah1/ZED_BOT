@@ -51,6 +51,18 @@ export function formatTermsDate(date: Date): string {
  */
 export const TELEGRAM_MESSAGE_LIMIT = 4096;
 
+/**
+ * Hard bound on the operator-editable title, so the DECORATION can never crowd
+ * out the thing being accepted. 4096 − 3500 (the body limit) leaves 596 for the
+ * title, the version line, the date line and the separators; 400 keeps a
+ * comfortable margin, which is why a conforming body always renders in full.
+ *
+ * The title is clamped rather than the body because the title is presentation
+ * an operator chose, while the body is the legal text acceptance is recorded
+ * against — see the invariant below.
+ */
+export const TERMS_TITLE_MAX_LENGTH = 400;
+
 export interface TermsScreen {
   text: string;
   keyboard: InlineKeyboard;
@@ -62,11 +74,13 @@ export interface TermsScreen {
  * document.
  */
 export async function buildTermsScreen(document: TermsDocument): Promise<TermsScreen> {
-  const [title, acceptLabel] = await Promise.all([
+  const [rawTitle, acceptLabel] = await Promise.all([
     getMessageTemplate("terms_page_title", TERMS_TITLE_FALLBACK),
     getButtonText("terms_accept", TERMS_ACCEPT_BUTTON_FALLBACK),
   ]);
 
+  // Clamp the DECORATION, never the text being accepted (see below).
+  const title = rawTitle.slice(0, TERMS_TITLE_MAX_LENGTH);
   const lines = [title, ""];
   if (document.version !== null) {
     lines.push(`نسخه: ${toPersianDigits(document.version)}`);
@@ -74,17 +88,23 @@ export async function buildTermsScreen(document: TermsDocument): Promise<TermsSc
   if (document.publishedAt !== null) {
     lines.push(`تاریخ انتشار: ${formatTermsDate(document.publishedAt)}`);
   }
-  // Reserve room for the header, then fit the body into what is left. The body
-  // is truncated for DISPLAY only; the stored document is never modified.
   const header = lines.join("\n");
-  const available = TELEGRAM_MESSAGE_LIMIT - header.length - 2;
-  const body =
-    document.body.length <= available
-      ? document.body
-      : `${document.body.slice(0, Math.max(0, available - 1))}…`;
+
+  // THE invariant (§4): a user may accept only the exact body that was rendered
+  // with the button. Truncating the body for display while still offering the
+  // accept button would record acceptance of clauses the user never saw, so an
+  // over-long body loses the BUTTON rather than losing its text. Clamping the
+  // title above means a conforming body (≤ 3,500) always fits, so this only
+  // triggers for a legacy body that migration 20260727130000 repairs.
+  if (header.length + 2 + document.body.length > TELEGRAM_MESSAGE_LIMIT) {
+    return {
+      text: await getMessageTemplate("terms_unavailable_text", TERMS_UNAVAILABLE_TEXT_FALLBACK),
+      keyboard: new InlineKeyboard(),
+    };
+  }
 
   return {
-    text: `${header}\n\n${body}`,
+    text: `${header}\n\n${document.body}`,
     keyboard: new InlineKeyboard().text(acceptLabel, termsAcceptCallback(document.id)),
   };
 }

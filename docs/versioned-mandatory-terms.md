@@ -271,14 +271,21 @@ unable to proceed *and* unable to see why, forever. Bodies are capped at 3,500,
 but the title is an operator-editable template and an upgraded install can carry
 a large legacy body, so the composed screens are bounded explicitly:
 
-- `buildTermsScreen` reserves the header and truncates the **displayed** body to
-  fit; the stored document is never modified.
+- `buildTermsScreen` clamps the operator-editable **title** to
+  `TERMS_TITLE_MAX_LENGTH` (400). 4,096 − 3,500 leaves 596 for the title, the
+  version and date lines and the separators, so a conforming body always renders
+  in full. The body is **never** shortened: the button accepts the whole
+  document, so eliding clauses would record acceptance of unseen text (§4). If a
+  legacy over-limit body still will not fit, the screen shows
+  `terms_unavailable_text` **with no accept button** — it fails closed rather
+  than offering acceptance of a partial document.
 - The admin preview splits its budget between the published document and the
   draft. A new draft is seeded from the published body, so both are large at the
   same time — rendering 3,500 of each broke the message for any document over
   ~2,000 characters.
-- The migration normalizes and truncates the legacy body to the same 3,500
-  limit, so an upgraded install can never publish an over-limit version 1.
+- The repair migration archives an over-limit bootstrapped version 1 and
+  publishes **nothing** in its place, so an upgraded install never carries an
+  over-limit published version (see §10).
 
 ## 9. Privacy
 
@@ -326,19 +333,38 @@ still empty) fabricates nothing.
 bootstrap could not: it copied the legacy body **verbatim**, so a `terms_text`
 carrying bidi overrides, direction marks, isolates, zero-width space, a BOM or
 control characters — or simply running past 3,500 characters — would have become
-a version 1 the admin UI itself could never produce, rendering a screen past
-Telegram's message limit. The repair normalizes and bounds that body exactly as
-the application does (ZWNJ and ZWJ are preserved — they are ordinary Persian
-letters) and recomputes the content hash.
+a version 1 the admin UI itself could never produce, and one the user screen now
+refuses to offer for acceptance at all.
 
-It touches **only** the still-published version 1 written by the bootstrap
+**Version 1 is never rewritten.** The bootstrap already backfilled an acceptance
+row for everyone who had accepted the legacy terms, and those rows point at
+version 1 by id. Editing that body in place would leave the audit trail claiming
+those users accepted wording they never saw. So the repair works by versioning,
+not by mutation:
+
+| Bootstrapped version 1 | Outcome |
+| --- | --- |
+| Already clean and within limits | Untouched. Nobody re-accepts. |
+| Dirty, but the text survives normalization intact | v1 → `ARCHIVED`; the cleaned text is **published as version 2**. Users accept once more. |
+| Nothing meaningful left after normalization | v1 → `ARCHIVED`; **nothing published**. |
+| Longer than 3,500 characters after normalization | v1 → `ARCHIVED`; **nothing published**. |
+
+The last row is deliberate: truncating terms of service and then demanding
+acceptance of the remainder would silently drop real clauses. Publishing nothing
+is the honest outcome — and it is safe, because enforcement with no published
+document is treated as a misconfiguration, so the gate steps aside and alerts
+the OWNER instead of locking anyone out until a real version is published.
+
+Normalization matches the application exactly, including preserving ZWNJ and ZWJ
+(ordinary Persian letters), and the emptiness test ignores **all** whitespace —
+one-argument `btrim` strips only spaces, so a body of, say, a bidi override
+wrapped in tabs would otherwise have survived as a blank screen.
+
+Scope is narrow: only the still-published version 1 written by the bootstrap
 (no admin author on either side). An archived version 1 is history and is left
 alone, and anything an operator published through the bot was already normalized
-on the way in. Acceptance rows are never touched: they key on the document id
-and version, both unchanged, so nobody is asked to accept again. In the extreme
-case where nothing meaningful survives normalization the document is archived
-rather than emptied — history and acceptances are kept, and with no published
-document enforcement simply cannot be switched on until a real version exists.
+on the way in. Existing acceptance rows are never modified — they keep pointing
+at the exact document, and the exact text, that was accepted.
 
 `bootstrapLegacyTermsDocument()` is an idempotent safety net for installs the
 migration cannot help — one restored from a partial backup, for example. It does
