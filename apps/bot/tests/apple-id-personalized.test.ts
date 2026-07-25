@@ -4,6 +4,7 @@ import {
   prisma,
   type Admin,
   type CheckoutSession,
+  type PaymentGateway,
   type Product,
   type User,
 } from "@zedbot/database";
@@ -16,12 +17,15 @@ import { enforceCustomerInfoBeforePayment } from "../src/handlers/user-checkout/
 import {
   getOrCreateCheckoutInput,
   isCheckoutInputSatisfied,
+  isMandatoryCustomerInfoMissing,
   submitCheckoutInput,
 } from "../src/services/checkout-customer-input.service.js";
 import { createCheckoutSession } from "../src/services/checkout.service.js";
 import {
   decodeValuesEncrypted,
+  PERSONALIZED_AI_DEFAULT_SCHEMA,
   PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA,
+  renderSafeSummary,
 } from "../src/services/customer-input-schema.service.js";
 import { dispatchPaidOrderFulfillment } from "../src/services/order-fulfillment.service.js";
 import { deliverManualOrder } from "../src/services/other-product-delivery.service.js";
@@ -31,6 +35,8 @@ import {
   type ProfileProductFields,
 } from "../src/services/other-product-profile.service.js";
 import { addStockItem } from "../src/services/other-product-stock.service.js";
+import { submitReceipt } from "../src/services/payment-method.service.js";
+import { approveReceiptPayment } from "../src/services/receipt-review.service.js";
 import { payPurchaseDraftWithWallet } from "../src/services/wallet-payment.service.js";
 
 // =============================================================================
@@ -64,6 +70,7 @@ let admin: Admin;
 let categoryId: string;
 let personalizedProduct: Product;
 let stockProduct: Product;
+let cardGateway: PaymentGateway;
 const userIds: string[] = [];
 const productIds: string[] = [];
 
@@ -171,6 +178,9 @@ describe.runIf(hasDb)("Apple ID personalized vs stock fulfillment (DB)", () => {
     admin = await prisma.admin.create({
       data: { telegramId: runTag + 900_000_000n, role: "OWNER", isActive: true },
     });
+    cardGateway = await prisma.paymentGateway.create({
+      data: { type: "CARD_TO_CARD", name: `apple-gw-${runTag}`, isEnabled: true },
+    });
     personalizedProduct = await createProduct({
       name: `apple-pers-${runTag}`,
       deliveryType: "MANUAL_ADMIN",
@@ -208,11 +218,13 @@ describe.runIf(hasDb)("Apple ID personalized vs stock fulfillment (DB)", () => {
     await prisma.otherProductStockItem.deleteMany({ where: { productId: { in: productIds } } });
     await prisma.otherProductOrder.deleteMany({ where: users });
     await prisma.walletTransaction.deleteMany({ where: users });
+    await prisma.manualReceipt.deleteMany({ where: users });
     await prisma.payment.deleteMany({ where: users });
     await prisma.order.deleteMany({ where: users });
     await prisma.checkoutSession.deleteMany({ where: users });
     await prisma.product.deleteMany({ where: { id: { in: productIds } } });
     await prisma.productCategory.deleteMany({ where: { id: categoryId } });
+    await prisma.paymentGateway.deleteMany({ where: { id: cardGateway.id } });
     await prisma.admin.deleteMany({ where: { id: admin.id } });
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });
     await prisma.$disconnect();
@@ -589,6 +601,249 @@ describe.runIf(hasDb)("Apple ID personalized vs stock fulfillment (DB)", () => {
     ).toBe("STOCK_CODE");
     // Apple stock still parses email-boundary, personalized still needs info.
     expect(buildFulfillmentSnapshot(stockProduct as ProfileProductFields).stockParser).toBe("EMAIL_BOUNDARY");
+  });
+
+  it("18. requireInfoBeforeSettlement is true ONLY for personalized Apple; other personalized kinds stay post-payment", () => {
+    const personalizedApple = buildFulfillmentSnapshot(personalizedProduct as ProfileProductFields);
+    expect(personalizedApple.requireInfoBeforeSettlement).toBe(true);
+    expect(buildFulfillmentSnapshot(stockProduct as ProfileProductFields).requireInfoBeforeSettlement).toBe(
+      false,
+    );
+    const base: ProfileProductFields = {
+      otherProductKind: "AI_ACCOUNT",
+      otherProductFulfillmentProfile: "PERSONALIZED_SERVICE",
+      otherProductStockParser: null,
+      collectInfoBeforeManualApproval: true,
+      customerInputSchema: null,
+      completionMessageTemplate: null,
+      requiredUserInfoEnabled: true,
+      requiredUserInfoPromptText: null,
+      deliveryType: "MANUAL_ADMIN",
+      stockEnabled: false,
+    };
+    // AI + Telegram Premium personalized keep post-payment collection.
+    expect(resolveEffectiveProfile(base).requireInfoBeforeSettlement).toBe(false);
+    expect(
+      resolveEffectiveProfile({ ...base, otherProductKind: "TELEGRAM_PREMIUM" })
+        .requireInfoBeforeSettlement,
+    ).toBe(false);
+  });
+
+  it("19. the settlement gate blocks personalized Apple before info and only AFTER submit; never blocks post-payment kinds", async () => {
+    const user = await createUser();
+    const appleCheckout = await makeCheckout(user, personalizedProduct);
+    expect(await isMandatoryCustomerInfoMissing(appleCheckout)).toBe(true);
+    await submitInfo(appleCheckout.id, user);
+    const afterApple = await prisma.checkoutSession.findUniqueOrThrow({
+      where: { id: appleCheckout.id },
+    });
+    expect(await isMandatoryCustomerInfoMissing(afterApple)).toBe(false);
+
+    // A post-payment kind (AI personalized) is NEVER blocked at settlement even
+    // with no info submitted - it collects info in the WAITING_USER_INFO queue.
+    const aiProduct = await createProduct({
+      name: `apple-ai-${runTag}`,
+      deliveryType: "MANUAL_ADMIN",
+      otherProductKind: "AI_ACCOUNT",
+      otherProductFulfillmentProfile: "PERSONALIZED_SERVICE",
+      requiredUserInfoEnabled: true,
+      collectInfoBeforeManualApproval: true,
+      stockEnabled: false,
+      customerInputSchema: JSON.parse(JSON.stringify(PERSONALIZED_AI_DEFAULT_SCHEMA)),
+    });
+    const aiCheckout = await makeCheckout(user, aiProduct);
+    expect(await isMandatoryCustomerInfoMissing(aiCheckout)).toBe(false);
+    // Stock Apple is never blocked (requires no info).
+    const stockCheckout = await makeCheckout(user, stockProduct);
+    expect(await isMandatoryCustomerInfoMissing(stockCheckout)).toBe(false);
+  });
+
+  it("20. CARD receipt approval FAILS CLOSED for personalized Apple without info, and settles after submit", async () => {
+    const user = await createUser();
+    const checkout = await makeCheckout(user, personalizedProduct);
+    const submitted = await submitReceipt(user, checkout, cardGateway.id, undefined, {
+      text: "کارت به کارت انجام شد",
+    });
+    expect(submitted.ok).toBe(true);
+    if (!submitted.ok) {
+      return;
+    }
+    const paymentId = submitted.payment.id;
+
+    // Direct settlement call cannot bypass the form: approval is refused, the
+    // checkout stays PENDING and no paid Order is created.
+    const blocked = await approveReceiptPayment(paymentId, admin);
+    expect(blocked.ok).toBe(false);
+    expect(
+      (await prisma.checkoutSession.findUniqueOrThrow({ where: { id: checkout.id } })).status,
+    ).toBe("PENDING");
+    expect(await prisma.order.count({ where: { checkoutSessionId: checkout.id } })).toBe(0);
+
+    // After the buyer submits the form, the same call settles normally.
+    await submitInfo(checkout.id, user);
+    const ok = await approveReceiptPayment(paymentId, admin);
+    expect(ok.ok).toBe(true);
+    expect(
+      (await prisma.checkoutSession.findUniqueOrThrow({ where: { id: checkout.id } })).status,
+    ).toBe("PAID");
+  });
+
+  it("21. wallet resumes the FROZEN personalized checkout even after the product is flipped to stock (mode immutability)", async () => {
+    const user = await createUser();
+    const flipProduct = await createProduct({
+      name: `apple-flip-${runTag}`,
+      deliveryType: "MANUAL_ADMIN",
+      otherProductKind: "APPLE_ID",
+      otherProductFulfillmentProfile: "PERSONALIZED_SERVICE",
+      requiredUserInfoEnabled: true,
+      collectInfoBeforeManualApproval: true,
+      stockEnabled: false,
+      customerInputSchema: JSON.parse(JSON.stringify(PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA)),
+    });
+    const draft = draftFor(flipProduct);
+    const balanceBefore = user.balanceToman;
+
+    // First tap materializes a personalized PENDING checkout (no money moves).
+    const first = await payPurchaseDraftWithWallet(user, draft);
+    expect(first.ok).toBe(false);
+    if (first.ok || !("needsCustomerInfo" in first)) {
+      throw new Error("expected needsCustomerInfo");
+    }
+    const pendingId = first.checkoutId;
+    draft.otherProductCheckoutId = pendingId;
+
+    // Admin flips the product to ready-from-stock BEFORE the buyer settles.
+    await prisma.product.update({
+      where: { id: flipProduct.id },
+      data: {
+        otherProductFulfillmentProfile: "STOCK_CREDENTIAL",
+        otherProductStockParser: "EMAIL_BOUNDARY",
+        requiredUserInfoEnabled: false,
+        collectInfoBeforeManualApproval: false,
+        deliveryType: "STOCK_ITEM",
+        stockEnabled: true,
+      },
+    });
+
+    // The buyer confirms the form and taps again: the FROZEN personalized
+    // checkout settles - never a new stock checkout - and dispatch routes to the
+    // manual queue, touching no stock.
+    await submitInfo(pendingId, user);
+    const second = await payPurchaseDraftWithWallet(user, draft);
+    expect(second.ok).toBe(true);
+    if (!second.ok) {
+      return;
+    }
+    expect(second.checkout.id).toBe(pendingId);
+    const recorder = sendRecorder();
+    await dispatchPaidOrderFulfillment(recorder.api, second.order.id, { source: "WALLET", user });
+    const record = await prisma.otherProductOrder.findUniqueOrThrow({
+      where: { orderId: second.order.id },
+    });
+    expect(record.status).toBe("WAITING_ADMIN_DELIVERY");
+    // No stock was ever reserved for this order.
+    expect(
+      await prisma.otherProductStockItem.count({ where: { deliveredOrderId: second.order.id } }),
+    ).toBe(0);
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(after.balanceToman).toBe(balanceBefore - PRICE);
+  });
+
+  it("22. a ready-from-stock wallet checkout freezes its fulfillment snapshot on the PAID checkout", async () => {
+    const user = await createUser();
+    // Give the stock product an item so the wallet purchase settles.
+    await addStockItem({
+      productId: stockProduct.id,
+      content: "frozen.snap@example.com\npw-frozen-1",
+      label: null,
+      createdByAdminId: admin.id,
+    });
+    const second = await payPurchaseDraftWithWallet(user, draftFor(stockProduct));
+    expect(second.ok).toBe(true);
+    if (!second.ok) {
+      return;
+    }
+    const paid = await prisma.checkoutSession.findUniqueOrThrow({ where: { id: second.checkout.id } });
+    const snap = paid.otherProductFulfillmentSnapshot as Record<string, unknown> | null;
+    expect(snap).not.toBeNull();
+    expect(snap?.profile).toBe("STOCK_CREDENTIAL");
+    expect(snap?.kind).toBe("APPLE_ID");
+  });
+
+  it("23. an EXPIRED materialized wallet checkout can never settle (fails closed)", async () => {
+    const user = await createUser();
+    const draft = draftFor(personalizedProduct);
+    const balanceBefore = user.balanceToman;
+    const first = await payPurchaseDraftWithWallet(user, draft);
+    if (first.ok || !("needsCustomerInfo" in first)) {
+      throw new Error("expected needsCustomerInfo");
+    }
+    const pendingId = first.checkoutId;
+    draft.otherProductCheckoutId = pendingId;
+    await submitInfo(pendingId, user);
+    // The buyer leaves the confirmation open past expiry.
+    await prisma.checkoutSession.update({
+      where: { id: pendingId },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+    const second = await payPurchaseDraftWithWallet(user, draft);
+    // Not settled: the expired checkout is not resumed and a fresh one needs the
+    // form again; no money moved.
+    expect(second.ok).toBe(false);
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(after.balanceToman).toBe(balanceBefore);
+    const stale = await prisma.checkoutSession.findUniqueOrThrow({ where: { id: pendingId } });
+    expect(stale.status).not.toBe("PAID");
+  });
+
+  it("24. a second materialize cancels the superseded pending wallet checkout and abandons its input", async () => {
+    const user = await createUser();
+    const firstDraft = draftFor(personalizedProduct);
+    const a = await payPurchaseDraftWithWallet(user, firstDraft);
+    if (a.ok || !("needsCustomerInfo" in a)) {
+      throw new Error("expected needsCustomerInfo");
+    }
+    const checkoutA = a.checkoutId;
+    await submitInfo(checkoutA, user);
+    // A brand-new draft (no otherProductCheckoutId) materializes a fresh
+    // checkout, superseding A.
+    const secondDraft = draftFor(personalizedProduct);
+    const b = await payPurchaseDraftWithWallet(user, secondDraft);
+    if (b.ok || !("needsCustomerInfo" in b)) {
+      throw new Error("expected needsCustomerInfo");
+    }
+    const checkoutB = b.checkoutId;
+    expect(checkoutB).not.toBe(checkoutA);
+    expect(
+      (await prisma.checkoutSession.findUniqueOrThrow({ where: { id: checkoutA } })).status,
+    ).toBe("CANCELLED");
+    expect(
+      (await prisma.checkoutSession.findUniqueOrThrow({ where: { id: checkoutB } })).status,
+    ).toBe("PENDING");
+    const abandonedInput = await prisma.checkoutCustomerInput.findUnique({
+      where: { checkoutSessionId: checkoutA },
+    });
+    expect(abandonedInput?.status).toBe("ABANDONED");
+    // Exactly one live PENDING checkout for this user+product remains.
+    expect(
+      await prisma.checkoutSession.count({
+        where: { userId: user.id, productId: personalizedProduct.id, status: "PENDING" },
+      }),
+    ).toBe(1);
+  });
+
+  it("25. the safe masked summary masks the personal identity fields but keeps country/region visible", () => {
+    const summary = renderSafeSummary(PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA, {
+      ...APPLE_VALUES,
+      phone: "09120000000",
+      extra_note: "no note",
+    });
+    // Masked (sensitive) fields never appear verbatim.
+    expect(summary).not.toContain("Rezaei");
+    expect(summary).not.toContain("recover.person@example.com");
+    expect(summary).not.toContain("09120000000");
+    // Country/region (not identifying) stays readable.
+    expect(summary).toContain("United States");
   });
 });
 

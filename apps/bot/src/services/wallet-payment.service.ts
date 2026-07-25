@@ -27,6 +27,7 @@ import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.
 import {
   buildFulfillmentSnapshot,
   FulfillmentProfileError,
+  readFulfillmentSnapshot,
 } from "./other-product-profile.service.js";
 import {
   attachReservationToOrder,
@@ -237,6 +238,16 @@ async function executeWalletOrderPayment(
   if (!(await isWalletPaymentEnabled())) {
     return { ok: false, error: WALLET_PAYMENT_DISABLED_TEXT };
   }
+  // §4 settlement-boundary defense in depth: never settle a resumed personalized
+  // OTHER_PRODUCT checkout whose mandatory customer-info form is not satisfied,
+  // even though payPurchaseDraftWithWallet already gated it upstream. Fail closed
+  // BEFORE the transaction - no deduction, no order.
+  if (
+    args.existingCheckoutId !== undefined &&
+    !(await isCheckoutInputSatisfied(args.existingCheckoutId))
+  ) {
+    return { ok: false, error: DRAFT_STALE_TEXT };
+  }
   const minutes = await checkoutExpiryMinutes();
   const now = new Date();
   const snapshotRecord = args.snapshot as Record<string, unknown>;
@@ -258,6 +269,10 @@ async function executeWalletOrderPayment(
             finalPriceToman: args.finalPriceToman,
             status: CheckoutStatus.PENDING,
             settledByPaymentId: null,
+            // §4 fail closed on a stale materialized checkout: a buyer who left
+            // the form open past expiry can never settle it (parity with the
+            // gateway/card paths, which reject expired checkouts).
+            expiresAt: { gt: now },
           },
           data: { status: CheckoutStatus.PAID, paidAt: now },
         });
@@ -519,21 +534,48 @@ async function materializePendingOtherProductCheckout(
 ): Promise<CheckoutSession> {
   const minutes = await checkoutExpiryMinutes();
   const now = new Date();
-  return prisma.checkoutSession.create({
-    data: {
-      userId: user.id,
-      purpose: "ORDER_PAYMENT",
-      productId: args.product.id,
-      orderType: OrderType.OTHER_PRODUCT,
-      productSnapshot: args.snapshot,
-      otherProductFulfillmentSnapshot: args.fulfillmentSnapshot,
-      originalPriceToman: args.originalPriceToman,
-      discountAmountToman: args.discountAmountToman,
-      finalPriceToman: args.finalPriceToman,
-      discountCodeId: args.discountCodeId,
-      status: CheckoutStatus.PENDING,
-      expiresAt: new Date(now.getTime() + minutes * 60_000),
-    },
+  return prisma.$transaction(async (tx) => {
+    // Cancel superseded PENDING checkouts for this user+product before creating
+    // a fresh one (mirrors createCheckoutSession), and ABANDON their
+    // customer-input rows + cancel their PENDING representative markers. Without
+    // this a buyer who abandons the form and restarts leaves multiple live
+    // checkouts and lingering copies of submitted personal data. The resume
+    // path never reaches here, so an in-progress checkout is never cancelled.
+    const superseded = await tx.checkoutSession.findMany({
+      where: { userId: user.id, productId: args.product.id, status: CheckoutStatus.PENDING },
+      select: { id: true },
+    });
+    if (superseded.length > 0) {
+      const ids = superseded.map((c) => c.id);
+      await tx.checkoutSession.updateMany({
+        where: { id: { in: ids } },
+        data: { status: CheckoutStatus.CANCELLED },
+      });
+      await tx.checkoutCustomerInput.updateMany({
+        where: { checkoutSessionId: { in: ids }, status: { in: ["COLLECTING", "SUBMITTED"] } },
+        data: { status: "ABANDONED" },
+      });
+      await tx.representativePurchase.updateMany({
+        where: { checkoutSessionId: { in: ids }, status: "PENDING" },
+        data: { status: "CANCELLED" },
+      });
+    }
+    return tx.checkoutSession.create({
+      data: {
+        userId: user.id,
+        purpose: "ORDER_PAYMENT",
+        productId: args.product.id,
+        orderType: OrderType.OTHER_PRODUCT,
+        productSnapshot: args.snapshot,
+        otherProductFulfillmentSnapshot: args.fulfillmentSnapshot,
+        originalPriceToman: args.originalPriceToman,
+        discountAmountToman: args.discountAmountToman,
+        finalPriceToman: args.finalPriceToman,
+        discountCodeId: args.discountCodeId,
+        status: CheckoutStatus.PENDING,
+        expiresAt: new Date(now.getTime() + minutes * 60_000),
+      },
+    });
   });
 }
 
@@ -663,38 +705,67 @@ export async function payPurchaseDraftWithWallet(
     finalPriceToman,
   });
 
-  // §4 wallet mandatory-input gate: a personalized OTHER_PRODUCT whose frozen
-  // fulfillment REQUIRES a structured customer-information form (e.g. a manually
-  // built Apple ID) must have that form CONFIRMED before the wallet charge. The
-  // wallet flow has no prior checkout, so materialize a PENDING one the buyer
-  // fills the form against and settle THAT checkout only after submission. When
-  // the info is still missing, no money moves and the handler opens the form.
+  // §4 wallet mandatory-input gate + frozen-mode resume. A personalized
+  // OTHER_PRODUCT whose fulfillment REQUIRES a structured customer-information
+  // form (e.g. a manually built Apple ID) must have it CONFIRMED before the
+  // wallet charge. The wallet flow has no prior checkout, so materialize a
+  // PENDING one the buyer fills the form against and settle THAT checkout only
+  // after submission; when the info is still missing, no money moves and the
+  // handler opens the form.
+  //
+  // MODE IMMUTABILITY (§6): when the draft already points at a materialized
+  // PENDING checkout, the EFFECTIVE fulfillment mode is read from THAT
+  // checkout's FROZEN snapshot - never re-derived from the live product - so an
+  // admin flipping the product to stock mid-flow can never abandon the
+  // personalized checkout (and its submitted data) nor silently charge a
+  // different mode. A stock (ready-from-stock) OTHER_PRODUCT freezes its mode
+  // onto the freshly created PAID checkout so downstream fulfillment reads the
+  // immutable capture, not the mutable live product.
   let existingCheckoutId: string | undefined;
+  let frozenFulfillmentSnapshot: Prisma.InputJsonObject | undefined;
   if (product.type === "OTHER_PRODUCT") {
-    let fulfillment;
+    let liveFulfillment;
     try {
-      fulfillment = buildFulfillmentSnapshot(product);
+      liveFulfillment = buildFulfillmentSnapshot(product);
     } catch (err) {
       if (err instanceof FulfillmentProfileError) {
         return { ok: false, error: DRAFT_STALE_TEXT };
       }
       throw err;
     }
-    if (fulfillment.requiresCustomerInfo && fulfillment.customerInputSchema !== null) {
-      let pendingId = draft.otherProductCheckoutId ?? null;
-      if (pendingId !== null) {
-        const existing = await prisma.checkoutSession.findUnique({ where: { id: pendingId } });
-        if (
-          existing === null ||
-          existing.userId !== user.id ||
-          existing.status !== CheckoutStatus.PENDING ||
-          existing.productId !== product.id ||
-          existing.finalPriceToman !== finalPriceToman
-        ) {
-          pendingId = null;
-        }
+
+    // Resume an existing materialized checkout when the draft carries one and it
+    // is still ours, PENDING, unsettled, UNEXPIRED, same product + price. Its
+    // frozen snapshot is authoritative for the mode.
+    const nowResume = new Date();
+    let resumed: CheckoutSession | null = null;
+    const draftCheckoutId = draft.otherProductCheckoutId ?? null;
+    if (draftCheckoutId !== null) {
+      const existing = await prisma.checkoutSession.findUnique({ where: { id: draftCheckoutId } });
+      if (
+        existing !== null &&
+        existing.userId === user.id &&
+        existing.status === CheckoutStatus.PENDING &&
+        existing.settledByPaymentId === null &&
+        existing.productId === product.id &&
+        existing.orderType === OrderType.OTHER_PRODUCT &&
+        existing.finalPriceToman === finalPriceToman &&
+        existing.expiresAt > nowResume
+      ) {
+        resumed = existing;
       }
-      if (pendingId === null) {
+    }
+
+    const effective =
+      resumed !== null ? await readFulfillmentSnapshot(resumed) : liveFulfillment;
+    // Only the pre-payment policy (Apple ID build) blocks the wallet charge and
+    // materializes a form-first checkout. Post-payment kinds (Premium / AI /
+    // legacy manual) charge now and collect info in the WAITING_USER_INFO queue.
+    if (effective.requireInfoBeforeSettlement && effective.customerInputSchema !== null) {
+      let pendingId: string;
+      if (resumed !== null) {
+        pendingId = resumed.id;
+      } else {
         const pending = await materializePendingOtherProductCheckout(user, {
           product,
           snapshot,
@@ -702,14 +773,20 @@ export async function payPurchaseDraftWithWallet(
           discountAmountToman,
           finalPriceToman,
           discountCodeId,
-          fulfillmentSnapshot: fulfillment as unknown as Prisma.InputJsonObject,
+          fulfillmentSnapshot: liveFulfillment as unknown as Prisma.InputJsonObject,
         });
         pendingId = pending.id;
       }
       if (!(await isCheckoutInputSatisfied(pendingId))) {
         return { ok: false, needsCustomerInfo: true, checkoutId: pendingId };
       }
+      // The resumed/materialized checkout already carries its frozen snapshot;
+      // executeWalletOrderPayment settles it in place (no fresh capture needed).
       existingCheckoutId = pendingId;
+    } else {
+      // Ready-from-stock OTHER_PRODUCT: no prior checkout, a fresh PAID checkout
+      // is created below - freeze the mode onto it (§6/P1-3).
+      frozenFulfillmentSnapshot = liveFulfillment as unknown as Prisma.InputJsonObject;
     }
   }
 
@@ -726,6 +803,9 @@ export async function payPurchaseDraftWithWallet(
     idempotencyKey: `wallet:${user.id}:${draft.draftNonce}`,
     serviceReservation,
     ...(existingCheckoutId !== undefined ? { existingCheckoutId } : {}),
+    ...(frozenFulfillmentSnapshot !== undefined
+      ? { otherProductFulfillmentSnapshot: frozenFulfillmentSnapshot }
+      : {}),
   });
 
   // Record the reseller purchase marker as COMPLETED once the wallet settled

@@ -376,20 +376,38 @@ export const TELEGRAM_PREMIUM_DEFAULT_SCHEMA: CustomerInputSchema = {
  * Personalized Apple ID: the structured details an admin needs to create a
  * fresh Apple ID for the buyer. Stable keys - fulfillment/admin views read
  * them by name. `recovery_email` is a real email; `phone` and `extra_note`
- * are optional. No field is `sensitive` (none is a stored secret/password);
- * every value is still encrypted at rest and only ever shown via the safe
- * masked summary. Fully editable through the customer-input schema system.
+ * are optional.
+ *
+ * PRIVACY: the personal-identity fields (name, birth date, recovery email,
+ * phone) are `sensitive`, so the MASKED safe summary - the string persisted in
+ * `renderedSafeSummary` / `OtherProductOrder.customerInputSummary` and shown in
+ * every list/queue/fallback view - masks them (maskSecretEdges). The building
+ * admin still reads the full plaintext through the separately-audited
+ * «نمایش کامل 🔓» full view (which ignores `sensitive`), so masking never
+ * blocks fulfillment. All values remain encrypted at rest. `country_region`
+ * (a country/region, not identifying) and the optional `extra_note` stay
+ * visible in the summary. Fully editable through the customer-input schema
+ * system.
  */
 export const PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA: CustomerInputSchema = {
   version: 1,
   fields: [
-    { key: "first_name", label: "نام", required: true, type: "TEXT", maxLength: 100, order: 1 },
+    {
+      key: "first_name",
+      label: "نام",
+      required: true,
+      type: "TEXT",
+      maxLength: 100,
+      sensitive: true,
+      order: 1,
+    },
     {
       key: "last_name",
       label: "نام خانوادگی",
       required: true,
       type: "TEXT",
       maxLength: 100,
+      sensitive: true,
       order: 2,
     },
     {
@@ -398,6 +416,7 @@ export const PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA: CustomerInputSchema = {
       required: true,
       type: "TEXT",
       maxLength: 40,
+      sensitive: true,
       order: 3,
     },
     {
@@ -408,8 +427,15 @@ export const PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA: CustomerInputSchema = {
       maxLength: 100,
       order: 4,
     },
-    { key: "recovery_email", label: "ایمیل بازیابی", required: true, type: "EMAIL", order: 5 },
-    { key: "phone", label: "شماره تماس", required: false, type: "PHONE", order: 6 },
+    {
+      key: "recovery_email",
+      label: "ایمیل بازیابی",
+      required: true,
+      type: "EMAIL",
+      sensitive: true,
+      order: 5,
+    },
+    { key: "phone", label: "شماره تماس", required: false, type: "PHONE", sensitive: true, order: 6 },
     {
       key: "extra_note",
       label: "توضیحات تکمیلی",

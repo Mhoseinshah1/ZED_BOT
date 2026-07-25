@@ -767,7 +767,12 @@ checkoutHandler.callbackQuery(CO_CB.WALLET_CONFIRM, async (ctx) => {
           where: { id: result.checkoutId },
         });
         if (pending !== null) {
-          await enforceCustomerInfoBeforePayment(ctx, pending);
+          // Resume hint: after the form the buyer taps «پرداخت با کیف پول ✅»,
+          // which re-runs WALLET_CONFIRM against the same draft (its
+          // otherProductCheckoutId now satisfied) and settles this checkout.
+          await enforceCustomerInfoBeforePayment(ctx, pending, {
+            resumePayment: { label: "پرداخت با کیف پول ✅", callback: CO_CB.WALLET_CONFIRM },
+          });
         } else {
           await safeAnswerCallback(ctx);
         }

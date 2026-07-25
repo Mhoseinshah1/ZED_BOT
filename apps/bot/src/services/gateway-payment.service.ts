@@ -28,6 +28,7 @@ import {
 import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
+import { isMandatoryCustomerInfoMissing } from "./checkout-customer-input.service.js";
 import { claimDiscountUsage } from "./discount.service.js";
 import {
   bindSettledReservationFromSnapshot,
@@ -709,6 +710,19 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
       checkoutFinalPriceToman: checkout.finalPriceToman,
     });
     return { kind: "error", error: "payment/checkout amount mismatch" };
+  }
+
+  // §4 settlement-boundary gate (defense in depth). The pre-payment UI gate
+  // already blocks creating a gateway payment / Stars invoice for a personalized
+  // OTHER_PRODUCT until the customer-info form is confirmed, but a direct IPN, a
+  // Stars successful_payment, or a settlement-sweep retry must ALSO refuse to
+  // flip the checkout PAID without it. The provider charge stays recorded; a
+  // later retry settles once the buyer completes the form.
+  if (await isMandatoryCustomerInfoMissing(checkout)) {
+    logger.warn("gateway settlement blocked: customer info not submitted", {
+      paymentId: payment.id,
+    });
+    return { kind: "error", error: "customer info not submitted" };
   }
 
   const now = new Date();
