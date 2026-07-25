@@ -646,16 +646,38 @@ describe.runIf(hasDb)("return to user menu from the admin panel", () => {
     await setSetting(FORCE_JOIN_KEY, "true", "BOOLEAN");
     await setUserMenuMode("INLINE");
     clearSettingsCache();
-    const user = await createUser({ forceJoinBypass: false });
-    const ctx = fakeCallbackCtx(user.telegramId, CB.USER_MENU, { admin: owner, user });
-    await gatedUserArea().middleware()(ctx.ctx, async () => {});
-    expect(ctx.session.lastMenu).not.toBe("user_main");
-    const flat = inlineRows(
-      markupOf(ctx.sent.at(-1) as SentMessage) as {
-        inline_keyboard: Array<Array<Record<string, unknown>>>;
+    // The real gate requires an active required channel that the user has NOT
+    // joined (an enabled gate with zero active channels passes everyone — D4).
+    const channel = await prisma.forceJoinChannel.create({
+      data: {
+        title: "کانال تست",
+        joinUrl: "https://t.me/forcejointest32",
+        normalizedLink: "https://t.me/forcejointest32",
+        chatId: -1_009_990_000_032n,
+        publicUsername: "forcejointest32",
+        isPrivate: false,
+        isActive: true,
+        sortOrder: 0,
       },
-    ).flat();
-    expect(flat.map((b) => b.callback)).toContain(CB.FORCE_JOIN_CHECK);
+    });
+    try {
+      const user = await createUser({ forceJoinBypass: false });
+      const ctx = fakeCallbackCtx(user.telegramId, CB.USER_MENU, { admin: owner, user });
+      // The user is not a member of the required channel.
+      (ctx.ctx as unknown as { api: { getChatMember: () => Promise<{ status: string }> } }).api = {
+        getChatMember: async () => ({ status: "left" }),
+      };
+      await gatedUserArea().middleware()(ctx.ctx, async () => {});
+      expect(ctx.session.lastMenu).not.toBe("user_main");
+      const flat = inlineRows(
+        markupOf(ctx.sent.at(-1) as SentMessage) as {
+          inline_keyboard: Array<Array<Record<string, unknown>>>;
+        },
+      ).flat();
+      expect(flat.map((b) => b.callback)).toContain(CB.FORCE_JOIN_CHECK);
+    } finally {
+      await prisma.forceJoinChannel.delete({ where: { id: channel.id } });
+    }
   });
 
   it("33. /admin remains independently available to an active admin regardless of user gates", async () => {

@@ -65,6 +65,13 @@ export const OPS_EVENTS = {
   // relation id (adminId/userId/… all null) — the actor is revalidated at
   // mutation time but never persisted here (fix/purchase-menu-audit-privacy).
   USER_MENU_PURCHASE_LAYOUT_CHANGED: "user_menu.purchase_layout_changed",
+  // Mandatory channel membership (force join): an ACTIVE required channel became
+  // unverifiable during a live membership check (bot lost access / channel
+  // deleted / username changed). Deduplicated per channel per rolling window
+  // (channel DB id + error class). Privacy-safe: metadata carries ONLY the
+  // channel DB id, a normalized error class and the isPrivate flag — never the
+  // Telegram chat id, the invite link, or the raw Telegram response (§4.11, T6).
+  FORCE_JOIN_CHANNEL_UNVERIFIABLE: "force_join.channel_unverifiable",
 } as const;
 export type OpsEventType = (typeof OPS_EVENTS)[keyof typeof OPS_EVENTS];
 

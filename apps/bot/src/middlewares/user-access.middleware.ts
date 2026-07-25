@@ -6,6 +6,7 @@ import { CB } from "../core/callbacks.js";
 import type { BotContext } from "../core/context.js";
 import { GENERIC_ERROR_TEXT } from "../core/errors.js";
 import { logger } from "../core/logger.js";
+import { resolveForceJoinGate } from "../services/force-join/force-join-gate.js";
 import { getBooleanSetting } from "../services/settings.service.js";
 import { getMessageTemplate } from "../services/text.service.js";
 import { registerOrUpdateUser } from "../services/user.service.js";
@@ -14,7 +15,6 @@ import { safeAnswerCallback, safeReply } from "../utils/safe-reply.js";
 export const ACCESS_DENIED_TEXT =
   "حساب کاربری شما مسدود شده است. برای بررسی بیشتر با پشتیبانی تماس بگیرید.";
 const TERMS_TEXT_FALLBACK = "برای استفاده از ربات، ابتدا قوانین را مطالعه و تایید کنید.";
-const FORCE_JOIN_TEXT_FALLBACK = "برای ادامه، ابتدا در کانال‌های مشخص‌شده عضو شوید.";
 
 /**
  * User access gate, in spec order:
@@ -73,16 +73,25 @@ export async function ensureUserAccess(ctx: BotContext): Promise<boolean> {
     return false;
   }
 
-  // 4. Force-join placeholder (skipped for the check action itself).
+  // 4. Mandatory channel membership (force join). Skipped for the check action
+  //    itself — that callback verifies membership on its own (bypassing the
+  //    negative cache) and re-enters this gate only after success. forceJoinBypass
+  //    users skip the whole check (§4.8). The active set is read once here.
   if (
     callbackData !== CB.FORCE_JOIN_CHECK &&
     !user.forceJoinBypass &&
     (await getBooleanSetting("force_join_enabled", false))
   ) {
-    await safeAnswerCallback(ctx);
-    const text = await getMessageTemplate("force_join_text", FORCE_JOIN_TEXT_FALLBACK);
-    await safeReply(ctx, text, new InlineKeyboard().text("عضو شدم ✅", CB.FORCE_JOIN_CHECK));
-    return false;
+    const gate = await resolveForceJoinGate(ctx, user.telegramId, { bypassNegativeCache: false });
+    if (!gate.pass) {
+      await safeAnswerCallback(ctx);
+      if (gate.kind === "TEMP") {
+        await safeReply(ctx, gate.text);
+      } else {
+        await safeReply(ctx, gate.screen.text, gate.screen.keyboard);
+      }
+      return false;
+    }
   }
 
   return true;
