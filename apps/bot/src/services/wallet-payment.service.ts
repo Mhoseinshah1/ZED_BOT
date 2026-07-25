@@ -22,7 +22,12 @@ import { REPRESENTATIVE_PRICING_MODE, resolveAutoRenewalCharge } from "@zedbot/s
 import { logger } from "../core/logger.js";
 import type { CheckoutDraft, ExtraTimeDraft, ExtraVolumeDraft, RenewalDraft } from "../core/session.js";
 import { isProductVisible } from "./catalog.service.js";
+import { isCheckoutInputSatisfied } from "./checkout-customer-input.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
+import {
+  buildFulfillmentSnapshot,
+  FulfillmentProfileError,
+} from "./other-product-profile.service.js";
 import {
   attachReservationToOrder,
   claimReservationForCheckout,
@@ -107,6 +112,16 @@ export type WalletPaymentResult =
     }
   | { ok: false; error: string };
 
+/**
+ * §4 result of a purchase wallet payment: the normal settlement result, OR a
+ * `needsCustomerInfo` signal telling the handler to open the structured
+ * customer-information form for the materialized PENDING checkout BEFORE any
+ * money moves (personalized OTHER_PRODUCT, e.g. a manually built Apple ID).
+ */
+export type PurchaseWalletResult =
+  | WalletPaymentResult
+  | { ok: false; needsCustomerInfo: true; checkoutId: string };
+
 /** Thrown inside the transaction to abort with a safe user error. */
 class WalletPaymentAbort extends Error {
   constructor(readonly userError: string) {
@@ -153,6 +168,20 @@ interface WalletOrderArgs {
    * panel-less services (byte-identical behaviour to before for those).
    */
   serviceReservation?: ReservationClaimArgs;
+  /**
+   * §4 wallet mandatory-input gate: when set, this payment SETTLES an existing
+   * PENDING OTHER_PRODUCT checkout (the one the buyer filled the customer-info
+   * form against) instead of creating a fresh PAID checkout. The checkout is
+   * CAS-flipped PENDING->PAID under a strict identity/price guard; any mismatch
+   * aborts the whole payment (fail closed). Absent for every other flow.
+   */
+  existingCheckoutId?: string;
+  /**
+   * Frozen fulfillment snapshot to store on a newly-created OTHER_PRODUCT
+   * checkout so paid orders resolve behavior from the immutable capture. Only
+   * passed on the OTHER_PRODUCT paths; null for SERVICE / legacy.
+   */
+  otherProductFulfillmentSnapshot?: Prisma.InputJsonObject;
 }
 
 /** Loads the settled result of a previously-executed idempotency key. */
@@ -214,23 +243,52 @@ async function executeWalletOrderPayment(
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const checkout = await tx.checkoutSession.create({
-        data: {
-          userId: user.id,
-          purpose: "ORDER_PAYMENT",
-          productId: args.product.id,
-          serviceId: args.serviceId,
-          orderType: args.orderType,
-          productSnapshot: args.snapshot,
-          originalPriceToman: args.originalPriceToman,
-          discountAmountToman: args.discountAmountToman,
-          finalPriceToman: args.finalPriceToman,
-          discountCodeId: args.discountCodeId,
-          status: CheckoutStatus.PAID,
-          paidAt: now,
-          expiresAt: new Date(now.getTime() + minutes * 60_000),
-        },
-      });
+      let checkout: CheckoutSession;
+      if (args.existingCheckoutId !== undefined) {
+        // §4: settle the PENDING checkout the buyer filled the info form against.
+        // CAS under a strict identity + price guard; anything unexpected aborts
+        // the whole payment (fail closed - no deduction, no order).
+        const flipped = await tx.checkoutSession.updateMany({
+          where: {
+            id: args.existingCheckoutId,
+            userId: user.id,
+            purpose: "ORDER_PAYMENT",
+            orderType: args.orderType,
+            productId: args.product.id,
+            finalPriceToman: args.finalPriceToman,
+            status: CheckoutStatus.PENDING,
+            settledByPaymentId: null,
+          },
+          data: { status: CheckoutStatus.PAID, paidAt: now },
+        });
+        if (flipped.count !== 1) {
+          throw new WalletPaymentAbort(DRAFT_STALE_TEXT);
+        }
+        checkout = await tx.checkoutSession.findUniqueOrThrow({
+          where: { id: args.existingCheckoutId },
+        });
+      } else {
+        checkout = await tx.checkoutSession.create({
+          data: {
+            userId: user.id,
+            purpose: "ORDER_PAYMENT",
+            productId: args.product.id,
+            serviceId: args.serviceId,
+            orderType: args.orderType,
+            productSnapshot: args.snapshot,
+            ...(args.otherProductFulfillmentSnapshot !== undefined
+              ? { otherProductFulfillmentSnapshot: args.otherProductFulfillmentSnapshot }
+              : {}),
+            originalPriceToman: args.originalPriceToman,
+            discountAmountToman: args.discountAmountToman,
+            finalPriceToman: args.finalPriceToman,
+            discountCodeId: args.discountCodeId,
+            status: CheckoutStatus.PAID,
+            paidAt: now,
+            expiresAt: new Date(now.getTime() + minutes * 60_000),
+          },
+        });
+      }
 
       const payment = await tx.payment.create({
         data: {
@@ -441,10 +499,48 @@ async function executeWalletOrderPayment(
  * by the post-commit fulfillment dispatch - the wallet transaction itself
  * never provisions, never sends and never touches stock.
  */
+/**
+ * Materializes a PENDING OTHER_PRODUCT checkout the buyer fills the §4
+ * customer-information form against (the wallet path has no prior checkout).
+ * The frozen fulfillment snapshot is stored so the later settle + fulfillment
+ * read behavior from the immutable capture.
+ */
+async function materializePendingOtherProductCheckout(
+  user: User,
+  args: {
+    product: ProductWithRelations;
+    snapshot: Prisma.InputJsonObject;
+    originalPriceToman: number;
+    discountAmountToman: number;
+    finalPriceToman: number;
+    discountCodeId: string | null;
+    fulfillmentSnapshot: Prisma.InputJsonObject;
+  },
+): Promise<CheckoutSession> {
+  const minutes = await checkoutExpiryMinutes();
+  const now = new Date();
+  return prisma.checkoutSession.create({
+    data: {
+      userId: user.id,
+      purpose: "ORDER_PAYMENT",
+      productId: args.product.id,
+      orderType: OrderType.OTHER_PRODUCT,
+      productSnapshot: args.snapshot,
+      otherProductFulfillmentSnapshot: args.fulfillmentSnapshot,
+      originalPriceToman: args.originalPriceToman,
+      discountAmountToman: args.discountAmountToman,
+      finalPriceToman: args.finalPriceToman,
+      discountCodeId: args.discountCodeId,
+      status: CheckoutStatus.PENDING,
+      expiresAt: new Date(now.getTime() + minutes * 60_000),
+    },
+  });
+}
+
 export async function payPurchaseDraftWithWallet(
   user: User,
   draft: CheckoutDraft,
-): Promise<WalletPaymentResult> {
+): Promise<PurchaseWalletResult> {
   if (draft.draftNonce === undefined) {
     return { ok: false, error: DRAFT_STALE_TEXT };
   }
@@ -566,6 +662,57 @@ export async function payPurchaseDraftWithWallet(
     discountAmountToman,
     finalPriceToman,
   });
+
+  // §4 wallet mandatory-input gate: a personalized OTHER_PRODUCT whose frozen
+  // fulfillment REQUIRES a structured customer-information form (e.g. a manually
+  // built Apple ID) must have that form CONFIRMED before the wallet charge. The
+  // wallet flow has no prior checkout, so materialize a PENDING one the buyer
+  // fills the form against and settle THAT checkout only after submission. When
+  // the info is still missing, no money moves and the handler opens the form.
+  let existingCheckoutId: string | undefined;
+  if (product.type === "OTHER_PRODUCT") {
+    let fulfillment;
+    try {
+      fulfillment = buildFulfillmentSnapshot(product);
+    } catch (err) {
+      if (err instanceof FulfillmentProfileError) {
+        return { ok: false, error: DRAFT_STALE_TEXT };
+      }
+      throw err;
+    }
+    if (fulfillment.requiresCustomerInfo && fulfillment.customerInputSchema !== null) {
+      let pendingId = draft.otherProductCheckoutId ?? null;
+      if (pendingId !== null) {
+        const existing = await prisma.checkoutSession.findUnique({ where: { id: pendingId } });
+        if (
+          existing === null ||
+          existing.userId !== user.id ||
+          existing.status !== CheckoutStatus.PENDING ||
+          existing.productId !== product.id ||
+          existing.finalPriceToman !== finalPriceToman
+        ) {
+          pendingId = null;
+        }
+      }
+      if (pendingId === null) {
+        const pending = await materializePendingOtherProductCheckout(user, {
+          product,
+          snapshot,
+          originalPriceToman,
+          discountAmountToman,
+          finalPriceToman,
+          discountCodeId,
+          fulfillmentSnapshot: fulfillment as unknown as Prisma.InputJsonObject,
+        });
+        pendingId = pending.id;
+      }
+      if (!(await isCheckoutInputSatisfied(pendingId))) {
+        return { ok: false, needsCustomerInfo: true, checkoutId: pendingId };
+      }
+      existingCheckoutId = pendingId;
+    }
+  }
+
   const result = await executeWalletOrderPayment(user, {
     orderType:
       product.type === "OTHER_PRODUCT" ? OrderType.OTHER_PRODUCT : OrderType.SERVICE_PURCHASE,
@@ -578,6 +725,7 @@ export async function payPurchaseDraftWithWallet(
     discountCodeId,
     idempotencyKey: `wallet:${user.id}:${draft.draftNonce}`,
     serviceReservation,
+    ...(existingCheckoutId !== undefined ? { existingCheckoutId } : {}),
   });
 
   // Record the reseller purchase marker as COMPLETED once the wallet settled
