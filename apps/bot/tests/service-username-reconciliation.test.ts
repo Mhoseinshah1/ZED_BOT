@@ -388,6 +388,140 @@ describe.runIf(hasDb)("SERVICE_USERNAME_UNBOUND reconciliation (DB)", () => {
     await prisma.panel.deleteMany({ where: { id: otherPanel.id } });
   });
 
+  it("a blocked case never refunds via naming resolution — the order stays PAID (Codex P1)", async () => {
+    // No naming snapshot: provisionPaidOrder would resolve naming, see the case's
+    // unbound reservation as a FOREIGN hold on the username, fail, and REFUND the
+    // externally-paid order — UNLESS the reconciliation gate runs BEFORE naming.
+    // It must, so a direct provisionNextPaidOrders/settlement-sweep call leaves the
+    // order PAID for the OWNER retry-bind instead of refunding it.
+    const built = await buildCase({
+      reservationStatus: ServiceUsernameReservationStatus.HELD,
+      withNamingSnapshot: false,
+    });
+    const outcome = await provisionPaidOrder(built.orderId);
+    expect(outcome.ok).toBe(false);
+    // The critical assertion: the block short-circuits before naming, so NO refund.
+    expect(outcome.refunded).toBe(false);
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: built.orderId } });
+    expect(order.status).toBe("PAID");
+    const service = await prisma.service.findFirst({ where: { orderId: built.orderId } });
+    expect(service).toBeNull();
+    const refund = await prisma.walletTransaction.findFirst({
+      where: { relatedOrderId: built.orderId, type: "REFUND" },
+    });
+    expect(refund).toBeNull();
+  });
+
+  it("panel drift on an already-PROVISIONING order never refunds it (Codex P1)", async () => {
+    // An uncertain remote outcome left the order PROVISIONING (a remote account may
+    // already exist on the frozen panel). A later panel reassignment must NOT trigger
+    // the drift refund — that would violate the unknown-outcome rule and orphan a
+    // free service. It stays PROVISIONING for reconciliation, untouched.
+    const otherPanel = await prisma.panel.create({
+      data: {
+        type: "MARZBAN",
+        name: `svc-recon-drift2-${runTag}-${++seq}`,
+        baseUrl: "http://127.0.0.1:1",
+        status: "ACTIVE",
+        isVisible: true,
+        username: "admin",
+        passwordEncrypted: "enc",
+        templateUsername: "tpl",
+        provisioningReady: true,
+      },
+    });
+    const checkout = await prisma.checkoutSession.create({
+      data: {
+        userId: user.id,
+        purpose: "ORDER_PAYMENT",
+        status: "PAID",
+        expiresAt: new Date(Date.now() + 3_600_000),
+        productSnapshot: { panelId: otherPanel.id },
+      },
+    });
+    const order = await prisma.order.create({
+      data: {
+        userId: user.id,
+        productId: product.id,
+        type: "SERVICE_PURCHASE",
+        status: "PROVISIONING",
+        checkoutSessionId: checkout.id,
+        finalPriceToman: 90_000,
+      },
+    });
+    const outcome = await provisionPaidOrder(order.id);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.refunded).toBe(false);
+    const after = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.status).toBe("PROVISIONING");
+    const service = await prisma.service.findFirst({ where: { orderId: order.id } });
+    expect(service).toBeNull();
+    await prisma.panel.deleteMany({ where: { id: otherPanel.id } });
+  });
+
+  it("the panel-drift refund releases the order's BOUND username reservation (Codex P2)", async () => {
+    // A PAID order refunded for panel drift must not keep its BOUND reservation
+    // occupying the global activeUsernameKey — cleanup would never reclaim it (the
+    // checkout is not terminal/expired), blocking that username on every panel.
+    const otherPanel = await prisma.panel.create({
+      data: {
+        type: "MARZBAN",
+        name: `svc-recon-drift3-${runTag}-${++seq}`,
+        baseUrl: "http://127.0.0.1:1",
+        status: "ACTIVE",
+        isVisible: true,
+        username: "admin",
+        passwordEncrypted: "enc",
+        templateUsername: "tpl",
+        provisioningReady: true,
+      },
+    });
+    const dusername = `svcdr${++seq}${Math.random().toString(36).slice(2, 6)}`.slice(0, 14);
+    const checkout = await prisma.checkoutSession.create({
+      data: {
+        userId: user.id,
+        purpose: "ORDER_PAYMENT",
+        status: "PAID",
+        expiresAt: new Date(Date.now() + 3_600_000),
+        productSnapshot: { panelId: otherPanel.id, serviceUsername: dusername },
+      },
+    });
+    const order = await prisma.order.create({
+      data: {
+        userId: user.id,
+        productId: product.id,
+        type: "SERVICE_PURCHASE",
+        status: "PAID",
+        checkoutSessionId: checkout.id,
+        finalPriceToman: 90_000,
+      },
+    });
+    const reservation = await prisma.serviceUsernameReservation.create({
+      data: {
+        panelId: otherPanel.id,
+        userId: user.id,
+        normalizedUsername: dusername,
+        activeUsernameKey: dusername,
+        mode: ServiceUsernameMode.CUSTOM,
+        status: ServiceUsernameReservationStatus.BOUND,
+        draftNonce: randomUUID(),
+        checkoutSessionId: checkout.id,
+        orderId: order.id,
+        boundAt: new Date(),
+      },
+    });
+    const outcome = await provisionPaidOrder(order.id);
+    expect(outcome.ok).toBe(false);
+    // The refund freed the reservation's global uniqueness slot in the same tx.
+    const after = await prisma.serviceUsernameReservation.findUniqueOrThrow({
+      where: { id: reservation.id },
+    });
+    expect(after.status).toBe(ServiceUsernameReservationStatus.RELEASED);
+    expect(after.activeUsernameKey).toBeNull();
+    await prisma.serviceUsernameReservation.deleteMany({ where: { panelId: otherPanel.id } });
+    await prisma.panel.deleteMany({ where: { id: otherPanel.id } });
+  });
+
   it("notify durably marks ownerNotifiedAt so the OWNER alert is delivered once (Codex P2)", async () => {
     const built = await buildCase({ reservationStatus: ServiceUsernameReservationStatus.BOUND });
     const reconciliationCase = await prisma.financialReconciliationCase.findUniqueOrThrow({

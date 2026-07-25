@@ -42,6 +42,7 @@ import {
 import {
   consumeReservationForOrder,
   hasForeignActiveReservationForUsername,
+  releaseReservationForFailedOrder,
 } from "./service-username-selection.service.js";
 
 // =============================================================================
@@ -179,6 +180,15 @@ export async function failOrderWithRefund(
       // Someone else owns the failure path; do not double-refund.
       return false;
     }
+    // Codex P2 fix: this call owns the FAILED transition, so free the order's own
+    // username reservation in the SAME transaction. A refunded SERVICE order must
+    // never keep a BOUND hold occupying the global activeUsernameKey; cleanup would
+    // never reclaim it (the checkout is not terminal/expired), blocking that
+    // username on every panel forever.
+    await releaseReservationForFailedOrder(tx, {
+      orderId: order.id,
+      checkoutSessionId: order.checkoutSessionId,
+    });
     if (order.finalPriceToman <= 0) {
       // Fully-discounted order: nothing to move, FAILED is enough.
       return true;
@@ -272,15 +282,44 @@ export async function provisionPaidOrder(orderId: string): Promise<ProvisionOutc
     // shared-state protection - delegate to the unguarded body.
     return provisionPaidOrderUnlocked(orderId, null);
   }
+  // Codex P1 fix (gate reconciliation BEFORE naming): an OPEN/IN_REVIEW
+  // SERVICE_USERNAME_UNBOUND case deliberately keeps this order PAID for the OWNER
+  // retry-bind. Its reservation is intentionally unbound, so if naming resolution
+  // (below) ran first it would see a "foreign" active hold, fail, and REFUND an
+  // externally-paid order that must stay PAID for review — the exact bug a direct
+  // caller like provisionNextPaidOrders hits. Gate HERE, before both the drift
+  // refund and naming, and ONLY for a still-PAID order (an already-provisioned
+  // order replays through the existing-Service idempotency check in the unlocked
+  // body). Money untouched. The unlocked body keeps the same guard as a backstop.
+  if (
+    head.status === OrderStatus.PAID &&
+    head.checkoutSessionId !== null &&
+    (await hasBlockingServiceUsernameUnboundCase(head.checkoutSessionId))
+  ) {
+    return {
+      ok: false,
+      refunded: false,
+      error: "ساخت سرویس به دلیل نیاز به بررسی رزرو نام کاربری، متوقف شد.",
+    };
+  }
   // Codex P1 fix (post-checkout panel drift): the username + reservation were
   // frozen against the checkout's panel. If an admin reassigned the Product's
   // panel AFTER checkout but before settlement, the live product.panel now
   // differs from the frozen one — provisioning here would create the account on
   // a panel where availability was never checked and the reservation does not
-  // apply. Detect that drift and FAIL CLOSED (refund) instead of provisioning on
-  // the wrong panel. Legacy orders without a frozen panelId are unaffected.
+  // apply. Refund ONLY an unstarted (still-PAID) order: a PROVISIONING order may
+  // already have created the remote account on the frozen panel, so refunding it
+  // would violate the unknown-outcome rule and orphan a free service. In-flight /
+  // completed drifted orders fall through to the idempotency-aware unlocked body,
+  // which replays an existing Service or returns "in progress" WITHOUT any panel
+  // call. Legacy orders without a frozen panelId are unaffected.
   const frozenPanelId = checkoutSnapshotPanelId(head.checkoutSession);
   if (frozenPanelId !== null && frozenPanelId !== headPanel.id) {
+    if (head.status !== OrderStatus.PAID) {
+      // Never refund a possibly-provisioned order; reconcile it against the frozen
+      // panel via the idempotency-aware body (no lock needed — it makes no panel call).
+      return provisionPaidOrderUnlocked(orderId, null);
+    }
     const refunded = await failOrderWithRefund(
       head,
       `panel drift after checkout: frozen ${frozenPanelId.slice(0, 8)} != live ${headPanel.id.slice(0, 8)}`,

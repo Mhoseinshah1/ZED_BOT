@@ -692,6 +692,40 @@ export async function releaseReservation(reservationId: string): Promise<void> {
 }
 
 /**
+ * Codex P2 fix: release the active (HELD/BOUND) username reservation of an order
+ * that is being FAILED + refunded, INSIDE the caller's failure transaction so the
+ * refund and the release commit atomically. Without this, a refunded SERVICE order
+ * (e.g. the panel-drift refund) leaves its BOUND reservation occupying the GLOBAL
+ * `activeUsernameKey` forever — the cleanup sweep only reclaims terminal/expired
+ * checkouts, so after the global unique-index change that username stays blocked on
+ * every panel. Matches ONLY this order's own reservation (its orderId, or its
+ * checkout for a not-yet-attached hold) — never another buyer's. CONSUMED
+ * reservations (a live provisioned service) are intentionally untouched; a
+ * refunded order never has one. Idempotent (CAS updateMany).
+ */
+export async function releaseReservationForFailedOrder(
+  tx: Prisma.TransactionClient,
+  args: { orderId: string; checkoutSessionId: string | null },
+): Promise<void> {
+  await tx.serviceUsernameReservation.updateMany({
+    where: {
+      status: { in: REBINDABLE_STATUSES },
+      OR: [
+        { orderId: args.orderId },
+        ...(args.checkoutSessionId !== null
+          ? [{ checkoutSessionId: args.checkoutSessionId }]
+          : []),
+      ],
+    },
+    data: {
+      status: ServiceUsernameReservationStatus.RELEASED,
+      activeUsernameKey: null,
+      releasedAt: new Date(),
+    },
+  });
+}
+
+/**
  * Release every still-HELD reservation for a checkout draft (abandonment / the
  * buyer navigated away before creating a CheckoutSession). BOUND reservations are
  * intentionally left alone — they are protected by their durable checkout/order.
