@@ -1,4 +1,4 @@
-import { prisma, type CheckoutSession } from "@zedbot/database";
+import { CheckoutStatus, prisma, type CheckoutSession } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
 
@@ -416,6 +416,7 @@ customerInputFormHandler.callbackQuery(/^cinput:start:([0-9a-f-]{4,32})$/, async
     return;
   }
   const checkout = matches[0];
+  const snapshot = await readFulfillmentSnapshot(checkout);
   // Prefer the frozen schema of an existing input row (the form the buyer
   // already saw); otherwise the checkout's fulfillment snapshot decides.
   let schema: CustomerInputSchema | null = null;
@@ -431,7 +432,6 @@ customerInputFormHandler.callbackQuery(/^cinput:start:([0-9a-f-]{4,32})$/, async
     schema = parsed.ok ? parsed.schema : null;
   }
   if (schema === null) {
-    const snapshot = await readFulfillmentSnapshot(checkout);
     schema = snapshot.customerInputSchema;
   }
   if (schema === null) {
@@ -439,7 +439,21 @@ customerInputFormHandler.callbackQuery(/^cinput:start:([0-9a-f-]{4,32})$/, async
     return;
   }
   await safeAnswerCallback(ctx);
-  await startCustomerInputForm(ctx, checkout.id, schema);
+  // Reconstruct the payment continuation so a cancel-then-resume buyer of a
+  // mandatory pre-payment form (still-unpaid Apple ID build) is not stranded
+  // after submitting: return them to the payment-method screen for THIS
+  // checkout. Without this, re-entry loses the resume hint and the post-submit
+  // screen would offer only the main menu.
+  const opts =
+    checkout.status === CheckoutStatus.PENDING && snapshot.requireInfoBeforeSettlement
+      ? {
+          resumePayment: {
+            label: "ادامه پرداخت 💳",
+            callback: `user:pay:m:${checkout.id.slice(0, 8)}`,
+          },
+        }
+      : undefined;
+  await startCustomerInputForm(ctx, checkout.id, schema, opts);
 });
 
 // SELECT option picked (index-addressed; option text never rides callbacks).

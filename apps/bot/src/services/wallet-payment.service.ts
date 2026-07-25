@@ -551,8 +551,15 @@ async function materializePendingOtherProductCheckout(
         where: { id: { in: ids } },
         data: { status: CheckoutStatus.CANCELLED },
       });
+      // Abandon only IN-PROGRESS (COLLECTING) inputs. A SUBMITTED input is left
+      // intact: a superseded checkout may still carry an in-flight gateway
+      // payment, and if the provider later reports success settleGatewayPayment
+      // must find the info satisfied so it reaches the duplicate-success
+      // reconciliation path (refund/credit) instead of rejecting the charge as
+      // "missing info" and stranding it. The retention sweep redacts SUBMITTED
+      // rows of CANCELLED checkouts, so no submitted data lingers indefinitely.
       await tx.checkoutCustomerInput.updateMany({
-        where: { checkoutSessionId: { in: ids }, status: { in: ["COLLECTING", "SUBMITTED"] } },
+        where: { checkoutSessionId: { in: ids }, status: "COLLECTING" },
         data: { status: "ABANDONED" },
       });
       await tx.representativePurchase.updateMany({

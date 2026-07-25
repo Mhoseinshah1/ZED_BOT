@@ -820,16 +820,39 @@ describe.runIf(hasDb)("Apple ID personalized vs stock fulfillment (DB)", () => {
     expect(
       (await prisma.checkoutSession.findUniqueOrThrow({ where: { id: checkoutB } })).status,
     ).toBe("PENDING");
-    const abandonedInput = await prisma.checkoutCustomerInput.findUnique({
+    // A's SUBMITTED input is PRESERVED (not abandoned): if A carried an in-flight
+    // gateway payment, a later provider success must still find the info
+    // satisfied so settleGatewayPayment reaches duplicate-success reconciliation
+    // instead of stranding the charge. The settlement gate on A is therefore
+    // NOT blocked.
+    const preservedInput = await prisma.checkoutCustomerInput.findUnique({
       where: { checkoutSessionId: checkoutA },
     });
-    expect(abandonedInput?.status).toBe("ABANDONED");
+    expect(preservedInput?.status).toBe("SUBMITTED");
+    const cancelledA = await prisma.checkoutSession.findUniqueOrThrow({ where: { id: checkoutA } });
+    expect(await isMandatoryCustomerInfoMissing(cancelledA)).toBe(false);
     // Exactly one live PENDING checkout for this user+product remains.
     expect(
       await prisma.checkoutSession.count({
         where: { userId: user.id, productId: personalizedProduct.id, status: "PENDING" },
       }),
     ).toBe(1);
+
+    // An IN-PROGRESS (COLLECTING, never submitted) input IS abandoned when its
+    // checkout is superseded, so dead form state is cleaned up.
+    await getOrCreateCheckoutInput(checkoutB, user.id, PERSONALIZED_APPLE_ID_DEFAULT_SCHEMA);
+    const thirdDraft = draftFor(personalizedProduct);
+    const c = await payPurchaseDraftWithWallet(user, thirdDraft);
+    if (c.ok || !("needsCustomerInfo" in c)) {
+      throw new Error("expected needsCustomerInfo");
+    }
+    expect(
+      (await prisma.checkoutSession.findUniqueOrThrow({ where: { id: checkoutB } })).status,
+    ).toBe("CANCELLED");
+    const collectingInput = await prisma.checkoutCustomerInput.findUnique({
+      where: { checkoutSessionId: checkoutB },
+    });
+    expect(collectingInput?.status).toBe("ABANDONED");
   });
 
   it("25. the safe masked summary masks the personal identity fields but keeps country/region visible", () => {
