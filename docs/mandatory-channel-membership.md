@@ -96,9 +96,25 @@ Actions: enable / disable force join, add channel, edit link, re-pick channel
 (private), test bot access, activate/deactivate, move up / move down, delete
 (with confirmation). A maximum of **10 active channels** is enforced in the
 service layer; an 11th channel is stored inactive rather than rejected.
+Activating an inactive channel **re-validates bot access first** (getMe →
+getChat → getChatMember) and refuses the transition if the bot is no longer an
+admin, so the overview can never advertise a required channel that membership
+evaluation would silently exclude as unverifiable. A successful **تست دسترسی
+ربات ♻️** clears any previously-recorded validation error. The overview is
+**paginated** (8 rows per page) so a long inactive list can never overflow
+Telegram's message / keyboard limits.
 
-Text entry uses session-bound flows; `انصراف`, `/admin`, `/start`, and
-navigation unwind the flow safely and remove any temporary reply keyboard.
+Text entry uses session-bound flows; `انصراف`, `/admin`, `/start`, `/ping`,
+`/paysupport`, and navigation unwind the flow safely and remove any temporary
+reply keyboard — even for a command whose own handler is registered ahead of the
+admin flow dispatcher (an early escape middleware clears the flow first). The
+private-channel `request_chat` picker is only offered in a **private chat** with
+the bot (Telegram forbids `request_chat` keyboards in groups); an attempt from a
+group is rejected with a "use the bot's private chat" notice instead of stranding
+the session in the picker flow. Editing a **public** channel's link adopts the
+freshly-validated username/title only when it resolves to the **same** channel; a
+link pointing at a different channel is rejected (use «افزودن کانال» to add a new
+one) so the gate and the join screen can never diverge.
 
 ## Runtime gate & user screen
 

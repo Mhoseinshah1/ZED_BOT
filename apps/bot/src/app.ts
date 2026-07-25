@@ -109,6 +109,7 @@ import {
   forceJoinAdminHandler,
   forceJoinAdminTextHandler,
   forceJoinChatSharedHandler,
+  forceJoinCommandEscapeHandler,
 } from "./handlers/admin-settings/force-join-admin.handler.js";
 import {
   adminRepresentativeHandler,
@@ -207,6 +208,15 @@ export function createBot(token: string): Bot<BotContext> {
   // by default — so no allowed_updates change is needed.)
   bot.use(starsSubscriptionUpdateHandler);
   bot.use(starsRefundedPaymentHandler);
+
+  // Force Join (Phase 5): unwind an armed force-join admin flow when the OWNER
+  // sends a command mid-flow. MUST run BEFORE the command composers below
+  // (pingHandler / startHandler / paysupportHandler / the /admin area), because
+  // those consume the command update and the force-join flow-text dispatcher is
+  // registered much later — without this the flow (and its request_chat picker
+  // keyboard) would stay armed and the next ordinary text would be mis-read as a
+  // channel link. Passes through untouched for non-command messages.
+  bot.use(forceJoinCommandEscapeHandler);
 
   // Gate-free basics.
   bot.use(pingHandler);

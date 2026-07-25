@@ -18,6 +18,7 @@ import {
   listAllChannels,
   rebindChannelIdentity,
   recordValidationError,
+  recordValidationSuccess,
   reorderChannel,
   resolveChannelByShortId,
   setChannelActive,
@@ -26,6 +27,7 @@ import {
   type BotAccessErrorCode,
   type BotAccessTarget,
   type ForceJoinBotApi,
+  type MutateResult,
 } from "../../services/force-join/force-join-channel.service.js";
 import { getBooleanSetting } from "../../services/settings.service.js";
 import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
@@ -67,6 +69,7 @@ const FJ_CB = {
   disable: "admin:force_join:disable",
   add: "admin:force_join:add",
   cancel: "admin:force_join:cancel",
+  page: (n: number): string => `admin:force_join:page:${n}`,
   detail: (sid: string): string => `admin:force_join:c:${sid}`,
   editLink: (sid: string): string => `admin:force_join:edit:${sid}`,
   rebind: (sid: string): string => `admin:force_join:rebind:${sid}`,
@@ -120,6 +123,12 @@ const TEST_OK_TOAST = "دسترسی ربات تایید شد ✅";
 const EXPIRED_TEXT = "درخواست منقضی شده است. دوباره تلاش کنید.";
 const KIND_MISMATCH_TEXT =
   "نوع لینک باید با نوع کانال فعلی یکسان باشد (عمومی یا خصوصی).";
+const EDIT_DIFFERENT_CHANNEL_TEXT =
+  "این لینک به کانال دیگری اشاره دارد. برای افزودن کانال جدید از «افزودن کانال» استفاده کنید.";
+const EXISTING_INACTIVE_TEXT =
+  "این کانال قبلاً ثبت شده و غیرفعال است. برای فعال‌سازی، آن را از فهرست باز کنید.";
+const PRIVATE_CHAT_REQUIRED_TEXT =
+  "افزودن یا انتخاب کانال خصوصی فقط در چت خصوصی با ربات ممکن است. لطفاً در چت خصوصی ربات دوباره تلاش کنید.";
 const STALE_TOAST = "کانال یافت نشد یا حذف شده است.";
 const TOGGLED_TOAST = "به‌روزرسانی شد ✅";
 const REBOUND_TOAST = "کانال به‌روزرسانی شد ✅";
@@ -132,10 +141,38 @@ const DELETE_CONFIRM_LABEL = "تایید حذف 🗑";
 
 const OVERVIEW_BACK_LABEL = "بازگشت به تنظیمات عمومی";
 const MAX_BUTTON_TITLE_CHARS = 40;
+// The overview lists every channel (only the ACTIVE set is capped at 10, so
+// inactive rows can accumulate). Paginate so the rendered text can never cross
+// Telegram's 4096-char message limit or the inline-keyboard button ceiling — a
+// silently-failed edit would otherwise make the whole section unusable (§4.4).
+const OVERVIEW_PAGE_SIZE = 8;
+const OVERVIEW_PREV_LABEL = "◀️ قبلی";
+const OVERVIEW_NEXT_LABEL = "بعدی ▶️";
+
+interface OverviewPage {
+  pageCount: number;
+  page: number;
+  start: number;
+  end: number;
+}
+
+/** Clamps a requested page to the valid range for `total` rows. */
+function overviewPageBounds(total: number, requested: number): OverviewPage {
+  const pageCount = Math.max(1, Math.ceil(total / OVERVIEW_PAGE_SIZE));
+  const page = Math.min(Math.max(Number.isFinite(requested) ? requested : 0, 0), pageCount - 1);
+  const start = page * OVERVIEW_PAGE_SIZE;
+  return { pageCount, page, start, end: Math.min(start + OVERVIEW_PAGE_SIZE, total) };
+}
 
 export const forceJoinAdminHandler = new Composer<BotContext>();
 export const forceJoinAdminTextHandler = new Composer<BotContext>();
 export const forceJoinChatSharedHandler = new Composer<BotContext>();
+// Runs BEFORE the command composers (start / ping / paysupport / …) in app.ts so
+// a command sent mid-flow unwinds the force-join flow (and removes any lingering
+// request_chat picker keyboard) before that command's own handler consumes the
+// update. The flow-dispatcher text handler above is registered AFTER those
+// command composers, so it can never see a command during a flow (Codex P2).
+export const forceJoinCommandEscapeHandler = new Composer<BotContext>();
 
 // --- helpers -----------------------------------------------------------------
 
@@ -171,6 +208,34 @@ function fjButton(key: string): Promise<string> {
 /** Deterministic, session-stable request_id for the private picker (T3 verify). */
 function pickRequestId(fromId: number): number {
   return (Math.abs(fromId) % 1_000_000) + 1;
+}
+
+/**
+ * request_chat / chat_shared keyboards are ONLY permitted by Telegram in private
+ * chats. Arming the private picker in a group/(super)group silently fails the
+ * reply-keyboard send while leaving the session in the private_pick flow, so the
+ * add/rebind flows guard on this before switching state.
+ */
+function isPrivateChat(ctx: BotContext): boolean {
+  return ctx.chat?.type === "private";
+}
+
+/**
+ * The success toast after an add / private-pick, distinguishing the three
+ * outcomes of createOrRebindChannel so the operator is never told the 10-active
+ * cap was hit when they merely re-added an already-registered inactive channel:
+ *  - activated → the channel is active now (created or rebound),
+ *  - created but not activated → a genuinely new row parked inactive at the cap,
+ *  - existing inactive rebind → the row was already configured and inactive.
+ */
+async function addedChannelToast(upsert: { created: boolean; activated: boolean }): Promise<string> {
+  if (upsert.activated) {
+    return getMessageTemplate("force_join_channel_added", "کانال اضافه شد ✅");
+  }
+  if (upsert.created) {
+    return LIMIT_ADDED_TEXT;
+  }
+  return EXISTING_INACTIVE_TEXT;
 }
 
 /** Makes a channel title safe for an inline button label (plain-text screen). */
@@ -230,7 +295,13 @@ export async function clearForceJoinAdminState(
 
 // --- overview + detail rendering ---------------------------------------------
 
-function overviewText(channels: ForceJoinChannel[], activeCount: number, enabled: boolean): string {
+function overviewText(
+  pageChannels: ForceJoinChannel[],
+  totalChannels: number,
+  activeCount: number,
+  enabled: boolean,
+  view: OverviewPage,
+): string {
   const lines = [
     "📢 عضویت اجباری",
     "",
@@ -241,19 +312,23 @@ function overviewText(channels: ForceJoinChannel[], activeCount: number, enabled
     "",
     "کانال‌ها:",
   ];
-  if (channels.length === 0) {
+  if (totalChannels === 0) {
     lines.push("هنوز کانالی اضافه نشده است.");
   } else {
-    channels.forEach((c, i) => {
-      lines.push(`${i + 1}. ${c.title} — ${c.isActive ? "فعال ✅" : "غیرفعال ⛔"}`);
+    pageChannels.forEach((c, i) => {
+      lines.push(`${view.start + i + 1}. ${c.title} — ${c.isActive ? "فعال ✅" : "غیرفعال ⛔"}`);
     });
+    if (view.pageCount > 1) {
+      lines.push("", `صفحه ${view.page + 1} از ${view.pageCount}`);
+    }
   }
   return lines.join("\n");
 }
 
 async function overviewKeyboard(
-  channels: ForceJoinChannel[],
+  pageChannels: ForceJoinChannel[],
   enabled: boolean,
+  view: OverviewPage,
 ): Promise<InlineKeyboard> {
   const [enableLabel, disableLabel, addLabel] = await Promise.all([
     fjButton("force_join_admin_enable"),
@@ -267,30 +342,49 @@ async function overviewKeyboard(
     kb.text(enableLabel, FJ_CB.enable).row();
   }
   kb.text(addLabel, FJ_CB.add).row();
-  channels.forEach((c, i) => {
-    kb.text(`${i + 1}. ${safeButtonLabel(c.title)}`, FJ_CB.detail(c.id.slice(0, 8))).row();
+  pageChannels.forEach((c, i) => {
+    kb.text(`${view.start + i + 1}. ${safeButtonLabel(c.title)}`, FJ_CB.detail(c.id.slice(0, 8))).row();
   });
+  if (view.pageCount > 1) {
+    let hasNav = false;
+    if (view.page > 0) {
+      kb.text(OVERVIEW_PREV_LABEL, FJ_CB.page(view.page - 1));
+      hasNav = true;
+    }
+    if (view.page < view.pageCount - 1) {
+      kb.text(OVERVIEW_NEXT_LABEL, FJ_CB.page(view.page + 1));
+      hasNav = true;
+    }
+    if (hasNav) {
+      kb.row();
+    }
+  }
   kb.text(OVERVIEW_BACK_LABEL, CB.ADMIN_GENERAL_SETTINGS);
   return kb;
 }
 
 /**
- * Renders the overview. `toast` shows as a callback answer in a callback context
- * and is prepended to the body in a message context (where there is no callback
- * to answer, e.g. the add / chat_shared paths) so the outcome is always visible.
+ * Renders the overview at `page` (default 0 — every mutation resets to the first
+ * page; only the page-nav callback advances it). `toast` shows as a callback
+ * answer in a callback context and is prepended to the body in a message context
+ * (where there is no callback to answer, e.g. the add / chat_shared paths) so the
+ * outcome is always visible. Paginated (§4.4) so a long inactive list can never
+ * overflow the Telegram message / keyboard limits.
  */
-async function renderOverview(ctx: BotContext, toast?: string): Promise<void> {
+async function renderOverview(ctx: BotContext, toast?: string, page = 0): Promise<void> {
   const [channels, activeCount, enabled] = await Promise.all([
     listAllChannels(),
     countActiveChannels(),
     getBooleanSetting(FORCE_JOIN_ENABLED_KEY, false),
   ]);
+  const view = overviewPageBounds(channels.length, page);
+  const pageChannels = channels.slice(view.start, view.end);
   await safeAnswerCallback(ctx, toast);
   const prefix = toast !== undefined && ctx.callbackQuery === undefined ? `${toast}\n\n` : "";
   await safeEditOrReply(
     ctx,
-    prefix + overviewText(channels, activeCount, enabled),
-    await overviewKeyboard(channels, enabled),
+    prefix + overviewText(pageChannels, channels.length, activeCount, enabled, view),
+    await overviewKeyboard(pageChannels, enabled, view),
   );
   ctx.session.lastMenu = FJ_CB.root;
 }
@@ -373,6 +467,11 @@ forceJoinAdminHandler.callbackQuery(FJ_CB.cancel, async (ctx) => {
   await renderOverview(ctx);
 });
 
+forceJoinAdminHandler.callbackQuery(/^admin:force_join:page:(\d{1,4})$/, async (ctx) => {
+  if (!(await ownerGuard(ctx))) return;
+  await renderOverview(ctx, undefined, Number(ctx.match[1]));
+});
+
 forceJoinAdminHandler.callbackQuery(/^admin:force_join:c:([0-9a-f-]{4,36})$/, async (ctx) => {
   if (!(await ownerGuard(ctx))) return;
   await clearForceJoinAdminState(ctx);
@@ -440,6 +539,12 @@ forceJoinAdminHandler.callbackQuery(/^admin:force_join:rebind:([0-9a-f-]{4,36})$
   if (from === undefined) return;
   const channel = await resolveOrStale(ctx, ctx.match[1]);
   if (channel === null) return;
+  // request_chat keyboards are private-chat-only — do not arm the picker (or
+  // switch the flow) from a group context (§4.2).
+  if (!isPrivateChat(ctx)) {
+    await safeAnswerCallback(ctx, PRIVATE_CHAT_REQUIRED_TEXT);
+    return;
+  }
   const requestId = pickRequestId(from.id);
   ctx.session.temp.forceJoin = {
     rebindChannelId: channel.id,
@@ -476,7 +581,11 @@ forceJoinAdminHandler.callbackQuery(/^admin:force_join:test:([0-9a-f-]{4,36})$/,
       : { kind: "PRIVATE", chatId: channel.chatId };
   const result = await validateBotChannelAccess(makeApi(ctx), target);
   if (result.ok) {
-    await renderDetail(ctx, channel, TEST_OK_TOAST);
+    // Persist the fresh success so a previously-recorded error class does not
+    // linger next to the success toast and lastValidatedAt reflects this test.
+    await recordValidationSuccess(channel.id);
+    const refreshed = (await getChannelById(channel.id)) ?? channel;
+    await renderDetail(ctx, refreshed, TEST_OK_TOAST);
     return;
   }
   await recordValidationError(channel.id, result.code);
@@ -503,6 +612,24 @@ forceJoinAdminHandler.callbackQuery(/^admin:force_join:toggle:([0-9a-f-]{4,36})$
   if (!(await ownerGuard(ctx))) return;
   const channel = await resolveOrStale(ctx, ctx.match[1]);
   if (channel === null) return;
+  // Activating (inactive→active) MUST re-validate bot access first: an
+  // inaccessible active channel is later excluded from gating as "unverifiable",
+  // so the UI would claim a required channel that users are not actually forced
+  // to join. Deactivating is always allowed (never blocked on a broken channel).
+  if (!channel.isActive) {
+    const target: BotAccessTarget =
+      channel.publicUsername !== null
+        ? { kind: "PUBLIC", username: channel.publicUsername }
+        : { kind: "PRIVATE", chatId: channel.chatId };
+    const access = await validateBotChannelAccess(makeApi(ctx), target);
+    if (!access.ok) {
+      await recordValidationError(channel.id, access.code);
+      const refreshed = (await getChannelById(channel.id)) ?? channel;
+      await renderDetail(ctx, refreshed, await accessErrorText(access.code, channel.isPrivate));
+      return;
+    }
+    await recordValidationSuccess(channel.id);
+  }
   const result = await setChannelActive(channel.id, !channel.isActive);
   if (!result.ok) {
     if (result.code === "ACTIVE_LIMIT") {
@@ -656,12 +783,7 @@ async function handleAddLink(ctx: BotContext, text: string, adminId: string): Pr
     }
     logger.info("force join channel added", { channelId: upsert.channel.id, isPrivate: false });
     await clearForceJoinAdminState(ctx);
-    await renderOverview(
-      ctx,
-      upsert.activated
-        ? await getMessageTemplate("force_join_channel_added", "کانال اضافه شد ✅")
-        : LIMIT_ADDED_TEXT,
-    );
+    await renderOverview(ctx, await addedChannelToast(upsert));
     return;
   }
 
@@ -670,6 +792,13 @@ async function handleAddLink(ctx: BotContext, text: string, adminId: string): Pr
   const from = ctx.from;
   if (from === undefined) {
     await clearForceJoinAdminState(ctx);
+    return;
+  }
+  // request_chat keyboards are private-chat-only; arming one in a group would
+  // silently fail the send and strand the session in the picker flow (§4.2).
+  if (!isPrivateChat(ctx)) {
+    await clearForceJoinAdminState(ctx);
+    await safeReply(ctx, PRIVATE_CHAT_REQUIRED_TEXT);
     return;
   }
   const requestId = pickRequestId(from.id);
@@ -724,27 +853,46 @@ async function handleEditLink(ctx: BotContext, text: string): Promise<void> {
     return; // keep armed
   }
 
-  let joinUrl: string;
-  let normalizedLink: string;
+  let updated: MutateResult;
   if (channel.isPrivate) {
-    joinUrl = parsed.value.joinUrl;
-    normalizedLink = parsed.value.normalizedLink;
+    // Private: only the invite URL changes; the chatId identity is unchanged (an
+    // invite link is not a resolvable identity — re-identifying a private channel
+    // only happens through the request_chat picker).
+    updated = await updateChannelJoinUrl(
+      channel.id,
+      parsed.value.joinUrl,
+      parsed.value.normalizedLink,
+    );
   } else {
-    // Public: re-validate bot-admin access and adopt the authoritative username.
+    // Public: re-validate bot-admin access and adopt the AUTHORITATIVE identity —
+    // but ONLY when the link resolves to the SAME channel. A link resolving to a
+    // different chatId is a different channel; updating only the URL while keeping
+    // this row's chatId/title would point users at one channel while the gate
+    // checks membership of another (Codex P1). Reject it instead and adopt the
+    // fresh title/username when the channel matches (handles a renamed channel).
     const username = parsed.value.publicUsername ?? "";
     const result = await validateBotChannelAccess(makeApi(ctx), { kind: "PUBLIC", username });
     if (!result.ok) {
       await safeReply(ctx, await accessErrorText(result.code, false), cancelKb);
       return; // keep armed
     }
+    if (result.chatId !== channel.chatId) {
+      await safeReply(ctx, EDIT_DIFFERENT_CHANNEL_TEXT, cancelKb);
+      return; // keep armed
+    }
     const lowerUser = (result.username ?? username).toLowerCase();
-    normalizedLink = `https://t.me/${lowerUser}`;
-    joinUrl = normalizedLink;
+    const normalizedLink = `https://t.me/${lowerUser}`;
+    updated = await rebindChannelIdentity(channel.id, {
+      chatId: result.chatId,
+      title: result.title || channel.title,
+      isPrivate: false,
+      publicUsername: lowerUser,
+      joinUrl: normalizedLink,
+      normalizedLink,
+    });
   }
-
-  const updated = await updateChannelJoinUrl(channel.id, joinUrl, normalizedLink);
   if (!updated.ok) {
-    if (updated.code === "LINK_CONFLICT") {
+    if (updated.code === "LINK_CONFLICT" || updated.code === "DUPLICATE_CHANNEL") {
       await clearForceJoinAdminState(ctx);
       await renderOverview(ctx, ALREADY_ADDED_TOAST);
       return;
@@ -782,6 +930,19 @@ forceJoinAdminTextHandler.on("message:text", async (ctx, next) => {
     return;
   }
   await handleEditLink(ctx, text);
+});
+
+// A command (`/start`, `/ping`, `/paysupport`, `/admin`, …) sent while a
+// force-join flow is armed unwinds that flow first, then falls through to the
+// command's own handler. Registered ahead of the command composers in app.ts so
+// the cleanup wins the race for the update; harmlessly passes through for every
+// non-command message and every non-force-join flow.
+forceJoinCommandEscapeHandler.on("message:text", async (ctx, next) => {
+  const flow = ctx.session.currentFlow;
+  if (flow !== null && FORCE_JOIN_FLOWS.has(flow) && ctx.message.text.startsWith("/")) {
+    await clearForceJoinAdminState(ctx);
+  }
+  return next();
 });
 
 // --- private picker response (chat_shared) — T3/T4/D1 ------------------------
@@ -862,9 +1023,6 @@ forceJoinChatSharedHandler.on("message:chat_shared", async (ctx, next) => {
     return;
   }
   logger.info("force join channel added", { channelId: upsert.channel.id, isPrivate: true });
-  const addedText = upsert.activated
-    ? await getMessageTemplate("force_join_channel_added", "کانال اضافه شد ✅")
-    : LIMIT_ADDED_TEXT;
-  await clearForceJoinAdminState(ctx, addedText);
+  await clearForceJoinAdminState(ctx, await addedChannelToast(upsert));
   await renderOverview(ctx);
 });

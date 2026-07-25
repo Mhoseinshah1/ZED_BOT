@@ -8,12 +8,15 @@ import {
   forceJoinAdminHandler,
   forceJoinAdminTextHandler,
   forceJoinChatSharedHandler,
+  forceJoinCommandEscapeHandler,
 } from "../src/handlers/admin-settings/force-join-admin.handler.js";
 import {
   FORCE_JOIN_ENABLED_KEY,
   createOrRebindChannel,
   disableForceJoin,
+  getChannelById,
   listAllChannels,
+  setChannelActive,
 } from "../src/services/force-join/force-join-channel.service.js";
 import { clearSettingsCache } from "../src/services/settings.service.js";
 import { clearTextCache } from "../src/services/text.service.js";
@@ -84,36 +87,51 @@ function baseCtx(admin: Admin | null, session: ReturnType<typeof initialSession>
   };
 }
 
-function callbackCtx(data: string, admin: Admin | null, session = initialSession(), config: ApiConfig = {}) {
+function callbackCtx(
+  data: string,
+  admin: Admin | null,
+  session = initialSession(),
+  config: ApiConfig = {},
+  chatType = "private",
+) {
   const rec: Recorders = { sent: [], toasts: [] };
   const apiRec = { getChatMemberCalls: 0 };
   const api = makeApi(config, apiRec);
+  const chat = { id: 1, type: chatType };
   const callback_query = {
     id: "cbq",
     chat_instance: "ci",
     from: { id: Number(admin?.telegramId ?? 999n), is_bot: false, first_name: "Owner" },
     data,
-    message: { message_id: 1, date: 0, chat: { id: 1, type: "private" } },
+    message: { message_id: 1, date: 0, chat },
   };
   const ctx = {
     ...baseCtx(admin, session, api, rec),
+    chat,
     callbackQuery: callback_query,
     update: { update_id: 1, callback_query },
   };
   return { ctx: ctx as never, rec, api, session };
 }
 
-function textCtx(text: string, admin: Admin | null, session = initialSession(), config: ApiConfig = {}) {
+function textCtx(
+  text: string,
+  admin: Admin | null,
+  session = initialSession(),
+  config: ApiConfig = {},
+  chatType = "private",
+) {
   const rec: Recorders = { sent: [], toasts: [] };
   const api = makeApi(config, { getChatMemberCalls: 0 });
+  const chat = { id: Number(admin?.telegramId ?? 999n), type: chatType };
   const message = {
     message_id: 2,
     date: 0,
-    chat: { id: Number(admin?.telegramId ?? 999n), type: "private" },
+    chat,
     from: { id: Number(admin?.telegramId ?? 999n), is_bot: false, first_name: "Owner" },
     text,
   };
-  const ctx = { ...baseCtx(admin, session, api, rec), message, update: { update_id: 2, message } };
+  const ctx = { ...baseCtx(admin, session, api, rec), chat, message, update: { update_id: 2, message } };
   return { ctx: ctx as never, rec, api, session };
 }
 
@@ -125,14 +143,15 @@ function chatSharedCtx(
 ) {
   const rec: Recorders = { sent: [], toasts: [] };
   const api = makeApi(config, { getChatMemberCalls: 0 });
+  const chat = { id: Number(admin?.telegramId ?? 999n), type: "private" };
   const message = {
     message_id: 3,
     date: 0,
-    chat: { id: Number(admin?.telegramId ?? 999n), type: "private" },
+    chat,
     from: { id: Number(admin?.telegramId ?? 999n), is_bot: false, first_name: "Owner" },
     chat_shared: shared,
   };
-  const ctx = { ...baseCtx(admin, session, api, rec), message, update: { update_id: 3, message } };
+  const ctx = { ...baseCtx(admin, session, api, rec), chat, message, update: { update_id: 3, message } };
   return { ctx: ctx as never, rec, api, session };
 }
 
@@ -140,6 +159,14 @@ const noop = async (): Promise<void> => {};
 const runCb = (c: { ctx: never }) => forceJoinAdminHandler.middleware()(c.ctx, noop);
 const runText = (c: { ctx: never }) => forceJoinAdminTextHandler.middleware()(c.ctx, noop);
 const runShared = (c: { ctx: never }) => forceJoinChatSharedHandler.middleware()(c.ctx, noop);
+// The pre-command escape composer always calls next(); track whether it did.
+async function runEscape(c: { ctx: never }): Promise<boolean> {
+  let passedThrough = false;
+  await forceJoinCommandEscapeHandler.middleware()(c.ctx, async () => {
+    passedThrough = true;
+  });
+  return passedThrough;
+}
 
 function lastText(rec: Recorders): string {
   return rec.sent.at(-1)?.text ?? "";
@@ -361,6 +388,182 @@ describe.runIf(hasDb)("force-join OWNER admin UI (§6)", () => {
     await runCb(detail);
     expect(allText(overview.rec)).not.toContain(chatId.toString());
     expect(allText(detail.rec)).not.toContain(chatId.toString());
+  });
+
+  // --- Codex review fixes ----------------------------------------------------
+
+  it("edit-link rejects a link resolving to a DIFFERENT channel and keeps identity (Codex P1)", async () => {
+    const created = await createOrRebindChannel(publicRow("origchan", -1050n));
+    if (!created.ok) throw new Error("setup");
+    const sid = created.channel.id.slice(0, 8);
+    const session = initialSession();
+    await runCb(callbackCtx(`admin:force_join:edit:${sid}`, OWNER, session));
+    expect(session.currentFlow).toBe("force_join:edit_link");
+    const t = textCtx("@otherchan", OWNER, session, {
+      getChat: { id: -1099, type: "channel", title: "Other", username: "otherchan" },
+      botStatus: "administrator",
+    });
+    await runText(t);
+    expect(allText(t.rec)).toContain("کانال دیگری");
+    const row = await getChannelById(created.channel.id);
+    expect(row?.chatId).toBe(-1050n);
+    expect(row?.publicUsername).toBe("origchan");
+    expect(session.currentFlow).toBe("force_join:edit_link"); // still armed to retry
+  });
+
+  it("edit-link on the SAME channel adopts the authoritative renamed identity (Codex P1)", async () => {
+    const created = await createOrRebindChannel(publicRow("oldname", -1051n));
+    if (!created.ok) throw new Error("setup");
+    const sid = created.channel.id.slice(0, 8);
+    const session = initialSession();
+    await runCb(callbackCtx(`admin:force_join:edit:${sid}`, OWNER, session));
+    const t = textCtx("@NewName", OWNER, session, {
+      getChat: { id: -1051, type: "channel", title: "Renamed", username: "NewName" },
+      botStatus: "administrator",
+    });
+    await runText(t);
+    const row = await getChannelById(created.channel.id);
+    expect(row?.chatId).toBe(-1051n);
+    expect(row?.publicUsername).toBe("newname");
+    expect(row?.normalizedLink).toBe("https://t.me/newname");
+    expect(row?.title).toBe("Renamed");
+    expect(session.currentFlow).toBeNull();
+  });
+
+  it("activating an inactive channel re-validates bot access and refuses when the bot lost admin (Codex P1)", async () => {
+    const created = await createOrRebindChannel(publicRow("togglechan", -1052n));
+    if (!created.ok) throw new Error("setup");
+    const off = await setChannelActive(created.channel.id, false);
+    expect(off.ok).toBe(true);
+    const sid = created.channel.id.slice(0, 8);
+    // bot no longer admin → activation refused, channel stays inactive, error recorded
+    await runCb(
+      callbackCtx(`admin:force_join:toggle:${sid}`, OWNER, initialSession(), {
+        getChat: { id: -1052, type: "channel", title: "T", username: "togglechan" },
+        botStatus: "member",
+      }),
+    );
+    const stillOff = await getChannelById(created.channel.id);
+    expect(stillOff?.isActive).toBe(false);
+    expect(stillOff?.lastValidationErrorCode).not.toBeNull();
+    // access restored → activates and clears the error
+    await runCb(
+      callbackCtx(`admin:force_join:toggle:${sid}`, OWNER, initialSession(), {
+        getChat: { id: -1052, type: "channel", title: "T", username: "togglechan" },
+        botStatus: "administrator",
+      }),
+    );
+    const back = await getChannelById(created.channel.id);
+    expect(back?.isActive).toBe(true);
+    expect(back?.lastValidationErrorCode).toBeNull();
+  });
+
+  it("a successful access test clears a previously recorded validation error (Codex P2)", async () => {
+    const created = await createOrRebindChannel(publicRow("testchan", -1053n));
+    if (!created.ok) throw new Error("setup");
+    await prisma.forceJoinChannel.update({
+      where: { id: created.channel.id },
+      data: { lastValidationErrorCode: "BOT_NOT_ADMIN" },
+    });
+    const sid = created.channel.id.slice(0, 8);
+    const c = callbackCtx(`admin:force_join:test:${sid}`, OWNER, initialSession(), {
+      getChat: { id: -1053, type: "channel", title: "T", username: "testchan" },
+      botStatus: "administrator",
+    });
+    await runCb(c);
+    const row = await getChannelById(created.channel.id);
+    expect(row?.lastValidationErrorCode).toBeNull();
+    expect(c.rec.toasts).toContain("دسترسی ربات تایید شد ✅");
+  });
+
+  it("re-adding an already-registered INACTIVE channel is not reported as the active-cap limit (Codex P2)", async () => {
+    const created = await createOrRebindChannel(publicRow("dupchan", -1054n));
+    if (!created.ok) throw new Error("setup");
+    await setChannelActive(created.channel.id, false);
+    const session = initialSession();
+    await runCb(callbackCtx("admin:force_join:add", OWNER, session));
+    const t = textCtx("@dupchan", OWNER, session, {
+      getChat: { id: -1054, type: "channel", title: "Dup", username: "dupchan" },
+      botStatus: "administrator",
+    });
+    await runText(t);
+    expect(allText(t.rec)).toContain("قبلاً ثبت شده و غیرفعال");
+    expect(allText(t.rec)).not.toContain("سقف"); // NOT the 10-active-cap wording
+    expect((await listAllChannels()).length).toBe(1);
+  });
+
+  it("paginates the overview so a long list never overflows the Telegram message limit (Codex P2)", async () => {
+    for (let i = 0; i < 10; i += 1) {
+      const r = await createOrRebindChannel(publicRow(`pg${i}`, -(1_200n + BigInt(i))));
+      if (!r.ok) throw new Error("setup");
+    }
+    const p0 = callbackCtx("admin:force_join:root", OWNER);
+    await runCb(p0);
+    const page0Text = lastText(p0.rec);
+    expect(page0Text.length).toBeLessThan(4096);
+    expect(page0Text).toContain("صفحه 1 از 2");
+    const nav = flatButtons(p0.rec.sent.at(-1)?.other);
+    expect(nav.some((b) => b.callback_data === "admin:force_join:page:1")).toBe(true);
+    // The second page shows the overflow rows with their global numbering.
+    const p1 = callbackCtx("admin:force_join:page:1", OWNER);
+    await runCb(p1);
+    expect(lastText(p1.rec)).toContain("9.");
+    expect(lastText(p1.rec)).toContain("10.");
+  });
+
+  it("refuses to arm the private add picker outside a private chat (Codex P2)", async () => {
+    const session = initialSession();
+    await runCb(callbackCtx("admin:force_join:add", OWNER, session, {}, "group"));
+    const t = textCtx("https://t.me/+GroupHash", OWNER, session, {}, "group");
+    await runText(t);
+    expect(allText(t.rec)).toContain("فقط در چت خصوصی");
+    expect(session.currentFlow).toBeNull();
+    expect((await listAllChannels()).length).toBe(0);
+    const armedPicker = t.rec.sent.some((s) => Array.isArray((s.other?.reply_markup as { keyboard?: unknown })?.keyboard));
+    expect(armedPicker).toBe(false);
+  });
+
+  it("refuses the private rebind picker outside a private chat (Codex P2)", async () => {
+    const created = await createOrRebindChannel({
+      chatId: -1060n,
+      title: "Priv",
+      joinUrl: "https://t.me/+priv",
+      normalizedLink: "https://t.me/+priv",
+      isPrivate: true,
+      publicUsername: null,
+      createdByAdminId: OWNER.id,
+    });
+    if (!created.ok) throw new Error("setup");
+    const sid = created.channel.id.slice(0, 8);
+    const session = initialSession();
+    const c = callbackCtx(`admin:force_join:rebind:${sid}`, OWNER, session, {}, "group");
+    await runCb(c);
+    expect(c.rec.toasts.some((t) => t?.includes("فقط در چت خصوصی"))).toBe(true);
+    expect(session.currentFlow).toBeNull();
+    expect(session.temp.forceJoin).toBeUndefined();
+  });
+
+  it("a command sent mid-flow unwinds the flow and removes the picker before the command runs (Codex P2)", async () => {
+    const session = initialSession();
+    await runCb(callbackCtx("admin:force_join:add", OWNER, session));
+    await runText(textCtx("https://t.me/+CmdHash", OWNER, session));
+    expect(session.currentFlow).toBe("force_join:private_pick");
+    const esc = textCtx("/start", OWNER, session);
+    const passedThrough = await runEscape(esc);
+    expect(passedThrough).toBe(true); // the command still reaches its own handler
+    expect(session.currentFlow).toBeNull();
+    const removal = esc.rec.sent.find((s) => (s.other?.reply_markup as { remove_keyboard?: boolean })?.remove_keyboard);
+    expect(removal).toBeDefined();
+  });
+
+  it("the command escape passes ordinary text through without clearing an armed flow (Codex P2)", async () => {
+    const session = initialSession();
+    await runCb(callbackCtx("admin:force_join:add", OWNER, session));
+    expect(session.currentFlow).toBe("force_join:add");
+    const esc = textCtx("just some text", OWNER, session);
+    const passedThrough = await runEscape(esc);
+    expect(passedThrough).toBe(true);
+    expect(session.currentFlow).toBe("force_join:add"); // untouched
   });
 });
 

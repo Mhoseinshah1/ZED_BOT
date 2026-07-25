@@ -391,6 +391,26 @@ export async function recordValidationError(id: string, code: string): Promise<v
   }
 }
 
+/**
+ * Records a SUCCESSFUL validation on a row (stamps lastValidatedAt and clears any
+ * prior lastValidationErrorCode) without changing identity. Used by the «تست
+ * دسترسی ربات» action and before an inactive→active transition so a restored
+ * channel never keeps showing a stale error class next to a success outcome.
+ */
+export async function recordValidationSuccess(id: string): Promise<void> {
+  try {
+    await prisma.forceJoinChannel.update({
+      where: { id },
+      data: { lastValidatedAt: new Date(), lastValidationErrorCode: null },
+    });
+  } catch (err) {
+    logger.warn("force-join: failed to record validation success", {
+      channelId: id,
+      error: errorMessage(err),
+    });
+  }
+}
+
 // --- activate / deactivate ----------------------------------------------------
 
 export type SetActiveResult =
