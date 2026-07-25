@@ -22,6 +22,47 @@ export const FORCE_JOIN_ENABLED_KEY = "force_join_enabled";
 /** Hard cap on ACTIVE channels (§4.4), enforced here in the service layer. */
 export const MAX_ACTIVE_FORCE_JOIN_CHANNELS = 10;
 
+// --- configuration serialization ---------------------------------------------
+
+/**
+ * ONE dedicated advisory-lock namespace serializing EVERY force-join
+ * configuration mutation. A row lock on the active set (`… WHERE "isActive" =
+ * true FOR UPDATE`) locks nothing at all when the active set is empty, so two
+ * concurrent "create the first channel" / "activate" / "enable" transactions
+ * could both observe `activeCount = 0` and both commit. A transaction-level
+ * advisory lock has no such hole: it exists independently of any row, and it is
+ * released automatically when the transaction commits or rolls back.
+ *
+ * Every mutation that reads-then-writes the active set, the active-channel cap,
+ * the sortOrder allocation or the master switch takes this lock FIRST, so the
+ * whole configuration behaves as a single serialized resource.
+ */
+const FORCE_JOIN_CONFIG_LOCK = "zedbot-force-join-config";
+
+async function lockForceJoinConfig(tx: Prisma.TransactionClient): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${FORCE_JOIN_CONFIG_LOCK}))`;
+}
+
+// --- bounded channel-health policy (§4.11) -----------------------------------
+
+/** Consecutive PERMANENT unverifiable results before a channel is retired. */
+export const FORCE_JOIN_HEALTH_FAILURE_THRESHOLD = 5;
+/**
+ * The failures must also have persisted for at least this long. Threshold alone
+ * would retire a channel within seconds on a busy bot; requiring a sustained
+ * window means a brief anomaly that merely *looks* permanent cannot rewrite the
+ * operator's configuration.
+ */
+export const FORCE_JOIN_HEALTH_MIN_WINDOW_MS = 10 * 60_000;
+/** A failure this long after the previous one starts a fresh window. */
+export const FORCE_JOIN_HEALTH_RESET_MS = 60 * 60_000;
+/**
+ * Write-debounce: at most one failure increment per channel per this interval,
+ * so a broken channel costs O(1) writes per interval instead of one write per
+ * gated user request. It only slows counting, never the decision.
+ */
+export const FORCE_JOIN_HEALTH_COUNT_DEBOUNCE_MS = 5_000;
+
 /** Deterministic ordering (T7): sortOrder, then createdAt, then id. */
 const CHANNEL_ORDER_BY: Prisma.ForceJoinChannelOrderByWithRelationInput[] = [
   { sortOrder: "asc" },
@@ -196,6 +237,36 @@ export function countActiveChannels(): Promise<number> {
   return prisma.forceJoinChannel.count({ where: { isActive: true } });
 }
 
+export interface ChannelPage {
+  /** Only the rows for the requested page, deterministically ordered (T7). */
+  rows: ForceJoinChannel[];
+  /** Total configured channels (all states) — drives the page count. */
+  total: number;
+  /** Total ACTIVE channels — rendered in the overview header. */
+  activeCount: number;
+}
+
+/**
+ * One page of the admin channel list, paginated IN THE DATABASE. The admin
+ * overview must never load every configured channel into memory just to render
+ * eight rows: only active channels are capped (at 10), so the inactive tail is
+ * unbounded. `skip`/`take` plus the deterministic `(sortOrder, createdAt, id)`
+ * ordering make paging stable, and both counts come from the same transaction
+ * as the rows so the header can never disagree with the page.
+ */
+export async function listChannelsPage(skip: number, take: number): Promise<ChannelPage> {
+  const [rows, total, activeCount] = await prisma.$transaction([
+    prisma.forceJoinChannel.findMany({
+      orderBy: CHANNEL_ORDER_BY,
+      skip: Math.max(0, skip),
+      take: Math.max(1, take),
+    }),
+    prisma.forceJoinChannel.count(),
+    prisma.forceJoinChannel.count({ where: { isActive: true } }),
+  ]);
+  return { rows, total, activeCount };
+}
+
 export function getChannelById(id: string): Promise<ForceJoinChannel | null> {
   return prisma.forceJoinChannel.findUnique({ where: { id } });
 }
@@ -244,9 +315,10 @@ export async function createOrRebindChannel(
 ): Promise<UpsertChannelResult> {
   try {
     return await prisma.$transaction(async (tx) => {
-      // Serialize against concurrent activations/creations by locking the
-      // active set (the cap is read against this locked snapshot).
-      await tx.$queryRaw`SELECT id FROM "ForceJoinChannel" WHERE "isActive" = true FOR UPDATE`;
+      // Serialize against every other configuration mutation. The cap, the
+      // chatId lookup and the sortOrder allocation below are all read against
+      // this serialized snapshot.
+      await lockForceJoinConfig(tx);
 
       const existing = await tx.forceJoinChannel.findUnique({ where: { chatId: input.chatId } });
       if (existing) {
@@ -260,6 +332,11 @@ export async function createOrRebindChannel(
             publicUsername: input.publicUsername,
             lastValidatedAt: new Date(),
             lastValidationErrorCode: null,
+            // Freshly validated → healthy.
+            healthFailureCount: 0,
+            healthFailureFirstAt: null,
+            healthFailureLastAt: null,
+            unhealthyAt: null,
           },
         });
         return { ok: true as const, channel, created: false, activated: channel.isActive };
@@ -301,34 +378,25 @@ export type MutateResult =
   | { ok: true; channel: ForceJoinChannel }
   | { ok: false; code: "NOT_FOUND" | "LINK_CONFLICT" | "DUPLICATE_CHANNEL" };
 
-/** Updates only the buyer-facing join URL (and normalized key for public rows). */
-export async function updateChannelJoinUrl(
-  id: string,
-  joinUrl: string,
-  normalizedLink: string,
-): Promise<MutateResult> {
-  try {
-    const existing = await prisma.forceJoinChannel.findUnique({ where: { id } });
-    if (!existing) {
-      return { ok: false, code: "NOT_FOUND" };
-    }
-    const channel = await prisma.forceJoinChannel.update({
-      where: { id },
-      data: { joinUrl, normalizedLink },
-    });
-    return { ok: true, channel };
-  } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      return { ok: false, code: "LINK_CONFLICT" };
-    }
-    throw err;
-  }
-}
-
 /**
- * Rebinds a row's Telegram identity to a freshly validated one (انتخاب مجدد
- * کانال). If the new chatId already belongs to a DIFFERENT row the rebind is
- * rejected as DUPLICATE_CHANNEL rather than merging two configs.
+ * Atomically rebinds BOTH a row's Telegram identity and its advertised join
+ * link, in one update.
+ *
+ * There is deliberately NO "update just the link" and NO "update just the
+ * identity" primitive. Either half alone produces a row whose displayed join
+ * link points at one channel while membership is verified against another — the
+ * user is then told to join channel B and stays blocked because the gate checks
+ * channel A (or passes without ever joining what they were shown). Both halves
+ * are therefore required parameters and are written in a single statement.
+ *
+ * The identity must come from a fresh `validateBotChannelAccess`, and for a
+ * private channel the link must come from the SAME session-bound operation that
+ * produced that identity (the invite link is not resolvable, so it can only be
+ * paired with a channel the OWNER just picked).
+ *
+ * Rejects DUPLICATE_CHANNEL when the chatId already belongs to another row, and
+ * LINK_CONFLICT when the normalized link is already taken (now globally unique
+ * across public AND private rows).
  */
 export async function rebindChannelIdentity(
   id: string,
@@ -337,12 +405,13 @@ export async function rebindChannelIdentity(
     title: string;
     isPrivate: boolean;
     publicUsername: string | null;
-    joinUrl?: string;
-    normalizedLink?: string;
+    joinUrl: string;
+    normalizedLink: string;
   },
 ): Promise<MutateResult> {
   try {
     return await prisma.$transaction(async (tx) => {
+      await lockForceJoinConfig(tx);
       const existing = await tx.forceJoinChannel.findUnique({ where: { id } });
       if (!existing) {
         return { ok: false as const, code: "NOT_FOUND" as const };
@@ -351,6 +420,12 @@ export async function rebindChannelIdentity(
       if (other && other.id !== id) {
         return { ok: false as const, code: "DUPLICATE_CHANNEL" as const };
       }
+      const linkOwner = await tx.forceJoinChannel.findUnique({
+        where: { normalizedLink: identity.normalizedLink },
+      });
+      if (linkOwner && linkOwner.id !== id) {
+        return { ok: false as const, code: "LINK_CONFLICT" as const };
+      }
       const channel = await tx.forceJoinChannel.update({
         where: { id },
         data: {
@@ -358,12 +433,15 @@ export async function rebindChannelIdentity(
           title: identity.title,
           isPrivate: identity.isPrivate,
           publicUsername: identity.publicUsername,
-          ...(identity.joinUrl !== undefined ? { joinUrl: identity.joinUrl } : {}),
-          ...(identity.normalizedLink !== undefined
-            ? { normalizedLink: identity.normalizedLink }
-            : {}),
+          joinUrl: identity.joinUrl,
+          normalizedLink: identity.normalizedLink,
           lastValidatedAt: new Date(),
           lastValidationErrorCode: null,
+          // A freshly validated identity is healthy by definition.
+          healthFailureCount: 0,
+          healthFailureFirstAt: null,
+          healthFailureLastAt: null,
+          unhealthyAt: null,
         },
       });
       return { ok: true as const, channel };
@@ -391,6 +469,168 @@ export async function recordValidationError(id: string, code: string): Promise<v
   }
 }
 
+/**
+ * Records a SUCCESSFUL validation on a row (stamps lastValidatedAt and clears any
+ * prior lastValidationErrorCode) without changing identity. Used by the «تست
+ * دسترسی ربات» action and before an inactive→active transition so a restored
+ * channel never keeps showing a stale error class next to a success outcome.
+ */
+export async function recordValidationSuccess(id: string): Promise<void> {
+  try {
+    await prisma.forceJoinChannel.update({
+      where: { id },
+      data: {
+        lastValidatedAt: new Date(),
+        lastValidationErrorCode: null,
+        // A verifiable channel is healthy again: the bounded failure window is
+        // cleared so an old, already-repaired outage can never combine with a
+        // new one to cross the retirement threshold.
+        healthFailureCount: 0,
+        healthFailureFirstAt: null,
+        healthFailureLastAt: null,
+        unhealthyAt: null,
+      },
+    });
+  } catch (err) {
+    logger.warn("force-join: failed to record validation success", {
+      channelId: id,
+      error: errorMessage(err),
+    });
+  }
+}
+
+// --- bounded unhealthy-channel lifecycle (§4.11) -----------------------------
+
+export type HealthFailureOutcome =
+  /** Counted (or debounced); the channel remains configured as-is. */
+  | { action: "COUNTED"; count: number }
+  /** Threshold + window reached: the channel was retired. */
+  | { action: "RETIRED"; forceJoinDisabled: boolean }
+  /** Nothing to do (row gone, or already inactive). */
+  | { action: "NOOP" };
+
+/**
+ * Records ONE permanent "the bot can no longer verify this channel" result and
+ * applies the bounded health policy.
+ *
+ * An unverifiable ACTIVE channel is excluded from gating so users are never
+ * bricked (D4) — but excluding it forever would silently leave the admin panel
+ * advertising a required channel that is not actually enforced. So the failures
+ * are counted durably, and once they are BOTH numerous
+ * (`FORCE_JOIN_HEALTH_FAILURE_THRESHOLD`) and sustained
+ * (`FORCE_JOIN_HEALTH_MIN_WINDOW_MS`) the channel is atomically deactivated.
+ * If it was the LAST active channel while force join was globally enabled, the
+ * master switch is disabled in the SAME transaction — never leaving the bot
+ * switched on with zero enforceable channels.
+ *
+ * Only PERMANENT results reach this function; transient Telegram/network
+ * failures never mutate configuration. Any success resets the window.
+ */
+export async function recordChannelHealthFailure(
+  id: string,
+  errorClass: string,
+): Promise<HealthFailureOutcome> {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      await lockForceJoinConfig(tx);
+      const row = await tx.forceJoinChannel.findUnique({ where: { id } });
+      if (!row || !row.isActive) {
+        return { action: "NOOP" as const };
+      }
+
+      const now = Date.now();
+      const lastAt = row.healthFailureLastAt?.getTime() ?? null;
+      // Write-debounce: many gated users hitting the same broken channel within
+      // a few seconds is ONE observation, not N.
+      if (lastAt !== null && now - lastAt < FORCE_JOIN_HEALTH_COUNT_DEBOUNCE_MS) {
+        return { action: "COUNTED" as const, count: row.healthFailureCount };
+      }
+
+      // A long gap since the previous failure means the earlier trouble is not
+      // evidence about this one — start a fresh window.
+      const staleWindow = lastAt === null || now - lastAt > FORCE_JOIN_HEALTH_RESET_MS;
+      const firstAt = staleWindow ? new Date(now) : (row.healthFailureFirstAt ?? new Date(now));
+      const count = staleWindow ? 1 : row.healthFailureCount + 1;
+
+      const sustainedMs = now - firstAt.getTime();
+      const retire =
+        count >= FORCE_JOIN_HEALTH_FAILURE_THRESHOLD &&
+        sustainedMs >= FORCE_JOIN_HEALTH_MIN_WINDOW_MS;
+
+      if (!retire) {
+        await tx.forceJoinChannel.update({
+          where: { id },
+          data: {
+            healthFailureCount: count,
+            healthFailureFirstAt: firstAt,
+            healthFailureLastAt: new Date(now),
+            lastValidatedAt: new Date(now),
+            lastValidationErrorCode: errorClass,
+          },
+        });
+        return { action: "COUNTED" as const, count };
+      }
+
+      const remainingActive = await tx.forceJoinChannel.count({
+        where: { isActive: true, id: { not: id } },
+      });
+      const enabled = isTruthySettingValue(
+        (await tx.setting.findUnique({ where: { key: FORCE_JOIN_ENABLED_KEY } }))?.value,
+      );
+      const forceJoinDisabled = enabled && remainingActive === 0;
+      if (forceJoinDisabled) {
+        await tx.setting.upsert({
+          where: { key: FORCE_JOIN_ENABLED_KEY },
+          update: { value: "false", type: "BOOLEAN" },
+          create: { key: FORCE_JOIN_ENABLED_KEY, value: "false", type: "BOOLEAN" },
+        });
+      }
+      await tx.forceJoinChannel.update({
+        where: { id },
+        data: {
+          isActive: false,
+          unhealthyAt: new Date(now),
+          healthFailureCount: count,
+          healthFailureFirstAt: firstAt,
+          healthFailureLastAt: new Date(now),
+          lastValidatedAt: new Date(now),
+          lastValidationErrorCode: errorClass,
+        },
+      });
+      return { action: "RETIRED" as const, forceJoinDisabled };
+    });
+  } catch (err) {
+    // Health bookkeeping must never break a membership check.
+    logger.warn("force-join: failed to record channel health failure", {
+      channelId: id,
+      error: errorMessage(err),
+    });
+    return { action: "NOOP" };
+  } finally {
+    clearSettingCacheKeys([FORCE_JOIN_ENABLED_KEY]);
+  }
+}
+
+/** Clears the bounded failure window after any successful verification. */
+export async function recordChannelHealthSuccess(id: string): Promise<void> {
+  try {
+    await prisma.forceJoinChannel.updateMany({
+      where: { id, healthFailureCount: { gt: 0 } },
+      data: {
+        healthFailureCount: 0,
+        healthFailureFirstAt: null,
+        healthFailureLastAt: null,
+        unhealthyAt: null,
+      },
+    });
+  } catch (err) {
+    logger.warn("force-join: failed to clear channel health failures", {
+      channelId: id,
+      error: errorMessage(err),
+    });
+  }
+}
+
 // --- activate / deactivate ----------------------------------------------------
 
 export type SetActiveResult =
@@ -409,7 +649,7 @@ export type SetActiveResult =
  */
 export async function setChannelActive(id: string, active: boolean): Promise<SetActiveResult> {
   return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "ForceJoinChannel" WHERE "isActive" = true FOR UPDATE`;
+    await lockForceJoinConfig(tx);
     const row = await tx.forceJoinChannel.findUnique({ where: { id } });
     if (!row) {
       return { ok: false, code: "NOT_FOUND" };
@@ -452,7 +692,7 @@ export type ReorderResult =
  */
 export async function reorderChannel(id: string, direction: "up" | "down"): Promise<ReorderResult> {
   return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "ForceJoinChannel" FOR UPDATE`;
+    await lockForceJoinConfig(tx);
     const ordered = await tx.forceJoinChannel.findMany({ orderBy: CHANNEL_ORDER_BY });
     const idx = ordered.findIndex((r) => r.id === id);
     if (idx === -1) {
@@ -486,7 +726,7 @@ export type DeleteResult =
  */
 export async function deleteChannel(id: string): Promise<DeleteResult> {
   return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "ForceJoinChannel" WHERE "isActive" = true FOR UPDATE`;
+    await lockForceJoinConfig(tx);
     const row = await tx.forceJoinChannel.findUnique({ where: { id } });
     if (!row) {
       return { ok: false, code: "NOT_FOUND" };
@@ -520,7 +760,7 @@ export type EnableResult = { ok: true } | { ok: false; code: "NO_ACTIVE" };
  */
 export async function enableForceJoin(): Promise<EnableResult> {
   const result = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "ForceJoinChannel" WHERE "isActive" = true FOR UPDATE`;
+    await lockForceJoinConfig(tx);
     const activeCount = await tx.forceJoinChannel.count({ where: { isActive: true } });
     if (activeCount === 0) {
       return { ok: false as const, code: "NO_ACTIVE" as const };
@@ -538,12 +778,19 @@ export async function enableForceJoin(): Promise<EnableResult> {
   return result;
 }
 
-/** Disables force join globally. Always allowed (never bricks anything). */
+/**
+ * Disables force join globally. Always allowed (never bricks anything), but
+ * still serialized on the configuration lock so it cannot interleave with an
+ * enable / activation that is reading the active set.
+ */
 export async function disableForceJoin(): Promise<void> {
-  await prisma.setting.upsert({
-    where: { key: FORCE_JOIN_ENABLED_KEY },
-    update: { value: "false", type: "BOOLEAN" },
-    create: { key: FORCE_JOIN_ENABLED_KEY, value: "false", type: "BOOLEAN" },
+  await prisma.$transaction(async (tx) => {
+    await lockForceJoinConfig(tx);
+    await tx.setting.upsert({
+      where: { key: FORCE_JOIN_ENABLED_KEY },
+      update: { value: "false", type: "BOOLEAN" },
+      create: { key: FORCE_JOIN_ENABLED_KEY, value: "false", type: "BOOLEAN" },
+    });
   });
   clearSettingCacheKeys([FORCE_JOIN_ENABLED_KEY]);
 }
@@ -555,7 +802,7 @@ export async function disableForceJoin(): Promise<void> {
  */
 export async function disableForceJoinAndDeactivate(id: string): Promise<DeleteResult> {
   const result = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "ForceJoinChannel" WHERE "isActive" = true FOR UPDATE`;
+    await lockForceJoinConfig(tx);
     const row = await tx.forceJoinChannel.findUnique({ where: { id } });
     if (!row) {
       return { ok: false as const, code: "NOT_FOUND" as const };
@@ -575,7 +822,7 @@ export async function disableForceJoinAndDeactivate(id: string): Promise<DeleteR
 /** D3 combined atomic action: disable force join AND delete the given channel. */
 export async function disableForceJoinAndDelete(id: string): Promise<DeleteResult> {
   const result = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "ForceJoinChannel" WHERE "isActive" = true FOR UPDATE`;
+    await lockForceJoinConfig(tx);
     const row = await tx.forceJoinChannel.findUnique({ where: { id } });
     if (!row) {
       return { ok: false as const, code: "NOT_FOUND" as const };

@@ -106,6 +106,12 @@ import {
 } from "./handlers/admin-settings/auto-renewal-admin.handler.js";
 import { referralAdminHandler } from "./handlers/admin-settings/referral-admin.handler.js";
 import {
+  forceJoinAdminHandler,
+  forceJoinAdminTextHandler,
+  forceJoinChatSharedHandler,
+  forceJoinCommandEscapeHandler,
+} from "./handlers/admin-settings/force-join-admin.handler.js";
+import {
   adminRepresentativeHandler,
   adminRepresentativeTextHandler,
 } from "./handlers/admin-representative/admin-representative.handler.js";
@@ -203,6 +209,15 @@ export function createBot(token: string): Bot<BotContext> {
   bot.use(starsSubscriptionUpdateHandler);
   bot.use(starsRefundedPaymentHandler);
 
+  // Force Join (Phase 5): unwind an armed force-join admin flow when the OWNER
+  // sends a command mid-flow. MUST run BEFORE the command composers below
+  // (pingHandler / startHandler / paysupportHandler / the /admin area), because
+  // those consume the command update and the force-join flow-text dispatcher is
+  // registered much later — without this the flow (and its request_chat picker
+  // keyboard) would stay armed and the next ordinary text would be mis-read as a
+  // channel link. Passes through untouched for non-command messages.
+  bot.use(forceJoinCommandEscapeHandler);
+
   // Gate-free basics.
   bot.use(pingHandler);
 
@@ -266,6 +281,10 @@ export function createBot(token: string): Bot<BotContext> {
   // admin page (admin:referral:*) — master switch, commission percent, first-
   // purchase-only, minimum order, totals. Never moves money or creates a commission.
   adminArea.use(referralAdminHandler);
+  // Mandatory channel membership (Force Join, Phase 5): OWNER-only «عضویت اجباری 📢»
+  // admin page (admin:force_join:*) — master switch, channel add/edit/rebind,
+  // per-channel test/reorder/delete. Never renders/logs the Telegram chatId.
+  adminArea.use(forceJoinAdminHandler);
   adminArea.use(adminRepresentativeHandler);
   adminArea.use(deviceGuidesHandler);
   adminArea.use(diagnosticsAdminHandler);
@@ -316,6 +335,10 @@ export function createBot(token: string): Bot<BotContext> {
   adminFlowText.use(stockTextHandler);
   adminFlowText.use(adminBroadcastTextHandler);
   adminFlowText.use(adminTextSettingsTextHandler);
+  // Force Join (Phase 5): the add-link / edit-link text input ("force_join:add",
+  // "force_join:edit_link"). Self-gates on currentFlow, so every other admin flow
+  // passes through untouched.
+  adminFlowText.use(forceJoinAdminTextHandler);
   // Checkout-payment reminders (Phase 2): numeric config input for the two
   // checkout rule pages ("admin_ntf_co:cfg"). Self-gates on currentFlow.
   adminFlowText.use(adminNotificationsTextHandler);
@@ -351,6 +374,11 @@ export function createBot(token: string): Bot<BotContext> {
   // and reaches the flow dispatcher exactly as before, so support / representative
   // / customer-input / admin flows keep priority.
   bot.on("message:text", purchaseNavigationEscapeRouter.middleware());
+  // Force Join (Phase 5): the private-channel picker's chat_shared response. Runs
+  // BEFORE the generic message dispatcher below (which returns next for non-text
+  // updates anyway); the handler self-gates on the "force_join:private_pick" flow
+  // + an active OWNER admin and re-validates the shared chat before trusting it.
+  bot.on("message:chat_shared", forceJoinChatSharedHandler.middleware());
   bot.on("message", async (ctx, next) => {
     const flow = ctx.session.currentFlow;
     if (flow === null) {

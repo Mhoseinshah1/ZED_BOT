@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 
 import {
   type ForceJoinMembershipApi,
+  classifyMemberCheckError,
   evaluateForceJoinMembership,
   resetForceJoinRedisForTests,
 } from "../src/services/force-join/membership.service.js";
@@ -76,9 +77,31 @@ afterEach(() => {
   resetForceJoinRedisForTests();
 });
 
+/**
+ * Removes the SystemLog rows this suite's alerts produce.
+ *
+ * SystemLogDelivery rows reference SystemLog, and writeSystemLog queues a
+ * delivery whenever a Telegram log group is configured — which an earlier suite
+ * in a full-suite run does. Deleting the logs directly then trips
+ * SystemLogDelivery_systemLogId_fkey, so the children go first.
+ */
+async function deleteForceJoinSystemLogs(): Promise<void> {
+  const eventTypes = ["force_join.channel_unverifiable", "force_join.channel_auto_deactivated"];
+  const logs = await prisma.systemLog.findMany({
+    where: { eventType: { in: eventTypes } },
+    select: { id: true },
+  });
+  if (logs.length === 0) {
+    return;
+  }
+  const ids = logs.map((l) => l.id);
+  await prisma.systemLogDelivery.deleteMany({ where: { systemLogId: { in: ids } } });
+  await prisma.systemLog.deleteMany({ where: { id: { in: ids } } });
+}
+
 afterAll(async () => {
   if (hasDb) {
-    await prisma.systemLog.deleteMany({ where: { eventType: "force_join.channel_unverifiable" } });
+    await deleteForceJoinSystemLogs();
     await prisma.$disconnect();
   }
 });
@@ -179,13 +202,67 @@ describe("evaluateForceJoinMembership — decision logic", () => {
     }
   });
 
-  it("a user-not-participant error is a MISS, not an unverifiable channel", async () => {
+  // Only an EXPLICIT "this user is not a participant" may block a real user.
+  it("an explicit user-not-participant error is a MISS", async () => {
+    const a = makeChannel();
+    const { api } = fakeApi(
+      new Map([
+        [Number(a.chatId), { throw: { error_code: 400, description: "Bad Request: USER_NOT_PARTICIPANT" } }],
+      ]),
+    );
+    const out = await evaluateForceJoinMembership({ api, userTelegramId: uniqueUser(), channels: [a] });
+    expect(out.decision).toBe("MISSING");
+  });
+
+  // "user not found" is Telegram not knowing the account — NOT proof they left
+  // the channel. Blocking on it would lock out a genuine member, so it must fail
+  // safe (channel excluded → the user is not blocked) instead.
+  it("never blocks a user on an ambiguous 'user not found' error", async () => {
     const a = makeChannel();
     const { api } = fakeApi(
       new Map([[Number(a.chatId), { throw: { error_code: 400, description: "Bad Request: user not found" } }]]),
     );
     const out = await evaluateForceJoinMembership({ api, userTelegramId: uniqueUser(), channels: [a] });
-    expect(out.decision).toBe("MISSING");
+    expect(out.decision).not.toBe("MISSING");
+  });
+
+  // Realistic getChatMember failures, worded as Telegram actually words them.
+  // The only verdict that BLOCKS a user is NOT_JOINED, so it is the only one
+  // that may never be guessed at.
+  describe("classifyMemberCheckError — realistic Telegram descriptions", () => {
+    const cases: Array<[string, unknown, "TEMP" | "NOT_JOINED" | "UNVERIFIABLE"]> = [
+      // The bot cannot see the channel → configuration problem, not the user's.
+      ["bot removed from the channel", { error_code: 403, description: "Forbidden: bot is not a member of the channel chat" }, "UNVERIFIABLE"],
+      ["bot demoted (member list hidden)", { error_code: 400, description: "Bad Request: member list is inaccessible" }, "UNVERIFIABLE"],
+      ["channel deleted / id stale", { error_code: 400, description: "Bad Request: chat not found" }, "UNVERIFIABLE"],
+      ["bot lacks rights", { error_code: 400, description: "Bad Request: not enough rights" }, "UNVERIFIABLE"],
+      ["bot kicked", { error_code: 403, description: "Forbidden: bot was kicked from the channel chat" }, "UNVERIFIABLE"],
+      ["private channel not accessible", { error_code: 400, description: "Bad Request: CHANNEL_PRIVATE" }, "UNVERIFIABLE"],
+      // Transient.
+      ["rate limited", { error_code: 429, description: "Too Many Requests: retry after 5" }, "TEMP"],
+      ["telegram 5xx", { error_code: 502, description: "Bad Gateway" }, "TEMP"],
+      ["network error (no code)", new Error("socket hang up"), "TEMP"],
+      ["aborted request", new Error("The user aborted a request."), "TEMP"],
+      // The ONLY explicit user-absence wording.
+      ["explicit not-a-participant", { error_code: 400, description: "Bad Request: USER_NOT_PARTICIPANT" }, "NOT_JOINED"],
+      ["participant id invalid", { error_code: 400, description: "Bad Request: PARTICIPANT_ID_INVALID" }, "NOT_JOINED"],
+      // Ambiguous → must fail safe, never block.
+      ["user unknown to telegram", { error_code: 400, description: "Bad Request: user not found" }, "UNVERIFIABLE"],
+      ["unknown 4xx", { error_code: 400, description: "Bad Request: something new we have never seen" }, "UNVERIFIABLE"],
+    ];
+
+    for (const [name, err, expected] of cases) {
+      it(`${name} → ${expected}`, () => {
+        expect(classifyMemberCheckError(err)).toBe(expected);
+      });
+    }
+
+    it("never returns NOT_JOINED for any bot-access wording", () => {
+      const accessErrors = cases.filter(([, , v]) => v === "UNVERIFIABLE").map(([, e]) => e);
+      for (const err of accessErrors) {
+        expect(classifyMemberCheckError(err)).not.toBe("NOT_JOINED");
+      }
+    });
   });
 
   it("PASSES with an empty active set", async () => {
@@ -217,7 +294,7 @@ describe.runIf(hasDb)("evaluateForceJoinMembership — unverifiable channels (§
   }
 
   afterAll(async () => {
-    await prisma.systemLog.deleteMany({ where: { eventType: "force_join.channel_unverifiable" } });
+    await deleteForceJoinSystemLogs();
     await prisma.forceJoinChannel.deleteMany({ where: { id: { in: createdIds } } });
   });
 

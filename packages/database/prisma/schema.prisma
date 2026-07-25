@@ -2524,10 +2524,12 @@ model ForceJoinChannel {
   joinUrl String
 
   // Normalized dedup / identity key. Public: `https://t.me/<lowercased-username>`
-  // (the same value as joinUrl). Private: the preserved invite link. A partial
-  // UNIQUE index enforces uniqueness ONLY among public rows (D6) — declared via
-  // raw SQL in the migration because Prisma cannot express a filtered unique.
-  normalizedLink String
+  // (the same value as joinUrl). Private: the preserved invite link. GLOBALLY
+  // unique across public AND private rows — the original partial (public-only)
+  // unique index was replaced by a full unique index in
+  // 20260726120000_force_join_link_unique_and_health, so two rows can never
+  // advertise the same join target.
+  normalizedLink String @unique
 
   // Internal Telegram peer id (the `-100…` form). Globally unique across ALL
   // rows, active or not (D5) — rebinding a channel UPDATES this row instead of
@@ -2554,6 +2556,18 @@ model ForceJoinChannel {
   // Telegram response / token / invite secret).
   lastValidatedAt         DateTime?
   lastValidationErrorCode String?
+
+  // Bounded channel-health state (§4.11). Only PERMANENT unverifiable results
+  // (the bot lost access / the channel is gone) count here; transient Telegram
+  // failures never mutate configuration. When the count reaches the threshold
+  // AND the failures have persisted for the minimum window, the channel is
+  // atomically deactivated so it stops being advertised as required.
+  healthFailureCount   Int       @default(0)
+  healthFailureFirstAt DateTime?
+  healthFailureLastAt  DateTime?
+  // Set when the channel was auto-deactivated by the health policy; cleared as
+  // soon as a validation / membership check succeeds again.
+  unhealthyAt          DateTime?
 
   @@index([isActive, sortOrder, createdAt, id])
 }

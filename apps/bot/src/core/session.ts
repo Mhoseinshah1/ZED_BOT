@@ -464,6 +464,24 @@ export interface SessionData {
     adminBroadcastDraft?: { text?: string };
     // Admin text-settings edit target (Phase 34).
     adminTextEditDraft?: { kind: "template" | "button"; id: string };
+    // Mandatory channel membership (Force Join) admin flows (Phase 5). Holds the
+    // in-progress add/edit/rebind draft. `editChannelId`/`rebindChannelId` name
+    // the target ForceJoinChannel row; `privatePick` carries the short-lived
+    // request_chat picker context (verified on chat_shared — the requestId +
+    // armed-admin + expiry are re-checked before the shared chat is trusted).
+    // NEVER holds a Telegram chatId; the invite hash is a join secret (never logged).
+    forceJoin?: {
+      editChannelId?: string;
+      rebindChannelId?: string;
+      privatePick?: {
+        requestId: number;
+        joinUrl: string;
+        normalizedLink: string;
+        inviteHash: string;
+        adminId: string;
+        expiresAtMs: number;
+      };
+    };
     // Device connection guides admin (feat/device-connection-guides). The
     // create-wizard accumulator + the single-field editor target. Holds only
     // operator-authored content in progress (never a Service secret); the app

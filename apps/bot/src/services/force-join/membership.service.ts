@@ -4,7 +4,13 @@ import { Redis } from "ioredis";
 
 import { logger } from "../../core/logger.js";
 import { OPS_EVENTS, writeSystemLog } from "../system-log.service.js";
-import { recordValidationError } from "./force-join-channel.service.js";
+import {
+  FORCE_JOIN_HEALTH_FAILURE_THRESHOLD,
+  FORCE_JOIN_HEALTH_MIN_WINDOW_MS,
+  recordChannelHealthFailure,
+  recordChannelHealthSuccess,
+  recordValidationError,
+} from "./force-join-channel.service.js";
 
 // =============================================================================
 // Mandatory channel membership (Force Join): live membership CHECKER.
@@ -158,6 +164,36 @@ async function emitUnverifiableAlert(channel: ForceJoinChannel, errorClass: stri
   });
 }
 
+/**
+ * Applies the bounded health policy to one PERMANENT unverifiable result and
+ * alerts the OWNER. The alert itself is deduplicated per channel per rolling
+ * window; the RETIREMENT alert is not deduplicated because it is a one-shot
+ * configuration change the OWNER must always see.
+ */
+async function handleUnverifiableChannel(channel: ForceJoinChannel): Promise<void> {
+  const errorClass = "UNVERIFIABLE";
+  await emitUnverifiableAlert(channel, errorClass);
+  const outcome = await recordChannelHealthFailure(channel.id, errorClass);
+  if (outcome.action !== "RETIRED") {
+    return;
+  }
+  await writeSystemLog({
+    level: "ERROR",
+    eventType: OPS_EVENTS.FORCE_JOIN_CHANNEL_RETIRED,
+    message: outcome.forceJoinDisabled
+      ? "Force-join channel stayed unverifiable and was deactivated; it was the last active channel, so mandatory membership was disabled too."
+      : "Force-join channel stayed unverifiable and was deactivated.",
+    metadata: {
+      channelId: channel.id,
+      isPrivate: channel.isPrivate,
+      forceJoinDisabled: outcome.forceJoinDisabled,
+      thresholdFailures: FORCE_JOIN_HEALTH_FAILURE_THRESHOLD,
+      windowMs: FORCE_JOIN_HEALTH_MIN_WINDOW_MS,
+    },
+    topicKey: "SYSTEM",
+  });
+}
+
 // --- per-user re-check debounce (§4.9) ---------------------------------------
 
 /**
@@ -199,42 +235,71 @@ export interface ForceJoinMembershipApi {
 type ChannelCheck = "JOINED" | "NOT_JOINED" | "TEMP" | "UNVERIFIABLE";
 
 /**
- * Classifies a getChatMember error. A "user is not a participant" error means
- * the user is simply NOT joined (§4.8), whereas a chat-access error means the
- * BOT can no longer verify the channel — a config problem, not the user's fault
- * (§4.11). Rate limits / 5xx / network are transient. Unknown permanent errors
- * are treated as unverifiable so a mystery failure never bricks the user.
+ * Classifies a getChatMember error, ordered so the SAFE answer always wins.
+ *
+ * Only NOT_JOINED blocks a real user, so it is the one verdict this function is
+ * not allowed to guess at. The order is therefore:
+ *
+ *   1. transient (429 / 5xx / network) → TEMP: fail closed without lying (D2);
+ *   2. channel- or bot-access failures → UNVERIFIABLE. Checked BEFORE any
+ *      user-absence match, because several of these descriptions also mention
+ *      the member/participant ("member list is inaccessible") and must never be
+ *      read as "this user did not join";
+ *   3. a NARROW, explicit "this user is not a participant" → NOT_JOINED;
+ *   4. anything else 4xx → UNVERIFIABLE.
+ *
+ * Deliberately NOT in the user-absence list: the bare substring "participant"
+ * (matches access errors), and "user not found" (Telegram not knowing the user
+ * is not proof they left the channel). Both now fall through to UNVERIFIABLE,
+ * which excludes the channel from gating and alerts the OWNER instead of
+ * blocking someone who may well be a member.
  */
-function classifyMemberCheckError(err: unknown): "TEMP" | "NOT_JOINED" | "UNVERIFIABLE" {
+export function classifyMemberCheckError(err: unknown): "TEMP" | "NOT_JOINED" | "UNVERIFIABLE" {
   const code = (err as { error_code?: unknown } | null)?.error_code;
   const desc = String((err as { description?: unknown } | null)?.description ?? "").toLowerCase();
+
+  // 1. Transient: rate limits, server errors, and anything without an API error
+  //    code (network / timeout / abort — see the fall-through at the end).
   if (code === 429 || (typeof code === "number" && code >= 500)) {
     return "TEMP";
   }
-  const userAbsentMarkers = [
-    "user not found",
-    "user_not_participant",
-    "participant",
-    "member not found",
-    "user_id_invalid",
-  ];
-  if (userAbsentMarkers.some((m) => desc.includes(m))) {
-    return "NOT_JOINED";
-  }
+
+  // 2. The BOT cannot see the channel — a configuration problem, never the
+  //    user's fault. Checked first so overlapping wording cannot be misread.
   const botAccessMarkers = [
     "chat not found",
+    "chat_not_found",
     "bot is not a member",
+    "bot is not a participant",
     "member list is inaccessible",
     "not enough rights",
     "chat_admin_required",
     "channel_private",
+    "channel_invalid",
     "peer_id_invalid",
     "chat_id_invalid",
     "bot was kicked",
+    "bot was blocked",
+    "the group chat was deleted",
+    "have no rights",
+    "forbidden",
   ];
   if (botAccessMarkers.some((m) => desc.includes(m))) {
     return "UNVERIFIABLE";
   }
+
+  // 3. Narrow, explicit user-not-a-participant only.
+  const userNotParticipantMarkers = [
+    "user_not_participant",
+    "user not participant",
+    "user is not a participant",
+    "participant_id_invalid",
+  ];
+  if (userNotParticipantMarkers.some((m) => desc.includes(m))) {
+    return "NOT_JOINED";
+  }
+
+  // 4. Unknown 4xx: fail safe. Never claim a user did not join on a mystery.
   if (typeof code === "number" && code >= 400 && code < 500) {
     return "UNVERIFIABLE";
   }
@@ -271,6 +336,13 @@ async function checkChannel(
     // The user genuinely is not a participant.
     await cacheSet(key, "0", NOT_JOINED_TTL_S);
     return "NOT_JOINED";
+  }
+
+  // The call SUCCEEDED, so the channel is verifiable again regardless of the
+  // verdict. Clear any bounded failure window — guarded on the in-memory
+  // snapshot so a healthy channel costs zero extra writes on the hot path.
+  if (channel.healthFailureCount > 0) {
+    await recordChannelHealthSuccess(channel.id);
   }
 
   if (isForceJoinMembershipActive(member.status, member.is_member)) {
@@ -333,9 +405,12 @@ export async function evaluateForceJoinMembership(
     } else if (check === "TEMP") {
       tempFailure = true;
     } else {
-      // UNVERIFIABLE — excluded from gating; alert owners (deduped).
+      // UNVERIFIABLE — excluded from THIS decision (users are never bricked),
+      // alert owners (deduped), and advance the bounded health policy so a
+      // permanently broken channel is eventually retired instead of silently
+      // pretending to be required forever (§4.11).
       alerts.push(
-        emitUnverifiableAlert(channel, "UNVERIFIABLE").catch((err) => {
+        handleUnverifiableChannel(channel).catch((err) => {
           logger.warn("force-join: alert emission failed", {
             channelId: channel.id,
             error: err instanceof Error ? err.message.slice(0, 120) : "unknown",

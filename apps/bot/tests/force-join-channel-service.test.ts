@@ -17,7 +17,6 @@ import {
   reorderChannel,
   resolveChannelByShortId,
   setChannelActive,
-  updateChannelJoinUrl,
   validateBotChannelAccess,
 } from "../src/services/force-join/force-join-channel.service.js";
 import { clearSettingsCache } from "../src/services/settings.service.js";
@@ -230,12 +229,35 @@ describe.runIf(hasDb)("ForceJoinChannel service (DB)", () => {
     expect(again).toEqual({ ok: false, code: "LINK_CONFLICT" });
   });
 
-  it("allows two PRIVATE channels sharing a normalizedLink (D6 excludes private)", async () => {
+  // normalizedLink is now GLOBALLY unique (public AND private). Two rows may
+  // never advertise the same join target: the user would be sent to one link
+  // while membership is verified against two different channels.
+  it("rejects a second PRIVATE channel reusing an existing normalizedLink", async () => {
     const a = await createOrRebindChannel(privateInput("samehash", nextChatId()));
     const b = await createOrRebindChannel(privateInput("samehash", nextChatId()));
     expect(a.ok).toBe(true);
-    expect(b.ok).toBe(true);
-    expect(await prisma.forceJoinChannel.count()).toBe(2);
+    expect(b).toEqual({ ok: false, code: "LINK_CONFLICT" });
+    expect(await prisma.forceJoinChannel.count()).toBe(1);
+  });
+
+  it("survives a concurrent duplicate-link race with exactly one winner", async () => {
+    const link = `https://t.me/+race${Date.now()}`;
+    const attempts = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        createOrRebindChannel({
+          chatId: nextChatId(),
+          title: "Race",
+          joinUrl: link,
+          normalizedLink: link,
+          isPrivate: true,
+          publicUsername: null,
+          createdByAdminId: null,
+        }),
+      ),
+    );
+    expect(attempts.filter((r) => r.ok).length).toBe(1);
+    expect(attempts.filter((r) => !r.ok && r.code === "LINK_CONFLICT").length).toBe(5);
+    expect(await prisma.forceJoinChannel.count({ where: { normalizedLink: link } })).toBe(1);
   });
 
   it("caps active channels at 10 — the 11th is created INACTIVE, never over the cap (§4.4)", async () => {
@@ -355,11 +377,14 @@ describe.runIf(hasDb)("ForceJoinChannel service (DB)", () => {
     if (!(a.ok && b.ok)) throw new Error("setup");
 
     const newChatId = nextChatId();
+    const newLink = `https://t.me/+rebound${Date.now()}`;
     const rebound = await rebindChannelIdentity(a.channel.id, {
       chatId: newChatId,
       title: "Rebound",
       isPrivate: true,
       publicUsername: null,
+      joinUrl: newLink,
+      normalizedLink: newLink,
     });
     expect(rebound.ok).toBe(true);
     if (rebound.ok) expect(rebound.channel.chatId).toBe(newChatId);
@@ -369,16 +394,52 @@ describe.runIf(hasDb)("ForceJoinChannel service (DB)", () => {
       title: "collide",
       isPrivate: true,
       publicUsername: null,
+      joinUrl: `${newLink}x`,
+      normalizedLink: `${newLink}x`,
     });
     expect(collide).toEqual({ ok: false, code: "DUPLICATE_CHANNEL" });
   });
 
-  it("updates only the join url", async () => {
-    const a = await createOrRebindChannel(privateInput("upd_hash", nextChatId()));
-    if (!a.ok) throw new Error("setup");
-    const res = await updateChannelJoinUrl(a.channel.id, "https://t.me/+newhash", "https://t.me/+newhash");
-    expect(res.ok).toBe(true);
-    if (res.ok) expect(res.channel.joinUrl).toBe("https://t.me/+newhash");
+  // A private invite link proves nothing about which channel it opens, so the
+  // service exposes no way to move one without the other. Identity and link are
+  // always written together, and a link already owned by another row is refused.
+  it("rebinds identity and link together, and never lets a link drift onto another channel", async () => {
+    const a = await createOrRebindChannel(privateInput("pair_a", nextChatId()));
+    const b = await createOrRebindChannel(privateInput("pair_b", nextChatId()));
+    if (!(a.ok && b.ok)) throw new Error("setup");
+
+    const newChatId = nextChatId();
+    const newLink = `https://t.me/+paired${Date.now()}`;
+    const paired = await rebindChannelIdentity(a.channel.id, {
+      chatId: newChatId,
+      title: "Paired",
+      isPrivate: true,
+      publicUsername: null,
+      joinUrl: newLink,
+      normalizedLink: newLink,
+    });
+    expect(paired.ok).toBe(true);
+    if (paired.ok) {
+      // BOTH halves moved in the same write — never one without the other.
+      expect(paired.channel.chatId).toBe(newChatId);
+      expect(paired.channel.joinUrl).toBe(newLink);
+      expect(paired.channel.normalizedLink).toBe(newLink);
+    }
+
+    // Adopting the OTHER row's link is refused, so "link A + identity B" is
+    // unreachable through the only identity/link primitive that exists.
+    const stealLink = await rebindChannelIdentity(a.channel.id, {
+      chatId: newChatId,
+      title: "Steal",
+      isPrivate: true,
+      publicUsername: null,
+      joinUrl: b.channel.joinUrl,
+      normalizedLink: b.channel.normalizedLink,
+    });
+    expect(stealLink).toEqual({ ok: false, code: "LINK_CONFLICT" });
+    const untouched = await prisma.forceJoinChannel.findUnique({ where: { id: a.channel.id } });
+    expect(untouched?.normalizedLink).toBe(newLink);
+    expect(untouched?.chatId).toBe(newChatId);
   });
 
   it("listActiveChannels returns only active rows in deterministic order", async () => {
