@@ -17,6 +17,7 @@ import {
   PROVISION_UNKNOWN_OUTCOME_TEXT,
   REFUND_PROVISIONING_REASON,
 } from "../src/services/provisioning.service.js";
+import { armServiceDraft } from "./helpers/service-checkout-fixture.js";
 
 // =============================================================================
 // End-to-end provisioning: User -> Panel -> Product -> Checkout -> Payment ->
@@ -687,16 +688,22 @@ describe.runIf(hasDeps)("E2E provisioning (XUI / Sanaei)", () => {
       where: { id: xuiSubsetProductId },
       include: { category: true, panel: true },
     });
-    const result = await payPurchaseDraftWithWallet(user, {
-      productId: product.id,
-      categoryId: product.categoryId,
-      panelId: product.panelId ?? undefined,
-      flowType: "SERVICE_PRODUCT",
-      originalPriceToman: PRICE,
-      discountAmountToman: 0,
-      finalPriceToman: PRICE,
-      draftNonce: `inb-snap-${runTag}-${tgSeq}`,
-    });
+    // Panel-backed XUI SERVICE: arm the completed customization + HELD reservation
+    // the wallet guard requires (§4) before settling.
+    const draft = await armServiceDraft(
+      {
+        productId: product.id,
+        categoryId: product.categoryId,
+        panelId: product.panelId ?? undefined,
+        flowType: "SERVICE_PRODUCT",
+        originalPriceToman: PRICE,
+        discountAmountToman: 0,
+        finalPriceToman: PRICE,
+        draftNonce: `inb-snap-${runTag}-${tgSeq}`,
+      },
+      { userId: user.id, panelId: product.panelId! },
+    );
+    const result = await payPurchaseDraftWithWallet(user, draft);
     expect(result.ok).toBe(true);
     if (result.ok) {
       const order = await prisma.order.findUniqueOrThrow({ where: { id: result.order.id } });

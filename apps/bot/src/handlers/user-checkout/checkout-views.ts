@@ -16,7 +16,7 @@ import { productShortId, type ProductWithRelations } from "../../services/produc
 import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
 import { escapeHtml } from "../../utils/html.js";
 import { PRICE_CB } from "../user-pricing/pricing-cb.js";
-import { ccb, CO_CB } from "./checkout-cb.js";
+import { ccb, coNonce, CO_CB } from "./checkout-cb.js";
 
 export const EMPTY_CATALOG_TEXT = "فعلاً محصولی برای این بخش فعال نیست.";
 
@@ -234,6 +234,7 @@ const SVC_LABEL = {
   cancel: "انصراف",
   backMenu: "بازگشت به منو",
   changeUsername: "↩️ تغییر یوزرنیم",
+  noteBack: "↩️ بازگشت",
 } as const;
 
 export async function serviceUsernameMethodText(): Promise<string> {
@@ -246,11 +247,11 @@ export async function serviceNotePromptText(): Promise<string> {
   return getMessageTemplate(SVC_TEXT_KEYS.notePrompt, SERVICE_NOTE_PROMPT_TEXT);
 }
 
-export async function serviceUsernameMethodKeyboard(): Promise<InlineKeyboard> {
+export async function serviceUsernameMethodKeyboard(nonce: string): Promise<InlineKeyboard> {
   return new InlineKeyboard()
-    .text(await getButtonText(SVC_BUTTON_KEYS.custom, SVC_LABEL.custom), CO_CB.UN_CUSTOM)
+    .text(await getButtonText(SVC_BUTTON_KEYS.custom, SVC_LABEL.custom), coNonce.unCustom(nonce))
     .row()
-    .text(await getButtonText(SVC_BUTTON_KEYS.random, SVC_LABEL.random), CO_CB.UN_RANDOM)
+    .text(await getButtonText(SVC_BUTTON_KEYS.random, SVC_LABEL.random), coNonce.unRandom(nonce))
     .row()
     .text(SVC_LABEL.backMenu, CB.USER_MENU);
 }
@@ -269,28 +270,33 @@ export function serviceUsernameConfirmText(username: string, isRandom: boolean):
   ].join("\n");
 }
 
-export async function serviceUsernameConfirmKeyboard(isRandom: boolean): Promise<InlineKeyboard> {
+export async function serviceUsernameConfirmKeyboard(
+  isRandom: boolean,
+  nonce: string,
+): Promise<InlineKeyboard> {
   const kb = new InlineKeyboard()
-    .text(await getButtonText(SVC_BUTTON_KEYS.confirm, SVC_LABEL.confirm), CO_CB.UN_CONFIRM)
+    .text(await getButtonText(SVC_BUTTON_KEYS.confirm, SVC_LABEL.confirm), coNonce.unConfirm(nonce))
     .row();
   if (isRandom) {
-    kb.text(await getButtonText(SVC_BUTTON_KEYS.regen, SVC_LABEL.regen), CO_CB.UN_REGEN).row();
+    kb.text(await getButtonText(SVC_BUTTON_KEYS.regen, SVC_LABEL.regen), coNonce.unRegen(nonce)).row();
   }
-  kb.text(await getButtonText(SVC_BUTTON_KEYS.method, SVC_LABEL.method), CO_CB.UN_METHOD)
+  // confirmation Back → username method (§10).
+  kb.text(await getButtonText(SVC_BUTTON_KEYS.method, SVC_LABEL.method), coNonce.unMethod(nonce))
     .row()
     .text(SVC_LABEL.backMenu, CB.USER_MENU);
   return kb;
 }
 
-export function serviceUsernameCustomPromptKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text(SVC_LABEL.cancel, CO_CB.UN_METHOD);
+export function serviceUsernameCustomPromptKeyboard(nonce: string): InlineKeyboard {
+  return new InlineKeyboard().text(SVC_LABEL.cancel, coNonce.unMethod(nonce));
 }
 
-export async function serviceNotePromptKeyboard(): Promise<InlineKeyboard> {
+export async function serviceNotePromptKeyboard(nonce: string): Promise<InlineKeyboard> {
+  // note Skip stores null (explicit); note Back → username confirmation (§10).
   return new InlineKeyboard()
-    .text(await getButtonText(SVC_BUTTON_KEYS.noteSkip, SVC_LABEL.noteSkip), CO_CB.NOTE_SKIP)
+    .text(await getButtonText(SVC_BUTTON_KEYS.noteSkip, SVC_LABEL.noteSkip), coNonce.noteSkip(nonce))
     .row()
-    .text(SVC_LABEL.changeUsername, CO_CB.UN_METHOD);
+    .text(SVC_LABEL.noteBack, coNonce.noteBack(nonce));
 }
 
 /** Safe, buyer-facing message for a rejected username (never echoes raw input). */

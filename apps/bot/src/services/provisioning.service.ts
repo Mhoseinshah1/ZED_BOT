@@ -18,6 +18,7 @@ import { errorMessage, referralCorrelationHash } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { escapeHtml } from "../utils/html.js";
+import { hasBlockingServiceUsernameUnboundCase } from "./financial-reconciliation.service.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import { enqueueReferralReverse } from "./ops-queue.service.js";
 import {
@@ -38,7 +39,11 @@ import {
   serviceProvisioningLockKey,
   type ServiceLock,
 } from "./service-lock.service.js";
-import { consumeReservationForOrder } from "./service-username-selection.service.js";
+import {
+  consumeReservationForOrder,
+  hasForeignActiveReservationForUsername,
+  releaseReservationForFailedOrder,
+} from "./service-username-selection.service.js";
 
 // =============================================================================
 // Provisioning (Phase 9): turns a PAID SERVICE_PURCHASE Order into a panel
@@ -175,6 +180,15 @@ export async function failOrderWithRefund(
       // Someone else owns the failure path; do not double-refund.
       return false;
     }
+    // Codex P2 fix: this call owns the FAILED transition, so free the order's own
+    // username reservation in the SAME transaction. A refunded SERVICE order must
+    // never keep a BOUND hold occupying the global activeUsernameKey; cleanup would
+    // never reclaim it (the checkout is not terminal/expired), blocking that
+    // username on every panel forever.
+    await releaseReservationForFailedOrder(tx, {
+      orderId: order.id,
+      checkoutSessionId: order.checkoutSessionId,
+    });
     if (order.finalPriceToman <= 0) {
       // Fully-discounted order: nothing to move, FAILED is enough.
       return true;
@@ -238,6 +252,21 @@ export async function failOrderWithRefund(
  * this pipeline is creating the account. Contention or an unavailable lock
  * backend leaves the order PAID and retryable - no panel call, no refund.
  */
+/** The panel the checkout FROZE at pre-invoice (`productSnapshot.panelId`), or
+ * null for a legacy/OTHER checkout with no frozen panel. Used to detect a
+ * post-checkout Product panel reassignment (Codex P1). */
+function checkoutSnapshotPanelId(checkout: CheckoutSession | null | undefined): string | null {
+  if (checkout === null || checkout === undefined) {
+    return null;
+  }
+  const snap = checkout.productSnapshot;
+  if (snap === null || typeof snap !== "object" || Array.isArray(snap)) {
+    return null;
+  }
+  const panelId = (snap as Record<string, unknown>).panelId;
+  return typeof panelId === "string" && panelId !== "" ? panelId : null;
+}
+
 export async function provisionPaidOrder(orderId: string): Promise<ProvisionOutcome> {
   // Pre-lock reads only feed the lock key (deterministic username + panel).
   const head = (await prisma.order.findUnique({
@@ -252,6 +281,54 @@ export async function provisionPaidOrder(orderId: string): Promise<ProvisionOutc
     // Type mismatch errors and the missing-panel preflight refund need no
     // shared-state protection - delegate to the unguarded body.
     return provisionPaidOrderUnlocked(orderId, null);
+  }
+  // Codex P1 fix (gate reconciliation BEFORE naming): an OPEN/IN_REVIEW
+  // SERVICE_USERNAME_UNBOUND case deliberately keeps this order PAID for the OWNER
+  // retry-bind. Its reservation is intentionally unbound, so if naming resolution
+  // (below) ran first it would see a "foreign" active hold, fail, and REFUND an
+  // externally-paid order that must stay PAID for review — the exact bug a direct
+  // caller like provisionNextPaidOrders hits. Gate HERE, before both the drift
+  // refund and naming, and ONLY for a still-PAID order (an already-provisioned
+  // order replays through the existing-Service idempotency check in the unlocked
+  // body). Money untouched. The unlocked body keeps the same guard as a backstop.
+  if (
+    head.status === OrderStatus.PAID &&
+    head.checkoutSessionId !== null &&
+    (await hasBlockingServiceUsernameUnboundCase(head.checkoutSessionId))
+  ) {
+    return {
+      ok: false,
+      refunded: false,
+      error: "ساخت سرویس به دلیل نیاز به بررسی رزرو نام کاربری، متوقف شد.",
+    };
+  }
+  // Codex P1 fix (post-checkout panel drift): the username + reservation were
+  // frozen against the checkout's panel. If an admin reassigned the Product's
+  // panel AFTER checkout but before settlement, the live product.panel now
+  // differs from the frozen one — provisioning here would create the account on
+  // a panel where availability was never checked and the reservation does not
+  // apply. Refund ONLY an unstarted (still-PAID) order: a PROVISIONING order may
+  // already have created the remote account on the frozen panel, so refunding it
+  // would violate the unknown-outcome rule and orphan a free service. In-flight /
+  // completed drifted orders fall through to the idempotency-aware unlocked body,
+  // which replays an existing Service or returns "in progress" WITHOUT any panel
+  // call. Legacy orders without a frozen panelId are unaffected.
+  const frozenPanelId = checkoutSnapshotPanelId(head.checkoutSession);
+  if (frozenPanelId !== null && frozenPanelId !== headPanel.id) {
+    if (head.status !== OrderStatus.PAID) {
+      // Never refund a possibly-provisioned order; reconcile it against the frozen
+      // panel via the idempotency-aware body (no lock needed — it makes no panel call).
+      return provisionPaidOrderUnlocked(orderId, null);
+    }
+    const refunded = await failOrderWithRefund(
+      head,
+      `panel drift after checkout: frozen ${frozenPanelId.slice(0, 8)} != live ${headPanel.id.slice(0, 8)}`,
+    );
+    return {
+      ok: false,
+      refunded,
+      error: "پیکربندی سرور این سرویس پس از ثبت سفارش تغییر کرده است؛ سفارش بازگردانده شد.",
+    };
   }
   // Naming phase: the lock key derives from the order's IMMUTABLE identity.
   // Stored snapshot first; a PAID order without one gets it resolved and
@@ -336,6 +413,25 @@ async function provisionPaidOrderUnlocked(
     return { ok: false, refunded: false, error: "وضعیت سفارش برای ساخت سرویس معتبر نیست." };
   }
 
+  // §5: the provisioning-authority defense. An OPEN/IN_REVIEW
+  // SERVICE_USERNAME_UNBOUND reconciliation case blocks provisioning HERE, inside
+  // the authority itself — not only in the outer Telegram dispatcher — so a
+  // direct/internal provisionPaidOrder call (settlement sweep, startup recovery,
+  // an admin action) can never bypass an unresolved case and create a service on
+  // an unbound username. Money is untouched: the order stays PAID for the OWNER
+  // retry-bind to resolve. An already-provisioned order returns above via the
+  // existing-Service idempotency check, so this never blocks a legitimate replay.
+  if (
+    order.checkoutSessionId !== null &&
+    (await hasBlockingServiceUsernameUnboundCase(order.checkoutSessionId))
+  ) {
+    return {
+      ok: false,
+      refunded: false,
+      error: "ساخت سرویس به دلیل نیاز به بررسی رزرو نام کاربری، متوقف شد.",
+    };
+  }
+
   // Pre-flight configuration checks. The order is PAID, so any dead end here
   // is a provisioning failure: FAIL + refund, never a silent charge.
   const product = order.product;
@@ -406,6 +502,22 @@ async function provisionPaidOrderUnlocked(
     return { ok: false, refunded, error: naming.safeUserMessage };
   }
   const username = naming.identity.resolvedRemoteUsername;
+
+  // Codex P1 fix (cross-path namespace, race-safe): under the per-(panel,
+  // username) provisioning lock, refuse to create a Service on a remote username
+  // that a FOREIGN active reservation holds. The naming resolver already avoids
+  // held names, but this closes the check-then-insert race — the reservation row
+  // is durable and this runs under the same lock the holder's own provisioning
+  // takes, so the reservation always wins. A SERVICE order's own reservation
+  // (bound to THIS order) is excluded, so it never blocks itself.
+  if (await hasForeignActiveReservationForUsername(username, order.id)) {
+    const refunded = await failOrderWithRefund(
+      order,
+      `remote username held by a foreign reservation: ${username.slice(0, 4)}…`,
+    );
+    return { ok: false, refunded, error: "نام کاربری این سرویس در دسترس نیست؛ سفارش بازگردانده شد." };
+  }
+
   const note = `zedbot order:${order.id.slice(0, 8)} tg:${order.user.telegramId}`;
 
   let created: CreateServiceAccountResult;

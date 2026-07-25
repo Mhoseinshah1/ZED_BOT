@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { prisma } from "@zedbot/database";
+import { prisma, ServiceUsernameMode } from "@zedbot/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { CheckoutDraft } from "../src/core/session.js";
@@ -54,6 +54,44 @@ function draftFor(productId: string, draftNonce: string): CheckoutDraft {
     finalPriceToman: PRICE,
     draftNonce,
   };
+}
+
+let usernameSeq = 0;
+/**
+ * A panel-backed SERVICE_PRODUCT wallet purchase requires a completed username
+ * customization whose exact HELD reservation the wallet transaction claims (§4).
+ * Create that reservation directly (no panel probe) and attach the completed
+ * customization, mirroring the real state at the wallet-pay boundary.
+ */
+async function armDraft(
+  userId: string,
+  productId: string,
+  draftNonce: string,
+): Promise<CheckoutDraft> {
+  const draft = draftFor(productId, draftNonce);
+  usernameSeq += 1;
+  const username = `u_race${usernameSeq}${Math.floor(Math.random() * 1e4)}`.slice(0, 16);
+  const res = await prisma.serviceUsernameReservation.create({
+    data: {
+      panelId,
+      userId,
+      normalizedUsername: username,
+      activeUsernameKey: username,
+      mode: ServiceUsernameMode.CUSTOM,
+      status: "HELD",
+      draftNonce,
+      expiresAt: new Date(Date.now() + 3_600_000),
+    },
+  });
+  draft.serviceCustomization = {
+    usernameMode: ServiceUsernameMode.CUSTOM,
+    normalizedUsername: username,
+    reservationId: res.id,
+    note: null,
+    usernameConfirmedAt: new Date().toISOString(),
+    completed: true,
+  };
+  return draft;
 }
 
 async function createUserWithBalance(balanceToman: number) {
@@ -118,11 +156,16 @@ describe.runIf(hasDb)("wallet payment balance race", () => {
   it("concurrent DIFFERENT drafts cannot overspend the balance", async () => {
     const user = await createUserWithBalance(BALANCE);
 
-    // Two independent pre-invoices (different products, different nonces)
-    // priced 80k each against a 100k balance - only one may settle.
+    // Two independent pre-invoices (different products, different nonces, each
+    // with its own HELD username reservation) priced 80k each against a 100k
+    // balance - only one may settle.
+    const [draftA, draftB] = await Promise.all([
+      armDraft(user.id, productAId, randomUUID()),
+      armDraft(user.id, productBId, randomUUID()),
+    ]);
     const [r1, r2] = await Promise.all([
-      payPurchaseDraftWithWallet(user, draftFor(productAId, randomUUID())),
-      payPurchaseDraftWithWallet(user, draftFor(productBId, randomUUID())),
+      payPurchaseDraftWithWallet(user, draftA),
+      payPurchaseDraftWithWallet(user, draftB),
     ]);
 
     const oks = [r1, r2].filter((r) => r.ok);
@@ -157,7 +200,7 @@ describe.runIf(hasDb)("wallet payment balance race", () => {
 
   it("same draft double-clicked concurrently stays idempotent", async () => {
     const user = await createUserWithBalance(BALANCE);
-    const draft = draftFor(productAId, randomUUID());
+    const draft = await armDraft(user.id, productAId, randomUUID());
 
     const [r1, r2] = await Promise.all([
       payPurchaseDraftWithWallet(user, draft),

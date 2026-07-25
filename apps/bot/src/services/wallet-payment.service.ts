@@ -23,7 +23,12 @@ import { logger } from "../core/logger.js";
 import type { CheckoutDraft, ExtraTimeDraft, ExtraVolumeDraft, RenewalDraft } from "../core/session.js";
 import { isProductVisible } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
-import { attachReservationToOrder } from "./service-username-selection.service.js";
+import {
+  attachReservationToOrder,
+  claimReservationForCheckout,
+  ReservationInvariantError,
+  type ReservationClaimArgs,
+} from "./service-username-selection.service.js";
 import { claimDiscountUsage, validateDiscountCode } from "./discount.service.js";
 import { resolveEffectiveProductPrice } from "./representative-pricing.service.js";
 import {
@@ -78,6 +83,10 @@ export const WALLET_ORDER_PAYMENT_REASON = "WALLET_ORDER_PAYMENT";
 export const WALLET_PAYMENT_DONE_TEXT = "پرداخت از کیف پول با موفقیت انجام شد ✅\nسفارش شما ثبت شد.";
 export const INSUFFICIENT_BALANCE_TEXT = "موجودی کیف پول شما کافی نیست.";
 const DRAFT_STALE_TEXT = "پیش‌فاکتور در دسترس نیست؛ لطفاً دوباره شروع کنید.";
+// hotfix §4: the buyer's chosen username hold is stale/drifted at the wallet
+// settlement boundary — fail closed with NO deduction and no order.
+const RESERVATION_STALE_TEXT =
+  "نام کاربری انتخابی دیگر معتبر نیست؛ لطفاً دوباره نام کاربری را انتخاب کنید.";
 const DISCOUNT_CHANGED_TEXT = "کد تخفیف دیگر معتبر نیست. لطفاً دوباره پیش‌فاکتور را بررسی کنید.";
 // Representative Program (§16): reseller pricing changed or is no longer
 // available at the settlement boundary — fail closed BEFORE money moves.
@@ -135,6 +144,15 @@ interface WalletOrderArgs {
   finalPriceToman: number;
   discountCodeId: string | null;
   idempotencyKey: string;
+  /**
+   * hotfix §4: the buyer's username reservation to CLAIM + BIND inside this
+   * financial transaction. Present ONLY on a panel-backed SERVICE purchase with a
+   * completed customization. A failed claim/bind aborts the entire payment — zero
+   * deduction, no Payment / Order / WalletTransaction / Service, no reservation
+   * corruption. Absent for OTHER_PRODUCT, renewals, extra-volume/time and legacy
+   * panel-less services (byte-identical behaviour to before for those).
+   */
+  serviceReservation?: ReservationClaimArgs;
 }
 
 /** Loads the settled result of a previously-executed idempotency key. */
@@ -271,10 +289,43 @@ async function executeWalletOrderPayment(
           paidAt: now,
         },
       });
-      // Bind the buyer's username reservation to this settled order (BOUND).
-      const reservationId = snapshotString(snapshotRecord, "serviceUsernameReservationId");
-      if (reservationId !== null) {
-        await attachReservationToOrder(tx, reservationId, order.id, checkout.id);
+      // hotfix §4: CLAIM + BIND the buyer's username reservation INSIDE this
+      // financial transaction. The wallet path creates its checkout + order
+      // together and never pre-bound, so first claim the HELD hold to this
+      // checkout (verifying owner / draft nonce / selected username / mode /
+      // CURRENT panel / unexpired / unlinked), then record this order on it. Any
+      // mismatch throws and rolls the WHOLE payment back — no deduction, no order,
+      // no wallet transaction, no reservation corruption. Placed BEFORE the balance
+      // deduction so a stale hold never costs the buyer money.
+      if (args.serviceReservation !== undefined) {
+        const claim = await claimReservationForCheckout(
+          tx,
+          args.serviceReservation,
+          checkout.id,
+          now,
+        );
+        if (!claim.ok) {
+          throw new WalletPaymentAbort(RESERVATION_STALE_TEXT);
+        }
+        try {
+          await attachReservationToOrder(
+            tx,
+            {
+              reservationId: args.serviceReservation.reservationId,
+              userId: args.serviceReservation.userId,
+              checkoutSessionId: checkout.id,
+              panelId: args.serviceReservation.panelId,
+              normalizedUsername: args.serviceReservation.normalizedUsername,
+              orderId: order.id,
+            },
+            now,
+          );
+        } catch (bindErr) {
+          if (bindErr instanceof ReservationInvariantError) {
+            throw new WalletPaymentAbort(RESERVATION_STALE_TEXT);
+          }
+          throw bindErr;
+        }
       }
       const settledPayment = await tx.payment.update({
         where: { id: payment.id },
@@ -410,6 +461,32 @@ export async function payPurchaseDraftWithWallet(
     return { ok: false, error: DRAFT_STALE_TEXT };
   }
 
+  // hotfix §4/§5: a panel-backed SERVICE purchase MUST carry a completed username
+  // customization whose exact reservation this financial transaction will claim +
+  // bind. Fail closed BEFORE any money moves if it is missing, incomplete, or the
+  // draft panel drifted from the live product panel — a stale wallet callback
+  // fired against an incomplete draft (or one whose product changed panels) can
+  // never deduct. OTHER_PRODUCT and legacy panel-less services carry no reservation.
+  let serviceReservation: ReservationClaimArgs | undefined;
+  if (product.type === "SERVICE_PRODUCT" && product.panelId !== null) {
+    const customization = draft.serviceCustomization;
+    if (
+      customization?.completed !== true ||
+      draft.panelId === undefined ||
+      draft.panelId !== product.panelId
+    ) {
+      return { ok: false, error: DRAFT_STALE_TEXT };
+    }
+    serviceReservation = {
+      reservationId: customization.reservationId,
+      userId: user.id,
+      draftNonce: draft.draftNonce ?? null,
+      normalizedUsername: customization.normalizedUsername,
+      mode: customization.usernameMode,
+      panelId: product.panelId,
+    };
+  }
+
   // Never trust the session price: recompute from the product + discount. For a
   // representative purchase the price comes from the authoritative resolver at
   // the SETTLE boundary (uncached switch) and a stale reseller price/fingerprint
@@ -500,6 +577,7 @@ export async function payPurchaseDraftWithWallet(
     finalPriceToman,
     discountCodeId,
     idempotencyKey: `wallet:${user.id}:${draft.draftNonce}`,
+    serviceReservation,
   });
 
   // Record the reseller purchase marker as COMPLETED once the wallet settled

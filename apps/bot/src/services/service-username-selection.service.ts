@@ -8,14 +8,26 @@
 // `(panelId, activeUsernameKey)` filtered-unique index plus Service.username
 // @unique — never by an in-memory Set, a Redis-only lock, or session state.
 //
-// Reservation lifecycle (each transition is a CAS updateMany with a status
+// Reservation lifecycle (each transition is a CAS updateMany with a full status
 // guard, so concurrent settlement / cleanup paths converge deterministically):
 //   HELD  → reserveServiceUsername (short TTL while the buyer decides)
-//   BOUND → bindReservationToCheckout (attached to a durable CheckoutSession;
-//           TTL cleared — expiry then derives from the linked checkout/order)
-//   BOUND → attachReservationToOrder (records the settled Order id)
+//   BOUND → claimReservationForCheckout (the ONE authoritative claim: an atomic
+//           conditional UPDATE that verifies id + owner + draft nonce + username
+//           + mode + panel + activeUsernameKey + HELD + unexpired + no existing
+//           checkout/order/service link BEFORE binding to a durable CheckoutSession.
+//           Zero rows matched → a typed NOT_CLAIMABLE result the caller MUST act on;
+//           a boolean/update-count is never silently ignored.)
+//   BOUND → attachReservationToOrder (records the settled Order id under an exact
+//           id + owner + checkout + panel + username + BOUND + no-foreign-order
+//           guard; returns on success, throws ReservationInvariantError otherwise.)
 //   CONSUMED → consumeReservationForOrder (a Service row was created)
 //   RELEASED → releaseReservation / releaseReservationsForDraft (given up)
+//
+// hotfix (fix/service-username-reservation-safety): the global activeUsernameKey
+// @unique index (matching Service.username) means an active hold blocks a username
+// on EVERY panel, and the claim/attach guards verify the CURRENT product panel so a
+// panel drift between selection and settlement fails closed instead of provisioning
+// against a stale panel.
 // =============================================================================
 
 import {
@@ -40,7 +52,7 @@ export const RESERVATION_HELD_TTL_MS = 30 * 60_000;
 /** Bounded number of random candidates tried before giving up (no unbounded loop). */
 export const RANDOM_USERNAME_MAX_ATTEMPTS = 10;
 
-/** Reservation states that still OWN the (panelId, username) uniqueness slot. */
+/** Reservation states that still OWN the GLOBAL username uniqueness slot. */
 const ACTIVE_STATUSES: ServiceUsernameReservationStatus[] = [
   ServiceUsernameReservationStatus.HELD,
   ServiceUsernameReservationStatus.BOUND,
@@ -54,6 +66,39 @@ const REBINDABLE_STATUSES: ServiceUsernameReservationStatus[] = [
 
 /** A transaction-capable Prisma client (base client or an interactive tx). */
 type Db = Prisma.TransactionClient | typeof prisma;
+
+/**
+ * A hard reservation invariant was violated at a settlement boundary (e.g. the
+ * order-binding claim matched zero rows because the reservation was released,
+ * re-bound to a foreign checkout/order, expired, or drifted to another panel).
+ * Carries only a machine-readable reason — never a username, note, or owner id —
+ * so it is safe to log. The financial caller (wallet) converts it into a safe
+ * abort that rolls the whole transaction back; the external-success callers
+ * (receipt / gateway) convert it into a reconciliation record instead of losing
+ * a real payment.
+ */
+export class ReservationInvariantError extends Error {
+  constructor(readonly reason: string) {
+    super(`service username reservation invariant violated: ${reason}`);
+    this.name = "ReservationInvariantError";
+  }
+}
+
+/** The identity a claim/attach must match EXACTLY against the live reservation. */
+export interface ReservationClaimArgs {
+  reservationId: string;
+  userId: string;
+  /** The draft nonce that created the hold (null-safe exact match). */
+  draftNonce: string | null;
+  /** The buyer-selected, normalized username the reservation must still hold. */
+  normalizedUsername: string;
+  mode: ServiceUsernameMode;
+  /** The CURRENT product panel — a drift from the reserved panel fails closed. */
+  panelId: string;
+}
+
+/** Typed result of the authoritative checkout claim (never a bare boolean). */
+export type ClaimReservationResult = { ok: true } | { ok: false; reason: "NOT_CLAIMABLE" };
 
 export type ReserveServiceUsernameResult =
   | {
@@ -146,6 +191,32 @@ export async function checkServiceUsernameAvailability(args: {
   }
 }
 
+/**
+ * Codex P1 fix (cross-path namespace): true when the remote username is held by
+ * an ACTIVE ServiceUsernameReservation that does NOT belong to `exceptOrderId` —
+ * i.e. a foreign in-progress/settled hold (HELD/BOUND/CONSUMED). The strategy
+ * naming path only checked `Service.username`; a normal purchase or free trial
+ * could therefore pick a username a paid buyer is actively holding, and the
+ * holder would then collide at provisioning despite owning the reservation. This
+ * makes the reservation table an authoritative part of the remote-username
+ * namespace for BOTH paths. Read-only.
+ */
+export async function hasForeignActiveReservationForUsername(
+  normalizedUsername: string,
+  exceptOrderId: string,
+): Promise<boolean> {
+  const row = await prisma.serviceUsernameReservation.findFirst({
+    where: {
+      normalizedUsername,
+      status: { in: ACTIVE_STATUSES },
+      // Foreign = unbound to any order, or bound to a DIFFERENT order.
+      OR: [{ orderId: null }, { orderId: { not: exceptOrderId } }],
+    },
+    select: { id: true },
+  });
+  return row !== null;
+}
+
 // -----------------------------------------------------------------------------
 // Reserve (HELD)
 // -----------------------------------------------------------------------------
@@ -185,17 +256,24 @@ export async function reserveServiceUsername(args: {
       panelId,
       status: { in: REBINDABLE_STATUSES },
     },
-    select: { id: true, normalizedUsername: true },
+    select: { id: true, normalizedUsername: true, status: true },
   });
   const sameUsernameHold = priorActive.find((r) => r.normalizedUsername === normalizedUsername);
   if (sameUsernameHold !== undefined) {
+    // Codex P2 fix: ONLY a HELD hold is a reusable draft hold. A same-username
+    // BOUND row is already claimed to a committed checkout — returning it as
+    // AVAILABLE would trap the buyer (the later HELD-only claim always fails,
+    // re-prompting the same choice forever). Surface it as RESERVED so the flow
+    // stops looping; the durable checkout is the thing to resume.
+    if (sameUsernameHold.status !== ServiceUsernameReservationStatus.HELD) {
+      return { outcome: "RESERVED" };
+    }
     await prisma.serviceUsernameReservation.updateMany({
       where: { id: sameUsernameHold.id, status: ServiceUsernameReservationStatus.HELD },
       data: { expiresAt: new Date(Date.now() + RESERVATION_HELD_TTL_MS) },
     });
     return { outcome: "AVAILABLE", reservationId: sameUsernameHold.id, normalizedUsername, mode };
   }
-  const priorToRelease = priorActive.map((r) => r.id);
 
   const availability = await checkServiceUsernameAvailability({
     panel,
@@ -208,6 +286,35 @@ export async function reserveServiceUsername(args: {
 
   try {
     const created = await prisma.$transaction(async (tx) => {
+      // Codex P2 fix: serialize replacement holds PER DRAFT. Two concurrent
+      // custom submissions / random regenerations for the same (userId,
+      // draftNonce) could otherwise each read the same prior-active set, pick
+      // DIFFERENT available usernames (so the global activeUsernameKey unique
+      // never conflicts), each insert a new HELD row, and each release only the
+      // stale ids it captured — leaving TWO active holds and one orphan that
+      // blocks its username until TTL. The advisory xact lock forces the second
+      // transaction to wait, then RE-READ the current active holds so it
+      // releases the first replacement too.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`zedbot-service-username-draft:${userId}:${draftNonce ?? ""}`}))`;
+      const currentActive = await tx.serviceUsernameReservation.findMany({
+        where: { userId, draftNonce, panelId, status: { in: REBINDABLE_STATUSES } },
+        select: { id: true, normalizedUsername: true, status: true },
+      });
+      // A concurrent replacement may have already established THIS exact HELD
+      // username under the lock — reuse it instead of stacking a second hold.
+      // (A BOUND same-username row was handled as RESERVED before the tx.)
+      const existingSame = currentActive.find(
+        (r) =>
+          r.normalizedUsername === normalizedUsername &&
+          r.status === ServiceUsernameReservationStatus.HELD,
+      );
+      if (existingSame !== undefined) {
+        await tx.serviceUsernameReservation.updateMany({
+          where: { id: existingSame.id, status: ServiceUsernameReservationStatus.HELD },
+          data: { expiresAt: new Date(Date.now() + RESERVATION_HELD_TTL_MS) },
+        });
+        return { id: existingSame.id };
+      }
       const row = await tx.serviceUsernameReservation.create({
         data: {
           panelId,
@@ -221,9 +328,12 @@ export async function reserveServiceUsername(args: {
         },
         select: { id: true },
       });
-      if (priorToRelease.length > 0) {
+      // Release EVERY prior active hold for this draft (re-read under the lock),
+      // so no superseded hold is ever left active/orphaned.
+      const toRelease = currentActive.map((r) => r.id);
+      if (toRelease.length > 0) {
         await tx.serviceUsernameReservation.updateMany({
-          where: { id: { in: priorToRelease }, status: { in: REBINDABLE_STATUSES } },
+          where: { id: { in: toRelease }, status: { in: REBINDABLE_STATUSES } },
           data: {
             status: ServiceUsernameReservationStatus.RELEASED,
             activeUsernameKey: null,
@@ -286,51 +396,217 @@ export async function reserveRandomServiceUsername(args: {
 // -----------------------------------------------------------------------------
 
 /**
- * BIND a HELD/BOUND reservation to a durable CheckoutSession. Clears the HELD TTL
- * (BOUND expiry is derived from the linked checkout/order, not this timestamp).
- * Runs inside the checkout-creation transaction. Returns whether it bound a row.
+ * THE authoritative reservation claim (§3). One atomic conditional UPDATE binds a
+ * still-HELD reservation to a durable CheckoutSession, but ONLY if every identity
+ * field still matches: the exact reservation id + owner + draft nonce + selected
+ * username + activeUsernameKey slot + mode + CURRENT product panel, in HELD state,
+ * unexpired, and not already linked to any checkout / order / service. Because all
+ * of that lives in the single UPDATE's WHERE clause there is no read-then-write
+ * window: two racing checkout creations can never both bind the same hold, and a
+ * hold that expired / was released / drifted to another panel matches zero rows.
+ *
+ * A zero-row result is returned as a typed NOT_CLAIMABLE outcome the caller MUST
+ * act on (roll the checkout back, invalidate the customization, return the buyer
+ * to username selection) — the count is never silently ignored. Runs INSIDE the
+ * checkout-creation transaction so the claim and the CheckoutSession commit (or
+ * roll back) together.
  */
-export async function bindReservationToCheckout(
+export async function claimReservationForCheckout(
   tx: Db,
-  reservationId: string,
+  args: ReservationClaimArgs,
   checkoutSessionId: string,
-  userId: string,
-): Promise<boolean> {
+  now: Date = new Date(),
+): Promise<ClaimReservationResult> {
   const res = await tx.serviceUsernameReservation.updateMany({
-    where: { id: reservationId, userId, status: { in: REBINDABLE_STATUSES } },
+    where: {
+      id: args.reservationId,
+      userId: args.userId,
+      draftNonce: args.draftNonce,
+      normalizedUsername: args.normalizedUsername,
+      activeUsernameKey: args.normalizedUsername,
+      mode: args.mode,
+      panelId: args.panelId,
+      status: ServiceUsernameReservationStatus.HELD,
+      expiresAt: { gt: now },
+      checkoutSessionId: null,
+      orderId: null,
+      serviceId: null,
+    },
     data: {
       status: ServiceUsernameReservationStatus.BOUND,
       checkoutSessionId,
-      boundAt: new Date(),
+      boundAt: now,
       expiresAt: null,
     },
   });
-  return res.count > 0;
+  return res.count === 1 ? { ok: true } : { ok: false, reason: "NOT_CLAIMABLE" };
 }
 
 /**
- * Record the settled Order id (and checkout id) on a still-active reservation,
- * transitioning it to BOUND and clearing the HELD TTL. Runs inside the settlement
- * transaction alongside the Order create. Accepts a HELD reservation too (the
- * wallet path creates its checkout + order together and never pre-bound), so this
- * one call covers every payment method. Idempotent CAS; no-op once CONSUMED.
+ * Read-only mirror of the {@link claimReservationForCheckout} accepted state (§4):
+ * true iff the exact HELD reservation is still claimable RIGHT NOW (same id +
+ * owner + draft nonce + selected username + activeUsernameKey + mode + CURRENT
+ * panel, HELD, unexpired, and unlinked). Used by the wallet callback layers to
+ * fail closed BEFORE showing a confirmation screen or moving money for a stale /
+ * drifted / incomplete SERVICE draft. It does not mutate anything.
+ */
+export async function isReservationClaimable(
+  args: ReservationClaimArgs,
+  now: Date = new Date(),
+): Promise<boolean> {
+  const row = await prisma.serviceUsernameReservation.findFirst({
+    where: {
+      id: args.reservationId,
+      userId: args.userId,
+      draftNonce: args.draftNonce,
+      normalizedUsername: args.normalizedUsername,
+      activeUsernameKey: args.normalizedUsername,
+      mode: args.mode,
+      panelId: args.panelId,
+      status: ServiceUsernameReservationStatus.HELD,
+      expiresAt: { gt: now },
+      checkoutSessionId: null,
+      orderId: null,
+      serviceId: null,
+    },
+    select: { id: true },
+  });
+  return row !== null;
+}
+
+/** The identity an order-binding must match EXACTLY against the BOUND reservation. */
+export interface ReservationOrderBindArgs {
+  reservationId: string;
+  userId: string;
+  /** The checkout the reservation was claimed to (the settling checkout). */
+  checkoutSessionId: string;
+  /** The CURRENT product panel — must equal the reserved panel. */
+  panelId: string;
+  /** The buyer-selected username the reservation must still hold. */
+  normalizedUsername: string;
+  /** The settled order to record. */
+  orderId: string;
+}
+
+/**
+ * Record the settled Order id on the reservation that was already claimed to this
+ * checkout (§6). NOT a permissive no-op: a single conditional UPDATE requires the
+ * exact reservation id + owner + checkout id + panel + username in BOUND state with
+ * no foreign order and no Service yet. On success it returns; on a genuine mismatch
+ * it throws {@link ReservationInvariantError} (after an idempotent re-check that the
+ * reservation is already bound to THIS same order, which returns cleanly). Runs
+ * inside the settlement transaction alongside the Order create.
  */
 export async function attachReservationToOrder(
   tx: Db,
-  reservationId: string,
-  orderId: string,
-  checkoutSessionId: string,
+  args: ReservationOrderBindArgs,
+  now: Date = new Date(),
 ): Promise<void> {
-  await tx.serviceUsernameReservation.updateMany({
-    where: { id: reservationId, status: { in: REBINDABLE_STATUSES } },
+  const res = await tx.serviceUsernameReservation.updateMany({
+    where: {
+      id: args.reservationId,
+      userId: args.userId,
+      checkoutSessionId: args.checkoutSessionId,
+      panelId: args.panelId,
+      normalizedUsername: args.normalizedUsername,
+      status: ServiceUsernameReservationStatus.BOUND,
+      serviceId: null,
+      // Not yet bound to any order, or idempotently re-bound to THIS same order.
+      OR: [{ orderId: null }, { orderId: args.orderId }],
+    },
     data: {
       status: ServiceUsernameReservationStatus.BOUND,
-      orderId,
-      checkoutSessionId,
-      boundAt: new Date(),
+      orderId: args.orderId,
+      boundAt: now,
       expiresAt: null,
     },
   });
+  if (res.count === 1) {
+    return;
+  }
+  // Idempotent success: the reservation already advanced to this exact order
+  // (possibly all the way to CONSUMED, whose serviceId fails the guard above).
+  const already = await tx.serviceUsernameReservation.findFirst({
+    where: {
+      id: args.reservationId,
+      userId: args.userId,
+      // Codex P2 fix: the idempotent re-check must assert the FULL immutable
+      // identity — including checkoutSessionId and panelId — so a historical row
+      // that carries this order+username but was bound to a DIFFERENT checkout or
+      // panel (possible under the old permissive rebinding) is NOT accepted as a
+      // clean bind. Otherwise retry-bind could resolve a case + unblock
+      // provisioning against a reservation that does not match the snapshot.
+      checkoutSessionId: args.checkoutSessionId,
+      panelId: args.panelId,
+      orderId: args.orderId,
+      normalizedUsername: args.normalizedUsername,
+      status: {
+        in: [
+          ServiceUsernameReservationStatus.BOUND,
+          ServiceUsernameReservationStatus.CONSUMED,
+        ],
+      },
+    },
+    select: { id: true },
+  });
+  if (already !== null) {
+    return;
+  }
+  throw new ReservationInvariantError("ORDER_BIND_NO_MATCH");
+}
+
+/** Typed outcome of an external-settlement reservation bind (§2/§6). */
+export type SettledReservationBindResult =
+  | { bound: true }
+  | { bound: false; reason: string };
+
+/**
+ * External-success settlement binding (§2/§6): read the reservation identity from
+ * the immutable checkout snapshot and strictly bind it to the settled order. Used
+ * by the receipt-approval and gateway (Zarinpal / NOWPayments / one-shot Stars)
+ * settlements, where the money has ALREADY moved externally. It returns a TYPED
+ * result — it never logs-and-swallows and never rolls a real payment back. The
+ * CALLER makes the durable settlement/reconciliation decision:
+ *   • `{ bound: true }`  → the exact reservation is now recorded on the order (or
+ *     there was nothing to bind: OTHER_PRODUCT / legacy panel-less service);
+ *   • `{ bound: false, reason }` → the exact reservation could NOT be bound (a
+ *     privacy-safe machine reason — never a username / note / owner id). The
+ *     caller MUST open a durable reconciliation case, must NOT dispatch the order
+ *     to provisioning, and must preserve provider-success truth.
+ */
+export async function bindSettledReservationFromSnapshot(
+  tx: Db,
+  snapshot: Record<string, unknown>,
+  args: { userId: string; checkoutSessionId: string; orderId: string },
+): Promise<SettledReservationBindResult> {
+  const reservationId = snapshotStr(snapshot, "serviceUsernameReservationId");
+  const normalizedUsername = snapshotStr(snapshot, "serviceUsername");
+  const panelId = snapshotStr(snapshot, "panelId");
+  if (reservationId === null || normalizedUsername === null || panelId === null) {
+    return { bound: true };
+  }
+  try {
+    await attachReservationToOrder(tx, {
+      reservationId,
+      userId: args.userId,
+      checkoutSessionId: args.checkoutSessionId,
+      panelId,
+      normalizedUsername,
+      orderId: args.orderId,
+    });
+    return { bound: true };
+  } catch (err) {
+    if (err instanceof ReservationInvariantError) {
+      return { bound: false, reason: err.reason };
+    }
+    throw err;
+  }
+}
+
+/** Safe string reader for an untyped snapshot field ("" → null). */
+function snapshotStr(snapshot: Record<string, unknown>, key: string): string | null {
+  const value = snapshot[key];
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
 /**
@@ -359,10 +635,88 @@ export async function consumeReservationForOrder(
   });
 }
 
+/**
+ * Take a row-level lock on a reservation for the whole settlement transaction (§7).
+ * Called at the START of an external settlement (receipt approval / gateway
+ * success) — BEFORE the checkout is flipped — so the concurrent cleanup sweep,
+ * which selects candidates with `FOR UPDATE ... SKIP LOCKED`, skips any reservation
+ * a settlement is actively holding. This is the shared lock that makes "a
+ * successfully settling reservation can never become EXPIRED" hold even in the
+ * narrow window before the checkout flip commits. No-op-safe for a row that does
+ * not exist (the settlement then simply has nothing to protect).
+ */
+export async function lockReservationForSettlement(
+  tx: Db,
+  reservationId: string,
+): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM "ServiceUsernameReservation" WHERE id = ${reservationId} FOR UPDATE`;
+}
+
+/**
+ * Release ONE exact HELD reservation for a draft (§8 abandonment). Matches on the
+ * full identity (owner + draft nonce + reservation id) and the HELD status, so it
+ * frees only the hold this draft is giving up and NEVER a BOUND / CONSUMED
+ * reservation (those are protected by their durable checkout / order / service).
+ * Idempotent: a already-released / never-existent hold is a no-op.
+ */
+export async function releaseHeldReservationForDraft(args: {
+  userId: string;
+  draftNonce: string | null;
+  reservationId: string;
+}): Promise<void> {
+  await prisma.serviceUsernameReservation.updateMany({
+    where: {
+      id: args.reservationId,
+      userId: args.userId,
+      draftNonce: args.draftNonce,
+      status: ServiceUsernameReservationStatus.HELD,
+    },
+    data: {
+      status: ServiceUsernameReservationStatus.RELEASED,
+      activeUsernameKey: null,
+      releasedAt: new Date(),
+    },
+  });
+}
+
 /** Release a single reservation by id (frees its uniqueness slot). Idempotent. */
 export async function releaseReservation(reservationId: string): Promise<void> {
   await prisma.serviceUsernameReservation.updateMany({
     where: { id: reservationId, status: { in: REBINDABLE_STATUSES } },
+    data: {
+      status: ServiceUsernameReservationStatus.RELEASED,
+      activeUsernameKey: null,
+      releasedAt: new Date(),
+    },
+  });
+}
+
+/**
+ * Codex P2 fix: release the active (HELD/BOUND) username reservation of an order
+ * that is being FAILED + refunded, INSIDE the caller's failure transaction so the
+ * refund and the release commit atomically. Without this, a refunded SERVICE order
+ * (e.g. the panel-drift refund) leaves its BOUND reservation occupying the GLOBAL
+ * `activeUsernameKey` forever — the cleanup sweep only reclaims terminal/expired
+ * checkouts, so after the global unique-index change that username stays blocked on
+ * every panel. Matches ONLY this order's own reservation (its orderId, or its
+ * checkout for a not-yet-attached hold) — never another buyer's. CONSUMED
+ * reservations (a live provisioned service) are intentionally untouched; a
+ * refunded order never has one. Idempotent (CAS updateMany).
+ */
+export async function releaseReservationForFailedOrder(
+  tx: Prisma.TransactionClient,
+  args: { orderId: string; checkoutSessionId: string | null },
+): Promise<void> {
+  await tx.serviceUsernameReservation.updateMany({
+    where: {
+      status: { in: REBINDABLE_STATUSES },
+      OR: [
+        { orderId: args.orderId },
+        ...(args.checkoutSessionId !== null
+          ? [{ checkoutSessionId: args.checkoutSessionId }]
+          : []),
+      ],
+    },
     data: {
       status: ServiceUsernameReservationStatus.RELEASED,
       activeUsernameKey: null,

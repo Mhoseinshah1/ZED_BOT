@@ -13,7 +13,7 @@ import {
   safeReply,
   safeReplyWithMarkup,
 } from "../utils/safe-reply.js";
-import { clearCheckoutState } from "./user-checkout/checkout-state.js";
+import { abandonCheckoutDraft } from "./user-checkout/checkout-state.js";
 
 /** Persian sales-status values for the start template (U-MENU-001). */
 export const SALES_STATUS_OPEN_TEXT = "فعال ✅";
@@ -82,7 +82,7 @@ export async function showUserMenu(ctx: BotContext): Promise<void> {
       await safeReply(ctx, text, keyboard);
     }
   }
-  clearCheckoutState(ctx);
+  await abandonCheckoutDraft(ctx, "MENU");
   ctx.session.currentFlow = null;
   ctx.session.lastMenu = "user_main";
 }

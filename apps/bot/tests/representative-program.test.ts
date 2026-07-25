@@ -71,6 +71,7 @@ import {
 import { clearSettingsCache } from "../src/services/settings.service.js";
 import { OPS_EVENTS } from "../src/services/system-log.service.js";
 import { payPurchaseDraftWithWallet } from "../src/services/wallet-payment.service.js";
+import { armServiceDraft } from "./helpers/service-checkout-fixture.js";
 
 // =============================================================================
 // Representative Program — end-to-end integration + isolation proof (§26).
@@ -468,6 +469,7 @@ describe.skipIf(!hasDb)("reseller checkout + financial isolation", () => {
             }
           : undefined,
     };
+    await armServiceDraft(draft, { userId: user.id, panelId });
     const result = await payPurchaseDraftWithWallet(user, draft);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -521,6 +523,7 @@ describe.skipIf(!hasDb)("reseller checkout + financial isolation", () => {
             }
           : undefined,
     };
+    await armServiceDraft(draft, { userId: user.id, panelId });
     const result = await payPurchaseDraftWithWallet(user, draft);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -574,6 +577,9 @@ describe.skipIf(!hasDb)("reseller checkout + financial isolation", () => {
             }
           : undefined,
     };
+    // Armed so it PASSES the reservation guard and reaches the fingerprint check,
+    // which is downstream and still fails closed for the right reason (§16).
+    await armServiceDraft(draft, { userId: user.id, panelId });
     const result = await payPurchaseDraftWithWallet(user, draft);
     expect(result.ok).toBe(false);
   });
@@ -607,6 +613,7 @@ describe.skipIf(!hasDb)("reseller checkout + financial isolation", () => {
             }
           : undefined,
     };
+    await armServiceDraft(draft, { userId: user.id, panelId });
     const result = await payPurchaseDraftWithWallet(user, draft);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -751,14 +758,21 @@ describe.skipIf(!hasDb)("superseded reseller checkouts cancel their markers (P2@
         priceFingerprint: effective.priceFingerprint,
       },
     });
-    const first = await createCheckoutSession(user, product, draft());
+    // Each checkout freeze needs its own armed customization + HELD reservation
+    // (the §5 createCheckoutSession gate claims it) — distinct nonce → distinct
+    // reservation, so the supersession assertion below is about the markers only.
+    const firstDraft = draft();
+    await armServiceDraft(firstDraft, { userId: user.id, panelId });
+    const first = await createCheckoutSession(user, product, firstDraft);
     const firstMarker = await prisma.representativePurchase.findUniqueOrThrow({
       where: { checkoutSessionId: first.id },
     });
     expect(firstMarker.status).toBe("PENDING");
 
     // Clicking "continue" again supersedes the first checkout.
-    const second = await createCheckoutSession(user, product, draft());
+    const secondDraft = draft();
+    await armServiceDraft(secondDraft, { userId: user.id, panelId });
+    const second = await createCheckoutSession(user, product, secondDraft);
     expect(second.id).not.toBe(first.id);
 
     const firstAfter = await prisma.representativePurchase.findUniqueOrThrow({
@@ -787,6 +801,7 @@ describe.skipIf(!hasDb)("regression: retail checkout unchanged", () => {
       finalPriceToman: RETAIL,
       draftNonce: randomUUID(),
     };
+    await armServiceDraft(draft, { userId: user.id, panelId });
     const result = await payPurchaseDraftWithWallet(user, draft);
     expect(result.ok).toBe(true);
     if (!result.ok) return;

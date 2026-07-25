@@ -29,7 +29,7 @@ import {
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 import { CO_CB } from "../user-checkout/checkout-cb.js";
 import { walletConfirmText, walletPayAvailable } from "../user-checkout/checkout-views.js";
-import { clearCheckoutState } from "../user-checkout/checkout-state.js";
+import { abandonCheckoutDraft, clearCheckoutState } from "../user-checkout/checkout-state.js";
 import { showPaymentMethods } from "../user-checkout/payment.handler.js";
 import {
   eligibleListKeyboard,
@@ -64,7 +64,7 @@ async function renderEligibleList(ctx: BotContext, page: number): Promise<void> 
   if (user === null) {
     return;
   }
-  clearCheckoutState(ctx);
+  await abandonCheckoutDraft(ctx, "EXTRA_VOLUME");
   const pageData = await listExtraVolumeServices(user.id, page);
   await safeAnswerCallback(ctx);
   if (pageData.total === 0) {
@@ -104,7 +104,7 @@ export async function renderExtraVolumeServicePage(
   if (user === null) {
     return;
   }
-  clearCheckoutState(ctx);
+  await abandonCheckoutDraft(ctx, "EXTRA_VOLUME");
   const service = await getExtraVolumeServiceByShortId(shortId, user.id);
   if (service === null) {
     await safeAnswerCallback(ctx, NOT_FOUND);

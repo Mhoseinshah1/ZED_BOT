@@ -24,6 +24,7 @@ import {
   WALLET_ORDER_PAYMENT_REASON,
 } from "../src/services/wallet-payment.service.js";
 import { WALLET_TOPUP_REASON } from "../src/services/wallet-topup.service.js";
+import { armServiceDraft } from "./helpers/service-checkout-fixture.js";
 
 // =============================================================================
 // Wallet ledger integrity integration tests.
@@ -114,6 +115,17 @@ function draftFor(draftNonce = randomUUID()): CheckoutDraft {
     finalPriceToman: PRICE,
     draftNonce,
   };
+}
+
+/**
+ * A panel-backed SERVICE draft that satisfies the production guard: it carries a
+ * completed username customization whose exact HELD reservation the wallet
+ * transaction claims (§4). Idempotency / race tests that fire the SAME draft
+ * twice MUST reuse the ONE object this returns (one reservation); distinct-draft
+ * tests each call it again for a distinct reservation (distinct nonce+username).
+ */
+async function armedDraft(userId: string, nonce?: string): Promise<CheckoutDraft> {
+  return armServiceDraft(draftFor(nonce), { userId, panelId });
 }
 
 /** A PENDING_REVIEW wallet top-up (checkout + payment + receipt), approvable. */
@@ -223,7 +235,7 @@ async function freshBalance(userId: string): Promise<number> {
 describe.runIf(hasDb)("wallet ledger integrity", () => {
   it("1. wallet payment success writes exactly one SPEND row with a business reason", async () => {
     const user = await createUser(100_000);
-    const outcome = await payPurchaseDraftWithWallet(user, draftFor());
+    const outcome = await payPurchaseDraftWithWallet(user, await armedDraft(user.id));
     expect(outcome.ok).toBe(true);
 
     const rows = await ledgerRows(user.id);
@@ -244,7 +256,7 @@ describe.runIf(hasDb)("wallet ledger integrity", () => {
     const broke = await createUser(0);
     const outcome = await payPurchaseDraftWithWallet(
       { ...broke, balanceToman: 100_000 },
-      draftFor(),
+      await armedDraft(broke.id),
     );
     expect(outcome.ok).toBe(false);
     expect(!outcome.ok && outcome.error).toBe(INSUFFICIENT_BALANCE_TEXT);
@@ -260,16 +272,21 @@ describe.runIf(hasDb)("wallet ledger integrity", () => {
     const user = await createUser(200_000);
     const nonce = randomUUID();
 
-    const first = await payPurchaseDraftWithWallet(user, draftFor(nonce));
+    // Same draft twice (sequential): ONE reservation shared across both calls so
+    // the retry resolves via the idempotency key, not a second claim.
+    const sequentialDraft = await armedDraft(user.id, nonce);
+    const first = await payPurchaseDraftWithWallet(user, sequentialDraft);
     expect(first.ok).toBe(true);
-    const retry = await payPurchaseDraftWithWallet(user, draftFor(nonce));
+    const retry = await payPurchaseDraftWithWallet(user, sequentialDraft);
     expect(retry.ok && retry.alreadyPaid).toBe(true);
 
     const concurrentNonce = randomUUID();
     const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+    // Same draft twice (concurrent): again ONE shared armed draft.
+    const concurrentDraft = await armedDraft(fresh.id, concurrentNonce);
     const [a, b] = await Promise.all([
-      payPurchaseDraftWithWallet(fresh, draftFor(concurrentNonce)),
-      payPurchaseDraftWithWallet(fresh, draftFor(concurrentNonce)),
+      payPurchaseDraftWithWallet(fresh, concurrentDraft),
+      payPurchaseDraftWithWallet(fresh, concurrentDraft),
     ]);
     expect(a.ok).toBe(true);
     expect(b.ok).toBe(true);
@@ -371,9 +388,11 @@ describe.runIf(hasDb)("wallet ledger integrity", () => {
 
   it("7. concurrent debits: funds covering one payment settle exactly one", async () => {
     const user = await createUser(PRICE); // covers exactly one purchase
+    // DISTINCT drafts (distinct reservations) racing on one balance.
+    const [draftA, draftB] = await Promise.all([armedDraft(user.id), armedDraft(user.id)]);
     const [a, b] = await Promise.all([
-      payPurchaseDraftWithWallet(user, draftFor()),
-      payPurchaseDraftWithWallet(user, draftFor()),
+      payPurchaseDraftWithWallet(user, draftA),
+      payPurchaseDraftWithWallet(user, draftB),
     ]);
     const results = [a, b];
     expect(results.filter((r) => r.ok).length).toBe(1);
@@ -426,9 +445,10 @@ describe.runIf(hasDb)("wallet ledger integrity", () => {
     for (let i = 0; i < 5; i += 1) {
       const user = await createUser(PRICE);
       const paymentId = await createTopupPayment(user, 70_000);
+      const debitDraft = await armedDraft(user.id);
       const [credit, debit] = await Promise.all([
         approveReceiptPayment(paymentId, admin),
-        payPurchaseDraftWithWallet(user, draftFor()),
+        payPurchaseDraftWithWallet(user, debitDraft),
       ]);
       expect(credit.ok).toBe(true);
       expect(debit.ok).toBe(true);
@@ -449,7 +469,7 @@ describe.runIf(hasDb)("wallet ledger integrity", () => {
     expect((await approveReceiptPayment(topup, admin)).ok).toBe(true);
     // wallet purchase -PRICE
     const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
-    expect((await payPurchaseDraftWithWallet(fresh, draftFor())).ok).toBe(true);
+    expect((await payPurchaseDraftWithWallet(fresh, await armedDraft(fresh.id))).ok).toBe(true);
     // provisioning refund +20k
     const order = await createPaidOrder(user, 20_000);
     expect(await failOrderWithRefund(order, "ledger test")).toBe(true);
@@ -503,8 +523,9 @@ describe.runIf(hasDb)("wallet ledger integrity", () => {
 
     const nonce = randomUUID();
     const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
-    expect((await payPurchaseDraftWithWallet(fresh, draftFor(nonce))).ok).toBe(true);
-    const replay = await payPurchaseDraftWithWallet(fresh, draftFor(nonce));
+    const armed = await armedDraft(fresh.id, nonce);
+    expect((await payPurchaseDraftWithWallet(fresh, armed)).ok).toBe(true);
+    const replay = await payPurchaseDraftWithWallet(fresh, armed);
     expect(replay.ok && replay.alreadyPaid).toBe(true);
 
     const order = await createPaidOrder(user, 5_000);
@@ -520,9 +541,10 @@ describe.runIf(hasDb)("wallet ledger integrity", () => {
 
   it("12. concurrent overdraft attempts can never drive the balance negative", async () => {
     const user = await createUser(30_000);
+    const [draftA, draftB] = await Promise.all([armedDraft(user.id), armedDraft(user.id)]);
     const outcomes = await Promise.all([
-      payPurchaseDraftWithWallet({ ...user, balanceToman: PRICE }, draftFor()),
-      payPurchaseDraftWithWallet({ ...user, balanceToman: PRICE }, draftFor()),
+      payPurchaseDraftWithWallet({ ...user, balanceToman: PRICE }, draftA),
+      payPurchaseDraftWithWallet({ ...user, balanceToman: PRICE }, draftB),
       adjustUserWallet({
         targetUserId: user.id,
         adminId: admin.id,

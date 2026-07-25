@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { errorMessage, normalizeServiceNote, validateServiceUsername } from "@zedbot/shared";
-import { type CheckoutSession, ServiceUsernameMode } from "@zedbot/database";
+import { type CheckoutSession, ServiceUsernameMode, type User } from "@zedbot/database";
 import { Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
@@ -21,6 +21,7 @@ import {
   visibleServiceProducts,
 } from "../../services/catalog.service.js";
 import {
+  CheckoutReservationError,
   checkoutShortId,
   createCheckoutSession,
   getCheckoutByShortId,
@@ -36,7 +37,8 @@ import {
 } from "../../services/service-naming.service.js";
 import { dispatchPaidOrderFulfillment } from "../../services/order-fulfillment.service.js";
 import {
-  releaseReservation,
+  isReservationClaimable,
+  releaseHeldReservationForDraft,
   reserveRandomServiceUsername,
   reserveServiceUsername,
 } from "../../services/service-username-selection.service.js";
@@ -45,8 +47,14 @@ import {
   WALLET_PAYMENT_DONE_TEXT,
 } from "../../services/wallet-payment.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
-import { clearCheckoutState } from "./checkout-state.js";
-import { ccb, CO_CB } from "./checkout-cb.js";
+import { abandonCheckoutDraft, clearCheckoutState } from "./checkout-state.js";
+import {
+  ccb,
+  CO_CB,
+  parseCoNonceCallback,
+  shortDraftNonce,
+  type CoNonceAction,
+} from "./checkout-cb.js";
 import {
   categoryListKeyboard,
   checkoutViewText,
@@ -81,6 +89,15 @@ import { CHECKOUT_EXPIRED_TEXT, paycb, RECEIPT_WAITING_TEXT } from "./payment-vi
 
 const HTML = { parseMode: "HTML" as const };
 const DRAFT_EXPIRED_TEXT = "پیش‌فاکتور در دسترس نیست؛ لطفاً دوباره محصول را انتخاب کنید.";
+// hotfix §2: a username/note button from an OLD (replaced) draft — fail closed.
+const STALE_STEP_TEXT = "این مرحله منقضی شده است؛ لطفاً دوباره اقدام کنید.";
+// hotfix §9: whitespace-only note text — invalid, ask again (only «رد کردن» skips).
+const SERVICE_NOTE_EMPTY_TEXT =
+  "یادداشت خالی است. یک متن کوتاه ارسال کنید یا برای رد کردن، دکمه «رد کردن» را بزنید.";
+// hotfix §4: a wallet button fired against an incomplete / drifted / stale SERVICE
+// draft — fail closed before showing a confirmation screen or moving money.
+const WALLET_SERVICE_STALE_TEXT =
+  "نام کاربری انتخابی دیگر معتبر نیست؛ لطفاً دوباره نام کاربری را انتخاب کنید.";
 
 export const checkoutHandler = new Composer<BotContext>();
 
@@ -107,6 +124,26 @@ function serviceCustomizationComplete(draft: CheckoutDraft): boolean {
   return draft.serviceCustomization?.completed === true;
 }
 
+/**
+ * Panel drift recovery (hotfix §3): the product changed panels since the buyer
+ * selected a username. Release the old HELD hold, drop the now-invalid
+ * customization, and re-seat the draft on the CURRENT product/panel — preserving
+ * productId + the navigation origin (retail / Pricing return location /
+ * representative context) — so the buyer re-selects a username on the new panel
+ * instead of looping forever on a claim failure. Moves no money.
+ */
+export async function rebuildDraftForCurrentPanel(
+  ctx: BotContext,
+  draft: CheckoutDraft,
+  product: ProductWithRelations,
+): Promise<void> {
+  await releaseDraftHeldReservation(ctx, draft);
+  draft.panelId = product.panelId ?? undefined;
+  draft.categoryId = product.categoryId;
+  draft.serviceCustomization = undefined;
+  ctx.session.currentFlow = null;
+}
+
 export async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<void> {
   const draft = ctx.session.temp.checkoutDraft;
   const user = ctx.dbUser;
@@ -116,9 +153,31 @@ export async function renderPreInvoice(ctx: BotContext, edit: boolean): Promise<
   }
   const product = await getProductByShortId(draft.productId.slice(0, 8));
   if (product === null || product.id !== draft.productId || !isProductVisible(product, user.group)) {
-    clearCheckoutState(ctx);
+    // §6: forced/deliberate exit — release the exact HELD reservation now, not
+    // just the session state, then bounce the buyer to the menu.
+    await abandonCheckoutDraft(ctx, "DRAFT_PRODUCT_UNAVAILABLE");
     await safeEditOrReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard(CB.USER_MENU));
     return;
+  }
+  // §3: a SERVICE draft whose product is no longer a panel-backed SERVICE_PRODUCT
+  // (its type changed, or it became panel-less) is structurally unsellable —
+  // abandon the draft (releasing its exact HELD reservation) and return to the
+  // menu; never render another username prompt for it.
+  if (
+    draft.flowType === "SERVICE_PRODUCT" &&
+    (product.type !== "SERVICE_PRODUCT" || product.panelId === null)
+  ) {
+    await abandonCheckoutDraft(ctx, "DRAFT_PRODUCT_UNSELLABLE");
+    await safeEditOrReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard(CB.USER_MENU));
+    return;
+  }
+  // §3 panel drift: re-seat the draft on the current panel before the gate below.
+  if (
+    draft.flowType === "SERVICE_PRODUCT" &&
+    product.panelId !== null &&
+    draft.panelId !== product.panelId
+  ) {
+    await rebuildDraftForCurrentPanel(ctx, draft, product);
   }
   // THE single gate: a SERVICE checkout never shows its pre-invoice until the
   // buyer has chosen a username and entered/skipped the optional note. This one
@@ -155,10 +214,9 @@ export async function startRetailPreInvoice(
   origin: CheckoutOrigin,
 ): Promise<void> {
   // Selecting a different product abandons any in-progress username reservation
-  // from the previous draft: release its HELD hold now so the username frees up
-  // immediately (the cleanup worker is only the backstop).
-  await releaseDraftReservationBestEffort(ctx.session.temp.checkoutDraft);
-  clearCheckoutState(ctx);
+  // from the previous draft: authoritatively release its exact HELD hold now so
+  // the username frees up immediately (the cleanup worker is only the backstop).
+  await abandonCheckoutDraft(ctx, "SELECT_ANOTHER_PRODUCT");
   ctx.session.currentFlow = null;
   const draft: CheckoutDraft = {
     productId: product.id,
@@ -212,7 +270,7 @@ async function renderCategoriesForPanel(ctx: BotContext, panelId: string): Promi
 }
 
 export async function startBuyFlow(ctx: BotContext): Promise<void> {
-  clearCheckoutState(ctx);
+  await abandonCheckoutDraft(ctx, "BUY_HUB");
   const panels = await purchasablePanels();
   if (panels.length === 0) {
     await safeEditOrReply(ctx, NO_PANEL_TEXT, backKeyboard(CB.USER_MENU));
@@ -320,7 +378,7 @@ export async function openOtherProductsSection(ctx: BotContext): Promise<void> {
   if (user === null) {
     return;
   }
-  clearCheckoutState(ctx);
+  await abandonCheckoutDraft(ctx, "OTHER_PRODUCTS");
   const products = await visibleOtherProducts(user.group);
   await safeAnswerCallback(ctx);
   if (products.length === 0) {
@@ -379,16 +437,26 @@ checkoutHandler.callbackQuery(/^user:op:p:([0-9a-f-]+)$/, async (ctx) => {
 // The durable authority is the DB reservation; the session draft only drives UI.
 // =============================================================================
 
-/** Best-effort release of a draft's HELD username reservation (fire safe). */
-async function releaseDraftReservationBestEffort(
-  draft: CheckoutDraft | undefined,
+/**
+ * Release ONLY this draft's own HELD username hold (exact userId + draftNonce +
+ * reservationId), never a BOUND/CONSUMED one. Best-effort — a failure is logged
+ * (safe category only) and swallowed; the cleanup sweep is the backstop.
+ */
+async function releaseDraftHeldReservation(
+  ctx: BotContext,
+  draft: CheckoutDraft,
 ): Promise<void> {
-  const reservationId = draft?.serviceCustomization?.reservationId;
-  if (reservationId === undefined) {
+  const user = ctx.dbUser;
+  const reservationId = draft.serviceCustomization?.reservationId;
+  if (user === null || reservationId === undefined) {
     return;
   }
   try {
-    await releaseReservation(reservationId);
+    await releaseHeldReservationForDraft({
+      userId: user.id,
+      draftNonce: draft.draftNonce ?? null,
+      reservationId,
+    });
   } catch (err) {
     logger.warn("release username reservation failed", { error: errorMessage(err) });
   }
@@ -400,15 +468,16 @@ async function renderServiceUsernameEntry(
   draft: CheckoutDraft,
   edit: boolean,
 ): Promise<void> {
+  const nonce = shortDraftNonce(draft.draftNonce);
   let text: string;
   let keyboard: InlineKeyboard;
   if (draft.serviceCustomization === undefined) {
     text = await serviceUsernameMethodText();
-    keyboard = await serviceUsernameMethodKeyboard();
+    keyboard = await serviceUsernameMethodKeyboard(nonce);
   } else {
     const isRandom = draft.serviceCustomization.usernameMode === ServiceUsernameMode.RANDOM;
     text = serviceUsernameConfirmText(draft.serviceCustomization.normalizedUsername, isRandom);
-    keyboard = await serviceUsernameConfirmKeyboard(isRandom);
+    keyboard = await serviceUsernameConfirmKeyboard(isRandom, nonce);
   }
   if (edit) {
     await safeEditOrReply(ctx, text, keyboard, HTML);
@@ -446,82 +515,106 @@ async function reserveRandomAndShow(ctx: BotContext, draft: CheckoutDraft): Prom
   await renderServiceUsernameEntry(ctx, draft, true);
 }
 
-// Pick "type my own username": arm the bounded text-input flow.
-checkoutHandler.callbackQuery(CO_CB.UN_CUSTOM, async (ctx) => {
-  const draft = ctx.session.temp.checkoutDraft;
-  if (draft === undefined || !draftNeedsServiceCustomization(draft)) {
-    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
-    return;
-  }
-  ctx.session.currentFlow = SVC_USERNAME_FLOW;
-  await safeAnswerCallback(ctx);
-  await safeEditOrReply(
-    ctx,
-    await serviceUsernameCustomPromptText(),
-    serviceUsernameCustomPromptKeyboard(),
-    HTML,
-  );
-});
+// =============================================================================
+// THE single nonce-validated username/note callback router (hotfix §2). Every
+// username/note action arrives as `user:co:un:{c,r,g,m,o}:<nonce>` or
+// `user:co:nt:{s,b}:<nonce>`. One route, one shared parser/validator: the nonce
+// MUST equal the current draft's own short nonce. A button from an OLD/replaced
+// draft carries a stale nonce and is rejected here — it can never generate,
+// confirm, release or replace a reservation, skip the note, or touch currentFlow.
+// =============================================================================
+checkoutHandler.callbackQuery(
+  /^user:co:(?:un:[crgmo]|nt:[sb]):[0-9a-f]{6,32}$/,
+  async (ctx) => {
+    const parsed = parseCoNonceCallback(ctx.callbackQuery.data ?? "");
+    const draft = ctx.session.temp.checkoutDraft;
+    if (
+      parsed === null ||
+      draft === undefined ||
+      !draftNeedsServiceCustomization(draft) ||
+      shortDraftNonce(draft.draftNonce) !== parsed.nonce
+    ) {
+      // Fail closed: acknowledge with a safe notice, mutate NOTHING.
+      await safeAnswerCallback(ctx, STALE_STEP_TEXT);
+      return;
+    }
+    await dispatchServiceCustomizationAction(ctx, draft, parsed.action);
+  },
+);
 
-// Pick "generate a random username".
-checkoutHandler.callbackQuery(CO_CB.UN_RANDOM, async (ctx) => {
-  const draft = ctx.session.temp.checkoutDraft;
-  if (draft === undefined || !draftNeedsServiceCustomization(draft)) {
-    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
-    return;
+/** Apply a nonce-validated username/note action to the CURRENT draft. */
+async function dispatchServiceCustomizationAction(
+  ctx: BotContext,
+  draft: CheckoutDraft,
+  action: CoNonceAction,
+): Promise<void> {
+  const nonce = shortDraftNonce(draft.draftNonce);
+  switch (action) {
+    case "un:c": // choose custom username → arm the bounded text-input flow
+      ctx.session.currentFlow = SVC_USERNAME_FLOW;
+      await safeAnswerCallback(ctx);
+      await safeEditOrReply(
+        ctx,
+        await serviceUsernameCustomPromptText(),
+        serviceUsernameCustomPromptKeyboard(nonce),
+        HTML,
+      );
+      return;
+    case "un:r": // choose random username
+      await reserveRandomAndShow(ctx, draft);
+      return;
+    case "un:g": // regenerate a fresh random username
+      if (draft.serviceCustomization === undefined) {
+        await safeAnswerCallback(ctx, STALE_STEP_TEXT);
+        return;
+      }
+      await reserveRandomAndShow(ctx, draft);
+      return;
+    case "un:m": // confirmation Back → method page: release the current HELD hold
+      await releaseDraftHeldReservation(ctx, draft);
+      draft.serviceCustomization = undefined;
+      ctx.session.currentFlow = null;
+      await safeAnswerCallback(ctx);
+      await renderServiceUsernameEntry(ctx, draft, true);
+      return;
+    case "un:o": // confirm username → optional-note step
+      if (draft.serviceCustomization === undefined) {
+        await safeAnswerCallback(ctx, STALE_STEP_TEXT);
+        return;
+      }
+      draft.serviceCustomization.completed = false;
+      ctx.session.currentFlow = SVC_NOTE_FLOW;
+      await safeAnswerCallback(ctx);
+      await safeEditOrReply(
+        ctx,
+        await serviceNotePromptText(),
+        await serviceNotePromptKeyboard(nonce),
+        HTML,
+      );
+      return;
+    case "nt:s": // skip the optional note (the ONLY path that stores note=null)
+      if (draft.serviceCustomization === undefined) {
+        await safeAnswerCallback(ctx, STALE_STEP_TEXT);
+        return;
+      }
+      draft.serviceCustomization.note = null;
+      draft.serviceCustomization.completed = true;
+      ctx.session.currentFlow = null;
+      await safeAnswerCallback(ctx);
+      await renderPreInvoice(ctx, true);
+      return;
+    case "nt:b": // note Back → username confirmation page (§10)
+      if (draft.serviceCustomization === undefined) {
+        await safeAnswerCallback(ctx, STALE_STEP_TEXT);
+        return;
+      }
+      draft.serviceCustomization.completed = false;
+      ctx.session.currentFlow = null;
+      await safeAnswerCallback(ctx);
+      await renderServiceUsernameEntry(ctx, draft, true);
+      return;
   }
-  await reserveRandomAndShow(ctx, draft);
-});
-
-// Regenerate a fresh random username (releases the prior hold via same-nonce reserve).
-checkoutHandler.callbackQuery(CO_CB.UN_REGEN, async (ctx) => {
-  const draft = ctx.session.temp.checkoutDraft;
-  if (draft === undefined || draft.serviceCustomization === undefined) {
-    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
-    return;
-  }
-  await reserveRandomAndShow(ctx, draft);
-});
-
-// Back to the method-choice page: release the current hold.
-checkoutHandler.callbackQuery(CO_CB.UN_METHOD, async (ctx) => {
-  const draft = ctx.session.temp.checkoutDraft;
-  if (draft === undefined || !draftNeedsServiceCustomization(draft)) {
-    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
-    return;
-  }
-  await releaseDraftReservationBestEffort(draft);
-  draft.serviceCustomization = undefined;
-  ctx.session.currentFlow = null;
-  await safeAnswerCallback(ctx);
-  await renderServiceUsernameEntry(ctx, draft, true);
-});
-
-// Confirm the chosen username → move to the optional-note step.
-checkoutHandler.callbackQuery(CO_CB.UN_CONFIRM, async (ctx) => {
-  const draft = ctx.session.temp.checkoutDraft;
-  if (draft === undefined || draft.serviceCustomization === undefined) {
-    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
-    return;
-  }
-  ctx.session.currentFlow = SVC_NOTE_FLOW;
-  await safeAnswerCallback(ctx);
-  await safeEditOrReply(ctx, await serviceNotePromptText(), await serviceNotePromptKeyboard(), HTML);
-});
-
-// Skip the optional note (stores null) → render the pre-invoice.
-checkoutHandler.callbackQuery(CO_CB.NOTE_SKIP, async (ctx) => {
-  const draft = ctx.session.temp.checkoutDraft;
-  if (draft === undefined || draft.serviceCustomization === undefined) {
-    await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
-    return;
-  }
-  draft.serviceCustomization.note = null;
-  draft.serviceCustomization.completed = true;
-  ctx.session.currentFlow = null;
-  await safeAnswerCallback(ctx);
-  await renderPreInvoice(ctx, true);
-});
+}
 
 // --- Discount code ---------------------------------------------------------------------
 
@@ -563,6 +656,45 @@ checkoutHandler.callbackQuery(CO_CB.DISCOUNT_CLEAR, async (ctx) => {
 
 // --- Wallet payment (Phase 15) ------------------------------------------------------------
 
+/**
+ * §4 wallet callback guard (defense in depth ABOVE the final service-layer gate).
+ * For a panel-backed SERVICE wallet payment it requires: the live product still
+ * matches the draft's productId + panelId, the customization is completed, and the
+ * EXACT HELD reservation is still claimable by this user + draft. Returns a safe
+ * error string when any of these fail (so a stale wallet button can never even
+ * render a valid-looking confirmation screen or move money), or null when OK.
+ * OTHER_PRODUCT / legacy panel-less services carry no reservation and pass through.
+ */
+async function walletServiceDraftBlock(
+  user: User,
+  draft: CheckoutDraft,
+): Promise<string | null> {
+  const product = await getProductByShortId(draft.productId.slice(0, 8));
+  if (
+    product === null ||
+    product.id !== draft.productId ||
+    !isProductVisible(product, user.group)
+  ) {
+    return DRAFT_EXPIRED_TEXT;
+  }
+  if (product.type !== "SERVICE_PRODUCT" || product.panelId === null) {
+    return null;
+  }
+  const custom = draft.serviceCustomization;
+  if (custom?.completed !== true || draft.panelId !== product.panelId) {
+    return WALLET_SERVICE_STALE_TEXT;
+  }
+  const claimable = await isReservationClaimable({
+    reservationId: custom.reservationId,
+    userId: user.id,
+    draftNonce: draft.draftNonce ?? null,
+    normalizedUsername: custom.normalizedUsername,
+    mode: custom.usernameMode,
+    panelId: product.panelId,
+  });
+  return claimable ? null : WALLET_SERVICE_STALE_TEXT;
+}
+
 checkoutHandler.callbackQuery(CO_CB.WALLET, async (ctx) => {
   const draft = ctx.session.temp.checkoutDraft;
   const user = ctx.dbUser;
@@ -573,6 +705,16 @@ checkoutHandler.callbackQuery(CO_CB.WALLET, async (ctx) => {
   // Phase 22: operator kill-switch, re-checked when the button is clicked.
   if (!(await isWalletPaymentEnabled())) {
     await safeAnswerCallback(ctx, WALLET_PAYMENT_DISABLED_TEXT);
+    await renderPreInvoice(ctx, true);
+    return;
+  }
+  // §4: a panel-backed SERVICE draft must be complete + un-drifted + still hold an
+  // exact claimable reservation BEFORE the confirmation screen renders. On failure
+  // re-render the pre-invoice (which recovers panel drift / returns to username
+  // selection). Moves no money.
+  const serviceBlock = await walletServiceDraftBlock(user, draft);
+  if (serviceBlock !== null) {
+    await safeAnswerCallback(ctx, serviceBlock);
     await renderPreInvoice(ctx, true);
     return;
   }
@@ -600,6 +742,16 @@ checkoutHandler.callbackQuery(CO_CB.WALLET_CONFIRM, async (ctx) => {
   const user = ctx.dbUser;
   if (draft === undefined || user === null) {
     await safeAnswerCallback(ctx, DRAFT_EXPIRED_TEXT);
+    return;
+  }
+  // §4: re-assert the SERVICE draft is complete + un-drifted + still holds an exact
+  // claimable reservation immediately before any money can move — a stale
+  // confirmation button never deducts. payPurchaseDraftWithWallet remains the
+  // final financial defense inside the transaction.
+  const serviceBlock = await walletServiceDraftBlock(user, draft);
+  if (serviceBlock !== null) {
+    await safeAnswerCallback(ctx, serviceBlock);
+    await renderPreInvoice(ctx, true);
     return;
   }
   try {
@@ -648,7 +800,8 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
     product.id !== draft.productId ||
     !isProductVisible(product, user.group)
   ) {
-    clearCheckoutState(ctx);
+    // §6: release the exact HELD reservation on this forced exit, not just state.
+    await abandonCheckoutDraft(ctx, "DRAFT_PRODUCT_UNAVAILABLE");
     await safeAnswerCallback(ctx);
     await safeEditOrReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard(CB.USER_MENU));
     return;
@@ -679,7 +832,8 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
       effective.priceFingerprint !== draft.representative.priceFingerprint ||
       effective.tierFingerprint !== draft.representative.tierFingerprint
     ) {
-      clearCheckoutState(ctx);
+      // §6: reseller price/fingerprint drifted — release the exact HELD hold too.
+      await abandonCheckoutDraft(ctx, "REPRESENTATIVE_PRICE_CHANGED");
       await safeAnswerCallback(ctx, "قیمت نمایندگی تغییر کرده است. لطفاً دوباره اقدام کنید.");
       await safeEditOrReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard("user:rep:buy"));
       return;
@@ -733,6 +887,24 @@ checkoutHandler.callbackQuery(CO_CB.CONTINUE, async (ctx) => {
       finalPriceToman: checkout.finalPriceToman,
     });
   } catch (err) {
+    // hotfix §3: the authoritative reservation claim failed — the buyer's hold
+    // is stale/drifted, so NO checkout was created. Invalidate the stale
+    // customization and send them back to the username selection step instead of
+    // showing a generic error. The whole transaction (incl. superseded
+    // cancellations) already rolled back inside createCheckoutSession.
+    if (err instanceof CheckoutReservationError) {
+      // §3: the authoritative claim failed (stale hold / panel drift / expiry).
+      // Release the exact old HELD hold now, drop the invalid customization, and
+      // re-render — renderPreInvoice re-seats the draft on the current panel (drift
+      // recovery) and returns the buyer to username selection instead of looping.
+      await releaseDraftHeldReservation(ctx, draft);
+      draft.serviceCustomization = undefined;
+      ctx.session.currentFlow = null;
+      logger.warn("checkout reservation claim failed", { reason: err.reason, userId: user.id });
+      await safeAnswerCallback(ctx, "نام کاربری انتخابی دیگر معتبر نیست؛ لطفاً دوباره انتخاب کنید.");
+      await renderPreInvoice(ctx, true);
+      return;
+    }
     logger.error("checkout creation failed", { error: errorMessage(err) });
     await safeAnswerCallback(ctx);
     await safeReply(ctx, "خطایی رخ داد. لطفاً دوباره تلاش کنید.");
@@ -808,8 +980,10 @@ async function handleDiscountText(
 ): Promise<void> {
   const text = ctx.message?.text ?? "";
   // Commands cancel the discount entry (and the draft) and continue normally.
+  // §6/§8: discount entry happens after the username is confirmed, so the draft
+  // may still hold an exact HELD reservation — release it now, not just state.
   if (text.startsWith("/")) {
-    clearCheckoutState(ctx);
+    await abandonCheckoutDraft(ctx, "DISCOUNT_INPUT_COMMAND");
     return next();
   }
   const draft = ctx.session.temp.checkoutDraft;
@@ -847,8 +1021,9 @@ async function handleServiceUsernameText(
 ): Promise<void> {
   const text = ctx.message?.text ?? "";
   if (text.startsWith("/")) {
-    await releaseDraftReservationBestEffort(ctx.session.temp.checkoutDraft);
-    clearCheckoutState(ctx);
+    // A command typed mid-entry is a deliberate exit (§8): authoritatively
+    // release this draft's exact HELD hold, then continue command handling.
+    await abandonCheckoutDraft(ctx, "USERNAME_INPUT_COMMAND");
     return next();
   }
   const draft = ctx.session.temp.checkoutDraft;
@@ -858,9 +1033,10 @@ async function handleServiceUsernameText(
     await safeReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard(CB.USER_MENU));
     return;
   }
+  const nonce = shortDraftNonce(draft.draftNonce);
   const validation = validateServiceUsername(text);
   if (!validation.ok) {
-    await safeReply(ctx, serviceUsernameRejectText(validation.reason), serviceUsernameCustomPromptKeyboard());
+    await safeReply(ctx, serviceUsernameRejectText(validation.reason), serviceUsernameCustomPromptKeyboard(nonce));
     return;
   }
   const result = await reserveServiceUsername({
@@ -874,7 +1050,7 @@ async function handleServiceUsernameText(
     await safeReply(
       ctx,
       serviceUsernameUnavailableText(result.outcome),
-      serviceUsernameCustomPromptKeyboard(),
+      serviceUsernameCustomPromptKeyboard(nonce),
     );
     return;
   }
@@ -897,7 +1073,9 @@ async function handleServiceNoteText(
 ): Promise<void> {
   const text = ctx.message?.text ?? "";
   if (text.startsWith("/")) {
-    clearCheckoutState(ctx);
+    // A command typed mid-entry is a deliberate exit (§8): release the draft's
+    // exact HELD hold, then continue command handling.
+    await abandonCheckoutDraft(ctx, "NOTE_INPUT_COMMAND");
     return next();
   }
   const draft = ctx.session.temp.checkoutDraft;
@@ -906,12 +1084,20 @@ async function handleServiceNoteText(
     await safeReply(ctx, DRAFT_EXPIRED_TEXT, backKeyboard(CB.USER_MENU));
     return;
   }
+  const nonce = shortDraftNonce(draft.draftNonce);
   const normalized = normalizeServiceNote(text);
   if (!normalized.ok) {
-    await safeReply(ctx, serviceNoteRejectText(normalized.reason), await serviceNotePromptKeyboard());
+    await safeReply(ctx, serviceNoteRejectText(normalized.reason), await serviceNotePromptKeyboard(nonce));
     return;
   }
-  draft.serviceCustomization.note = normalized.normalized.length > 0 ? normalized.normalized : null;
+  // hotfix §9: whitespace-only text is INVALID, not a silent null. `note=null` is
+  // stored ONLY via the explicit «رد کردن» (nt:s) button. Keep the note flow armed
+  // and ask again so the buyer either types real content or explicitly skips.
+  if (normalized.normalized === "") {
+    await safeReply(ctx, SERVICE_NOTE_EMPTY_TEXT, await serviceNotePromptKeyboard(nonce));
+    return;
+  }
+  draft.serviceCustomization.note = normalized.normalized;
   draft.serviceCustomization.completed = true;
   ctx.session.currentFlow = null;
   await renderPreInvoice(ctx, false);

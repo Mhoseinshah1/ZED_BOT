@@ -9,6 +9,7 @@ import type { CheckoutDraft } from "../src/core/session.js";
 import { DISCOUNT_CLAIM_FAILED_TEXT } from "../src/services/discount.service.js";
 import { approveReceiptPayment } from "../src/services/receipt-review.service.js";
 import { payPurchaseDraftWithWallet } from "../src/services/wallet-payment.service.js";
+import { armServiceDraft } from "./helpers/service-checkout-fixture.js";
 
 // =============================================================================
 // Atomic discount consumption integration tests.
@@ -99,6 +100,20 @@ function draftFor(discountCode: string, draftNonce = randomUUID()): CheckoutDraf
   };
 }
 
+/**
+ * A panel-backed SERVICE draft (keeping its discountCode) armed with the completed
+ * customization + HELD reservation the wallet guard requires (§4). Same-draft
+ * idempotency tests reuse the ONE object this returns; distinct-draft tests call
+ * it again for a distinct reservation.
+ */
+async function armedDraft(
+  userId: string,
+  discountCode: string,
+  nonce?: string,
+): Promise<CheckoutDraft> {
+  return armServiceDraft(draftFor(discountCode, nonce), { userId, panelId });
+}
+
 async function createUser(balanceToman = BALANCE): Promise<User> {
   return prisma.user.create({
     data: {
@@ -140,9 +155,14 @@ describe.runIf(hasDb)("atomic discount consumption (wallet payments)", () => {
     const code = await createCode({ totalUsageLimit: 1 });
     const [userA, userB] = await Promise.all([createUser(), createUser()]);
 
+    // Two different users, two DISTINCT armed drafts racing the same code.
+    const [draftA, draftB] = await Promise.all([
+      armedDraft(userA.id, code.code),
+      armedDraft(userB.id, code.code),
+    ]);
     const [a, b] = await Promise.all([
-      payPurchaseDraftWithWallet(userA, draftFor(code.code)),
-      payPurchaseDraftWithWallet(userB, draftFor(code.code)),
+      payPurchaseDraftWithWallet(userA, draftA),
+      payPurchaseDraftWithWallet(userB, draftB),
     ]);
 
     const results = [a, b];
@@ -171,9 +191,14 @@ describe.runIf(hasDb)("atomic discount consumption (wallet payments)", () => {
     const code = await createCode({ perUserUsageLimit: 1 });
     const user = await createUser();
 
+    // Same user racing two DISTINCT armed drafts (distinct reservations).
+    const [draftA, draftB] = await Promise.all([
+      armedDraft(user.id, code.code),
+      armedDraft(user.id, code.code),
+    ]);
     const [a, b] = await Promise.all([
-      payPurchaseDraftWithWallet(user, draftFor(code.code)),
-      payPurchaseDraftWithWallet(user, draftFor(code.code)),
+      payPurchaseDraftWithWallet(user, draftA),
+      payPurchaseDraftWithWallet(user, draftB),
     ]);
 
     expect([a, b].filter((r) => r.ok).length).toBe(1);
@@ -188,9 +213,13 @@ describe.runIf(hasDb)("atomic discount consumption (wallet payments)", () => {
     const code = await createCode({ totalUsageLimit: 2, totalUsedCount: 1 });
     const [userA, userB] = await Promise.all([createUser(), createUser()]);
 
+    const [draftA, draftB] = await Promise.all([
+      armedDraft(userA.id, code.code),
+      armedDraft(userB.id, code.code),
+    ]);
     const [a, b] = await Promise.all([
-      payPurchaseDraftWithWallet(userA, draftFor(code.code)),
-      payPurchaseDraftWithWallet(userB, draftFor(code.code)),
+      payPurchaseDraftWithWallet(userA, draftA),
+      payPurchaseDraftWithWallet(userB, draftB),
     ]);
 
     expect([a, b].filter((r) => r.ok).length).toBe(1);
@@ -207,7 +236,7 @@ describe.runIf(hasDb)("atomic discount consumption (wallet payments)", () => {
     const broke = await createUser(0);
     const outcome = await payPurchaseDraftWithWallet(
       { ...broke, balanceToman: BALANCE },
-      draftFor(code.code),
+      await armedDraft(broke.id, code.code),
     );
     expect(outcome.ok).toBe(false);
 
@@ -221,9 +250,12 @@ describe.runIf(hasDb)("atomic discount consumption (wallet payments)", () => {
     const user = await createUser();
     const nonce = randomUUID();
 
-    const first = await payPurchaseDraftWithWallet(user, draftFor(code.code, nonce));
+    // Same draft retried: ONE reservation shared so the retry resolves via the
+    // idempotency key, not a second claim.
+    const draft = await armedDraft(user.id, code.code, nonce);
+    const first = await payPurchaseDraftWithWallet(user, draft);
     expect(first.ok).toBe(true);
-    const retry = await payPurchaseDraftWithWallet(user, draftFor(code.code, nonce));
+    const retry = await payPurchaseDraftWithWallet(user, draft);
     expect(retry.ok).toBe(true);
     expect(retry.ok && retry.alreadyPaid).toBe(true);
 
@@ -237,9 +269,11 @@ describe.runIf(hasDb)("atomic discount consumption (wallet payments)", () => {
     const user = await createUser();
     const nonce = randomUUID();
 
+    // Same draft fired concurrently: ONE shared armed draft (one reservation).
+    const draft = await armedDraft(user.id, code.code, nonce);
     const [a, b] = await Promise.all([
-      payPurchaseDraftWithWallet(user, draftFor(code.code, nonce)),
-      payPurchaseDraftWithWallet(user, draftFor(code.code, nonce)),
+      payPurchaseDraftWithWallet(user, draft),
+      payPurchaseDraftWithWallet(user, draft),
     ]);
     expect(a.ok).toBe(true);
     expect(b.ok).toBe(true);

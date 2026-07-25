@@ -14,7 +14,6 @@ import {
   isProductStructurallySellable,
   isProductVisible,
 } from "../src/services/catalog.service.js";
-import { createCheckoutSession } from "../src/services/checkout.service.js";
 import {
   setProductRepresentativeEligible,
   type ProductWithRelations,
@@ -41,6 +40,7 @@ import {
 import { clearSettingsCache } from "../src/services/settings.service.js";
 import { OPS_EVENTS } from "../src/services/system-log.service.js";
 import { payPurchaseDraftWithWallet } from "../src/services/wallet-payment.service.js";
+import { armServiceDraft } from "./helpers/service-checkout-fixture.js";
 
 // =============================================================================
 // Representative Program — post-merge gap fixes (PR #121 follow-up):
@@ -644,8 +644,11 @@ describe.skipIf(!hasDb)("settlement policy: opt-out never cancels a paid reselle
             }
           : undefined,
     };
-    // freeze the checkout snapshot exactly like the buy flow, then settle it.
-    await createCheckoutSession(user, product, draft);
+    // Arm the completed customization + HELD reservation the wallet guard requires
+    // (§4), then settle exactly like the buy flow. The wallet path freezes its own
+    // checkout snapshot internally, so no separate createCheckoutSession is needed
+    // (and a separate freeze would double-claim the single HELD reservation).
+    await armServiceDraft(draft, { userId: user.id, panelId: sellablePanelId });
     const result = await payPurchaseDraftWithWallet(user, draft);
     expect(result.ok).toBe(true);
     if (!result.ok) return;

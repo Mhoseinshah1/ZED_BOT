@@ -15,7 +15,7 @@ import { isRepresentativeProgramEnabled } from "../../services/representative-se
 import { getRepresentativeByUserId } from "../../services/representative.service.js";
 import { getButtonText, getMessageTemplate } from "../../services/text.service.js";
 import { safeAnswerCallback, safeEditOrReply } from "../../utils/safe-reply.js";
-import { clearCheckoutState } from "../user-checkout/checkout-state.js";
+import { abandonCheckoutDraft } from "../user-checkout/checkout-state.js";
 import { startRetailPreInvoice } from "../user-checkout/checkout.handler.js";
 import {
   boundHtmlText,
@@ -83,8 +83,8 @@ async function unavailableToast(): Promise<string> {
  * Pressing Buy does NOT call this (it enters `startRetailPreInvoice`, which
  * itself clears then seeds exactly the new authoritative retail draft).
  */
-function enterPricingSurface(ctx: BotContext): void {
-  clearCheckoutState(ctx);
+async function enterPricingSurface(ctx: BotContext): Promise<void> {
+  await abandonCheckoutDraft(ctx, "PRICING");
 }
 
 /**
@@ -209,7 +209,7 @@ export async function renderPricingRoot(ctx: BotContext): Promise<void> {
   if (user === null) {
     return;
   }
-  enterPricingSurface(ctx);
+  await enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const [catalog, intro, disclaimer, repApplicable] = await Promise.all([
     loadUserRetailCatalog(user),
@@ -249,7 +249,7 @@ async function renderServicePanels(ctx: BotContext, page: number): Promise<void>
   if (user === null) {
     return;
   }
-  enterPricingSurface(ctx);
+  await enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const catalog = await loadUserRetailCatalog(user);
   if (catalog.servicePanels.length === 0) {
@@ -298,7 +298,7 @@ async function renderServiceCategories(ctx: BotContext, panelSid: string, page: 
   if (user === null) {
     return;
   }
-  enterPricingSurface(ctx);
+  await enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const catalog = await loadUserRetailCatalog(user);
   const resolved = resolveByShortId(catalog.servicePanels, panelSid, (e) => e.panel.id);
@@ -350,7 +350,7 @@ async function renderServiceProducts(
   if (user === null) {
     return;
   }
-  enterPricingSurface(ctx);
+  await enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const catalog = await loadUserRetailCatalog(user);
   const panel = resolveByShortId(catalog.servicePanels, panelSid, (e) => e.panel.id);
@@ -395,7 +395,7 @@ async function renderServiceDetail(
   if (user === null) {
     return;
   }
-  enterPricingSurface(ctx);
+  await enterPricingSurface(ctx);
   const product = await getProductByShortId(prodSid);
   if (
     product === null ||
@@ -439,7 +439,7 @@ async function renderOtherCategories(ctx: BotContext, page: number): Promise<voi
   if (user === null) {
     return;
   }
-  enterPricingSurface(ctx);
+  await enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const catalog = await loadUserRetailCatalog(user);
   if (catalog.otherProductCategories.length === 0) {
@@ -477,7 +477,7 @@ async function renderOtherProducts(ctx: BotContext, catSid: string, page: number
   if (user === null) {
     return;
   }
-  enterPricingSurface(ctx);
+  await enterPricingSurface(ctx);
   await safeAnswerCallback(ctx);
   const catalog = await loadUserRetailCatalog(user);
   const cat = resolveByShortId(catalog.otherProductCategories, catSid, (c) => c.category.id);
@@ -516,7 +516,7 @@ async function renderOtherDetail(
   if (user === null) {
     return;
   }
-  enterPricingSurface(ctx);
+  await enterPricingSurface(ctx);
   const product = await getProductByShortId(prodSid);
   if (
     product === null ||

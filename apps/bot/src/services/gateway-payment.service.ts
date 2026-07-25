@@ -29,11 +29,18 @@ import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { claimDiscountUsage } from "./discount.service.js";
-import { attachReservationToOrder } from "./service-username-selection.service.js";
 import {
+  bindSettledReservationFromSnapshot,
+  lockReservationForSettlement,
+} from "./service-username-selection.service.js";
+import {
+  blockedServiceUnboundCheckoutIds,
+  fileServiceUsernameUnboundCase,
   findCaseForDuplicatePayment,
   notifyDuplicateSuccessCase,
+  notifyServiceUsernameUnboundCase,
   recordDuplicateSuccess,
+  sweepUnnotifiedServiceUnboundCases,
 } from "./financial-reconciliation.service.js";
 import { dispatchPaidOrderFulfillment } from "./order-fulfillment.service.js";
 import { type DeliverySendApi } from "./other-product-delivery.service.js";
@@ -453,7 +460,18 @@ export async function recordProviderSuccessFromBot(
 // --- settlement (the exactly-once money gate) -----------------------------------------
 
 export type SettleOutcome =
-  | { kind: "settled"; payment: Payment; order: Order | null; purpose: PaymentPurpose }
+  | {
+      kind: "settled";
+      payment: Payment;
+      order: Order | null;
+      purpose: PaymentPurpose;
+      /**
+       * §2/§3: present only when THIS settlement filed (or found) a durable
+       * SERVICE_USERNAME_UNBOUND reconciliation case. `created` is true only on
+       * the filing call, so the caller sends the OWNER alert exactly once.
+       */
+      serviceUnbound?: { reconciliationCase: FinancialReconciliationCase; created: boolean };
+    }
   | { kind: "already"; payment: Payment; order: Order | null; purpose: PaymentPurpose }
   | { kind: "pending" }
   | { kind: "failed"; status: PaymentStatus }
@@ -695,8 +713,22 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
 
   const now = new Date();
   const snapshot = (checkout.productSnapshot ?? {}) as Record<string, unknown>;
+  // §3: captured inside the settlement tx when a NEW SERVICE_USERNAME_UNBOUND case
+  // is filed, so the OWNER alert fires exactly once AFTER commit (never inside the tx).
+  let serviceUnbound: {
+    reconciliationCase: FinancialReconciliationCase;
+    created: boolean;
+  } | null = null;
   try {
     const order = await prisma.$transaction(async (tx) => {
+      // hotfix §7: lock the buyer's username reservation for the WHOLE settlement
+      // transaction, BEFORE the checkout is flipped, so the concurrent cleanup
+      // sweep (FOR UPDATE ... SKIP LOCKED) skips it and can never expire a
+      // reservation that is settling. No-op when the snapshot carries no reservation.
+      const settlingReservationId = snapshotString(snapshot, "serviceUsernameReservationId");
+      if (settlingReservationId !== null) {
+        await lockReservationForSettlement(tx, settlingReservationId);
+      }
       // (a) THE ATOMIC CROSS-PROVIDER CLAIM (P0 settlement phase): the
       // checkout - not the payment - is the financial gate. Exactly one
       // Payment can ever set settledByPaymentId (compare-and-set on NULL),
@@ -825,10 +857,27 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
         orderCreated = result.created;
       }
       if (orderCreated) {
-        // Bind the buyer's username reservation to this settled order (BOUND).
-        const reservationId = snapshotString(snapshot, "serviceUsernameReservationId");
-        if (reservationId !== null) {
-          await attachReservationToOrder(tx, reservationId, order.id, checkout.id);
+        // hotfix §2/§6: strictly bind the buyer's username reservation to this
+        // settled order. EXTERNAL-SUCCESS settlement (Zarinpal / NOWPayments /
+        // one-shot Stars): the provider already captured real money, so a bind
+        // anomaly must NOT roll back. Instead file a DURABLE reconciliation case
+        // (committed atomically with this paid Order); the order-fulfillment
+        // dispatcher refuses to provision any SERVICE order that has such an open
+        // case, so provider SUCCESS is preserved but no service is created and the
+        // username is never regenerated. Idempotent by the settling payment id.
+        const bindResult = await bindSettledReservationFromSnapshot(tx, snapshot, {
+          userId: checkout.userId,
+          checkoutSessionId: checkout.id,
+          orderId: order.id,
+        });
+        if (!bindResult.bound) {
+          serviceUnbound = await fileServiceUsernameUnboundCase(tx, {
+            checkoutSessionId: checkout.id,
+            paymentId: payment.id,
+            userId: checkout.userId,
+            expectedAmountToman: checkout.finalPriceToman,
+            safeReason: `gateway settlement reservation bind failed: ${bindResult.reason}`,
+          });
         }
         await tx.payment.update({
           where: { id: payment.id },
@@ -926,6 +975,7 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
       payment: settled ?? payment,
       order,
       purpose: payment.purpose,
+      ...(serviceUnbound !== null ? { serviceUnbound } : {}),
     };
   } catch (err) {
     if (err instanceof AbortToAlready) {
@@ -1033,6 +1083,18 @@ export async function fulfillSettledGatewayOrder(
       return;
     }
     await dispatchPaidOrderFulfillment(api, order.id, { source: "GATEWAY", user });
+    // §3: a NEWLY filed username-reconciliation case alerts the OWNER admins
+    // exactly once — AFTER the settlement committed and fulfillment ran (which
+    // already sent the user the safe hold notice and blocked provisioning). The
+    // alert send is non-blocking and never throws, so it cannot roll back the
+    // provider-success settlement or delete the durable case.
+    if (outcome.kind === "settled" && outcome.serviceUnbound?.created === true) {
+      await notifyServiceUsernameUnboundCase(
+        api,
+        outcome.serviceUnbound.reconciliationCase,
+        payment,
+      );
+    }
   } catch (err) {
     logger.error("gateway fulfillment crashed", { error: errorMessage(err) });
   }
@@ -1097,6 +1159,13 @@ export async function runGatewaySettlementSweep(api: DeliverySendApi): Promise<v
     }
 
     const cutoff = new Date(Date.now() - UNFULFILLED_ORDER_MIN_AGE_MS);
+    // Codex P1 fix: a SERVICE order whose username reservation could not be bound
+    // is deliberately held PAID behind an OPEN/IN_REVIEW reconciliation case.
+    // EXCLUDE those checkouts from the recovery batch so they are neither
+    // re-notified on every one-minute sweep nor allowed to starve the bounded
+    // batch and block genuinely unfulfilled orders. The case is resolved (and the
+    // order provisioned) only via the OWNER retry-bind action.
+    const blockedCheckoutIds = await blockedServiceUnboundCheckoutIds();
     const unfulfilled = await prisma.payment.findMany({
       where: {
         provider: { in: ONLINE_PROVIDER_TYPES },
@@ -1107,6 +1176,9 @@ export async function runGatewaySettlementSweep(api: DeliverySendApi): Promise<v
             status: OrderStatus.PAID,
             updatedAt: { lt: cutoff },
             otherProductOrder: { is: null },
+            ...(blockedCheckoutIds.length > 0
+              ? { checkoutSessionId: { notIn: blockedCheckoutIds } }
+              : {}),
           },
         },
       },
@@ -1138,6 +1210,11 @@ export async function runGatewaySettlementSweep(api: DeliverySendApi): Promise<v
     if (expired.count > 0) {
       logger.info("expired stale gateway payments", { count: expired.count });
     }
+
+    // Codex P2 fix: durably retry OWNER alerts for any SERVICE_USERNAME_UNBOUND
+    // case that was committed but never notified (crash between commit and push,
+    // or a transient send failure). Idempotent — each case is marked delivered.
+    await sweepUnnotifiedServiceUnboundCases(api);
   } catch (err) {
     logger.error("gateway settlement sweep failed", { error: errorMessage(err) });
   }

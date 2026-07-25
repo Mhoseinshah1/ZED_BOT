@@ -19,7 +19,7 @@ import { clearAdminTextSettingsState } from "./admin-settings/text-settings.hand
 import { clearAdminStockState } from "./admin-stock/stock.handler.js";
 import { clearAdminSupportState } from "./admin-support/support-admin.handler.js";
 import { clearAdminUsersState } from "./admin-users/admin-users.handler.js";
-import { clearCheckoutState } from "./user-checkout/checkout-state.js";
+import { abandonCheckoutDraft } from "./user-checkout/checkout-state.js";
 import { clearSupportState } from "./user-support/support.handler.js";
 
 export const ADMIN_MENU_TEXT = "پنل مدیریت 🛠\n\nیک بخش را انتخاب کنید:";
@@ -63,7 +63,7 @@ export async function showAdminMenu(ctx: BotContext): Promise<void> {
   // any Phase 20 admin-users state (wallet draft + stored search query),
   // any Phase 21 payment-method configuration draft and any Phase 23
   // manual-order delivery draft.
-  clearCheckoutState(ctx);
+  await abandonCheckoutDraft(ctx, "ADMIN_PANEL");
   clearAdminUsersState(ctx);
   clearAdminPaymentState(ctx);
   clearManualOrderState(ctx);
