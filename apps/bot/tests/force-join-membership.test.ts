@@ -77,9 +77,31 @@ afterEach(() => {
   resetForceJoinRedisForTests();
 });
 
+/**
+ * Removes the SystemLog rows this suite's alerts produce.
+ *
+ * SystemLogDelivery rows reference SystemLog, and writeSystemLog queues a
+ * delivery whenever a Telegram log group is configured — which an earlier suite
+ * in a full-suite run does. Deleting the logs directly then trips
+ * SystemLogDelivery_systemLogId_fkey, so the children go first.
+ */
+async function deleteForceJoinSystemLogs(): Promise<void> {
+  const eventTypes = ["force_join.channel_unverifiable", "force_join.channel_auto_deactivated"];
+  const logs = await prisma.systemLog.findMany({
+    where: { eventType: { in: eventTypes } },
+    select: { id: true },
+  });
+  if (logs.length === 0) {
+    return;
+  }
+  const ids = logs.map((l) => l.id);
+  await prisma.systemLogDelivery.deleteMany({ where: { systemLogId: { in: ids } } });
+  await prisma.systemLog.deleteMany({ where: { id: { in: ids } } });
+}
+
 afterAll(async () => {
   if (hasDb) {
-    await prisma.systemLog.deleteMany({ where: { eventType: "force_join.channel_unverifiable" } });
+    await deleteForceJoinSystemLogs();
     await prisma.$disconnect();
   }
 });
@@ -272,7 +294,7 @@ describe.runIf(hasDb)("evaluateForceJoinMembership — unverifiable channels (§
   }
 
   afterAll(async () => {
-    await prisma.systemLog.deleteMany({ where: { eventType: "force_join.channel_unverifiable" } });
+    await deleteForceJoinSystemLogs();
     await prisma.forceJoinChannel.deleteMany({ where: { id: { in: createdIds } } });
   });
 
