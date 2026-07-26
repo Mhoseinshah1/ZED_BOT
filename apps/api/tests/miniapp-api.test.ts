@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 
 import { prisma } from "@zedbot/database";
 import Fastify, { type FastifyInstance } from "fastify";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 // =============================================================================
 // Mini App HTTP surface (M27-M51), driven with fastify.inject() against the
@@ -695,11 +695,16 @@ describe.skipIf(!hasDb)("mini app API", () => {
     }
   });
 
-  it("M51 a force-join gate reports that the bot must clear it", async () => {
+  it("M51 the force-join gate is enforced, and satisfied, over HTTP", async () => {
+    // This used to assert that an armed gate ALWAYS answered FORCE_JOIN_REQUIRED
+    // without ever checking membership - which meant a user who joined and
+    // verified in the bot was refused by the Mini App forever. The gate now
+    // asks Telegram, so the test drives both answers through the real route.
+    const chatId = -(1_000_000_000_000n + runTag);
     const channel = await prisma.forceJoinChannel.create({
       data: {
         title: `miniapp-test-${runTag}`,
-        chatId: -(1_000_000_000_000n + runTag),
+        chatId,
         joinUrl: `https://t.me/miniapp_test_${runTag}`,
         normalizedLink: `https://t.me/miniapp_test_${runTag}`,
         isActive: true,
@@ -710,21 +715,53 @@ describe.skipIf(!hasDb)("mini app API", () => {
       create: { key: "force_join_enabled", value: "true", type: "BOOLEAN" },
       update: { value: "true" },
     });
-    try {
-      const response = await app.inject({
+
+    // Telegram is stubbed: no outbound call, and membership is what the test
+    // says it is. `status` is the only thing the shared classifier reads.
+    let joined = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          result: { status: joined ? "member" : "left", is_member: joined },
+        }),
+      })),
+    );
+
+    const authenticate = () =>
+      app.inject({
         method: "POST",
         url: "/api/miniapp/auth",
         headers: { origin: "https://miniapp.test.example" },
         payload: { initData: initDataFor(OWNER_TELEGRAM_ID) },
       });
-      expect(response.statusCode).toBe(403);
-      const body = response.json();
+
+    try {
+      const refused = await authenticate();
+      expect(refused.statusCode).toBe(403);
+      const body = refused.json();
       expect(body.code).toBe("FORCE_JOIN_REQUIRED");
-      // The API cannot verify membership - only the bot can call Telegram - so
-      // it says so instead of guessing, and the client shows an "open the bot"
-      // action rather than a dead end.
+      // The bot is where the channel list with join buttons lives.
       expect(body.requiresBot).toBe(true);
+
+      // The user joins. Touching the row moves `updatedAt`, which is part of
+      // the membership cache key - the same invalidation an edit or a
+      // reactivation produces in the bot, and what keeps the short negative TTL
+      // from outliving the fact it described.
+      joined = true;
+      await prisma.forceJoinChannel.update({
+        where: { id: channel.id },
+        data: { title: `miniapp-test-${runTag}-touched` },
+      });
+
+      const admitted = await authenticate();
+      expect(admitted.statusCode).toBe(200);
+      expect(admitted.json().ok).toBe(true);
     } finally {
+      vi.unstubAllGlobals();
       await prisma.setting.upsert({
         where: { key: "force_join_enabled" },
         create: { key: "force_join_enabled", value: "false", type: "BOOLEAN" },
