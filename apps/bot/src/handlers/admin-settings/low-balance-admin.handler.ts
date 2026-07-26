@@ -357,10 +357,15 @@ lowBalanceAdminHandler.callbackQuery(LB_ADMIN_CB.backfill, async (ctx) => {
       "",
       `حد هشدار: ${formatTomanAmount(config.thresholdToman)}`,
       "",
-      // The headline number is what will actually be SENT, not merely who is
-      // below the threshold — the breakdown below shows the difference, so the
-      // OWNER confirms a number the run can really deliver.
-      `<b>پیام‌هایی که ارسال می‌شود: ${candidates.expectedRecipients}</b>`,
+      // An ESTIMATE, and labelled as one. The number is measured now; the run
+      // re-checks balance, status and preferences for every single user before
+      // it queues anything, so the count that is finally sent can only be this
+      // or lower. Presenting it as "messages that will be sent" claimed a
+      // certainty no honest implementation can have.
+      `<b>برآورد دریافت‌کنندگان واجد شرایط در حال حاضر: ${candidates.expectedRecipients}</b>`,
+      "",
+      "تعداد نهایی ارسال‌شده ممکن است کمتر باشد: پیش از ثبت و پیش از ارسال،",
+      "موجودی و تنظیمات هر کاربر دوباره بررسی می‌شود.",
       "",
       "<b>جزئیات:</b>",
       `زیر حد هشدار: ${candidates.belowThreshold}`,

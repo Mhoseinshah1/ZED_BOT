@@ -173,8 +173,21 @@ export function evaluateLowBalanceTransition(
  * historical keys.
  */
 export function lowBalanceDedupeKey(userId: string, cycle: number): string {
-  return `wallet-low-balance:v${LOW_BALANCE_RULE_VERSION}:${userId}:${cycle}`;
+  return `${LOW_BALANCE_DEDUPE_PREFIX}${userId}${LOW_BALANCE_DEDUPE_SEPARATOR}${cycle}`;
 }
+
+/**
+ * The two literal pieces `lowBalanceDedupeKey` is assembled from.
+ *
+ * They are exported because the admin candidate count has to ask the SAME
+ * question the worker asks — "does this user's current cycle already have its
+ * message?" — for a whole population at once, which means composing the key in
+ * SQL instead of in JavaScript. Reading the pieces from here rather than
+ * repeating the literal is what keeps the two spellings from drifting apart;
+ * L112 asserts the SQL-composed key equals this function's output.
+ */
+export const LOW_BALANCE_DEDUPE_PREFIX = `wallet-low-balance:v${LOW_BALANCE_RULE_VERSION}:`;
+export const LOW_BALANCE_DEDUPE_SEPARATOR = ":";
 
 /** Backfill-originated cycles share the same key space — one message per cycle. */
 export function lowBalanceBackfillDedupeKey(userId: string, cycle: number): string {

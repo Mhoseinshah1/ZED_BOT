@@ -9,8 +9,9 @@ import {
   errorMessage,
   formatTomanAmount,
   INT32_MAX,
-  lowBalanceDedupeKey,
   LOW_BALANCE_CONFIG_VERSION_KEY,
+  LOW_BALANCE_DEDUPE_PREFIX,
+  LOW_BALANCE_DEDUPE_SEPARATOR,
   LOW_BALANCE_REARM_MARGIN_KEY,
   LOW_BALANCE_THRESHOLD_KEY,
   rearmBoundaryToman,
@@ -130,76 +131,105 @@ export interface BackfillCandidateBreakdown {
   lowBalanceOptOuts: number;
   /** Of those, how many silenced the whole PAYMENT category. */
   paymentCategoryOptOuts: number;
-  /** Of those, how many already have the message for their current cycle. */
+  /**
+   * Of the eligible remainder, how many are ALERTED on a cycle greater than
+   * zero that already produced its deterministic message.
+   */
   alreadyNotified: number;
-  /** What the run intends to queue. This is the number the OWNER is shown. */
+  /**
+   * The eligibility estimate the OWNER is shown: how many users the run would
+   * queue a message for IF nothing changed between now and the run reaching
+   * them. It is not a promise — see `startLowBalanceBackfill`.
+   */
   expectedRecipients: number;
+}
+
+/** One row, five bigints — everything the aggregate returns. */
+interface CandidateAggregateRow {
+  below_threshold: bigint;
+  low_balance_opt_outs: bigint;
+  payment_category_opt_outs: bigint;
+  already_notified: bigint;
+  expected_recipients: bigint;
 }
 
 /**
  * Counts what a backfill would SEND, not merely who is poor.
  *
- * The earlier version showed every ACTIVE user below the threshold, which
- * over-promised: opted-out users and users already holding their current
- * cycle's message were counted and then skipped, so the OWNER confirmed a
- * number the run could not deliver.
+ * BOUNDED. This is ONE aggregate query. The previous version loaded every
+ * eligible user id and cycle into application memory, built a dedupe key per
+ * user and sent them all as a single `IN` list — which on a production-sized
+ * installation is hundreds of thousands of strings in the bot process and a
+ * statement far past PostgreSQL's bind-parameter limit. The admin screen would
+ * simply fail, and the failure would arrive as a generic error. The counts are
+ * now computed database-side with `FILTER`, so application memory is constant
+ * (one row) and the statement carries three parameters no matter how many users
+ * exist.
+ *
+ * EXACT. The classification mirrors the worker's rules, case for case:
+ *
+ *   no state row                                        -> recipient
+ *   ARMED (any cycle) while at or below the threshold   -> recipient
+ *   ALERTED, cycle 0 (the silent baseline)              -> recipient
+ *   ALERTED, cycle > 0, that cycle has no message       -> recipient
+ *   ALERTED, cycle > 0, that cycle HAS its message      -> already notified
+ *   opted out / payment category off / not ACTIVE       -> excluded
+ *
+ * The ARMED case is the one that was wrong before: a user re-armed after cycle 3
+ * still has a notification for cycle 3, and the old query counted them as
+ * already notified — while the worker would open cycle 4 and queue a message.
+ * The screen therefore promised FEWER messages than the run would send. Being
+ * ALERTED is now part of the condition, exactly as it is in the transition.
+ *
+ * "Recovered" needs no case: the population filter is `balance <= threshold` and
+ * the re-arm boundary is never below the threshold, so no user inside this set
+ * can be recovered.
  */
 export async function countBackfillCandidates(
   config: LowBalanceConfig,
+  client: Prisma.TransactionClient = prisma,
 ): Promise<BackfillCandidateBreakdown> {
-  const lowFilter = {
-    status: UserStatus.ACTIVE,
-    balanceToman: { lte: config.thresholdToman },
-  } as const;
+  // The dedupe key composed in SQL from the shared pieces. L112 asserts this
+  // spelling and `lowBalanceDedupeKey` produce byte-identical keys.
+  const [row] = await client.$queryRaw<CandidateAggregateRow[]>`
+    SELECT
+      COUNT(*) AS below_threshold,
+      COUNT(*) FILTER (
+        WHERE NOT u."lowBalanceNotificationsEnabled"
+      ) AS low_balance_opt_outs,
+      COUNT(*) FILTER (
+        WHERE u."lowBalanceNotificationsEnabled"
+          AND NOT u."paymentNotificationsEnabled"
+      ) AS payment_category_opt_outs,
+      COUNT(*) FILTER (
+        WHERE u."lowBalanceNotificationsEnabled"
+          AND u."paymentNotificationsEnabled"
+          AND n."id" IS NOT NULL
+      ) AS already_notified,
+      COUNT(*) FILTER (
+        WHERE u."lowBalanceNotificationsEnabled"
+          AND u."paymentNotificationsEnabled"
+          AND n."id" IS NULL
+      ) AS expected_recipients
+    FROM "User" u
+    LEFT JOIN "LowBalanceAlertState" s
+      ON s."userId" = u."id"
+    LEFT JOIN "AutomatedNotification" n
+      ON s."state" = 'ALERTED'
+     AND s."alertCycle" > 0
+     AND n."dedupeKey" =
+         ${LOW_BALANCE_DEDUPE_PREFIX} || u."id" ||
+         ${LOW_BALANCE_DEDUPE_SEPARATOR} || s."alertCycle"::text
+    WHERE u."status" = ${UserStatus.ACTIVE}::"UserStatus"
+      AND u."balanceToman" <= ${config.thresholdToman}
+  `;
 
-  const [belowThreshold, lowBalanceOptOuts, paymentCategoryOptOuts] = await Promise.all([
-    prisma.user.count({ where: lowFilter }),
-    prisma.user.count({ where: { ...lowFilter, lowBalanceNotificationsEnabled: false } }),
-    prisma.user.count({
-      where: {
-        ...lowFilter,
-        lowBalanceNotificationsEnabled: true,
-        paymentNotificationsEnabled: false,
-      },
-    }),
-  ]);
-
-  // Eligible users whose CURRENT cycle already produced its message. The
-  // deterministic key is the authority, so this counts real notifications
-  // rather than inferring from the state row alone.
-  const eligible = await prisma.user.findMany({
-    where: {
-      ...lowFilter,
-      lowBalanceNotificationsEnabled: true,
-      paymentNotificationsEnabled: true,
-      lowBalanceAlertState: { is: { alertCycle: { gt: 0 } } },
-    },
-    select: { id: true, lowBalanceAlertState: { select: { alertCycle: true } } },
-  });
-  let alreadyNotified = 0;
-  const keys = eligible
-    .map((u) =>
-      u.lowBalanceAlertState === null
-        ? null
-        : lowBalanceDedupeKey(u.id, u.lowBalanceAlertState.alertCycle),
-    )
-    .filter((k): k is string => k !== null);
-  if (keys.length > 0) {
-    alreadyNotified = await prisma.automatedNotification.count({
-      where: { dedupeKey: { in: keys } },
-    });
-  }
-
-  const expectedRecipients = Math.max(
-    0,
-    belowThreshold - lowBalanceOptOuts - paymentCategoryOptOuts - alreadyNotified,
-  );
   return {
-    belowThreshold,
-    lowBalanceOptOuts,
-    paymentCategoryOptOuts,
-    alreadyNotified,
-    expectedRecipients,
+    belowThreshold: Number(row?.below_threshold ?? 0n),
+    lowBalanceOptOuts: Number(row?.low_balance_opt_outs ?? 0n),
+    paymentCategoryOptOuts: Number(row?.payment_category_opt_outs ?? 0n),
+    alreadyNotified: Number(row?.already_notified ?? 0n),
+    expectedRecipients: Number(row?.expected_recipients ?? 0n),
   };
 }
 
@@ -215,6 +245,10 @@ function isUniqueViolation(err: unknown): boolean {
 /**
  * Creates the single backfill run. The worker advances it; this only authorises
  * it, freezing the config it was authorised against.
+ *
+ * `estimatedCount` is exactly that — an estimate. Balances move, users opt out,
+ * and every unit re-checks eligibility before it queues anything, so the number
+ * of messages actually sent can only be this or fewer.
  *
  * Only the EXPECTED uniqueness violation becomes `already-running`. Reporting
  * every database failure that way told the OWNER a run existed when none did,
