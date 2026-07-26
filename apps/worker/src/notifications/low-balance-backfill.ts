@@ -43,6 +43,15 @@ import {
 // alerted in this cycle cannot be alerted twice. One run can be PENDING or
 // RUNNING at a time (a partial unique index), and a durable worker claim stops
 // two replicas advancing the same run.
+//
+// LOCK ORDER. Every per-user unit takes locks in exactly this order:
+//
+//   LowBalanceBackfillRun (the claim)  ->  LowBalanceAlertState  ->  outbox row
+//
+// and nothing anywhere takes them the other way round: the wallet observer and
+// the reconciliation sweep only ever take the state lock, and cancellation and
+// claim takeover only ever take the run lock. So no cycle exists and the units
+// cannot deadlock against the admin surface or against a checkout.
 // =============================================================================
 
 const log = createLogger("worker:low-balance-backfill");
@@ -133,8 +142,10 @@ export async function runLowBalanceBackfillTick(): Promise<BackfillTickResult> {
       queued += page.queued;
       skipped += page.skipped;
 
-      // A unit reported the claim gone. Return immediately WITHOUT releasing —
-      // the run belongs to someone else now, or the OWNER cancelled it.
+      // A unit reported the claim gone. Return immediately; the `finally`
+      // release below is guarded on our own token and a RUNNING status, so it
+      // matches nothing and cannot disturb whoever owns the run now — or undo
+      // the OWNER's cancellation.
       if (page.lostClaim) {
         return { status: "lost-claim", runId: run.id, processed, queued, skipped };
       }
@@ -264,10 +275,8 @@ async function advanceOneBatch(
   }
 
   // The cursor and the counters commit with the run row, after the units they
-  // describe have already committed.
-  // Counters and cursor commit only while we still hold the claim, and only for
-  // units that actually committed — so they can never move backwards or be
-  // incremented twice by a worker that lost the run mid-page.
+  // describe have already committed. They move only while we still hold the
+  // claim, and only for units that actually committed.
   await prisma.lowBalanceBackfillRun.updateMany({
     where: { id: runId, ownerToken, status: LowBalanceBackfillStatus.RUNNING },
     data: {
@@ -288,23 +297,40 @@ async function advanceOneBatch(
   };
 }
 
+/** The claim fields, read back from the LOCKED run row. */
+interface LockedClaim {
+  status: string;
+  ownerToken: string | null;
+  leaseExpiresAt: Date | null;
+}
+
 /**
- * One user, one transaction — and one CLAIM CHECK.
+ * One user, one transaction — and one LOCKED CLAIM.
  *
  * Everything that authorises a message happens inside this transaction:
  *
- *   1. the run is still ours: id, RUNNING, our owner token, lease not expired,
- *      and no committed cancellation;
+ *   1. the run row is LOCKED, then checked: id, RUNNING, our owner token,
+ *      lease not expired — a cancellation is a status change, so this same
+ *      check enforces it;
  *   2. the user is still eligible and still low;
  *   3. the state row is LOCKED and its current cycle read;
  *   4. that locked cycle is checked for an existing message;
  *   5. the transition and the outbox row are written.
  *
- * Checking the claim only between batches is not enough. A worker whose lease
- * expired mid-batch keeps going, another worker takes over the same run, and
- * both process the same page — and a cancellation committed mid-batch still
- * lets a whole bounded batch of messages out. Verifying per unit makes both
- * impossible, and it costs one indexed read per user.
+ * THE LOCK IS THE POINT. A plain read of the run row proves nothing: it sees a
+ * snapshot, and a cancellation or a claim takeover can commit the instant after
+ * it — while this transaction goes on to open a cycle and queue a message. The
+ * `FOR UPDATE` puts this unit and every mutation of the claim into ONE serial
+ * order. Either the cancellation/takeover commits first, in which case the lock
+ * is granted only afterwards and PostgreSQL re-evaluates the row we then read
+ * (so we see the new status and stop), or this unit takes the lock first, in
+ * which case the cancellation waits and takes effect on the NEXT unit — after
+ * this one has committed atomically. There is no interleaving in between.
+ *
+ * The row is locked by PRIMARY KEY and the fields are judged afterwards, rather
+ * than folding the conditions into the WHERE: a predicate that no longer matches
+ * locks nothing, and "nothing was locked" cannot be told apart from "somebody
+ * else holds it" without a second query.
  */
 async function processOneUser(
   runId: string,
@@ -314,18 +340,20 @@ async function processOneUser(
 ): Promise<UnitOutcome> {
   try {
     return await prisma.$transaction(async (tx) => {
-      // (1) Still our run, still running, lease still valid. A cancellation is
-      // a status change, so this same read enforces it.
-      const claim = await tx.lowBalanceBackfillRun.findFirst({
-        where: {
-          id: runId,
-          status: LowBalanceBackfillStatus.RUNNING,
-          ownerToken,
-          leaseExpiresAt: { gt: new Date() },
-        },
-        select: { id: true },
-      });
-      if (claim === null) {
+      // (1) LOCK the claim, then judge it.
+      const [claim] = await tx.$queryRaw<LockedClaim[]>`
+        SELECT "status"::text AS "status", "ownerToken", "leaseExpiresAt"
+        FROM "LowBalanceBackfillRun"
+        WHERE "id" = ${runId}
+        FOR UPDATE
+      `;
+      if (
+        claim === undefined ||
+        claim.status !== LowBalanceBackfillStatus.RUNNING ||
+        claim.ownerToken !== ownerToken ||
+        claim.leaseExpiresAt === null ||
+        claim.leaseExpiresAt.getTime() <= Date.now()
+      ) {
         return "lost-claim";
       }
 
@@ -339,14 +367,14 @@ async function processOneUser(
           paymentNotificationsEnabled: true,
         },
       });
-      if (user === null || user.status !== UserStatus.ACTIVE) {
-        return "skipped";
-      }
-      // Re-checked live: the balance may have recovered since the page was read.
-      if (user.balanceToman > config.thresholdToman) {
-        return "skipped";
-      }
-      if (!user.lowBalanceNotificationsEnabled || !user.paymentNotificationsEnabled) {
+      if (
+        user === null ||
+        user.status !== UserStatus.ACTIVE ||
+        // Re-checked live: the balance may have recovered since the page was read.
+        user.balanceToman > config.thresholdToman ||
+        !user.lowBalanceNotificationsEnabled ||
+        !user.paymentNotificationsEnabled
+      ) {
         return "skipped";
       }
 
