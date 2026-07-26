@@ -61,6 +61,10 @@ async function publish(body: string): Promise<string> {
   const id = await makeDraft(body);
   const result = await publishTermsDraft(id, null);
   if (!result.ok) throw new Error(`publish failed: ${result.code}`);
+  // Enforcement is switched ON here because that is the only world in which
+  // an acceptance is meaningful: recordTermsAcceptance refuses to write once
+  // the master switch is off (a keyboard rendered before it was disabled).
+  await enableTermsRequirement();
   return result.document.id;
 }
 
@@ -260,17 +264,60 @@ describe.runIf(hasDb)("versioned terms — concurrency (§10)", () => {
     );
   });
 
+  it("C10b 100 different users accepting at once each land exactly one row", async () => {
+    // Publishing re-gates the whole user base at once, so a burst on this scale
+    // is the NORMAL case, not an edge case. It is also why the acceptance path
+    // does not take the configuration advisory lock: 100 serialized writers each
+    // holding a pooled connection would starve the rest of the bot.
+    const id = await publish("قوانین");
+    const users = await Promise.all(Array.from({ length: 100 }, () => makeUser()));
+
+    const results = await Promise.all(users.map((u) => recordTermsAcceptance(u, id)));
+
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(await prisma.termsAcceptance.count({ where: { termsDocumentId: id } })).toBe(100);
+    // Every row names the same document and version — no partial/duplicate writes.
+    const rows = await prisma.termsAcceptance.findMany({ where: { termsDocumentId: id } });
+    expect(new Set(rows.map((r) => r.userId)).size).toBe(100);
+    expect(rows.every((r) => r.termsVersion === 1)).toBe(true);
+    // And every one of them got their legacy timestamp stamped.
+    expect(
+      await prisma.user.count({ where: { id: { in: users }, termsAcceptedAt: { not: null } } }),
+    ).toBe(100);
+  });
+
   it("C11 edit racing publish never changes a published body", async () => {
     const draftId = await makeDraft("متن اصلی");
 
-    await Promise.all([
+    const [publishResult, editResult] = await Promise.all([
       publishTermsDraft(draftId, null),
       updateTermsDraftBody(draftId, "متن دستکاری‌شده"),
     ]);
 
     const row = await prisma.termsDocument.findUniqueOrThrow({ where: { id: draftId } });
-    if (row.status === TermsDocumentStatus.PUBLISHED) {
-      // Published documents are immutable: the edit must have lost.
+
+    if (!publishResult.ok) {
+      // Publication lost outright - nothing became mandatory.
+      expect(row.status).toBe(TermsDocumentStatus.DRAFT);
+      return;
+    }
+
+    // Editing a draft before it is published is legitimate, so BOTH bodies are
+    // valid outcomes here. The invariant is not "the original text wins", it is
+    // that whatever body publication FROZE is the body that survives: the stored
+    // row must never drift away from what publishTermsDraft returned.
+    expect(row.status).toBe(TermsDocumentStatus.PUBLISHED);
+    expect(row.body).toBe(publishResult.document.body);
+    expect(row.contentHash).toBe(publishResult.document.contentHash);
+
+    if (editResult.ok) {
+      // The edit committed while the row was still a draft; publication then
+      // froze the edited text and the hash above proves the two agree.
+      expect(row.body).toBe("متن دستکاری‌شده");
+    } else {
+      // The edit arrived after publication and was refused - a published
+      // document is not reachable through the draft path (see also T17).
+      expect(editResult.code).toBe("NOT_FOUND");
       expect(row.body).toBe("متن اصلی");
     }
   });

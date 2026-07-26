@@ -7,7 +7,7 @@ import type { BotContext } from "../core/context.js";
 import { GENERIC_ERROR_TEXT } from "../core/errors.js";
 import { logger } from "../core/logger.js";
 import { resolveForceJoinGate } from "../services/force-join/force-join-gate.js";
-import { getBooleanSetting } from "../services/settings.service.js";
+import { getBooleanSetting, tryGetBooleanSettingFresh } from "../services/settings.service.js";
 import { OPS_EVENTS, writeSystemLog } from "../services/system-log.service.js";
 import { isTermsAcceptCallback } from "../services/terms/terms-callbacks.js";
 import {
@@ -64,7 +64,22 @@ export function resetTermsMisconfigAlertForTests(): void {
  * Returns true when the user may proceed. Sends the blocking message itself
  * otherwise. Also guarantees ctx.dbUser is set for downstream handlers.
  */
-export async function ensureUserAccess(ctx: BotContext): Promise<boolean> {
+export interface EnsureAccessOptions {
+  /**
+   * Normally the terms step skips itself for the accept action, so pressing
+   * accept is not gated into the very screen it is trying to satisfy. AFTER the
+   * acceptance is recorded that skip becomes wrong: if a newer version was
+   * published in between, the user still owes it, and keeping the skip would
+   * walk them past the gate into the menu. The accept handler therefore re-runs
+   * the gate with this set.
+   */
+  enforceTerms?: boolean;
+}
+
+export async function ensureUserAccess(
+  ctx: BotContext,
+  options: EnsureAccessOptions = {},
+): Promise<boolean> {
   const from = ctx.from;
   if (from === undefined || from.is_bot) {
     return false;
@@ -107,7 +122,7 @@ export async function ensureUserAccess(ctx: BotContext): Promise<boolean> {
   //    acceptance row for version 4, so publishing a new version re-gates
   //    everyone without touching a single user row.
   if (
-    !isTermsAcceptCallback(callbackData) &&
+    (options.enforceTerms === true || !isTermsAcceptCallback(callbackData)) &&
     (await getBooleanSetting(TERMS_REQUIRED_KEY, false))
   ) {
     const published = await getPublishedTerms();
@@ -148,6 +163,64 @@ export async function ensureUserAccess(ctx: BotContext): Promise<boolean> {
     }
   }
 
+  return true;
+}
+
+/**
+ * Gate steps 1-2 ONLY: maintenance mode and account status.
+ *
+ * The terms-accept action needs these applied BEFORE it records anything — a
+ * blocked user pressing a stale accept button must not write an acceptance row,
+ * and maintenance mode must not admit database writes. It cannot simply call
+ * `ensureUserAccess` first, because that would run the FORCE-JOIN step ahead of
+ * terms and invert the documented gate order. Returns true when the caller may
+ * proceed; sends its own message otherwise.
+ */
+export async function ensurePreTermsAccess(ctx: BotContext): Promise<boolean> {
+  const from = ctx.from;
+  if (from === undefined || from.is_bot) {
+    return false;
+  }
+  // Maintenance FIRST, and read FRESH. registerOrUpdateUser is itself a write
+  // (it upserts the user and touches profile / last-seen), so checking after it
+  // would let the very scenario this guard exists to stop through. The cached
+  // reader can serve a stale `false` for its TTL — and in a multi-process
+  // deployment for longer — which is exactly the window in which an operator
+  // has just declared an emergency, so this one precondition pays for a real
+  // read rather than trusting the cache.
+  //
+  // And it FAILS CLOSED. The ordinary fresh reader returns its fallback when
+  // the query errors, so a transient database failure would read exactly like
+  // "maintenance is off" and this guard would wave through the write it exists
+  // to stop — while the later cached gate could still say `true` and block the
+  // user, after the acceptance had already been recorded. "We could not read
+  // the switch" is not "the switch is off".
+  const maintenance = await tryGetBooleanSettingFresh("maintenance_mode", false);
+  if (!maintenance.ok) {
+    await safeAnswerCallback(ctx);
+    await safeReply(ctx, GENERIC_ERROR_TEXT);
+    return false;
+  }
+  if (maintenance.value) {
+    await safeAnswerCallback(ctx);
+    await safeReply(ctx, await getMessageTemplate("bot_off_text"));
+    return false;
+  }
+  if (ctx.dbUser === null) {
+    try {
+      ctx.dbUser = await registerOrUpdateUser(from);
+    } catch (err) {
+      logger.error("user registration failed", { error: errorMessage(err) });
+      await safeAnswerCallback(ctx);
+      await safeReply(ctx, GENERIC_ERROR_TEXT);
+      return false;
+    }
+  }
+  if (ctx.dbUser.status !== UserStatus.ACTIVE) {
+    await safeAnswerCallback(ctx);
+    await safeReply(ctx, await getMessageTemplate("blocked_text", ACCESS_DENIED_TEXT));
+    return false;
+  }
   return true;
 }
 

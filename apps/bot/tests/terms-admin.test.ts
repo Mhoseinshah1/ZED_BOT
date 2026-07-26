@@ -13,6 +13,7 @@ import {
 import { clearSettingsCache, getBooleanSettingFresh } from "../src/services/settings.service.js";
 import {
   createTermsDraft,
+  enableTermsRequirement,
   getDraftTerms,
   getPublishedTerms,
   publishTermsDraft,
@@ -275,6 +276,7 @@ describe.runIf(hasDb)("terms admin — overview + buttons (§8)", () => {
   it("A05 the overview reports enforcement, version, date, draft state and counts", async () => {
     const id = await publish("متن قوانین منتشرشده");
     const user = await makeUser();
+    await enableTermsRequirement();
     await recordTermsAcceptance(user, id);
     await runCallback("admin:terms:enable", OWNER);
 
@@ -294,6 +296,7 @@ describe.runIf(hasDb)("terms admin — overview + buttons (§8)", () => {
     const id = await publish("قوانین");
     const userId = await makeUser();
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    await enableTermsRequirement();
     await recordTermsAcceptance(userId, id);
 
     const { rec } = await runCallback("admin:terms:root", OWNER);
@@ -306,6 +309,7 @@ describe.runIf(hasDb)("terms admin — overview + buttons (§8)", () => {
     const id = await publish("قوانین");
     const userId = await makeUser();
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    await enableTermsRequirement();
     await recordTermsAcceptance(userId, id);
 
     const { rec } = await runCallback("admin:terms:stats", OWNER);
@@ -640,6 +644,29 @@ describe.runIf(hasDb)("terms admin — history + preview (§8)", () => {
     await publish("قوانین");
     const { rec } = await runCallback("admin:terms:history:0", OWNER);
     expect(allText(rec)).toContain(`نسخه ${toPersianDigits(1)}`);
+  });
+
+  it("A32b an absurd page number is clamped to the last real page", async () => {
+    for (let i = 1; i <= 3; i += 1) await publish(`نسخه ${i}`);
+    // The callback regex accepts any digit run; unclamped this became an
+    // out-of-range Prisma `skip` and rendered "page 99999999 of 1".
+    const { rec } = await runCallback("admin:terms:history:99999999", OWNER);
+    const text = allText(rec);
+    expect(text).toContain(`نسخه ${toPersianDigits(3)}`);
+    expect(text).toContain(`صفحه ${toPersianDigits(1)} از ${toPersianDigits(1)}`);
+  });
+
+  it("A33b the preview stays inside Telegram's limit with a large published+draft pair", async () => {
+    // A new draft is SEEDED from the published body, so both are large at once.
+    await publish("ب".repeat(3000));
+    const draft = await createTermsDraft(null);
+    if (!draft.ok) throw new Error("draft failed");
+
+    const { rec } = await runCallback("admin:terms:preview", OWNER);
+    for (const sent of rec.sent) {
+      expect(sent.text.length).toBeLessThanOrEqual(4096);
+    }
+    expect(rec.sent.length).toBeGreaterThan(0);
   });
 
   it("A33 preview shows the published version and the draft side by side", async () => {

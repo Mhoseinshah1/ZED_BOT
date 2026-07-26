@@ -1,8 +1,9 @@
+import { readFileSync } from "node:fs";
+
 import { prisma, TermsDocumentStatus } from "@zedbot/database";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
-  bootstrapLegacyTermsDocument,
   createTermsDraft,
   deleteTermsDraft,
   disableTermsRequirement,
@@ -73,6 +74,10 @@ async function publish(body: string): Promise<{ id: string; version: number }> {
   if (!updated.ok) throw new Error(`draft update failed: ${updated.code}`);
   const published = await publishTermsDraft(updated.draft.id, null);
   if (!published.ok) throw new Error(`publish failed: ${published.code}`);
+  // Enforcement is switched ON here because that is the only world in which
+  // an acceptance is meaningful: recordTermsAcceptance refuses to write once
+  // the master switch is off (a keyboard rendered before it was disabled).
+  await enableTermsRequirement();
   return { id: published.document.id, version: published.document.version ?? -1 };
 }
 
@@ -285,6 +290,80 @@ describe.runIf(hasDb)("versioned terms — acceptance (§3, §6, §10)", () => {
     await prisma.$disconnect();
   });
 
+  it("T25a records NOTHING once enforcement has been switched off", async () => {
+    // The keyboard was rendered while terms were required; the OWNER disabled
+    // them before the user pressed it. Nothing is owed, so nothing may be
+    // written — not the acceptance row, not the legacy timestamp.
+    const { id } = await publish("قوانین");
+    await enableTermsRequirement();
+    const userId = await makeUser();
+    await disableTermsRequirement();
+
+    const result = await recordTermsAcceptance(userId, id);
+
+    expect(result).toEqual({ ok: false, code: "DISABLED" });
+    expect(await prisma.termsAcceptance.count({ where: { userId } })).toBe(0);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).termsAcceptedAt).
+      toBeNull();
+  });
+
+  it("T25b a duplicate acceptance leaves the transaction usable (ON CONFLICT, not a caught 23505)", async () => {
+    // A raised unique violation would ABORT the transaction, so the legacy
+    // timestamp written after it could never commit. Proving the write lands is
+    // proving the insert used ON CONFLICT DO NOTHING rather than a caught error.
+    const { id } = await publish("قوانین");
+    await enableTermsRequirement();
+    const userId = await makeUser();
+
+    await recordTermsAcceptance(userId, id);
+    // Clear the legacy stamp so the second call has something to write.
+    await prisma.user.update({ where: { id: userId }, data: { termsAcceptedAt: null } });
+
+    const second = await recordTermsAcceptance(userId, id);
+
+    expect(second).toMatchObject({ ok: true, alreadyAccepted: true });
+    expect(await prisma.termsAcceptance.count({ where: { userId } })).toBe(1);
+    // The post-insert statement committed — impossible in an aborted transaction.
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).termsAcceptedAt).
+      not.toBeNull();
+  });
+
+  it("T25c honours every truthy setting representation, not just the literal 'true'", async () => {
+    // getBooleanSetting accepts "true"/"1"/"yes" case-insensitively, so the gate
+    // considers an install storing "1" ENABLED. If this path disagreed it would
+    // refuse to record, the gate would re-show the same screen, and the user
+    // could never get past it.
+    const { id } = await publish("قوانین");
+    const userId = await makeUser();
+
+    for (const raw of ["1", "yes", "TRUE", "True"]) {
+      await prisma.termsAcceptance.deleteMany({ where: { userId } });
+      await prisma.setting.update({ where: { key: TERMS_REQUIRED_KEY }, data: { value: raw } });
+      clearSettingsCache();
+
+      const result = await recordTermsAcceptance(userId, id);
+
+      expect(result, `value ${raw} must be treated as enabled`).toMatchObject({ ok: true });
+    }
+  });
+
+  it("T25d never moves the legacy timestamp backwards", async () => {
+    // Two acceptances can interleave without the configuration lock; the older
+    // one resuming last must not drag `termsAcceptedAt` back in time.
+    const { id } = await publish("قوانین");
+    const userId = await makeUser();
+    await recordTermsAcceptance(userId, id);
+
+    const future = new Date(Date.now() + 60_000);
+    await prisma.user.update({ where: { id: userId }, data: { termsAcceptedAt: future } });
+    await prisma.termsAcceptance.deleteMany({ where: { userId } });
+
+    await recordTermsAcceptance(userId, id);
+
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    expect(after.termsAcceptedAt?.getTime()).toBe(future.getTime());
+  });
+
   it("T26 accepting records the exact version and stamps the legacy timestamp", async () => {
     const { id, version } = await publish("قوانین");
     const userId = await makeUser();
@@ -334,9 +413,17 @@ describe.runIf(hasDb)("versioned terms — acceptance (§3, §6, §10)", () => {
   });
 
   it("T30 accepting with nothing published accepts nothing", async () => {
+    // Enforcement ON but the published document gone — the misconfiguration the
+    // gate steps aside for. Publishing first is what makes enabling legal; the
+    // document is then removed to reach the state under test.
+    const { id } = await publish("قوانین");
     const userId = await makeUser();
-    const result = await recordTermsAcceptance(userId, "00000000-0000-0000-0000-000000000000");
+    await prisma.termsDocument.delete({ where: { id } });
+
+    const result = await recordTermsAcceptance(userId, id);
+
     expect(result).toEqual({ ok: false, code: "NOT_FOUND" });
+    expect(await prisma.termsAcceptance.count({ where: { userId } })).toBe(0);
   });
 
   it("T31 acceptance history survives publishing a new version", async () => {
@@ -386,6 +473,18 @@ describe.runIf(hasDb)("versioned terms — acceptance (§3, §6, §10)", () => {
     expect(await prisma.termsAcceptance.count({ where: { userId } })).toBe(0);
     // The published document is untouched and still usable by everyone else.
     expect((await getPublishedTerms())?.id).toBe(id);
+  });
+
+  it("T33c stats are a single snapshot and exclude non-active users", async () => {
+    const { id } = await publish("قوانین");
+    const baseline = await activeUserCount();
+    const blocked = await makeUser("BLOCKED");
+    await recordTermsAcceptance(blocked, id);
+
+    const stats = await getTermsAcceptanceStats(id);
+    // A BLOCKED user's acceptance counts on neither side.
+    expect(stats.accepted).toBe(0);
+    expect(stats.pending).toBe(baseline);
   });
 
   it("T33 acceptance stats are aggregates over ACTIVE users only", async () => {
@@ -479,84 +578,218 @@ describe.runIf(hasDb)("versioned terms — enable/disable safety (§7)", () => {
   });
 });
 
-describe.runIf(hasDb)("versioned terms — legacy bootstrap (§11)", () => {
+
+// =============================================================================
+// The 20260727130000 repair migration, executed as the real file (§11).
+//
+// The bootstrap in 20260727120000 copied the legacy body VERBATIM. This
+// migration repairs that — but version 1 already carries backfilled acceptance
+// rows, so it must never be rewritten: an acceptance that keeps pointing at a
+// changed body would claim the user accepted wording they never saw. A body
+// needing repair is therefore ARCHIVED and the clean text published as a NEW
+// version, and text that would have to be CUT is never republished at all.
+// =============================================================================
+
+const REPAIR_MIGRATION_SQL = readFileSync(
+  new URL(
+    "../../../packages/database/prisma/migrations/20260727130000_normalize_bootstrapped_terms_body/migration.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
+
+/** Writes a bootstrapped-looking published version 1 (no admin author). */
+async function seedBootstrappedV1(body: string): Promise<string> {
+  const row = await prisma.termsDocument.create({
+    data: {
+      version: 1,
+      body,
+      status: TermsDocumentStatus.PUBLISHED,
+      contentHash: termsContentHash(body),
+      publishedAt: new Date(),
+    },
+  });
+  return row.id;
+}
+
+async function runRepairMigration(): Promise<void> {
+  await prisma.$executeRawUnsafe(REPAIR_MIGRATION_SQL);
+}
+
+describe.runIf(hasDb)("versioned terms — bootstrap repair migration (§11)", () => {
   beforeEach(resetTermsState);
   afterAll(async () => {
     await resetTermsState();
     await prisma.$disconnect();
   });
 
-  it("T40 does nothing when no legacy terms text exists", async () => {
-    expect(await bootstrapLegacyTermsDocument()).toEqual({
-      ok: true,
-      created: false,
-      reason: "NO_LEGACY_TEXT",
-    });
-    expect(await prisma.termsDocument.count()).toBe(0);
-  });
+  it("M1 archives the dirty version 1 and publishes the cleaned text as a new version", async () => {
+    const dirty = `‮قوانین‌استفاده\nخط دوم\tتب`;
+    const v1 = await seedBootstrappedV1(dirty);
 
-  it("T41 does nothing when the legacy text is only whitespace", async () => {
-    await prisma.messageTemplate.create({
-      data: {
-        key: "terms_text",
-        title: "متن قوانین",
-        category: "general",
-        defaultContent: "x",
-        currentContent: "   \n\u200b ",
-      },
-    });
-    expect(await bootstrapLegacyTermsDocument()).toMatchObject({ created: false });
-    expect(await prisma.termsDocument.count()).toBe(0);
-  });
+    await runRepairMigration();
 
-  it("T42 creates version 1 and backfills existing acceptances with original timestamps", async () => {
-    const acceptedAt = new Date("2026-01-15T10:20:30.000Z");
-    const accepted = await prisma.user.create({
-      data: { telegramId: nextTelegramId(), status: "ACTIVE", termsAcceptedAt: acceptedAt },
-    });
-    createdUserIds.push(accepted.id);
-    const never = await makeUser();
-
-    await prisma.messageTemplate.create({
-      data: {
-        key: "terms_text",
-        title: "متن قوانین",
-        category: "general",
-        defaultContent: "x",
-        currentContent: "قوانین قدیمی سرویس",
-      },
-    });
-
-    const result = await bootstrapLegacyTermsDocument();
-    expect(result).toMatchObject({ ok: true, created: true });
+    const original = await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } });
+    expect(original.status).toBe(TermsDocumentStatus.ARCHIVED);
+    // Byte-for-byte untouched: this is what the acceptance rows refer to.
+    expect(original.body).toBe(dirty);
 
     const published = await getPublishedTerms();
-    expect(published?.version).toBe(1);
-    expect(published?.body).toBe("قوانین قدیمی سرویس");
-
-    // The previously-accepting user is NOT asked to accept again, and keeps
-    // their original timestamp.
-    const row = await prisma.termsAcceptance.findFirstOrThrow({ where: { userId: accepted.id } });
-    expect(row.acceptedAt.getTime()).toBe(acceptedAt.getTime());
-    expect(row.source).toBe("MIGRATION");
-    expect(await hasAcceptedTermsDocument(accepted.id, published?.id ?? "")).toBe(true);
-    // Someone who never accepted still has to.
-    expect(await hasAcceptedTermsDocument(never, published?.id ?? "")).toBe(false);
+    expect(published?.version).toBe(2);
+    expect(published?.body).toBe("قوانین‌استفاده\nخط دوم\tتب");
+    expect(published?.contentHash).toBe(termsContentHash(published?.body ?? ""));
+    // ZWNJ survives — it is a Persian letter, not formatting.
+    expect(published?.body).toContain("‌");
   });
 
-  it("T43 is idempotent — a second run creates nothing", async () => {
-    await prisma.messageTemplate.create({
-      data: {
-        key: "terms_text",
-        title: "متن قوانین",
-        category: "general",
-        defaultContent: "x",
-        currentContent: "قوانین قدیمی",
-      },
-    });
-    await bootstrapLegacyTermsDocument();
-    const again = await bootstrapLegacyTermsDocument();
-    expect(again).toEqual({ ok: true, created: false, reason: "DOCUMENT_EXISTS" });
+  it("M2 leaves NOTHING published when the body is only invisible characters", async () => {
+    // btrim() alone strips spaces but not tabs or newlines, so the emptiness
+    // test has to ignore all whitespace or this body survives as a blank screen.
+    const v1 = await seedBootstrappedV1("\t‮\n");
+
+    await runRepairMigration();
+
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    expect(await getPublishedTerms()).toBeNull();
+  });
+
+  it("M3 refuses to republish a body it would have to truncate", async () => {
+    const v1 = await seedBootstrappedV1(`‮${"پ".repeat(4000)}`);
+
+    await runRepairMigration();
+
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    // Cutting terms of service and demanding acceptance of the remainder would
+    // drop real clauses; publishing nothing is the honest outcome.
+    expect(await getPublishedTerms()).toBeNull();
     expect(await prisma.termsDocument.count()).toBe(1);
+  });
+
+  it("M4 leaves an already-clean version 1 completely alone", async () => {
+    const clean = "قوانین‌تمیز";
+    const v1 = await seedBootstrappedV1(clean);
+    const before = await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } });
+
+    await runRepairMigration();
+
+    const after = await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } });
+    expect(after.status).toBe(TermsDocumentStatus.PUBLISHED);
+    expect(after.body).toBe(clean);
+    expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+    expect(await prisma.termsDocument.count()).toBe(1);
+  });
+
+  it("M5 preserves every existing acceptance, still pointing at version 1", async () => {
+    const v1 = await seedBootstrappedV1(`‮متن قانونی`);
+    const userId = await makeUser();
+    await prisma.termsAcceptance.create({
+      data: { userId, termsDocumentId: v1, termsVersion: 1, source: "MIGRATION" },
+    });
+
+    await runRepairMigration();
+
+    const acceptance = await prisma.termsAcceptance.findUniqueOrThrow({
+      where: { userId_termsDocumentId: { userId, termsDocumentId: v1 } },
+    });
+    expect(acceptance.termsVersion).toBe(1);
+    // The document it refers to still holds exactly the text that was accepted.
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).body).toBe(
+      "‮متن قانونی",
+    );
+    // ...and the user now owes an acceptance of the republished version.
+    const published = await getPublishedTerms();
+    expect(published?.version).toBe(2);
+    expect(await hasAcceptedTermsDocument(userId, published?.id ?? "")).toBe(false);
+  });
+
+  it("M7 archives an already-clean body that is over the limit", async () => {
+    // The body needs no normalization, so the "unchanged" fast path used to
+    // return early and leave it published. The screen refuses to render a
+    // document it cannot show in full, so that left every user gated with no
+    // button to press — the length check has to come first.
+    const v1 = await seedBootstrappedV1("ن".repeat(4000));
+
+    await runRepairMigration();
+
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    expect(await getPublishedTerms()).toBeNull();
+  });
+
+  it("M8 measures the limit in UTF-16 code units, as the application does", async () => {
+    // 2,100 emoji are 2,100 characters to PostgreSQL's length() but 4,200 to
+    // JavaScript's .length — over the limit the bot actually enforces.
+    const emoji = "😀".repeat(2100);
+    expect(emoji.length).toBe(4200);
+    const v1 = await seedBootstrappedV1(`‮${emoji}`);
+
+    await runRepairMigration();
+
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    expect(await getPublishedTerms()).toBeNull();
+  });
+
+  it("M9 treats a joiner-only body as blank", async () => {
+    // The RLO is what let this past the original bootstrap's emptiness test.
+    // Once stripped, only an invisible ZWNJ remains — which the application
+    // does not consider meaningful either.
+    const v1 = await seedBootstrappedV1("‮‌");
+
+    await runRepairMigration();
+
+    expect(isMeaningfulTermsBody("‌")).toBe(false);
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    expect(await getPublishedTerms()).toBeNull();
+  });
+
+  it("M11 treats an NBSP-only body as blank, as JavaScript trim() does", async () => {
+    // PostgreSQL's `[[:space:]]` and one-argument btrim() do NOT match U+00A0,
+    // but JavaScript `.trim()` and `\s` do. The RLO is what let this body past
+    // the original bootstrap's emptiness test; once stripped, a check written
+    // in POSIX whitespace would call the remaining invisible NBSP meaningful
+    // and republish a blank screen with a live accept button.
+    const v1 = await seedBootstrappedV1("‮ ");
+
+    await runRepairMigration();
+
+    expect(isMeaningfulTermsBody(" ")).toBe(false);
+    expect((await prisma.termsDocument.findUniqueOrThrow({ where: { id: v1 } })).status).toBe(
+      TermsDocumentStatus.ARCHIVED,
+    );
+    expect(await getPublishedTerms()).toBeNull();
+  });
+
+  it("M10 folds a lone carriage return to a newline instead of deleting it", async () => {
+    // Stripping CR as a control character would run two clauses together.
+    await seedBootstrappedV1("‮بند الف\rبند ب");
+
+    await runRepairMigration();
+
+    const published = await getPublishedTerms();
+    expect(published?.body).toBe("بند الف\nبند ب");
+    expect(published?.body).toBe(normalizeTermsBody("‮بند الف\rبند ب"));
+  });
+
+  it("M6 is idempotent — running it twice changes nothing further", async () => {
+    await seedBootstrappedV1(`‮قوانین`);
+
+    await runRepairMigration();
+    const afterFirst = await prisma.termsDocument.findMany({ orderBy: { createdAt: "asc" } });
+    await runRepairMigration();
+    const afterSecond = await prisma.termsDocument.findMany({ orderBy: { createdAt: "asc" } });
+
+    expect(afterSecond).toHaveLength(afterFirst.length);
+    expect(afterSecond.map((d) => `${d.version}:${d.status}:${d.body}`)).toEqual(
+      afterFirst.map((d) => `${d.version}:${d.status}:${d.body}`),
+    );
   });
 });

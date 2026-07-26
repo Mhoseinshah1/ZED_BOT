@@ -23,7 +23,11 @@ import {
   updateTermsDraftBody,
   type TermsBodyError,
 } from "../../services/terms/terms-document.service.js";
-import { formatTermsDate, toPersianDigits } from "../../services/terms/terms-views.js";
+import {
+  formatTermsDate,
+  TELEGRAM_MESSAGE_LIMIT,
+  toPersianDigits,
+} from "../../services/terms/terms-views.js";
 import { getButtonText } from "../../services/text.service.js";
 import { safeAnswerCallback, safeEditOrReply, safeReply } from "../../utils/safe-reply.js";
 
@@ -106,6 +110,8 @@ const STATS_TITLE = "📊 آمار پذیرش";
 /** Characters of a document body shown in the overview / list previews. */
 const PREVIEW_CHARS = 500;
 const HISTORY_PAGE_SIZE = 8;
+/** Fixed chrome around the two preview sections (titles, separators, newlines). */
+const PREVIEW_OVERHEAD = 200;
 
 export const termsAdminHandler = new Composer<BotContext>();
 export const termsAdminTextHandler = new Composer<BotContext>();
@@ -382,16 +388,24 @@ termsAdminHandler.callbackQuery(/^admin:terms:del_ok:([0-9a-f-]{4,36})$/i, async
 termsAdminHandler.callbackQuery(TERMS_CB.preview, async (ctx) => {
   if (!(await ownerGuard(ctx))) return;
   const [published, draft] = await Promise.all([getPublishedTerms(), getDraftTerms()]);
+  // A new draft is SEEDED from the published body, so both are usually about the
+  // same size — rendering 3,500 characters of each would break the message for
+  // any document over ~2,000. Split the remaining budget between the sections
+  // that are actually present.
+  const sections = (published === null ? 0 : 1) + (draft === null ? 0 : 1);
+  const perSection =
+    sections === 0 ? 0 : Math.floor((TELEGRAM_MESSAGE_LIMIT - PREVIEW_OVERHEAD) / sections);
+
   const lines = [PREVIEW_TITLE];
   if (published !== null) {
     lines.push(
       "",
       `— نسخه منتشرشده ${toPersianDigits(published.version ?? 0)} —`,
-      preview(published.body, TERMS_MAX_BODY_LENGTH),
+      preview(published.body, perSection),
     );
   }
   if (draft !== null) {
-    lines.push("", "— پیش‌نویس —", preview(draft.body, TERMS_MAX_BODY_LENGTH));
+    lines.push("", "— پیش‌نویس —", preview(draft.body, perSection));
   }
   if (published === null && draft === null) {
     lines.push("", "هیچ نسخه‌ای برای نمایش وجود ندارد.");
@@ -472,7 +486,13 @@ termsAdminHandler.callbackQuery(/^admin:terms:pub_ok:([0-9a-f-]{4,36})$/i, async
 termsAdminHandler.callbackQuery(/^admin:terms:history:(\d+)$/, async (ctx) => {
   if (!(await ownerGuard(ctx))) return;
   const requested = Number.parseInt(ctx.match[1], 10);
-  const page = Number.isFinite(requested) && requested > 0 ? requested : 0;
+  const asked = Number.isFinite(requested) && requested > 0 ? requested : 0;
+  // Clamp to the real page count BEFORE it reaches Prisma's `skip`: the callback
+  // regex accepts any digit run, and an absurd page would otherwise become an
+  // out-of-range offset (and render "page 100000000 of 1").
+  const totalCount = (await listTermsVersionsPage(0, 1)).total;
+  const lastPage = Math.max(0, Math.ceil(totalCount / HISTORY_PAGE_SIZE) - 1);
+  const page = Math.min(asked, lastPage);
   // Paginated in the DATABASE: an install with hundreds of versions never loads
   // them all, and the rendered message stays inside Telegram's size limit.
   const { rows, total } = await listTermsVersionsPage(page * HISTORY_PAGE_SIZE, HISTORY_PAGE_SIZE);

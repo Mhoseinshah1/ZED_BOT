@@ -145,22 +145,93 @@ current terms and the current button, which is exactly what the user needs.
 `recordTermsAcceptance(userId, documentId)`:
 
 - rejects anything that is not the currently published document (`STALE`),
+- refuses to write when enforcement is switched off (`DISABLED`) or when nothing
+  at all is published (`NOT_FOUND`) — both read the *database*, not a cache, so
+  a switch flipped by another process is honoured immediately,
 - is **idempotent** — a second press returns the original row; `acceptedAt` is
-  never overwritten and no duplicate row appears,
+  never overwritten and no duplicate row appears (a concurrent double-press is
+  resolved by the unique index and reported as an idempotent success),
 - writes the acceptance row and `User.termsAcceptedAt` in **one transaction**,
 - touches **nothing else**: no balance, order, referral, checkout, payment,
   force-join bypass, role or account status.
+
+Maintenance mode and account status are applied **before** anything is recorded
+(`ensurePreTermsAccess`), so a blocked user pressing a stale accept button
+writes no row at all. The terms and force-join steps are deliberately not
+applied there — this action *is* the terms step, and force join must stay after
+it.
+
+This path deliberately does **not** take the configuration advisory lock.
+Publishing re-gates the whole user base at once, which is exactly when a burst
+of acceptances arrives; serializing all of them behind the OWNER's lock would
+queue every user while each held a pooled connection. Correctness does not need
+it: the published document is re-read inside the transaction, so a publish
+committing meanwhile either makes this read return the NEW document (stale
+button rejected) or leaves it unchanged (an acceptance of the OLD document,
+which is historically valid and still does not satisfy the gate).
 
 After a successful acceptance the handler answers `قوانین تایید شد ✅` and
 re-runs the **full** access path, so the user continues to the force-join screen
 or the normal menu according to the gate order.
 
+A refusal re-draws the terms screen only for `STALE`, because that is the only
+code for which a document the user still owes actually exists. `DISABLED` and
+`NOT_FOUND` both mean the requirement itself is gone, so the handler falls
+through to the **same** access path instead — re-drawing would park the user on
+a screen no press can ever satisfy (pressing again returns the same code). This
+keeps the accept action consistent with §4: enforcement enabled with nothing
+published is a recoverable misconfiguration the gate steps aside for, and the
+state is reachable in production whenever the `20260727130000` repair migration
+archives an unrenderable version 1 without publishing a replacement.
+
+The same rule governs **every** path that would otherwise "show the current
+terms": the versioned button with an unresolvable short id, and the pre-upgrade
+`terms:accept` button, which names no document and so always lands there. All
+three re-enter the access path when there is no current version to draw, and
+none of them reports the absence to the user — a message about a
+misconfiguration only the OWNER can fix is a dead end, not an answer.
+
+Both of those id-less paths also read the master switch **fresh** before
+drawing anything. Disabling enforcement deliberately does not unpublish the
+current version, so a published document still exists to draw; without the
+check the user would be re-shown terms the bot no longer requires and would
+need a second press to get past them. A button carrying a valid document id
+needs no such check — `recordTermsAcceptance` reads the switch inside the
+acceptance transaction and answers `DISABLED`.
+
+## 5b. Reads that precede a write fail closed
+
+`ensurePreTermsAccess` is the one guard that runs *before* a mutation, so it
+does not use the ordinary fresh reader: that helper returns its fallback when
+the query errors, making a transient database failure indistinguishable from
+"maintenance is off". `tryGetBooleanSettingFresh` reports whether the read
+actually happened, and the guard refuses the action when it did not. A missing
+row is still a successful read of "not set" — only the query failing is
+treated as unknown.
+
+This matters because the failure is asymmetric: the cache is left untouched on
+error, so the later cached gate could still read `true` and block the user
+*after* the acceptance row had already been written. Every other
+`getBooleanSettingFresh` caller gates a read or a redraw rather than a write,
+and falling back there degrades to "let the normal gate decide", which writes
+nothing.
+
+For `DISABLED` the handler also drops `terms_required` from **this process's**
+30-second settings cache before re-entering the gate. The acceptance transaction
+decided `DISABLED` against the database; the gate reads the cache. Without the
+invalidation a worker whose cache still said `true` would immediately re-draw
+the retired screen, and every subsequent press would loop through the same pair
+of decisions.
+
 ---
 
 ## 6. Concurrency
 
-Every configuration mutation — publish, draft create/edit/delete, enable,
-disable, acceptance — takes one dedicated transaction-level advisory lock:
+Every **configuration** mutation — publish, draft create/edit/delete, enable,
+disable — takes one dedicated transaction-level advisory lock. The repair
+migration `20260727130000` takes the same lock, because deployments keep the old
+containers serving traffic while migrations run. Recording an **acceptance**
+deliberately does not (see below):
 
 ```ts
 const TERMS_CONFIG_LOCK = "zedbot-terms-config";
@@ -185,9 +256,21 @@ decorative.
 ### The acceptance/publication race
 
 If a user presses the version-N button at the moment version N+1 is published,
-`recordTermsAcceptance` re-reads the published document under the lock and
-**rejects the stale acceptance before inserting anything**. Whichever order the
-two transactions commit in:
+`recordTermsAcceptance` re-reads the published document inside its own
+transaction and **rejects the stale acceptance before inserting anything**.
+
+It does this *without* taking the configuration lock. Acceptance is the one hot
+path here — every user hits it after a publication — and serializing all of them
+behind the OWNER's lock would turn a routine publish into a stampede. It does not
+need the lock to be correct: the insert is keyed to one specific document id, and
+`@@unique([userId, termsDocumentId])` makes a duplicate impossible, so a `P2002`
+is simply read as "already accepted".
+
+A version-N acceptance may therefore legitimately *land* after version N+1 is
+published — it is a truthful historical record of a body the user really was
+shown. What can never happen is an acceptance row for N+1, because no button for
+N+1 was ever rendered to that user. Whichever order the two transactions commit
+in:
 
 - the user is never marked as having accepted N+1,
 - and they are still required to accept the current version.
@@ -247,13 +330,41 @@ simply retype. `/start`, `/admin` and any other command unwind the flow first �
 
 ---
 
+## 8b. Rendering bounds
+
+Telegram rejects a text message over 4,096 characters, `safeReply` swallows the
+400, and the gate still blocks — so an oversized terms screen would leave a user
+unable to proceed *and* unable to see why, forever. Bodies are capped at 3,500,
+but the title is an operator-editable template and an upgraded install can carry
+a large legacy body, so the composed screens are bounded explicitly:
+
+- `buildTermsScreen` clamps the operator-editable **title** to
+  `TERMS_TITLE_MAX_LENGTH` (400). 4,096 − 3,500 leaves 596 for the title, the
+  version and date lines and the separators, so a conforming body always renders
+  in full. The body is **never** shortened: the button accepts the whole
+  document, so eliding clauses would record acceptance of unseen text (§4). If a
+  legacy over-limit body still will not fit, the screen shows
+  `terms_unavailable_text` **with no accept button** — it fails closed rather
+  than offering acceptance of a partial document.
+- The admin preview splits its budget between the published document and the
+  draft. A new draft is seeded from the published body, so both are large at the
+  same time — rendering 3,500 of each broke the message for any document over
+  ~2,000 characters.
+- The repair migration archives an over-limit bootstrapped version 1 and
+  publishes **nothing** in its place, so an upgraded install never carries an
+  over-limit published version (see §10).
+
 ## 9. Privacy
 
 - Stored per acceptance: user id, document id, version, timestamp, and a coarse
   source string. **No IP address, no device fingerprint, no Telegram update
   payload.**
 - The admin overview and stats page expose **aggregate counts only** — no user
-  id, Telegram id, name or acceptance time reaches any page.
+  id, Telegram id, name or acceptance time reaches any page. The two counts are
+  read in one transaction so they cannot straddle a concurrent registration.
+  Read them as "ACTIVE users holding an acceptance row for the current version"
+  and "every other ACTIVE user" — the latter includes long-dormant accounts, and
+  the former includes acceptances backfilled by the upgrade.
 - The whole section is OWNER-only, so acceptance data is never shown to
   non-OWNER admins.
 - The migration and the bootstrap service report **counts only**; the terms body
@@ -268,10 +379,11 @@ simply retype. `/start`, `/admin` and any other command unwind the flow first �
 
 ## 10. Migration and existing installs
 
-Forward-only migration `20260727120000_versioned_mandatory_terms`. No existing
-migration is edited and no existing column is dropped.
+Two forward-only migrations. No existing migration is edited and no existing
+column is dropped.
 
-Its tail performs the one-time legacy bootstrap:
+`20260727120000_versioned_mandatory_terms` creates the tables, indexes and
+database-level invariants. Its tail performs the one-time legacy bootstrap:
 
 1. If any `TermsDocument` already exists → do nothing (re-run safe).
 2. Read `MessageTemplate.currentContent` for `terms_text`. If absent, or
@@ -284,10 +396,54 @@ So an upgrade never silently forces the whole user base to accept again, and a
 fresh database (which is migrated *before* it is seeded, so the registry is
 still empty) fabricates nothing.
 
-`bootstrapLegacyTermsDocument()` is an idempotent safety net for installs the
-migration cannot help — one whose `terms_text` was seeded after the migration
-ran, or one restored from a partial backup. It does nothing once any document
-exists.
+`20260727130000_normalize_bootstrapped_terms_body` then repairs what that
+bootstrap could not: it copied the legacy body **verbatim**, so a `terms_text`
+carrying bidi overrides, direction marks, isolates, zero-width space, a BOM or
+control characters — or simply running past 3,500 characters — would have become
+a version 1 the admin UI itself could never produce, and one the user screen now
+refuses to offer for acceptance at all.
+
+**Version 1 is never rewritten.** The bootstrap already backfilled an acceptance
+row for everyone who had accepted the legacy terms, and those rows point at
+version 1 by id. Editing that body in place would leave the audit trail claiming
+those users accepted wording they never saw. So the repair works by versioning,
+not by mutation:
+
+| Bootstrapped version 1 | Outcome |
+| --- | --- |
+| Already clean and within limits | Untouched. Nobody re-accepts. |
+| Dirty, but the text survives normalization intact | v1 → `ARCHIVED`; the cleaned text is **published as version 2**. Users accept once more. |
+| Nothing meaningful left after normalization | v1 → `ARCHIVED`; **nothing published**. |
+| Longer than 3,500 characters after normalization | v1 → `ARCHIVED`; **nothing published**. |
+
+The last row is deliberate: truncating terms of service and then demanding
+acceptance of the remainder would silently drop real clauses. Publishing nothing
+is the honest outcome — and it is safe, because enforcement with no published
+document is treated as a misconfiguration, so the gate steps aside and alerts
+the OWNER instead of locking anyone out until a real version is published.
+
+Normalization matches the application exactly, including preserving ZWNJ and ZWJ
+(ordinary Persian letters), and the emptiness test ignores **all** whitespace —
+one-argument `btrim` strips only spaces, so a body of, say, a bidi override
+wrapped in tabs would otherwise have survived as a blank screen.
+
+Scope is narrow: only the still-published version 1 written by the bootstrap
+(no admin author on either side). An archived version 1 is history and is left
+alone, and anything an operator published through the bot was already normalized
+on the way in. Existing acceptance rows are never modified — they keep pointing
+at the exact document, and the exact text, that was accepted.
+
+There is deliberately **no programmatic bootstrap helper**. An earlier revision
+carried `bootstrapLegacyTermsDocument()` as a "safety net" for installs the
+migration could not reach, but nothing invoked it — not startup, not seeding, not
+the admin panel — so it was unreachable code that could silently fabricate a
+version 1 if some future caller ever wired it up carelessly.
+
+For the one case the migration genuinely cannot cover (a `terms_text` that only
+appears *after* the migration ran), the OWNER already has a first-class,
+audited path: `ایجاد پیش‌نویس جدید ➕` followed by `انتشار نسخه جدید 🚀`. That
+publishes a real version with a real author recorded, which is strictly better
+than a background helper inventing one.
 
 ### Verified upgrade paths
 
@@ -324,6 +480,7 @@ of what each user accepted stays intact.
 | ---- | ---- |
 | `packages/database/prisma/schema.prisma` | `TermsDocument`, `TermsAcceptance`, `TermsDocumentStatus` |
 | `packages/database/prisma/migrations/20260727120000_versioned_mandatory_terms/` | Forward-only migration + legacy bootstrap |
+| `packages/database/prisma/migrations/20260727130000_normalize_bootstrapped_terms_body/` | Forward-only repair: normalizes the bootstrapped version 1 |
 | `apps/bot/src/services/terms/terms-document.service.ts` | All reads/mutations, advisory lock, validation, bootstrap |
 | `apps/bot/src/services/terms/terms-callbacks.ts` | Versioned callback identity contract |
 | `apps/bot/src/services/terms/terms-views.ts` | The user terms screen |
