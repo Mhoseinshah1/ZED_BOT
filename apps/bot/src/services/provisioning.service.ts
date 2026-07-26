@@ -44,6 +44,7 @@ import {
   hasForeignActiveReservationForUsername,
   releaseReservationForFailedOrder,
 } from "./service-username-selection.service.js";
+import { onWalletBalanceChanged } from "./low-balance/low-balance-hook.js";
 
 // =============================================================================
 // Provisioning (Phase 9): turns a PAID SERVICE_PURCHASE Order into a panel
@@ -219,6 +220,14 @@ export async function failOrderWithRefund(
         balanceBeforeToman: balanceBefore,
         balanceAfterToman: balanceAfter,
       },
+    });
+
+    // Low-balance state machine: same transaction, committed balance, no I/O.
+    await onWalletBalanceChanged(tx, {
+      userId: order.userId,
+      balanceBeforeToman: balanceBefore,
+      balanceAfterToman: balanceAfter,
+      source: "REFUND",
     });
     return true;
   });

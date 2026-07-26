@@ -61,6 +61,7 @@ import {
   getRenewableServiceByShortId,
   isRenewalPlanValid,
 } from "./renewal-checkout.service.js";
+import { onWalletBalanceChanged } from "./low-balance/low-balance-hook.js";
 
 // =============================================================================
 // Wallet payment for ORDER checkouts (Phase 15): an immediate payment method
@@ -447,8 +448,16 @@ async function executeWalletOrderPayment(
           relatedOrderId: order.id,
           relatedPaymentId: payment.id,
           balanceBeforeToman: balanceBefore,
-          balanceAfterToman: balanceAfter,
+        balanceAfterToman: balanceAfter,
         },
+      });
+
+      // Low-balance state machine: same transaction, committed balance, no I/O.
+      await onWalletBalanceChanged(tx, {
+        userId: user.id,
+        balanceBeforeToman: balanceBefore,
+        balanceAfterToman: balanceAfter,
+        source: "ORDER",
       });
 
       // SECURITY-CRITICAL discount finalization: claimDiscountUsage locks

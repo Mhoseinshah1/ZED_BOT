@@ -39,6 +39,12 @@ export const NOTIFICATION_JOB_NAMES = {
   RECONCILE_NOTIFICATION_ATTRIBUTION_BATCH: "RECONCILE_NOTIFICATION_ATTRIBUTION_BATCH",
   RECONCILE_NOTIFICATION_ATTRIBUTION_REVERSALS: "RECONCILE_NOTIFICATION_ATTRIBUTION_REVERSALS",
   CLEANUP_NOTIFICATION_ATTRIBUTION: "CLEANUP_NOTIFICATION_ATTRIBUTION",
+  // Low wallet balance. Both run on the maintenance queue:
+  //   RECONCILE_LOW_BALANCE_STATE - bounded keyset repair sweep (NOT the trigger;
+  //                                 the wallet observer is authoritative)
+  //   RUN_LOW_BALANCE_BACKFILL    - advances an OWNER-confirmed backfill run
+  RECONCILE_LOW_BALANCE_STATE: "RECONCILE_LOW_BALANCE_STATE",
+  RUN_LOW_BALANCE_BACKFILL: "RUN_LOW_BALANCE_BACKFILL",
 } as const;
 export type NotificationJobName =
   (typeof NOTIFICATION_JOB_NAMES)[keyof typeof NOTIFICATION_JOB_NAMES];
@@ -56,6 +62,11 @@ export const NOTIFICATION_SCHEDULER_IDS = {
   attributionBatch: "notif-sched-attribution-batch",
   attributionReversals: "notif-sched-attribution-reversals",
   attributionCleanup: "notif-sched-attribution-cleanup",
+  // Low wallet balance: the repair sweep and the backfill advancer. Both are
+  // registered only while the low-balance feature is enabled, so a dormant
+  // install runs no low-balance work at all.
+  lowBalanceReconcile: "notif-sched-low-balance-reconcile",
+  lowBalanceBackfill: "notif-sched-low-balance-backfill",
 } as const;
 
 /**
@@ -126,6 +137,8 @@ export interface NotificationWorkerStatus {
   attributionsActive?: number;
   attributionsReversed?: number;
   attributionReconcileFailures?: number;
+  /** Last low-balance repair sweep (ISO), null while the feature is disabled. */
+  lastLowBalanceReconcileAt?: string | null;
   // Wallet auto-renewal phase (Phase 1 auto-renewal). Optional for rolling
   // upgrades; counts + timestamps only, never a user/service/order id or balance.
   walletAutoRenewalEnabled?: boolean;
@@ -224,7 +237,10 @@ export type NotificationType =
   | "STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED"
   // Corrective Phase — durable advance notice before a wallet auto-renewal charge
   // (PAYMENT category; gated by cron + payment prefs, never marketing).
-  | "AUTO_RENEWAL_UPCOMING";
+  | "AUTO_RENEWAL_UPCOMING"
+  // Low wallet balance (PAYMENT category). Produced by the in-transaction wallet
+  // observer, never by a periodic scan.
+  | "WALLET_LOW_BALANCE";
 
 export type NotificationCategory = "SERVICE" | "PAYMENT" | "MARKETING";
 
@@ -258,6 +274,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   STARS_SUBSCRIPTION_REFUNDED: "PAYMENT",
   STARS_SUBSCRIPTION_PRICE_VERSION_CHANGED: "PAYMENT",
   AUTO_RENEWAL_UPCOMING: "PAYMENT",
+  WALLET_LOW_BALANCE: "PAYMENT",
 };
 
 /** The notification types Phase 1 actually schedules + delivers. */
@@ -296,6 +313,9 @@ export const NOTIFICATION_TYPE_PRIORITY: Record<NotificationType, number> = {
   // Advance pre-charge notice: money is about to move → ranks with the important
   // service/expiry warnings (kept ahead of marketing under a daily cap).
   AUTO_RENEWAL_UPCOMING: 2,
+  // The user is running out of money: ranks with the important warnings, but
+  // below the states where money has ALREADY moved or a service has stopped.
+  WALLET_LOW_BALANCE: 2,
 };
 
 // --- expiry thresholds -------------------------------------------------------
@@ -828,6 +848,10 @@ export const NTF_ACTION_CODES = {
   // cancel button routes to the existing consent/cancel service.
   VIEW_AUTO_RENEWAL: "e",
   CANCEL_AUTO_RENEWAL: "k",
+  // Low wallet balance. t = open the wallet TOP-UP entry directly (the point of
+  // the alert). The second button reuses "w" (VIEW_WALLET) with its own label.
+  // Neither charges anything: both open an existing screen.
+  TOPUP_WALLET: "t",
 } as const;
 export type NtfActionCode = (typeof NTF_ACTION_CODES)[keyof typeof NTF_ACTION_CODES];
 
@@ -907,6 +931,9 @@ export const NOTIF_BUTTON_KEYS = {
   AUTO_RENEWAL_VIEW_SETTINGS: "notif_btn_auto_renewal_view_settings",
   AUTO_RENEWAL_CANCEL: "notif_btn_auto_renewal_cancel",
   AUTO_RENEWAL_WALLET: "notif_btn_auto_renewal_wallet",
+  // Low wallet balance alert buttons.
+  LOW_BALANCE_TOPUP: "low_balance_topup",
+  LOW_BALANCE_VIEW_WALLET: "low_balance_view_wallet",
 } as const;
 
 /** Action code -> the DEFAULT ButtonText key (fallback when a button spec omits
@@ -930,6 +957,7 @@ export const NTF_ACTION_BUTTON_KEY: Record<NtfActionCode, string> = {
   [NTF_ACTION_CODES.PAYMENT_SUPPORT]: NOTIF_BUTTON_KEYS.STARS_PAYMENT_SUPPORT,
   [NTF_ACTION_CODES.VIEW_AUTO_RENEWAL]: NOTIF_BUTTON_KEYS.AUTO_RENEWAL_VIEW_SETTINGS,
   [NTF_ACTION_CODES.CANCEL_AUTO_RENEWAL]: NOTIF_BUTTON_KEYS.AUTO_RENEWAL_CANCEL,
+  [NTF_ACTION_CODES.TOPUP_WALLET]: NOTIF_BUTTON_KEYS.LOW_BALANCE_TOPUP,
 };
 
 /** Template keys for the Phase-2 checkout/payment reminder messages. */

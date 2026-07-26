@@ -538,6 +538,8 @@ model User {
   totalReferralPurchaseAmountToman Int       @default(0)
   totalReferralCommissionToman     Int       @default(0)
 
+  lowBalanceAlertState LowBalanceAlertState?
+
   // Wallet totals (authoritative history in WalletTransaction)
   balanceToman             Int     @default(0)
   totalChargedToman        Int     @default(0)
@@ -580,11 +582,14 @@ model User {
   freeTrialDefaultAllowanceOverride Int?
 
   // Message preferences
-  cronNotificationsEnabled    Boolean @default(true)
-  marketingMessagesEnabled    Boolean @default(true)
-  supportMessagesEnabled      Boolean @default(true)
-  paymentNotificationsEnabled Boolean @default(true)
-  serviceNotificationsEnabled Boolean @default(true)
+  cronNotificationsEnabled       Boolean @default(true)
+  marketingMessagesEnabled       Boolean @default(true)
+  supportMessagesEnabled         Boolean @default(true)
+  paymentNotificationsEnabled    Boolean @default(true)
+  serviceNotificationsEnabled    Boolean @default(true)
+  // Focused opt-out for the low-wallet-balance warning. Gated IN ADDITION to
+  // paymentNotificationsEnabled, so turning it off silences only this alert.
+  lowBalanceNotificationsEnabled Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2704,6 +2709,8 @@ enum AutomatedNotificationType {
   // Corrective Phase — durable advance notice before a wallet auto-renewal
   // deduction (PAYMENT category; normally delivered ~24h before the charge).
   AUTO_RENEWAL_UPCOMING
+  // Low wallet balance — PAYMENT category, one message per durable alert cycle.
+  WALLET_LOW_BALANCE
 }
 
 /**
@@ -3637,4 +3644,178 @@ model RepresentativePurchase {
   @@index([representativeId, createdAt])
   @@index([userId, createdAt])
   @@index([status, createdAt])
+}
+
+// =============================================================================
+// Low wallet balance notifications
+//
+// Money here is WHOLE TOMAN in the canonical `User.balanceToman` unit (Int).
+// These tables never hold a balance of record — only the last balance the state
+// machine OBSERVED, so nothing in this feature can become a second wallet.
+// =============================================================================
+
+enum LowBalanceAlertStateValue {
+  /**
+   * Eligible to alert on the next committed crossing.
+   */
+  ARMED
+  /**
+   * Already alerted for the current cycle; silent until a durable re-arm.
+   */
+  ALERTED
+}
+
+/**
+ * The durable per-user low-balance state machine (§3).
+ * ONE row per user (`userId` unique), so concurrent debits contend on a single
+ * row instead of racing to create duplicates. `alertCycle` only advances on a
+ * committed ARMED->ALERTED transition and is what makes the notification
+ * dedupe key unique per cycle: a second message for the same crossing is
+ * impossible, and a new one becomes possible only after a committed re-arm.
+ * Deliberately NOT Redis-only: the machine must survive worker restarts, and a
+ * user's notification history must never be inferred from delivery logs.
+ */
+model LowBalanceAlertState {
+  id String @id @default(uuid())
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  state LowBalanceAlertStateValue @default(ARMED)
+
+  /**
+   * Monotonic per-user alert-cycle counter; feeds the notification dedupe key.
+   */
+  alertCycle Int @default(0)
+
+  /**
+   * Last balance this machine evaluated (observation only, never authoritative).
+   */
+  lastObservedBalanceToman Int @default(0)
+  /**
+   * The alert boundary in force when the current state was entered.
+   */
+  lastThresholdToman       Int @default(0)
+  /**
+   * The re-arm boundary in force when the current state was entered.
+   */
+  lastRearmBoundaryToman   Int @default(0)
+  /**
+   * The durable config version the current cycle was opened under (§13).
+   */
+  lastConfigVersion        Int @default(1)
+
+  alertedAt DateTime?
+  rearmedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The reconciliation sweep pages by (state, lastObservedBalanceToman) to find
+  // rows whose recorded state disagrees with the live balance, and keyset-pages
+  // by id — never a full User scan.
+  @@index([state, lastObservedBalanceToman])
+  @@index([updatedAt])
+}
+
+enum LowBalanceBackfillStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+/**
+ * One OWNER-launched "notify the currently low-balance users" run (§12).
+ * A partial unique index (added by the migration) permits at most one PENDING or
+ * RUNNING row, so starting the operation twice cannot double-notify. The config
+ * snapshot freezes the threshold the run was authorised against, and the keyset
+ * cursor makes it restart-safe without ever loading all users into memory.
+ */
+model LowBalanceBackfillRun {
+  id String @id @default(uuid())
+
+  status LowBalanceBackfillStatus @default(PENDING)
+
+  /**
+   * Config snapshot the OWNER confirmed against — the run never re-reads live settings.
+   */
+  thresholdToman     Int
+  rearmBoundaryToman Int
+  configVersion      Int
+
+  createdByAdminId String?
+
+  /**
+   * Keyset cursor (User.id); null = not started. Restart resumes from here.
+   */
+  cursorUserId String?
+
+  estimatedCount Int @default(0)
+  processedCount Int @default(0)
+  queuedCount    Int @default(0)
+  skippedCount   Int @default(0)
+  failedCount    Int @default(0)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  cancelledAt DateTime?
+
+  safeErrorCode String?
+
+  /**
+   * Durable worker claim. Two replicas cannot advance the same run: acquiring
+   * the lease is a conditional update on (ownerToken IS NULL OR expired), and
+   * every write the worker makes is guarded on still holding the token. A
+   * crashed worker's lease simply expires and is taken over.
+   */
+  ownerToken     String?
+  leaseExpiresAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+}
+
+/**
+ * The singleton control record for the low-balance reconciliation sweep.
+ * Replaces a session-level advisory lock, which is unsafe through a connection
+ * pool: the lock and the unlock can land on different connections, so it may be
+ * released by the wrong session or leak until the pooled connection is recycled.
+ * A durable lease has neither problem and survives a worker crash.
+ * It also makes progress durable. The sweep pages by keyset and persists its
+ * cursor after every committed batch, so a large installation reaches its later
+ * rows instead of rescanning the first page forever. Reaching the end wraps the
+ * cursor back to the beginning.
+ * Coordination only — it holds no user identity, balance or notification data.
+ */
+model LowBalanceReconciliationState {
+  singletonKey String @id @default("default")
+
+  /**
+   * Opaque per-run token. Non-null with a future expiry means a worker holds it.
+   */
+  ownerToken     String?
+  leaseExpiresAt DateTime?
+
+  /**
+   * Keyset cursor over ACTIVE users still missing a state row.
+   */
+  initCursorUserId String?
+
+  /**
+   * Keyset cursor over LowBalanceAlertState rows for the repair phase.
+   */
+  repairCursorId String?
+
+  lastSweepStartedAt   DateTime?
+  lastSweepCompletedAt DateTime?
+  completedSweepCount  Int       @default(0)
+
+  safeLastErrorCode String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

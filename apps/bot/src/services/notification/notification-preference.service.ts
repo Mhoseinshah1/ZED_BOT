@@ -136,7 +136,14 @@ export async function getOrCreateNotificationPreference(userId: string): Promise
 
 export async function toggleUserCategory(
   userId: string,
-  field: "serviceNotificationsEnabled" | "paymentNotificationsEnabled" | "marketingMessagesEnabled" | "cronNotificationsEnabled",
+  field:
+    | "serviceNotificationsEnabled"
+    | "paymentNotificationsEnabled"
+    | "marketingMessagesEnabled"
+    | "cronNotificationsEnabled"
+    // Focused low-balance opt-out: silencing this one alert must not require
+    // silencing every payment notice, so it is its own boolean.
+    | "lowBalanceNotificationsEnabled",
 ): Promise<User> {
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   return prisma.user.update({
