@@ -54,6 +54,7 @@ import {
 } from "./handlers/admin-receipts/receipts.handler.js";
 import { forceJoinHandler } from "./handlers/force-join.handler.js";
 import { menuHandler } from "./handlers/menu.handler.js";
+import { miniAppHandler } from "./handlers/miniapp.handler.js";
 import {
   extraTimeHandler,
   extraTimeTextHandler,
@@ -554,8 +555,15 @@ export function createBot(token: string): Bot<BotContext> {
   // «تعرفه‌ها» page. MUST run before the placeholder handler, which used to own
   // CB.USER_PRICING — so old `user:pricing` keyboards open the real page.
   userArea.use(pricingHandler);
+  // Telegram Mini App entry (feat/telegram-miniapp-foundation): /app and the
+  // `user:miniapp` callback. Registered before the placeholder handler so the
+  // callback always reaches the real entry point.
+  userArea.use(miniAppHandler);
   userArea.use(userPlaceholdersHandler);
   bot.command("menu", userArea.middleware());
+  // Same gated area as /menu: the Mini App entry is a user surface and must
+  // pass maintenance, account status, terms and force-join like any other.
+  bot.command("app", userArea.middleware());
   bot.callbackQuery(/^(user|common):/, userArea.middleware());
   // Customer-input form callbacks (cinput:*) go through the same gated user
   // area - the access gates and owner checks apply exactly as for user:*.

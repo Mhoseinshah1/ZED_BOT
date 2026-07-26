@@ -72,6 +72,11 @@ services:
       dockerfile: Dockerfile
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
+        # Public bot handle baked into the Mini App bundle (an "open the bot"
+        # link on its error screens). Public information only - no secret is
+        # ever a build argument, because build args are visible in image
+        # history.
+        VITE_BOT_USERNAME: ${VITE_BOT_USERNAME:-}
     image: zedbot-app
     container_name: zedbot-api
     restart: unless-stopped
@@ -105,6 +110,11 @@ services:
       dockerfile: Dockerfile
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
+        # Public bot handle baked into the Mini App bundle (an "open the bot"
+        # link on its error screens). Public information only - no secret is
+        # ever a build argument, because build args are visible in image
+        # history.
+        VITE_BOT_USERNAME: ${VITE_BOT_USERNAME:-}
     image: zedbot-app
     container_name: zedbot-bot
     restart: unless-stopped
@@ -138,6 +148,11 @@ services:
       dockerfile: Dockerfile
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
+        # Public bot handle baked into the Mini App bundle (an "open the bot"
+        # link on its error screens). Public information only - no secret is
+        # ever a build argument, because build args are visible in image
+        # history.
+        VITE_BOT_USERNAME: ${VITE_BOT_USERNAME:-}
     image: zedbot-app
     container_name: zedbot-worker
     restart: unless-stopped

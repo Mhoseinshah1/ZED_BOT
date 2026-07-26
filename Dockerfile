@@ -16,6 +16,7 @@ FROM base AS build
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY apps/api/package.json apps/api/
 COPY apps/bot/package.json apps/bot/
+COPY apps/miniapp/package.json apps/miniapp/
 COPY apps/worker/package.json apps/worker/
 COPY packages/database/package.json packages/database/
 COPY packages/shared/package.json packages/shared/
@@ -26,6 +27,12 @@ COPY tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps
 RUN pnpm --filter @zedbot/database exec prisma generate
+# Vite inlines VITE_* variables at BUILD time, so the Mini App's public bot
+# handle has to be present here rather than in the runtime environment. It is
+# the only build argument the frontend reads, and it is public: build args are
+# recorded in image history, which is why no secret may ever become one.
+ARG VITE_BOT_USERNAME=
+ENV VITE_BOT_USERNAME=${VITE_BOT_USERNAME}
 RUN pnpm -r run build
 
 # --- Production-only dependencies ---------------------------------------------
@@ -33,11 +40,15 @@ FROM base AS prod-deps
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY apps/api/package.json apps/api/
 COPY apps/bot/package.json apps/bot/
+COPY apps/miniapp/package.json apps/miniapp/
 COPY apps/worker/package.json apps/worker/
 COPY packages/database/package.json packages/database/
 COPY packages/shared/package.json packages/shared/
 COPY packages/panel-adapters/package.json packages/panel-adapters/
 COPY packages/payments/package.json packages/payments/
+# --prod skips the Mini App's devDependencies (React, Vite); the bundle it
+# builds is copied in from the build stage as plain static files, so the
+# runtime image never carries a frontend toolchain.
 RUN pnpm install --prod --frozen-lockfile
 
 # --- Runtime -------------------------------------------------------------------
@@ -59,6 +70,10 @@ COPY --from=build /repo/packages/payments/dist packages/payments/dist
 COPY --from=build /repo/apps/api/dist apps/api/dist
 COPY --from=build /repo/apps/bot/dist apps/bot/dist
 COPY --from=build /repo/apps/worker/dist apps/worker/dist
+# The built Mini App: static HTML/CSS/JS with content-hashed names, served by
+# the api process under /miniapp. Shipping it inside the same image guarantees
+# the page and the API it calls are always the same build.
+COPY --from=build /repo/apps/miniapp/dist apps/miniapp/dist
 # The Prisma schema ships in the image so `prisma migrate deploy` can run in a
 # one-off container (scripts/migrate.sh), and the client is generated against
 # the runtime node_modules tree.

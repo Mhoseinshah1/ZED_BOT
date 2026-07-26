@@ -13,9 +13,13 @@
 // come from the authenticated `/me` response, which the server built from the
 // database row.
 //
-// The SDK is not bundled. Telegram injects `window.Telegram.WebApp` into every
-// Mini App WebView, and pulling in a script from telegram.org would mean a
-// third-party origin in the CSP for an object that is already there.
+// The SDK is loaded from telegram.org by `index.html` rather than bundled. The
+// native mobile clients inject `window.Telegram` themselves, but Telegram
+// Desktop and Telegram Web run a Mini App in an IFRAME where nothing is
+// injected and the script is the only thing that defines it - so bundling a
+// copy would mean shipping a stale snapshot of a host bridge whose contract
+// Telegram controls. Every accessor below therefore treats the object as
+// possibly absent.
 // =============================================================================
 
 interface TelegramThemeParams {

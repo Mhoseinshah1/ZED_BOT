@@ -14,6 +14,7 @@ import Fastify from "fastify";
 import { Redis } from "ioredis";
 
 import { miniAppRoutes } from "./miniapp/routes.js";
+import { miniAppStaticRoutes } from "./miniapp/static.js";
 import { paymentRoutes } from "./payment-routes.js";
 
 const logger = createLogger("api");
@@ -78,6 +79,11 @@ void app.register(paymentRoutes);
 // the session cookie is scoped to - payment callbacks, /health and /version
 // never receive it.
 void app.register(miniAppRoutes, { prefix: "/api/miniapp" });
+
+// The built Mini App bundle, served from the SAME origin as the API above -
+// which is what lets the session cookie stay SameSite=Lax with no CORS at all.
+// Encapsulated so its long-lived asset caching cannot reach any JSON route.
+void app.register(miniAppStaticRoutes);
 
 app.get("/health", async (_request, reply) => {
   let database = "ok";
