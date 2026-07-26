@@ -353,12 +353,20 @@ describe("mini app Nginx configuration", () => {
     if (!supportsHttp2Directive) {
       server = server.replace(/^\s*http2 on;\s*$/m, "");
     }
-    // 3. IPv6 listeners - `nginx -t` opens the listening sockets, so a
-    //    container built without IPv6 fails on `[::]` with an errno that has
-    //    nothing to do with the configuration's correctness.
+    // 3. IPv6 listeners - `nginx -t` OPENS the listening sockets, so a host
+    //    without IPv6 fails on `[::]` with an errno that says nothing about
+    //    the configuration.
     if (!existsSync("/proc/net/if_inet6")) {
       server = server.replace(/^\s*listen \[::\][^\n]*\n/gm, "");
     }
+    // 4. Privileged ports - same reason, one step further. `nginx -t` binds 80
+    //    and 443, which an unprivileged CI runner cannot do, and it reports
+    //    that as a failed config test even after printing "syntax is ok". The
+    //    port number is not the thing under test; every location, header and
+    //    CSP is untouched.
+    server = server
+      .replace(/\blisten (\[::\]:)?80;/g, (_m, v6) => `listen ${v6 ?? ""}18080;`)
+      .replace(/\blisten (\[::\]:)?443 ssl;/g, (_m, v6) => `listen ${v6 ?? ""}18443 ssl;`);
     mkdirSync(path.join(dir, "logs"), { recursive: true });
     const confPath = path.join(dir, "nginx.conf");
     writeFileSync(
@@ -383,8 +391,27 @@ describe("mini app Nginx configuration", () => {
 
     const result = spawnSync("nginx", ["-t", "-c", confPath, "-p", dir], { encoding: "utf8" });
     const output = `${result.stdout}${result.stderr}`;
+
+    // The assertion that matters: every directive parsed and is legal in the
+    // context it appears in. `nginx -t` prints this verdict separately from
+    // its exit code precisely because it also tries to OPEN the listeners.
     expect(output, output).toContain("syntax is ok");
-    expect(result.status, output).toBe(0);
+
+    // The exit code is required too - but a socket error is a property of the
+    // machine, not of the configuration, and treating one as a config failure
+    // would make this test fail on any host that happens to lack a port or an
+    // address family. Those are reported and tolerated; anything else still
+    // fails, so a genuine error cannot hide behind the exemption.
+    if (result.status !== 0) {
+      const socketOnly = output
+        .split("\n")
+        .filter((line) => line.includes("[emerg]"))
+        .every((line) => /bind\(\) to |socket\(\) \[/.test(line));
+      expect(socketOnly, output).toBe(true);
+      console.warn(`N10: config is valid; nginx could not open its listeners here:\n${output}`);
+      return;
+    }
+    expect(output, output).toContain("test is successful");
   });
 });
 

@@ -308,6 +308,17 @@ location ~ ^/miniapp(/|$) {
 | `/health`, `/version` | `DENY` | – | ✓ | ✓ | ✓ |
 | `/miniapp`, `/miniapp/*` | **absent** | ✓ | ✓ | ✓ | ✓ |
 
+Verified against a live Nginx, not only against the rendered text: every
+path-confusion variant (`/miniapp/../api/miniapp/me`, `/miniapp/..%2fapi/…`,
+`//miniapp/../api/…`, `/miniappfoo`) resolves into `location /` and keeps
+`DENY`.
+
+`X-Content-Type-Options` appears **twice** on Mini App responses — once from the
+API, once from Nginx — both exactly `nosniff`. The browser reads the first value
+and applies it, so the duplicate is inert, and it is deliberate: Nginx is the
+backstop if the API ever stops sending it, and the API's own copy protects local
+development where there is no edge.
+
 ### 6.2 The policy
 
 ```
