@@ -294,7 +294,7 @@ async function enqueueLowBalanceNotification(
           },
           meta: {
             kind: "low-balance",
-            cycle: args.cycle,
+            alertCycle: args.cycle,
             // The config the cycle was opened under. Delivery interprets the
             // alert with THESE numbers, never with unrelated newer settings.
             configVersion: args.config.configVersion,

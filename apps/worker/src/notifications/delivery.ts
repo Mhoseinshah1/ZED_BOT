@@ -29,6 +29,7 @@ import {
   revalidateFailedPaymentForDelivery,
 } from "./checkout-eligibility.js";
 import { revalidateWinbackForDelivery } from "./winback-eligibility.js";
+import { revalidateLowBalanceForDelivery } from "./low-balance-eligibility.js";
 import { enqueuePanelSync, type NotificationDeliveryJobData } from "./queues.js";
 import {
   loadUserGates,
@@ -84,6 +85,12 @@ interface RevalMeta {
   stage?: number;
   /** Win-back stage key, e.g. "s30" (Phase 3). */
   stageKey?: string;
+  /** Low-balance alert cycle. Distinct from `cycle`, which is a fingerprint. */
+  alertCycle?: number;
+  /** Low-balance config the alert cycle was opened under. */
+  configVersion?: number;
+  thresholdToman?: number;
+  rearmBoundaryToman?: number;
 }
 
 /** The minimal live service state delivery re-checks against. */
@@ -528,6 +535,19 @@ export function createNotificationDeliveryProcessor(
       }
       // Re-render with the LIVE price / ceiling / timestamps — never a stale amount.
       snapshot.variables = { ...snapshot.variables, ...decision.freshVariables };
+    }
+
+    // --- low wallet balance re-validation ------------------------------------
+    // A queued low-balance alert is a claim about the past. Re-check the feature
+    // switch, the focused opt-out and — authoritatively — the CURRENT balance,
+    // against the boundary the cycle was opened under. A user who topped up in
+    // the meantime must never receive an obsolete "running out of money" notice.
+    if (notification.type === "WALLET_LOW_BALANCE") {
+      const decision = await revalidateLowBalanceForDelivery(notification, meta);
+      if (decision !== null) {
+        await markTerminal(notificationId, decision);
+        return { cancelled: decision.reason };
+      }
     }
 
     // --- quiet hours + daily cap (delivery-time concerns) --------------------
