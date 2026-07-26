@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -417,5 +417,65 @@ describe("deploy scripts (Phase 36)", () => {
       expect(out).not.toContain(TOKEN);
       expect(out).not.toContain(OTHER);
     });
+  });
+});
+
+// =============================================================================
+// The Dockerfile enumerates workspace packages by hand.
+//
+// It has to: the manifest-copy layers exist so `pnpm install` can be cached
+// separately from the sources, which means naming each `package.json`. The cost
+// is that adding a workspace package and forgetting the Dockerfile produces a
+// green typecheck, a green test run, a green local build — and an image build
+// that dies inside CI with `ERR_PNPM_OUTDATED_LOCKFILE`, because the lockfile
+// references a package whose manifest was never copied in.
+//
+// That is exactly what happened when `@zedbot/force-join` was added. This test
+// derives the expected list from the filesystem so the next one cannot.
+// =============================================================================
+
+describe("Dockerfile workspace coverage", () => {
+  const dockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
+  const packageDirs = readdirSync(path.join(repoRoot, "packages"), {
+    withFileTypes: true,
+  })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => {
+      try {
+        readFileSync(path.join(repoRoot, "packages", name, "package.json"), "utf8");
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
+  it("copies every workspace package manifest into both install stages", () => {
+    expect(packageDirs.length).toBeGreaterThan(0);
+    for (const name of packageDirs) {
+      const line = `COPY packages/${name}/package.json packages/${name}/`;
+      // Twice: the build stage and the --prod runtime-deps stage. A package
+      // missing from either one breaks a different half of the image.
+      const occurrences = dockerfile.split(line).length - 1;
+      expect(occurrences, `${line} (expected in both install stages)`).toBe(2);
+    }
+  });
+
+  it("copies the built output of every package the runtime actually needs", () => {
+    // A package with no build script emits no dist and must not be asserted on;
+    // everything that does build has to reach the runtime image, or the app
+    // starts and then throws ERR_MODULE_NOT_FOUND on first use.
+    for (const name of packageDirs) {
+      const manifest = JSON.parse(
+        readFileSync(path.join(repoRoot, "packages", name, "package.json"), "utf8"),
+      ) as { scripts?: Record<string, string> };
+      if (manifest.scripts?.build === undefined) {
+        continue;
+      }
+      expect(
+        dockerfile,
+        `packages/${name}/dist must be copied into the runtime image`,
+      ).toContain(`COPY --from=build /repo/packages/${name}/dist packages/${name}/dist`);
+    }
   });
 });

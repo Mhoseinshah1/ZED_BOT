@@ -20,6 +20,7 @@ COPY apps/miniapp/package.json apps/miniapp/
 COPY apps/worker/package.json apps/worker/
 COPY packages/database/package.json packages/database/
 COPY packages/shared/package.json packages/shared/
+COPY packages/force-join/package.json packages/force-join/
 COPY packages/panel-adapters/package.json packages/panel-adapters/
 COPY packages/payments/package.json packages/payments/
 RUN pnpm install --frozen-lockfile
@@ -44,6 +45,7 @@ COPY apps/miniapp/package.json apps/miniapp/
 COPY apps/worker/package.json apps/worker/
 COPY packages/database/package.json packages/database/
 COPY packages/shared/package.json packages/shared/
+COPY packages/force-join/package.json packages/force-join/
 COPY packages/panel-adapters/package.json packages/panel-adapters/
 COPY packages/payments/package.json packages/payments/
 # --prod skips the Mini App's devDependencies (React, Vite); the bundle it
@@ -65,6 +67,7 @@ RUN apk add --no-cache postgresql16-client
 COPY --from=prod-deps /repo ./
 COPY --from=build /repo/packages/shared/dist packages/shared/dist
 COPY --from=build /repo/packages/database/dist packages/database/dist
+COPY --from=build /repo/packages/force-join/dist packages/force-join/dist
 COPY --from=build /repo/packages/panel-adapters/dist packages/panel-adapters/dist
 COPY --from=build /repo/packages/payments/dist packages/payments/dist
 COPY --from=build /repo/apps/api/dist apps/api/dist
