@@ -12,7 +12,7 @@ import {
   validateMiniAppInitData,
   verifyMiniAppSession,
 } from "@zedbot/shared";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 
 import { evaluateMiniAppAccess, type MiniAppAccessUser } from "./access-policy.js";
 import { miniAppInitDataMaxAgeSeconds, miniAppSessionTtlSeconds } from "./config.js";
@@ -30,6 +30,7 @@ import {
   toMiniAppTransaction,
   toMiniAppUser,
 } from "./serializers.js";
+import { isSecureRequest } from "./transport.js";
 
 const logger = createLogger("api");
 
@@ -91,16 +92,6 @@ declare module "fastify" {
 
 export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
   const allowedOrigins = miniAppAllowedOrigins();
-  // Production means "the browser reached us over TLS", which behind Nginx is
-  // reported by X-Forwarded-Proto. Issuing a `Secure` cookie over plain http
-  // would mean the browser silently drops it and the user is stuck in a login
-  // loop, so the flag follows the actual scheme rather than NODE_ENV alone.
-  const isSecureRequest = (request: FastifyRequest): boolean => {
-    const forwarded = request.headers["x-forwarded-proto"];
-    const proto = typeof forwarded === "string" ? forwarded.split(",")[0].trim() : request.protocol;
-    return proto === "https";
-  };
-  const requireSecureCookie = isSecureRequest;
 
   app.addHook("onSend", async (_request, reply, payload) => {
     // Nothing the Mini App returns is cacheable: every response is scoped to
@@ -210,7 +201,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
       void reply.header(
         "Set-Cookie",
         serializeMiniAppSessionCookie(token, {
-          secure: requireSecureCookie(request),
+          secure: isSecureRequest(request),
           maxAgeSeconds: ttlSeconds,
         }),
       );
@@ -229,7 +220,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
     // Unconditionally successful and unconditionally clearing: logout must work
     // for an already-expired session, and it must never reveal whether the
     // cookie it just cleared was valid.
-    void reply.header("Set-Cookie", serializeMiniAppSessionClearCookie(requireSecureCookie(request)));
+    void reply.header("Set-Cookie", serializeMiniAppSessionClearCookie(isSecureRequest(request)));
     return reply.send({ ok: true });
   });
 
@@ -247,7 +238,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
         // resent on every subsequent request.
         void reply.header(
           "Set-Cookie",
-          serializeMiniAppSessionClearCookie(requireSecureCookie(request)),
+          serializeMiniAppSessionClearCookie(isSecureRequest(request)),
         );
         return fail(reply, 401, "NOT_AUTHENTICATED");
       }
