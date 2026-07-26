@@ -20,6 +20,7 @@ import {
   getReferralPayoutWindows,
   isReferralSystemEnabled,
 } from "./referral.service.js";
+import { onWalletBalanceChanged } from "./low-balance/low-balance-hook.js";
 
 // =============================================================================
 // Referral affiliate commissions — the money engine (financial-safety phase).
@@ -255,6 +256,13 @@ export async function creditReferralCommissionForOrder(
         },
         select: { id: true },
       });
+
+      // Low-balance state machine: same transaction, committed balance, no I/O.
+      await onWalletBalanceChanged(tx, {
+        userId: referral.referrerUserId,
+        balanceAfterToman: balanceAfter,
+        source: "REFERRAL",
+      });
       await tx.referralCommission.update({ where: { id: commission.id }, data: { walletTransactionId: wtx.id } });
       await tx.referral.update({
         where: { id: referral.id },
@@ -366,6 +374,13 @@ async function runClawbackStep(
           balanceAfterToman: balanceAfter,
         },
         select: { id: true },
+      });
+
+      // Low-balance state machine: same transaction, committed balance, no I/O.
+      await onWalletBalanceChanged(tx, {
+        userId: commission.referrerUserId,
+        balanceAfterToman: balanceAfter,
+        source: "REFERRAL",
       });
       await tx.referral.update({
         where: { id: commission.referralId },

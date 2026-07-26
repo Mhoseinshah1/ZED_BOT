@@ -16,6 +16,7 @@ import { errorMessage } from "@zedbot/shared";
 
 import { logger } from "../core/logger.js";
 import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
+import { onWalletBalanceChanged } from "./low-balance/low-balance-hook.js";
 
 // =============================================================================
 // Admin manual wallet management (Phase 20): an admin increases/decreases a
@@ -447,6 +448,13 @@ export async function adjustUserWallet(
           balanceBeforeToman: balanceBefore,
           balanceAfterToman: balanceAfter,
         },
+      });
+
+      // Low-balance state machine: same transaction, committed balance, no I/O.
+      await onWalletBalanceChanged(tx, {
+        userId: args.targetUserId,
+        balanceAfterToman: balanceAfter,
+        source: "ADMIN_ADJUSTMENT",
       });
       return { user: updated, walletTransaction };
     });

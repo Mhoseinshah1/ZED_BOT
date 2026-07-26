@@ -50,6 +50,7 @@ import { auditRepresentativeSettlementPricing } from "./representative-pricing.s
 import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 import { getMessageTemplate } from "./text.service.js";
 import { WALLET_TOPUP_REASON } from "./wallet-topup.service.js";
+import { onWalletBalanceChanged } from "./low-balance/low-balance-hook.js";
 
 // =============================================================================
 // Online gateway payments (payment-gateway-system phase): payment creation
@@ -823,6 +824,13 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
               balanceBeforeToman: balanceAfter - payment.amountToman,
               balanceAfterToman: balanceAfter,
             },
+          });
+
+          // Low-balance state machine: same transaction, committed balance, no I/O.
+          await onWalletBalanceChanged(tx, {
+            userId: payment.userId,
+            balanceAfterToman: balanceAfter,
+            source: "GATEWAY_TOPUP",
           });
         }
         return null;
