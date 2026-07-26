@@ -4,32 +4,22 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
-    <!--
-      No <meta http-equiv="Content-Security-Policy"> here on purpose. The CSP is
-      served as a header by Nginx, which is the one authority for it; a second
-      policy in the document would intersect with the header and produce a
-      combined policy nobody wrote, which is the classic way a CSP silently
-      stops doing what its author believes it does.
-    -->
     <title>پنل کاربری</title>
     <!--
-      Telegram's WebApp bridge. It is NOT optional and it is NOT bundleable:
-      inside the native mobile clients the object is injected into the page,
-      but inside Telegram Desktop and Telegram Web the Mini App runs in an
-      iframe where nothing is injected and this script is the only thing that
-      defines `window.Telegram`. Loading it from anywhere but telegram.org
-      would be serving a stale copy of someone else's host bridge, so the CSP
-      names that one origin in `script-src` and nothing else.
+      Telegram's WebApp bridge. Not optional and not bundleable: the native
+      mobile clients inject window.Telegram themselves, but Telegram Desktop
+      and Telegram Web run a Mini App in an iframe where nothing is injected
+      and this script is the only thing that defines it. telegram.org is the
+      one third-party origin the security policy names.
+
+      No policy meta tag lives in this document on purpose - the edge serves
+      the only one. See docs/telegram-miniapp-foundation.md, section 6.
     -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <!-- Vite rewrites this against `base` ("/miniapp/") for dev and build. -->
+    <script type="module" src="/src/main.tsx"></script>
   </head>
   <body>
     <div id="root"></div>
-    <!--
-      Vite rewrites this against `base` ("/miniapp/") for both the dev server
-      and the production build, so the emitted tag never points at the domain
-      root and the bundle keeps working from its sub-path.
-    -->
-    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

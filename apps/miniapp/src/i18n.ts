@@ -79,6 +79,11 @@ export const FAILURE_TEXT: Record<ApiFailureCode, FailureText> = {
     body: "این بخش هنوز پیکربندی نشده است. لطفاً بعداً تلاش کنید.",
     retryable: true,
   },
+  INSECURE_TRANSPORT: {
+    title: "اتصال امن نیست",
+    body: "این صفحه باید روی اتصال امن (HTTPS) باز شود. لطفاً مینی\u200cاپ را از داخل ربات باز کنید.",
+    retryable: false,
+  },
   INTERNAL: {
     title: "خطای سرور",
     body: "مشکلی در سمت سرور رخ داد. لطفاً چند لحظه بعد دوباره تلاش کنید.",

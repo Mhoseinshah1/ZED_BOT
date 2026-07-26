@@ -6,6 +6,7 @@ import {
   issueMiniAppSession,
   MINIAPP_INITDATA_MAX_BYTES,
   MINIAPP_SESSION_DEFAULT_TTL_SECONDS,
+  optionalEnv,
   readMiniAppSessionCookie,
   serializeMiniAppSessionClearCookie,
   serializeMiniAppSessionCookie,
@@ -21,6 +22,7 @@ import {
   clientRateKey,
   FixedWindowRateLimiter,
   miniAppAllowedOrigins,
+  miniAppAuthRateLimit,
 } from "./security.js";
 import {
   toMiniAppServiceDetail,
@@ -54,11 +56,11 @@ const logger = createLogger("api");
 /** Bounds the request body: `initData` is capped at 8 KiB, so 16 KiB is ample. */
 const MINIAPP_BODY_LIMIT_BYTES = 16 * 1024;
 
-/** Five authentications per minute per client is far above honest use. */
-const AUTH_RATE_LIMIT = 5;
 const AUTH_RATE_WINDOW_MS = 60_000;
 
-const authLimiter = new FixedWindowRateLimiter(AUTH_RATE_LIMIT, AUTH_RATE_WINDOW_MS);
+// The ceiling is resolved per check, so `MINIAPP_AUTH_RATE_LIMIT` takes effect
+// without the module having to be reloaded.
+const authLimiter = new FixedWindowRateLimiter(miniAppAuthRateLimit, AUTH_RATE_WINDOW_MS);
 
 /** Recent-activity slice on the dashboard. Fixed, not client-controlled. */
 const DASHBOARD_TRANSACTION_COUNT = 5;
@@ -73,6 +75,7 @@ type ErrorCode =
   | "BAD_REQUEST"
   | "NOT_FOUND"
   | "NOT_CONFIGURED"
+  | "INSECURE_TRANSPORT"
   | "INTERNAL";
 
 function fail(reply: FastifyReply, status: number, code: ErrorCode | string): FastifyReply {
@@ -92,11 +95,12 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
   // reported by X-Forwarded-Proto. Issuing a `Secure` cookie over plain http
   // would mean the browser silently drops it and the user is stuck in a login
   // loop, so the flag follows the actual scheme rather than NODE_ENV alone.
-  const requireSecureCookie = (request: FastifyRequest): boolean => {
+  const isSecureRequest = (request: FastifyRequest): boolean => {
     const forwarded = request.headers["x-forwarded-proto"];
     const proto = typeof forwarded === "string" ? forwarded.split(",")[0].trim() : request.protocol;
     return proto === "https";
   };
+  const requireSecureCookie = isSecureRequest;
 
   app.addHook("onSend", async (_request, reply, payload) => {
     // Nothing the Mini App returns is cacheable: every response is scoped to
@@ -123,6 +127,18 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
       if (!rate.allowed) {
         void reply.header("Retry-After", String(rate.retryAfterSeconds));
         return fail(reply, 429, "RATE_LIMITED");
+      }
+
+      // In production a session is NEVER minted over plain HTTP. A cookie
+      // issued there could not carry `Secure`, so it would ride every later
+      // plaintext request and be readable by anyone on the path - and a
+      // production deployment always terminates TLS at Nginx, so a plaintext
+      // auth request is either a misconfiguration or a downgrade attempt.
+      // Refusing is the fail-closed answer; local development over
+      // http://localhost is unaffected.
+      if (optionalEnv("NODE_ENV", "development") === "production" && !isSecureRequest(request)) {
+        logger.error("mini app auth refused: plaintext request in production");
+        return fail(reply, 403, "INSECURE_TRANSPORT");
       }
 
       const botToken = getTelegramBotToken();

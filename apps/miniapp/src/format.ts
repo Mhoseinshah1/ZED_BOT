@@ -83,7 +83,12 @@ export function formatBytes(raw: string): string {
   }
   const divisor = 1024 ** unit;
   const display = Number(value) / divisor;
-  const text = display >= 100 || unit === 0 ? display.toFixed(0) : display.toFixed(1);
+  const text =
+    display >= 100 || unit === 0
+      ? display.toFixed(0)
+      : // One decimal, but never a bare ".0" - "۵۰ گیگابایت" reads as a plan
+        // size, "۵۰٫۰ گیگابایت" reads as a measurement.
+        display.toFixed(1).replace(/\.0$/, "");
   return `${toPersianDigits(text.replace(".", "٫"))} ${BYTE_UNITS[unit]}`;
 }
 

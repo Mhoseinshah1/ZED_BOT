@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { optionalEnv } from "@zedbot/shared";
+import { intEnv, optionalEnv } from "@zedbot/shared";
 import type { FastifyRequest } from "fastify";
 
 // =============================================================================
@@ -106,6 +106,21 @@ function headerValue(request: FastifyRequest, name: string): string | null {
 
 // --- rate limiting -----------------------------------------------------------
 
+/** Production default. Five sign-ins a minute is far above honest use. */
+export const MINIAPP_AUTH_RATE_LIMIT_DEFAULT = 5;
+
+/**
+ * The per-minute authentication ceiling.
+ *
+ * Clamped rather than trusted: a zero or negative value would lock everyone
+ * out, and an unbounded one would make the setting a footgun disguised as a
+ * tuning knob.
+ */
+export function miniAppAuthRateLimit(): number {
+  const configured = intEnv("MINIAPP_AUTH_RATE_LIMIT", MINIAPP_AUTH_RATE_LIMIT_DEFAULT);
+  return Math.min(Math.max(configured, 1), 10_000);
+}
+
 export interface RateLimitDecision {
   allowed: boolean;
   /** Seconds until the current window rolls over; sent as `Retry-After`. */
@@ -129,13 +144,22 @@ export class FixedWindowRateLimiter {
   private readonly windows = new Map<string, Window>();
 
   constructor(
-    private readonly limit: number,
+    /**
+     * A number, or a function consulted per check.
+     *
+     * The callable form exists so the ceiling can come from configuration
+     * without the limiter caching a value read once at import time - which
+     * would make the setting unobservable in exactly the situation where an
+     * operator most wants to change it.
+     */
+    private readonly limit: number | (() => number),
     private readonly windowMs: number,
     /** Bounds memory: an attacker rotating keys must not grow the map forever. */
     private readonly maxKeys = 10_000,
   ) {}
 
   check(key: string, nowMs = Date.now()): RateLimitDecision {
+    const ceiling = typeof this.limit === "function" ? this.limit() : this.limit;
     const existing = this.windows.get(key);
     if (existing === undefined || existing.resetAtMs <= nowMs) {
       if (this.windows.size >= this.maxKeys) {
@@ -145,7 +169,7 @@ export class FixedWindowRateLimiter {
       return { allowed: true, retryAfterSeconds: 0 };
     }
     existing.count += 1;
-    if (existing.count > this.limit) {
+    if (existing.count > ceiling) {
       return {
         allowed: false,
         retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAtMs - nowMs) / 1000)),

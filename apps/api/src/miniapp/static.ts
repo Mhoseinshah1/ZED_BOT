@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import fastifyStatic from "@fastify/static";
 import { createLogger, optionalEnv } from "@zedbot/shared";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 const logger = createLogger("api");
 
@@ -79,6 +79,12 @@ export async function miniAppStaticRoutes(app: FastifyInstance): Promise<void> {
   await app.register(fastifyStatic, {
     root,
     prefix: "/miniapp/",
+    // `wildcard: false` makes the plugin register ONE route per file that
+    // actually exists in the bundle, instead of claiming /miniapp/* wholesale.
+    // That is what leaves the wildcard free below - and it is what makes the
+    // difference between "this asset is missing" and "this is a frontend
+    // route" decidable by the router rather than guessed by a handler.
+    wildcard: false,
     // Serving index.html for a bare directory request is handled explicitly
     // below so its Cache-Control is never the asset one.
     index: false,
@@ -86,6 +92,10 @@ export async function miniAppStaticRoutes(app: FastifyInstance): Promise<void> {
     list: false,
     // Dotfiles have no business in a built bundle; refuse rather than serve.
     dotfiles: "deny",
+    // The plugin's own Cache-Control would be `public, max-age=0` and would
+    // land alongside - not behind - the values set below. Turning it off makes
+    // `setHeaders` the single writer, so what this file says is what ships.
+    cacheControl: false,
     setHeaders: (response, path) => {
       response.setHeader("X-Content-Type-Options", "nosniff");
       if (path.endsWith("index.html")) {
@@ -97,24 +107,64 @@ export async function miniAppStaticRoutes(app: FastifyInstance): Promise<void> {
     },
   });
 
-  // The SPA entry. Registered for the prefix itself and for the unslashed
-  // form so /miniapp and /miniapp/ both land on the app.
-  //
-  // There is NO catch-all fallback here. The frontend has no client-side
-  // router - navigation is component state - so a wildcard would only serve
-  // HTML for paths that should honestly 404, and it would happily answer
-  // /miniapp/api/... with an HTML page, which is precisely the path-confusion
-  // shape the Nginx configuration is written to prevent.
-  const sendIndex = async (
-    _request: unknown,
-    reply: { header: (k: string, v: string) => unknown; sendFile: (f: string) => unknown },
-  ): Promise<unknown> => {
+  const sendIndex = async (_request: FastifyRequest, reply: FastifyReply): Promise<unknown> => {
     reply.header("Cache-Control", "no-store");
     reply.header("X-Content-Type-Options", "nosniff");
     return reply.sendFile("index.html");
   };
+
+  // /miniapp and /miniapp/ both open the app.
   app.get("/miniapp", sendIndex);
   app.get("/miniapp/", sendIndex);
 
+  // The SPA fallback, and the three things it deliberately refuses.
+  //
+  // A blanket "serve index.html for anything under /miniapp" is the usual
+  // shape, and it is wrong in ways that matter here:
+  //
+  //   * a missing hashed asset would answer 200 with HTML. The browser would
+  //     then try to execute a document as JavaScript, and the actual problem -
+  //     a half-deployed bundle - would look like a mystifying syntax error
+  //     instead of a 404.
+  //   * /miniapp/api/... would answer with a page, which is exactly the
+  //     path-confusion shape the Nginx location is written to prevent. Refused
+  //     here too, so the guarantee does not depend on the edge alone.
+  //   * a traversal attempt would be answered rather than rejected. Nothing can
+  //     escape the root (the only file this handler ever sends is a fixed
+  //     name), but a 404 states the refusal instead of hiding it behind a 200.
+  app.get<{ Params: { "*": string } }>("/miniapp/*", async (request, reply) => {
+    const rest = request.params["*"] ?? "";
+    const decoded = safeDecode(rest);
+    if (decoded === null || decoded.split("/").some((segment) => segment === "..")) {
+      return reply.code(404).type("application/json").send({ ok: false, code: "NOT_FOUND" });
+    }
+    if (decoded === "api" || decoded.startsWith("api/")) {
+      return reply.code(404).type("application/json").send({ ok: false, code: "NOT_FOUND" });
+    }
+    // A final segment containing a dot is a FILE request - an extension of any
+    // length, or a dotfile. Reaching the fallback means the router found no
+    // such file among the bundle's real ones, so it is an honest 404. Frontend
+    // routes are path segments without dots (`/miniapp/services/<uuid>`), so
+    // nothing legitimate is caught by this.
+    const last = decoded.split("/").pop() ?? "";
+    if (last.includes(".")) {
+      return reply.code(404).type("application/json").send({ ok: false, code: "NOT_FOUND" });
+    }
+    return sendIndex(request, reply);
+  });
+
   logger.info("mini app bundle served under /miniapp");
+}
+
+/** Percent-decoding that reports malformed input rather than throwing. */
+function safeDecode(raw: string): string | null {
+  try {
+    // Twice: an encoded-encoded traversal ("%252e%252e") decodes to "%2e%2e"
+    // on the first pass, which is still a traversal attempt and must be caught
+    // rather than passed through as an innocuous-looking literal.
+    const once = decodeURIComponent(raw);
+    return decodeURIComponent(once.replace(/%(?![0-9A-Fa-f]{2})/g, "%25"));
+  } catch {
+    return null;
+  }
 }

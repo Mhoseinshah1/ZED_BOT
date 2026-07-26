@@ -36,6 +36,7 @@ export type ApiFailureCode =
   | "BAD_REQUEST"
   | "NOT_FOUND"
   | "NOT_CONFIGURED"
+  | "INSECURE_TRANSPORT"
   | "INTERNAL"
   // access gates
   | "MAINTENANCE"
@@ -65,6 +66,7 @@ const KNOWN_CODES = new Set<string>([
   "BAD_REQUEST",
   "NOT_FOUND",
   "NOT_CONFIGURED",
+  "INSECURE_TRANSPORT",
   "INTERNAL",
   "MAINTENANCE",
   "USER_BLOCKED",
