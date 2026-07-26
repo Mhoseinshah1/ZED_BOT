@@ -803,6 +803,24 @@ export const INITIAL_MESSAGE_TEMPLATES: MessageTemplateSeed[] = [
       "service_expiry",
     ],
   },
+  // Low wallet balance alert (feat/low-wallet-balance-notifications, category
+  // PAYMENT). The ONLY two variables are the user's own balance and the operator's
+  // configured threshold, both pre-formatted in whole Toman by the renderer —
+  // never a raw integer, an id, a ledger reference or another user's figure.
+  {
+    key: "low_balance_notification_text",
+    title: "اعلان کاهش موجودی کیف پول",
+    category: "notification",
+    defaultContent:
+      "موجودی کیف پول شما رو به اتمام است ⚠️\n" +
+      "\n" +
+      "موجودی فعلی:\n{balance}\n" +
+      "\n" +
+      "حد هشدار:\n{threshold}\n" +
+      "\n" +
+      "برای جلوگیری از توقف سرویس‌ها، کیف پول خود را شارژ کنید.",
+    allowedVariables: ["balance", "threshold"],
+  },
   // Device connection guides (feat/device-connection-guides). Pure operator copy;
   // control-flow/validation text stays as code constants. {service_name}/{device}/
   // {app} are safe, non-secret display values — never a subscription URL or config.
@@ -1410,4 +1428,9 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   { key: "svc_username_method_back", title: "خرید: انتخاب روش دیگر یوزرنیم", text: "↩️ انتخاب روش دیگر" },
   { key: "svc_username_confirm", title: "خرید: تأیید یوزرنیم", text: "✅ تأیید و ادامه" },
   { key: "svc_note_skip", title: "خرید: رد کردن یادداشت", text: "رد کردن (بدون یادداشت)" },
+  // --- low wallet balance alerts (feat/low-wallet-balance-notifications) ---
+  // LABELS only. The two action buttons on the alert route by constant callbacks
+  // to the existing wallet screens, so relabelling them can never break routing.
+  { key: "low_balance_topup", title: "هشدار موجودی: شارژ کیف پول", text: "شارژ کیف پول 💳" },
+  { key: "low_balance_view_wallet", title: "هشدار موجودی: مشاهده کیف پول", text: "مشاهده کیف پول 👛" },
 ];

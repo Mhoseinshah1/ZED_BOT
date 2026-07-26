@@ -36,6 +36,9 @@ import {
   DEFAULT_ABANDONED_CHECKOUT_CONFIG,
   DEFAULT_CHECKOUT_SCAN_MINUTES,
   DEFAULT_FAILED_PAYMENT_CONFIG,
+  DEFAULT_LOW_BALANCE_RECONCILE_MINUTES,
+  LOW_BALANCE_ENABLED_KEY,
+  LOW_BALANCE_RECONCILE_MINUTES_KEY,
   NOTIF_ABANDONED_CONFIG_KEY,
   NOTIF_CHECKOUT_RULE_ENABLED_KEYS,
   NOTIF_CHECKOUT_SCAN_MINUTES_KEY,
@@ -271,4 +274,24 @@ export async function getAttributionReversalsMinutes(): Promise<number> {
 
 export async function getAttributionRetentionDays(): Promise<number> {
   return intSetting(NOTIF_ATTRIBUTION_RETENTION_DAYS_KEY, DEFAULT_ATTRIBUTION_RETENTION_DAYS, 30, 3650);
+}
+
+// --- low wallet balance -------------------------------------------------------
+
+/**
+ * MASTER switch for the low-balance feature. False for every existing install
+ * until an OWNER explicitly enables it, so shipping this code notifies nobody.
+ */
+export async function isLowBalanceEnabled(): Promise<boolean> {
+  return toBool(await settingValue(LOW_BALANCE_ENABLED_KEY));
+}
+
+/** Cadence of the bounded repair sweep. Never the primary trigger. */
+export async function getLowBalanceReconcileMinutes(): Promise<number> {
+  return intSetting(
+    LOW_BALANCE_RECONCILE_MINUTES_KEY,
+    DEFAULT_LOW_BALANCE_RECONCILE_MINUTES,
+    1,
+    24 * 60,
+  );
 }

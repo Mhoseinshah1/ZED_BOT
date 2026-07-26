@@ -177,6 +177,10 @@ export async function renderSettingsLanding(ctx: BotContext): Promise<void> {
     // (handler re-checks); literal callback avoids importing the admin handler here.
     .text("قوانین و شرایط 📜", "admin:terms:root")
     .row()
+    // Low wallet balance alerts. OWNER-only (handler re-checks); literal
+    // callback avoids importing the admin handler here.
+    .text("هشدار کاهش موجودی کیف پول ⚠️", "admin:lowbal:root")
+    .row()
     .text("بازگشت به منوی ادمین", CB.ADMIN_MENU);
   await safeEditOrReply(ctx, "تنظیمات عمومی ⚙️\n\nیک بخش را انتخاب کنید:", kb);
 }

@@ -20,6 +20,8 @@ import {
   reconcileOrderAttribution,
 } from "./attribution.js";
 import { createNotificationDeliveryProcessor } from "./delivery.js";
+import { runLowBalanceBackfillTick } from "./low-balance-backfill.js";
+import { runLowBalanceReconciliation } from "./low-balance-reconcile.js";
 import { runNotificationCleanup, runNotificationReconcile } from "./maintenance.js";
 import {
   createNotificationQueues,
@@ -159,6 +161,17 @@ export function startNotificationEngine(
       }
       if (job.name === NOTIFICATION_JOB_NAMES.CLEANUP_NOTIFICATION_ATTRIBUTION) {
         return (await runAttributionCleanup()) as unknown as Record<string, unknown>;
+      }
+      // Low wallet balance. The sweep REPAIRS state the in-transaction wallet
+      // observer could not record; the backfill advances an OWNER-confirmed run.
+      // Neither is the trigger for a normal alert.
+      if (job.name === NOTIFICATION_JOB_NAMES.RECONCILE_LOW_BALANCE_STATE) {
+        const result = await runLowBalanceReconciliation();
+        state.lastLowBalanceReconcileAt = new Date().toISOString();
+        return result as unknown as Record<string, unknown>;
+      }
+      if (job.name === NOTIFICATION_JOB_NAMES.RUN_LOW_BALANCE_BACKFILL) {
+        return (await runLowBalanceBackfillTick()) as unknown as Record<string, unknown>;
       }
       throw new Error(`unknown job: ${job.name}`);
     },

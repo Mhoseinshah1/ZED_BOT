@@ -7,6 +7,7 @@ import {
   UserStatus,
 } from "@zedbot/database";
 import {
+  buildLowBalanceSnapshot,
   createLogger,
   DEFAULT_LOW_BALANCE_REARM_MARGIN_TOMAN,
   DEFAULT_LOW_BALANCE_THRESHOLD_TOMAN,
@@ -300,17 +301,14 @@ async function repairInconsistentStates(
             dedupeKey: lowBalanceDedupeKey(row.userId, cycle),
             ruleVersion: LOW_BALANCE_RULE_VERSION,
             scheduledFor: new Date(),
-            payloadSnapshot: {
-              variables: { balance, threshold: config.thresholdToman },
-              meta: {
-                kind: "low-balance",
-                alertCycle: cycle,
-                configVersion: config.configVersion,
-                thresholdToman: config.thresholdToman,
-                rearmBoundaryToman: config.rearmBoundaryToman,
-                origin: "reconcile",
-              },
-            },
+            payloadSnapshot: buildLowBalanceSnapshot({
+              balanceToman: balance,
+              thresholdToman: config.thresholdToman,
+              rearmBoundaryToman: config.rearmBoundaryToman,
+              configVersion: config.configVersion,
+              alertCycle: cycle,
+              origin: "reconcile",
+            }),
           },
         ],
         skipDuplicates: true,

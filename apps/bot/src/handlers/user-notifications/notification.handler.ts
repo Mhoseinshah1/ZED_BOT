@@ -15,6 +15,7 @@ import type { BotContext } from "../../core/context.js";
 import { suppressCheckoutReminders } from "../../services/checkout-notification.service.js";
 import { resumeCheckoutForUser } from "../../services/checkout-resume.service.js";
 import { getOwnedCheckout } from "../../services/checkout.service.js";
+import { getLowBalanceConfig } from "../../services/low-balance/low-balance.service.js";
 import { getWinbackConfig } from "../../services/notification/notification-settings.service.js";
 import {
   getOwnedNotificationByShortId,
@@ -366,7 +367,7 @@ async function handleAutoRenewalNotificationAction(
   await safeEditOrReply(ctx, AUTO_RENEWAL_CANCEL_CONFIRM_TEXT, cancelConfirmKeyboard(mandate));
 }
 
-userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpxdngwzouayek])$/, async (ctx) => {
+userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpxdngwzouayekt])$/, async (ctx) => {
   const user = ctx.dbUser;
   if (user === null) {
     return;
@@ -396,6 +397,29 @@ userNotificationsHandler.callbackQuery(/^ntf:([0-9a-f]{4,12}):([srvcpxdngwzouaye
   }
   // Auto-renewal-only actions on a non-auto-renewal notification are invalid.
   if (action === "e" || action === "k") {
+    await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+    return;
+  }
+
+  // Low wallet balance (PAYMENT) routed by TYPE first. Both of its actions just
+  // open an existing wallet screen — neither charges anything, and neither is
+  // allowed to fall through to a service/checkout/win-back branch.
+  if (notification.type === "WALLET_LOW_BALANCE") {
+    if (action === "t" || action === "w") {
+      await recordNotificationInteraction(
+        notification.id,
+        user.id,
+        NotificationInteractionType.VIEW_WALLET,
+      );
+      await safeAnswerCallback(ctx);
+      await renderWallet(ctx);
+    } else {
+      await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
+    }
+    return;
+  }
+  // The top-up action only exists on a low-balance alert.
+  if (action === "t") {
     await safeAnswerCallback(ctx, NTF_INVALID_TEXT);
     return;
   }
@@ -566,7 +590,8 @@ userNotificationsHandler.callbackQuery(/^wb:cancel:([0-9a-f]{4,12})$/, async (ct
 
 const NSET_CB = {
   root: "user:nset:root",
-  toggle: (field: "cron" | "svc" | "quiet" | "mkt"): string => `user:nset:toggle:${field}`,
+  toggle: (field: "cron" | "svc" | "quiet" | "mkt" | "lowbal"): string =>
+    `user:nset:toggle:${field}`,
   tz: "user:nset:tz",
   limit: "user:nset:limit",
   unsnooze: "user:nset:unsnooze",
@@ -597,10 +622,11 @@ async function renderUserNotificationSettings(ctx: BotContext): Promise<void> {
   if (user === null) {
     return;
   }
-  const [pref, effective, snoozedUntil] = await Promise.all([
+  const [pref, effective, snoozedUntil, lowBalance] = await Promise.all([
     getOrCreateNotificationPreference(user.id),
     resolveEffectiveDeliveryPreferences(user.id),
     getActiveWinbackSnooze(user.id),
+    getLowBalanceConfig(),
   ]);
   const lines = [
     "🔔 تنظیمات اعلان‌ها",
@@ -613,6 +639,11 @@ async function renderUserNotificationSettings(ctx: BotContext): Promise<void> {
     `اعلان سرویس‌ها: ${onOff(user.serviceNotificationsEnabled)}`,
     `ساعات سکوت: ${onOff(pref.quietHoursEnabled)}`,
     `پیشنهادها و پیام‌های بازگشت: ${onOff(user.marketingMessagesEnabled)}`,
+    // Shown ONLY while the OWNER has the feature on: a dormant install must not
+    // advertise a toggle that controls nothing.
+    ...(lowBalance.enabled
+      ? [`هشدار کاهش موجودی: ${onOff(user.lowBalanceNotificationsEnabled)}`]
+      : []),
     `توقف موقت پیام‌های بازگشت: ${snoozedUntil === null ? "غیرفعال" : `تا ${formatSnoozeDate(snoozedUntil)}`}`,
     "",
     `منطقه زمانی: ${effective.timezone}`,
@@ -636,6 +667,12 @@ async function renderUserNotificationSettings(ctx: BotContext): Promise<void> {
       NSET_CB.toggle("mkt"),
     )
     .row();
+  if (lowBalance.enabled) {
+    kb.text(
+      `هشدار کاهش موجودی: ${user.lowBalanceNotificationsEnabled ? "✅" : "❌"}`,
+      NSET_CB.toggle("lowbal"),
+    ).row();
+  }
   if (snoozedUntil !== null) {
     kb.text("لغو توقف موقت پیام‌های بازگشت", NSET_CB.unsnooze).row();
   }
@@ -652,7 +689,7 @@ userNotificationsHandler.callbackQuery(NSET_CB.root, async (ctx) => {
   await renderUserNotificationSettings(ctx);
 });
 
-userNotificationsHandler.callbackQuery(/^user:nset:toggle:(cron|svc|quiet|mkt)$/, async (ctx) => {
+userNotificationsHandler.callbackQuery(/^user:nset:toggle:(cron|svc|quiet|mkt|lowbal)$/, async (ctx) => {
   const user = ctx.dbUser;
   if (user === null) {
     return;
@@ -666,6 +703,10 @@ userNotificationsHandler.callbackQuery(/^user:nset:toggle:(cron|svc|quiet|mkt)$/
   } else if (field === "mkt") {
     // Marketing (win-back) opt-in/out: touches ONLY marketingMessagesEnabled.
     ctx.dbUser = await toggleUserCategory(user.id, "marketingMessagesEnabled");
+  } else if (field === "lowbal") {
+    // Low-balance opt-in/out: touches ONLY lowBalanceNotificationsEnabled, so a
+    // user who does not want balance warnings still gets payment receipts.
+    ctx.dbUser = await toggleUserCategory(user.id, "lowBalanceNotificationsEnabled");
   } else {
     const pref = await getOrCreateNotificationPreference(user.id);
     await setUserQuietHoursEnabled(user.id, !pref.quietHoursEnabled);

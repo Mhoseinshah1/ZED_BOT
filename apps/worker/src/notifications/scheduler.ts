@@ -9,6 +9,8 @@ import {
   getAttributionReconcileMinutes,
   getAttributionReversalsMinutes,
   getCheckoutScanMinutes,
+  getLowBalanceReconcileMinutes,
+  isLowBalanceEnabled,
   getRetentionScanMinutes,
   getScheduleMinutes,
   isNotificationAnalyticsEnabled,
@@ -125,6 +127,33 @@ export async function reconcileNotificationSchedulers(queues: NotificationQueues
       queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.attributionCleanup),
     ]);
   }
+
+  // Low wallet balance. The repair sweep and the backfill advancer exist ONLY
+  // while the feature is on: a disabled install schedules no low-balance work,
+  // and turning the feature off removes both schedulers on the next reconcile
+  // without a worker restart.
+  if (await isLowBalanceEnabled()) {
+    const reconcileMinutes = await getLowBalanceReconcileMinutes();
+    await Promise.all([
+      queues.maintenanceQueue.upsertJobScheduler(
+        NOTIFICATION_SCHEDULER_IDS.lowBalanceReconcile,
+        { every: reconcileMinutes * 60_000 },
+        { name: NOTIFICATION_JOB_NAMES.RECONCILE_LOW_BALANCE_STATE, data: {} },
+      ),
+      // The backfill tick is cheap when idle (one indexed lookup), so it runs
+      // often enough that an OWNER-launched run makes visible progress.
+      queues.maintenanceQueue.upsertJobScheduler(
+        NOTIFICATION_SCHEDULER_IDS.lowBalanceBackfill,
+        { every: 60_000 },
+        { name: NOTIFICATION_JOB_NAMES.RUN_LOW_BALANCE_BACKFILL, data: {} },
+      ),
+    ]);
+  } else {
+    await Promise.allSettled([
+      queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.lowBalanceReconcile),
+      queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.lowBalanceBackfill),
+    ]);
+  }
   return true;
 }
 
@@ -139,6 +168,8 @@ async function removeAllSchedulers(queues: NotificationQueues): Promise<void> {
     queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.attributionBatch),
     queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.attributionReversals),
     queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.attributionCleanup),
+    queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.lowBalanceReconcile),
+    queues.maintenanceQueue.removeJobScheduler(NOTIFICATION_SCHEDULER_IDS.lowBalanceBackfill),
   ]);
 }
 

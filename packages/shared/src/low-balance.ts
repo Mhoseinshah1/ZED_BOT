@@ -244,3 +244,67 @@ export function parseTomanAmount(raw: string): ParsedAmount {
 export function formatTomanAmount(value: number): string {
   return `${value.toLocaleString("en-US")} تومان`;
 }
+
+// --- payload snapshot ---------------------------------------------------------
+
+/**
+ * Everything needed to build one low-balance notification's payload snapshot.
+ *
+ * All three producers — the in-transaction observer, the reconciliation sweep
+ * and the backfill — go through this ONE builder, so an alert is byte-identical
+ * regardless of which of them opened the cycle.
+ */
+export interface LowBalanceSnapshotArgs {
+  /** The committed post-mutation balance, whole Toman. */
+  balanceToman: number;
+  thresholdToman: number;
+  rearmBoundaryToman: number;
+  configVersion: number;
+  alertCycle: number;
+  origin: "event" | "backfill" | "reconcile";
+}
+
+/**
+ * Builds the payload snapshot.
+ *
+ * PRIVACY. The snapshot carries exactly two rendered figures — the user's own
+ * balance and the operator's threshold — plus non-rendered diagnostics. It never
+ * holds a name, username, phone number, chat id, ledger id or payment token, so
+ * a snapshot that leaks into a log cannot identify anyone.
+ *
+ * The amounts are stored PRE-FORMATTED. The rendering worker performs plain
+ * substitution, so formatting here is what guarantees a user never sees a raw
+ * integer where a Toman amount belongs.
+ */
+export function buildLowBalanceSnapshot(args: LowBalanceSnapshotArgs): {
+  templateKey: string;
+  variables: Record<string, string | number>;
+  buttons: { action: string; buttonTextKey: string }[];
+  meta: Record<string, string | number>;
+} {
+  return {
+    templateKey: LOW_BALANCE_TEMPLATE_KEY,
+    variables: {
+      balance: formatTomanAmount(args.balanceToman),
+      threshold: formatTomanAmount(args.thresholdToman),
+    },
+    // Constant action codes: relabelling a button in the text registry can never
+    // change where it routes. Neither button charges anything.
+    buttons: [
+      { action: "t", buttonTextKey: "low_balance_topup" },
+      { action: "w", buttonTextKey: "low_balance_view_wallet" },
+    ],
+    meta: {
+      kind: "low-balance",
+      // Deliberately NOT `cycle`: the shared re-validation meta already uses
+      // that name for the expiry fingerprint, which is a string.
+      alertCycle: args.alertCycle,
+      // The configuration the cycle was OPENED under. Delivery interprets the
+      // alert with these numbers, never with unrelated newer settings (§13).
+      configVersion: args.configVersion,
+      thresholdToman: args.thresholdToman,
+      rearmBoundaryToman: args.rearmBoundaryToman,
+      origin: args.origin,
+    },
+  };
+}

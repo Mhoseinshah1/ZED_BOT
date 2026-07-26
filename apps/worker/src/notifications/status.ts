@@ -40,6 +40,8 @@ export interface NotificationEngineState {
   lastAttributionBatchAt: string | null;
   lastAttributionReversalsAt: string | null;
   attributionReconcileFailures: number;
+  // Low wallet balance.
+  lastLowBalanceReconcileAt: string | null;
 }
 
 export function createEngineState(): NotificationEngineState {
@@ -57,6 +59,7 @@ export function createEngineState(): NotificationEngineState {
     lastAttributionBatchAt: null,
     lastAttributionReversalsAt: null,
     attributionReconcileFailures: 0,
+    lastLowBalanceReconcileAt: null,
   };
 }
 
@@ -99,6 +102,7 @@ export async function publishNotificationWorkerStatus(
     attributionsActive,
     attributionsReversed,
     attributionReconcileFailures: state.attributionReconcileFailures,
+    lastLowBalanceReconcileAt: state.lastLowBalanceReconcileAt,
     // Wallet auto-renewal fields (Phase 1) are merged from the auto-renewal
     // engine's status provider; a failure there never blocks the snapshot.
     ...(extraStatus === undefined ? {} : await extraStatus().catch(() => ({}))),

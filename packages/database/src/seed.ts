@@ -136,6 +136,22 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   // enables it. Enabling moves no money and mutates no Service; disabling deletes
   // no operation history.
   { key: "admin_service_mutations_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Low wallet balance alerts. The MASTER switch seeds FALSE: shipping this code
+  // notifies nobody, and even enabling it only arms FUTURE crossings — existing
+  // low-balance users are seeded silently. Telling the people who are ALREADY low
+  // is a separate, explicitly-confirmed OWNER action.
+  //
+  // The two boundaries are whole TOMAN, the canonical `User.balanceToman` unit:
+  // alert at or below the threshold, re-arm only above threshold + margin. The
+  // margin is the hysteresis that stops one balance hovering on the boundary from
+  // producing a stream of messages.
+  { key: "low_balance_notification_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "low_balance_threshold", value: "100000", type: SettingType.NUMBER, isPublic: false },
+  { key: "low_balance_rearm_margin", value: "20000", type: SettingType.NUMBER, isPublic: false },
+  // Bumped whenever a boundary changes, so a queued alert can be read against
+  // the configuration it was created under rather than the current one.
+  { key: "low_balance_config_version", value: "1", type: SettingType.NUMBER, isPublic: false },
+  { key: "low_balance_reconcile_minutes", value: "15", type: SettingType.NUMBER, isPublic: false },
 ];
 
 // Log-group topics used by later phases for Telegram group reporting. Keys are

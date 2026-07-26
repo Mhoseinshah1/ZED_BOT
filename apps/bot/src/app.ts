@@ -112,6 +112,10 @@ import {
   forceJoinCommandEscapeHandler,
 } from "./handlers/admin-settings/force-join-admin.handler.js";
 import {
+  lowBalanceAdminHandler,
+  lowBalanceAdminTextHandler,
+} from "./handlers/admin-settings/low-balance-admin.handler.js";
+import {
   termsAdminHandler,
   termsAdminTextHandler,
   termsCommandEscapeHandler,
@@ -301,6 +305,10 @@ export function createBot(token: string): Bot<BotContext> {
   // create/edit/delete, publish, history and aggregate acceptance counts.
   // Never renders a user identity and never deletes a published version.
   adminArea.use(termsAdminHandler);
+  // Low wallet balance alerts: OWNER-only «هشدار کاهش موجودی کیف پول ⚠️» admin
+  // page (admin:lowbal:*) — master switch, boundaries, template preview and the
+  // explicitly-confirmed backfill. Aggregate counts only; never names a user.
+  adminArea.use(lowBalanceAdminHandler);
   adminArea.use(adminRepresentativeHandler);
   adminArea.use(deviceGuidesHandler);
   adminArea.use(diagnosticsAdminHandler);
@@ -358,6 +366,7 @@ export function createBot(token: string): Bot<BotContext> {
   // Versioned mandatory terms: the draft-body text input ("terms:draft_body").
   // Self-gates on currentFlow, so every other admin flow passes through.
   adminFlowText.use(termsAdminTextHandler);
+  adminFlowText.use(lowBalanceAdminTextHandler);
   // Checkout-payment reminders (Phase 2): numeric config input for the two
   // checkout rule pages ("admin_ntf_co:cfg"). Self-gates on currentFlow.
   adminFlowText.use(adminNotificationsTextHandler);

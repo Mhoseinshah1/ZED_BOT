@@ -11,6 +11,7 @@ import {
   DEFAULT_LOW_BALANCE_CONFIG,
   DEFAULT_LOW_BALANCE_REARM_MARGIN_TOMAN,
   DEFAULT_LOW_BALANCE_THRESHOLD_TOMAN,
+  buildLowBalanceSnapshot,
   evaluateLowBalanceTransition,
   isLowBalance,
   isRearmed,
@@ -287,22 +288,14 @@ async function enqueueLowBalanceNotification(
         dedupeKey,
         ruleVersion: LOW_BALANCE_RULE_VERSION,
         scheduledFor: now,
-        payloadSnapshot: {
-          variables: {
-            balance: args.balanceToman,
-            threshold: args.config.thresholdToman,
-          },
-          meta: {
-            kind: "low-balance",
-            alertCycle: args.cycle,
-            // The config the cycle was opened under. Delivery interprets the
-            // alert with THESE numbers, never with unrelated newer settings.
-            configVersion: args.config.configVersion,
-            thresholdToman: args.config.thresholdToman,
-            rearmBoundaryToman: rearmBoundaryToman(args.config),
-            origin: args.origin,
-          },
-        } as unknown as Prisma.InputJsonValue,
+        payloadSnapshot: buildLowBalanceSnapshot({
+          balanceToman: args.balanceToman,
+          thresholdToman: args.config.thresholdToman,
+          rearmBoundaryToman: rearmBoundaryToman(args.config),
+          configVersion: args.config.configVersion,
+          alertCycle: args.cycle,
+          origin: args.origin,
+        }) as unknown as Prisma.InputJsonValue,
       },
     ],
     skipDuplicates: true,
