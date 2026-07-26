@@ -70,6 +70,16 @@ ARMED   --(committed balance <= threshold)-->   ALERTED   (notify once)
 ALERTED --(committed balance >  boundary)-->    ARMED     (silently)
 ```
 
+### Three kinds of cycle
+
+These look alike and mean different things:
+
+| | Meaning | Message? |
+| --- | --- | --- |
+| **cycle 0 — silent baseline** | "Already below the threshold the first time we ever looked." Recorded ALERTED so the machine is truthful, but no decrease was *witnessed*, so claiming one would be a lie. This is what enabling the feature produces for existing low-balance users. | No |
+| **cycle > 0 — real alert** | A witnessed crossing: above the threshold, then at or below it. | Yes, exactly one |
+| **cycle > 0 — explicit backfill** | The OWNER asked us to notify people who are already low. Same shape and same dedupe key as a real alert, but opened without a witnessed crossing — which is why it takes an explicit confirmed action. | Yes, exactly one |
+
 `alertCycle` increments on every ARMED → ALERTED transition and is the identity
 of "this particular episode of being low". It is what makes the alert
 idempotent: the dedupe key is
@@ -78,12 +88,56 @@ idempotent: the dedupe key is
 wallet-low-balance:v<ruleVersion>:<userId>:<alertCycle>
 ```
 
-`evaluateLowBalanceTransition()` takes **only the post-mutation balance**. The
-"before" value is irrelevant once durable state records where the machine is —
-and that is precisely what makes concurrent debits converge on one alert rather
-than one alert each.
-
 Re-arming does **not** increment the cycle. Only opening a new alert does.
+
+### First observation, and why the BEFORE balance is required
+
+A user can have no state row at all — the feature was enabled and the sweep has
+not reached them. Their next purchase taking them from comfortably funded to
+below the threshold is the single most likely real crossing there is, and with
+only the *after* balance it is indistinguishable from a user who was always low.
+The alert would be silently swallowed. So callers pass both:
+
+| before | after | result |
+| --- | --- | --- |
+| > threshold | ≤ threshold | cycle 1, ALERTED, **notify** |
+| ≤ threshold | ≤ threshold | cycle 0, ALERTED, silent baseline |
+| any | > threshold | cycle 0, ARMED, silent |
+
+This asks nothing new of the callers: every wallet site already computes the
+before value for its `WalletTransaction.balanceBeforeToman`.
+
+The implementation does not special-case any of this. It **seeds the row from
+the before balance and then evaluates the transition to the after balance**, so
+a first observation runs through exactly the same code as every later one.
+
+### Concurrent state creation
+
+A row that does not exist cannot be locked. Selecting `FOR UPDATE`, finding
+nothing and plain-creating means two first observations both `INSERT`, and the
+loser's unique violation aborts the surrounding PostgreSQL transaction — a real
+wallet mutation lost to a notification bookkeeping row.
+
+So the row is seeded with `INSERT … ON CONFLICT DO NOTHING` **first** and only
+then locked `FOR UPDATE`. Both racers converge on the same row; the second
+evaluates against the first's committed result.
+
+### One mechanism, three callers
+
+The live observer, the reconciliation sweep and the backfill all go through
+`applyLowBalanceObservation` in `@zedbot/database` — the only package both apps
+depend on that has Prisma. It takes a `buildNotification(cycle)` callback so
+`@zedbot/shared` stays out of that package. There is deliberately no second
+implementation of "when do we alert" to drift.
+
+**Authoritative balance.** When the caller witnessed the edge itself (a wallet
+mutation, inside the transaction that moved the money) its `after` is
+authoritative by construction. When it did not — the sweep and the backfill pass
+a null `before` — the balance is re-read *under the state lock*. Reading it
+earlier and deciding later is a real race: a wallet mutation committing in
+between makes the sweep judge a stale balance against fresh state, re-arming a
+user who has just alerted so the next pass opens a second cycle for the same
+decrease.
 
 ---
 
@@ -99,6 +153,7 @@ ledger row, each site calls:
 ```ts
 await onWalletBalanceChanged(tx, {
   userId,
+  balanceBeforeToman: balanceBefore,
   balanceAfterToman: balanceAfter,
   source: "ORDER",
 });
@@ -147,6 +202,19 @@ The insert uses `createMany({ skipDuplicates: true })`, which compiles to
 > would fail with 25P02 and `COMMIT` would degrade to `ROLLBACK` — the checkout
 > would die because of a duplicate notification. The duplicate must therefore be
 > absorbed by the index, never by a caught error.
+
+### The atomicity invariant
+
+**A committed cycle greater than zero always has its deterministic outbox row.**
+
+State transition and outbox insert happen in one transaction — in the wallet
+path the caller's, in the sweep and backfill one transaction per user, which
+also covers the live balance re-read and the locked state read. Counters and the
+cursor commit after the units they describe.
+
+If those were separate commits, a crash in between would leave a user ALERTED
+with nothing queued, and every later pass would skip them as "already alerted" —
+silent forever.
 
 ### What the hook's `catch` does and does not buy
 
@@ -227,15 +295,39 @@ gaps it cannot cover: rows written before the feature shipped, a legacy path
 that bypasses the observer, and the failure modes where the observer's own write
 was lost.
 
-**Scale.** It never scans `User` for repairs. It pages `LowBalanceAlertState` by
-keyset on the primary key in bounded batches (500 rows, at most 20 batches per
-pass) and joins back to the balance only for the current page. First-time
-initialisation is a separate bounded keyset page over ACTIVE users, so it is
-incremental too. Nothing here is O(all users) in one pass.
+**Scale.** It never scans `User` for repairs. Two phases, paged differently on
+purpose:
 
-**Multi-replica safety.** The whole pass runs under
-`pg_try_advisory_lock` — non-blocking, so a second replica returns immediately
-rather than duplicating work or queueing.
+* **Initialise** — users with no state row. This predicate *shrinks* as the
+  phase works, so it needs no cursor; each batch takes the next page of whatever
+  is still missing. That also makes it self-healing. Paging a shrinking set by
+  keyset is subtly wrong: a row whose unit fails sits behind an
+  already-advanced cursor and is never revisited. It cost exactly one user in
+  several hundred in testing — invisible in production, and permanently
+  un-warned.
+* **Repair** — every state row. This set does *not* shrink, so it pages by
+  keyset (500 rows, at most 20 batches per pass) and **persists its cursor after
+  every committed batch**. Without that, a large installation rescans the first
+  page forever and its later rows are never repaired. Draining both phases wraps
+  the cursor back to the start, so a clean tail cannot pin it there.
+
+**Multi-replica safety — a durable lease, not an advisory lock.** The first cut
+used `pg_try_advisory_lock`. A *session-level* advisory lock taken through
+Prisma's connection pool is unsafe: the lock and its unlock can be issued on
+different pooled connections, so the unlock may target a session that does not
+hold it, or the lock may leak until the connection is recycled. Nothing in the
+pool guarantees affinity.
+
+It is now a lease row carrying an owner token and an expiry. Acquisition is a
+conditional `updateMany` that admits only an unheld or expired lease, so of N
+replicas exactly one wins and the rest return immediately. Every write the
+holder makes is guarded on still holding the token. A crashed worker cannot
+strand the sweep, because its lease simply expires and is taken over. The
+backfill run carries the same claim, so two replicas cannot advance it at once.
+
+This mirrors the claim convention the notification maintenance worker already
+uses — conditional `updateMany` plus a bounded-age takeover — rather than
+introducing a second coordination framework.
 
 **Safety.** It advances the machine exactly like the observer does, through the
 same dedupe key, so it cannot produce a second message for a cycle that already
@@ -254,6 +346,22 @@ says so in plain Persian.
 The other choice — "also tell the people who are already low" — is a separate,
 explicitly confirmed OWNER action with its own confirmation screen showing the
 exact candidate count before anything is queued.
+
+**Population.** Every ACTIVE, eligible user currently at or below the frozen
+threshold, whatever state the machine is in:
+
+| State | Action |
+| --- | --- |
+| no state row | create the first explicit cycle and notify |
+| silent baseline (cycle 0) | open the first real cycle and notify |
+| ARMED while low | advance one cycle and notify |
+| cycle already produced its message | skip |
+| opted out / payment category off / inactive / recovered | skip |
+
+Skipping the first two is what made an earlier cut complete having sent almost
+nothing: right after enabling, essentially the whole low-balance population *is*
+those two states. Whether a cycle already produced its message is asked of the
+deterministic key, never inferred from the state alone.
 
 The backfill is the most conservative thing in the feature:
 
@@ -308,7 +416,9 @@ delivery re-checks it (test **L63**).
 
 ## 12. Schema
 
-Migration `20260728120000_low_wallet_balance_notifications`, forward-only:
+Two forward-only migrations. Neither modifies a released one.
+
+**`20260728120000_low_wallet_balance_notifications`**
 
 * enums `LowBalanceAlertStateValue` (ARMED / ALERTED) and
   `LowBalanceBackfillStatus`
@@ -322,6 +432,15 @@ Migration `20260728120000_low_wallet_balance_notifications`, forward-only:
   `CHECK ("alertCycle" >= 0)`
 * `LowBalanceBackfillRun` — plus the partial unique index that permits at most
   one active run
+
+**`20260729120000_low_balance_reconciliation_lease`**
+
+* `LowBalanceBackfillRun.ownerToken` / `.leaseExpiresAt` — the durable worker
+  claim
+* `LowBalanceReconciliationState` — the singleton control record: owner token,
+  lease expiry, repair cursor, sweep health counters, and a
+  `completedSweepCount >= 0` check. Coordination only; it holds no user
+  identity, balance or notification data.
 
 ---
 
@@ -356,25 +475,34 @@ state or history is deleted.
 
 ## 15. Tests
 
-65 numbered cases, `L01`–`L65`, across two suites:
+**92 numbered cases, `L01`–`L90`**, across four suites:
 
-* `apps/bot/tests/low-balance.test.ts` (34) — pure boundary/parsing contract,
-  the DB-backed state machine, concurrency and idempotency, financial
-  invariants, the admin read model.
-* `apps/bot/tests/low-balance-worker.test.ts` (31) — the payload snapshot, admin
-  mutations, the backfill, the reconciliation sweep, send-time policy.
+| Suite | Cases | Covers |
+| --- | --- | --- |
+| `low-balance.test.ts` | 34 | pure boundary/parsing contract, the DB-backed state machine, concurrency, financial invariants, admin read model |
+| `low-balance-worker.test.ts` | 33 | payload snapshot, admin mutations, backfill population, reconciliation, send-time policy |
+| `low-balance-first-observation.test.ts` | 18 | first-observation semantics, concurrent state creation, atomicity, lease behaviour |
+| `low-balance-multi-replica.test.ts` | 7 | concurrent replicas, cursor progress, constrained connection pool |
 
 The load-bearing ones:
 
 | Case | What it proves |
 | --- | --- |
-| L25 | Two concurrent crossing debits produce exactly one alert |
-| L26 | Twelve concurrent debits produce exactly one alert |
+| L25 / L26 | Two, then twelve, concurrent crossing debits produce exactly one alert |
 | L28 | A duplicate dedupe key inserts zero rows rather than raising |
 | L30 | A rolled-back transaction takes the notification with it |
 | L31 | The observer never changes a balance, a total or the ledger |
 | L32 / L32b | Logic errors are swallowed; DB errors roll back atomically |
 | L45 | A second backfill start is rejected by the database |
-| L54 | A missed crossing is alerted exactly once by the sweep |
+| L47 / L47b / L47c | Already-notified skipped; silent baseline and no-state users notified |
 | L61 | Recovery is judged against the cycle's own boundary |
 | L65 | A stale alert re-arms only its own cycle |
+| **L66** | The first post-enable debit that crosses alerts exactly once |
+| **L67 / L68 / L69 / L70** | Historically low stays silent; above-threshold arms; a first-observation top-up never alerts; the hysteresis band arms silently |
+| **L72 / L73** | Two, then twelve, concurrent FIRST observations: no wallet mutation fails, one state row, one cycle |
+| **L76 / L77 / L78** | Failure after the transition, and after the outbox insert, rolls the whole unit back; every committed cycle has its message |
+| **L79 / L80** | One lease holder at a time; an expired lease is taken over |
+| **L83 / L86** | No advisory lock is left behind, including with `connection_limit=1` |
+| **L85** | Rows beyond one bounded pass are reached, not starved |
+| **L87 / L88 / L89** | Four replicas advance one backfill without double-notifying; an abandoned claim is taken over; a live claim is respected |
+| **L90** | A backfill interleaved with live crossings notifies each user exactly once |
