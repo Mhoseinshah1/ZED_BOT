@@ -1,4 +1,9 @@
 import { prisma, UserStatus } from "@zedbot/database";
+import {
+  evaluateForceJoinMembership,
+  httpForceJoinMembershipApi,
+  listActiveChannels,
+} from "@zedbot/force-join";
 
 // =============================================================================
 // Transport-independent Mini App access policy.
@@ -6,8 +11,10 @@ import { prisma, UserStatus } from "@zedbot/database";
 // The bot enforces the same gates through grammY middleware that renders
 // Telegram messages. None of that can be imported here: the API must not depend
 // on grammY, on `BotContext`, or on message rendering. What this module shares
-// with the bot is the AUTHORITY — the same Setting rows and the same tables —
-// not the transport.
+// with the bot is the AUTHORITY — the same Setting rows, the same tables, and
+// for Force Join the same `@zedbot/force-join` decision procedure — not the
+// transport. Sharing the DECISION rather than re-deriving it is what keeps a
+// gate satisfiable: whatever clears it in the bot clears it here.
 //
 // Every outcome is a structured code. No database error, internal id or gate
 // detail ever reaches the client; the frontend maps the code to Persian text and
@@ -155,7 +162,7 @@ export async function evaluateMiniAppAccess(userId: string): Promise<MiniAppAcce
   }
 
   // 4. Mandatory channel membership.
-  const forceJoinGate = await evaluateForceJoinGate(user.forceJoinBypass);
+  const forceJoinGate = await evaluateForceJoinGate(user.telegramId, user.forceJoinBypass);
   if (forceJoinGate !== null) {
     return forceJoinGate;
   }
@@ -196,18 +203,32 @@ async function evaluateTermsGate(userId: string): Promise<MiniAppAccessDenied | 
 /**
  * Mandatory channel membership.
  *
- * The bot verifies membership by calling Telegram's `getChatMember`. The API
- * deliberately does NOT: it must not talk to the Bot API, and a frontend claim
- * of "I joined" is worth nothing. There is also no durable per-user membership
- * record to consult — the bot caches its verdict in Redis, which is a cache and
- * not an authority.
+ * Evaluated for real, against the same authority the bot uses: a LIVE
+ * `getChatMember` for every currently active required channel, through the
+ * shared `@zedbot/force-join` checker. Same Redis verdict cache, same error
+ * classification, same unhealthy-channel rule. Only the transport differs — the
+ * bot passes grammY's `ctx.api`, the API passes a plain fetch client — because
+ * grammY must not enter this process.
  *
- * So when the gate is armed and the user has no bypass, the Mini App reports
- * `FORCE_JOIN_REQUIRED` and sends the user to the bot, which is the only place
- * that can actually verify and clear it. Conservative by construction: the worst
- * case is telling an already-joined user to tap through the bot once.
+ * Sharing the checker is the point. An earlier version answered
+ * `FORCE_JOIN_REQUIRED` whenever the gate was armed, without ever establishing
+ * membership: a user who joined and verified in the bot was refused by the Mini
+ * App forever, with no action available anywhere that could clear it.
+ *
+ * Nothing the frontend says is consulted. There is no "I joined" claim to
+ * trust, and no membership fact is stored in the session — every request
+ * re-derives it.
+ *
+ * Fails CLOSED on uncertainty: a transient Telegram failure, an unreadable
+ * setting, an unreadable channel list, or a missing bot token all deny rather
+ * than admit. The one case that deliberately passes is the bot's own D4 rule —
+ * when every active channel is unverifiable the gate enforces nothing, so users
+ * are not bricked by a broken configuration.
  */
-async function evaluateForceJoinGate(bypass: boolean): Promise<MiniAppAccessDenied | null> {
+async function evaluateForceJoinGate(
+  telegramId: bigint,
+  bypass: boolean,
+): Promise<MiniAppAccessDenied | null> {
   if (bypass) {
     return null;
   }
@@ -218,10 +239,45 @@ async function evaluateForceJoinGate(bypass: boolean): Promise<MiniAppAccessDeni
   if (!enabled.value) {
     return null;
   }
+
+  let channels;
   try {
-    const activeChannels = await prisma.forceJoinChannel.count({ where: { isActive: true } });
-    return activeChannels > 0 ? deny("FORCE_JOIN_REQUIRED") : null;
+    channels = await listActiveChannels();
   } catch {
     return deny("ACCESS_CHECK_UNAVAILABLE");
   }
+  if (channels.length === 0) {
+    // Enabled with zero active channels enforces nothing (D4) — the same
+    // conclusion `resolveForceJoinGate` reaches in the bot.
+    return null;
+  }
+
+  const api = httpForceJoinMembershipApi();
+  if (api === null) {
+    // No bot token in this process: membership is UNKNOWABLE, not satisfied.
+    return deny("ACCESS_CHECK_UNAVAILABLE");
+  }
+
+  let outcome;
+  try {
+    outcome = await evaluateForceJoinMembership({
+      api,
+      userTelegramId: telegramId,
+      channels,
+      // The Mini App has no "بررسی عضویت" button; a user who just joined clears
+      // the short negative TTL on their next request, exactly as the bot's
+      // middleware does. Bypassing the cache here would let a reload loop hammer
+      // the Bot API.
+      bypassNegativeCache: false,
+    });
+  } catch {
+    return deny("ACCESS_CHECK_UNAVAILABLE");
+  }
+
+  if (outcome.decision === "PASS") {
+    return null;
+  }
+  // TEMP_FAILURE is uncertainty, not a verdict: retryable, and never rendered as
+  // "you are not a member".
+  return deny(outcome.decision === "TEMP_FAILURE" ? "ACCESS_CHECK_UNAVAILABLE" : "FORCE_JOIN_REQUIRED");
 }

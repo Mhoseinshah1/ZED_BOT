@@ -120,9 +120,12 @@ export const FAILURE_TEXT: Record<ApiFailureCode, FailureText> = {
   },
   FORCE_JOIN_REQUIRED: {
     title: "عضویت در کانال لازم است",
-    body: "برای ادامه باید عضو کانال‌های اعلام‌شده باشید. بررسی عضویت فقط در ربات انجام می‌شود.",
-    action: "بررسی در ربات",
-    retryable: false,
+    body: "برای ادامه باید عضو کانال‌های اعلام‌شده باشید. پس از عضویت، دوباره تلاش کنید.",
+    // The bot renders the list of required channels with join buttons; this app
+    // deliberately does not expose channel data. Membership itself is verified
+    // here on every request, so a retry after joining is enough.
+    action: "مشاهده کانال‌ها در ربات",
+    retryable: true,
   },
   ACCESS_CHECK_UNAVAILABLE: {
     title: "بررسی دسترسی ممکن نشد",

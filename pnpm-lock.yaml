@@ -29,6 +29,9 @@ importers:
       '@zedbot/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@zedbot/force-join':
+        specifier: workspace:*
+        version: link:../../packages/force-join
       '@zedbot/payments':
         specifier: workspace:*
         version: link:../../packages/payments
@@ -60,6 +63,9 @@ importers:
       '@zedbot/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@zedbot/force-join':
+        specifier: workspace:*
+        version: link:../../packages/force-join
       '@zedbot/panel-adapters':
         specifier: workspace:*
         version: link:../../packages/panel-adapters
@@ -168,6 +174,25 @@ importers:
       prisma:
         specifier: ^6.2.1
         version: 6.19.3(typescript@5.9.3)
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.0
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/force-join:
+    dependencies:
+      '@zedbot/database':
+        specifier: workspace:*
+        version: link:../database
+      '@zedbot/shared':
+        specifier: workspace:*
+        version: link:../shared
+      ioredis:
+        specifier: ^5.4.2
+        version: 5.11.1
     devDependencies:
       '@types/node':
         specifier: ^22.10.0

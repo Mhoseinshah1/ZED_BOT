@@ -191,12 +191,15 @@ describe("mini app api client", () => {
       expect(text.title, code).toMatch(/[؀-ۿ]/);
       expect(text.title, code).not.toContain(code);
     }
-    // The two gates the Mini App genuinely cannot clear must send the user to
-    // the bot rather than dead-ending.
+    // Both gates point at the bot, which is where the channel list and the
+    // terms document live.
     expect(FAILURE_TEXT.TERMS_REQUIRED.action).toBeTruthy();
     expect(FAILURE_TEXT.FORCE_JOIN_REQUIRED.action).toBeTruthy();
-    // ...and neither pretends a retry would help.
+    // Accepting terms is a write this app does not perform, so a retry alone
+    // cannot clear it.
     expect(FAILURE_TEXT.TERMS_REQUIRED.retryable).toBe(false);
-    expect(FAILURE_TEXT.FORCE_JOIN_REQUIRED.retryable).toBe(false);
+    // Force Join IS re-evaluated live on every request, so once the user has
+    // joined, retrying here genuinely admits them — offering a retry is honest.
+    expect(FAILURE_TEXT.FORCE_JOIN_REQUIRED.retryable).toBe(true);
   });
 });
