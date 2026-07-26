@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { intEnv, optionalEnv } from "@zedbot/shared";
+import { optionalEnv } from "@zedbot/shared";
 import type { FastifyRequest } from "fastify";
 
 // =============================================================================
@@ -106,20 +106,18 @@ function headerValue(request: FastifyRequest, name: string): string | null {
 
 // --- rate limiting -----------------------------------------------------------
 
-/** Production default. Five sign-ins a minute is far above honest use. */
-export const MINIAPP_AUTH_RATE_LIMIT_DEFAULT = 5;
-
-/**
- * The per-minute authentication ceiling.
- *
- * Clamped rather than trusted: a zero or negative value would lock everyone
- * out, and an unbounded one would make the setting a footgun disguised as a
- * tuning knob.
- */
-export function miniAppAuthRateLimit(): number {
-  const configured = intEnv("MINIAPP_AUTH_RATE_LIMIT", MINIAPP_AUTH_RATE_LIMIT_DEFAULT);
-  return Math.min(Math.max(configured, 1), 10_000);
-}
+// The ceiling ITSELF is resolved in `config.ts`, next to every other validated
+// numeric knob and behind a parser that cannot throw — this is called from
+// inside the limiter on every `POST /auth`, so a parser that raised on a typo
+// would turn a misconfigured environment into a 500 on every sign-in. Re-
+// exported here because the limiter and its bound belong together at the call
+// site.
+export {
+  MINIAPP_AUTH_RATE_LIMIT_DEFAULT,
+  MINIAPP_AUTH_RATE_LIMIT_MAX,
+  MINIAPP_AUTH_RATE_LIMIT_MIN,
+  miniAppAuthRateLimit,
+} from "./config.js";
 
 export interface RateLimitDecision {
   allowed: boolean;

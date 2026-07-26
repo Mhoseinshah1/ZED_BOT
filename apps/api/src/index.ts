@@ -13,6 +13,7 @@ import {
 import Fastify from "fastify";
 import { Redis } from "ioredis";
 
+import { logMiniAppConfig } from "./miniapp/config.js";
 import { miniAppRoutes } from "./miniapp/routes.js";
 import { apiTrustedProxies } from "./miniapp/trusted-proxy.js";
 import { miniAppStaticRoutes } from "./miniapp/static.js";
@@ -169,6 +170,12 @@ async function main(): Promise<void> {
     gitSha: normalizeGitSha(process.env.GIT_SHA) ?? "unknown",
     trustedProxies: trustProxy === false ? "none" : trustProxy,
   });
+  // The Mini App's numeric settings fail SOFT — an unusable value falls back to
+  // the documented default rather than throwing on a request path. That is the
+  // right failure mode, but it is a silent one, so the effective value of each
+  // is reported exactly here, once, where an operator can see that what they
+  // wrote is not what is running.
+  logMiniAppConfig();
 }
 
 main().catch((err: unknown) => {
