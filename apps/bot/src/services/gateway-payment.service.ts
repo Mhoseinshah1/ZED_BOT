@@ -829,6 +829,10 @@ export async function settleGatewayPayment(paymentId: string): Promise<SettleOut
           // Low-balance state machine: same transaction, committed balance, no I/O.
           await onWalletBalanceChanged(tx, {
             userId: payment.userId,
+            // Same authoritative expression the ledger row above records: the
+            // increment UPDATE took the row lock and returned the post-update
+            // row, so after - amount is exactly the locked before value.
+            balanceBeforeToman: balanceAfter - payment.amountToman,
             balanceAfterToman: balanceAfter,
             source: "GATEWAY_TOPUP",
           });

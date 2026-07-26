@@ -541,13 +541,14 @@ async function approveWalletTopup(
           reason: WALLET_TOPUP_REASON,
           relatedPaymentId: payment.id,
           balanceBeforeToman: balanceBefore,
-          balanceAfterToman: balanceAfter,
+        balanceAfterToman: balanceAfter,
         },
       });
 
       // Low-balance state machine: same transaction, committed balance, no I/O.
       await onWalletBalanceChanged(tx, {
         userId: payment.userId,
+        balanceBeforeToman: balanceBefore,
         balanceAfterToman: balanceAfter,
         source: "RECEIPT_TOPUP",
       });

@@ -3764,8 +3764,58 @@ model LowBalanceBackfillRun {
 
   safeErrorCode String?
 
+  /**
+   * Durable worker claim. Two replicas cannot advance the same run: acquiring
+   * the lease is a conditional update on (ownerToken IS NULL OR expired), and
+   * every write the worker makes is guarded on still holding the token. A
+   * crashed worker's lease simply expires and is taken over.
+   */
+  ownerToken     String?
+  leaseExpiresAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([status, createdAt])
+}
+
+/**
+ * The singleton control record for the low-balance reconciliation sweep.
+ * Replaces a session-level advisory lock, which is unsafe through a connection
+ * pool: the lock and the unlock can land on different connections, so it may be
+ * released by the wrong session or leak until the pooled connection is recycled.
+ * A durable lease has neither problem and survives a worker crash.
+ * It also makes progress durable. The sweep pages by keyset and persists its
+ * cursor after every committed batch, so a large installation reaches its later
+ * rows instead of rescanning the first page forever. Reaching the end wraps the
+ * cursor back to the beginning.
+ * Coordination only — it holds no user identity, balance or notification data.
+ */
+model LowBalanceReconciliationState {
+  singletonKey String @id @default("default")
+
+  /**
+   * Opaque per-run token. Non-null with a future expiry means a worker holds it.
+   */
+  ownerToken     String?
+  leaseExpiresAt DateTime?
+
+  /**
+   * Keyset cursor over ACTIVE users still missing a state row.
+   */
+  initCursorUserId String?
+
+  /**
+   * Keyset cursor over LowBalanceAlertState rows for the repair phase.
+   */
+  repairCursorId String?
+
+  lastSweepStartedAt   DateTime?
+  lastSweepCompletedAt DateTime?
+  completedSweepCount  Int       @default(0)
+
+  safeLastErrorCode String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

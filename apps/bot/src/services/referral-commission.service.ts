@@ -252,7 +252,7 @@ export async function creditReferralCommissionForOrder(
           reason: `پاداش زیرمجموعه‌گیری (سفارش ${order.id.slice(0, 8)})`,
           relatedOrderId: order.id,
           balanceBeforeToman: balanceBefore,
-          balanceAfterToman: balanceAfter,
+        balanceAfterToman: balanceAfter,
         },
         select: { id: true },
       });
@@ -260,6 +260,7 @@ export async function creditReferralCommissionForOrder(
       // Low-balance state machine: same transaction, committed balance, no I/O.
       await onWalletBalanceChanged(tx, {
         userId: referral.referrerUserId,
+        balanceBeforeToman: balanceBefore,
         balanceAfterToman: balanceAfter,
         source: "REFERRAL",
       });
@@ -371,7 +372,7 @@ async function runClawbackStep(
           reason: `بازگردانی پاداش زیرمجموعه‌گیری (سفارش ${commission.orderId.slice(0, 8)})`,
           relatedOrderId: commission.orderId,
           balanceBeforeToman: balanceBefore,
-          balanceAfterToman: balanceAfter,
+        balanceAfterToman: balanceAfter,
         },
         select: { id: true },
       });
@@ -379,6 +380,7 @@ async function runClawbackStep(
       // Low-balance state machine: same transaction, committed balance, no I/O.
       await onWalletBalanceChanged(tx, {
         userId: commission.referrerUserId,
+        balanceBeforeToman: balanceBefore,
         balanceAfterToman: balanceAfter,
         source: "REFERRAL",
       });

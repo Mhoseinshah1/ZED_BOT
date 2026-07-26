@@ -54,3 +54,12 @@ export {
   type ReferralUniqueIndexVerification,
   type OrdinaryMigrationsIntegrity,
 } from "./migration-lineage.js";
+
+export {
+  applyLowBalanceObservation,
+  hasNotificationForCycle,
+  type LowBalanceNotificationDraft,
+  type LowBalanceObservationInput,
+  type LowBalanceObservationOutcome,
+  type TomanAmount,
+} from "./low-balance-core.js";

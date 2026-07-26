@@ -225,6 +225,7 @@ export async function failOrderWithRefund(
     // Low-balance state machine: same transaction, committed balance, no I/O.
     await onWalletBalanceChanged(tx, {
       userId: order.userId,
+      balanceBeforeToman: balanceBefore,
       balanceAfterToman: balanceAfter,
       source: "REFUND",
     });

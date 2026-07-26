@@ -61,11 +61,24 @@ async function makeUser(
   return row.id;
 }
 
-/** Moves the balance and runs the observer exactly as a wallet mutation does. */
+/**
+ * Moves the balance and runs the observer exactly as a wallet mutation does —
+ * including the authoritative BEFORE value, which every real wallet site
+ * already computes for its `WalletTransaction.balanceBeforeToman`.
+ */
 async function moveBalance(userId: string, to: number): Promise<void> {
   await prisma.$transaction(async (tx) => {
+    const before = await tx.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { balanceToman: true },
+    });
     await tx.user.update({ where: { id: userId }, data: { balanceToman: to } });
-    await onWalletBalanceChanged(tx, { userId, balanceAfterToman: to, source: "TEST" });
+    await onWalletBalanceChanged(tx, {
+      userId,
+      balanceBeforeToman: before.balanceToman,
+      balanceAfterToman: to,
+      source: "TEST",
+    });
   });
 }
 
@@ -356,11 +369,11 @@ describe.runIf(hasDb)("low balance — concurrency and idempotency (§7)", () =>
     await Promise.all([
       prisma.$transaction(async (tx) => {
         await tx.user.update({ where: { id: userId }, data: { balanceToman: 90_000 } });
-        await observeWalletBalance(tx, { userId, balanceAfterToman: 90_000 });
+        await observeWalletBalance(tx, { userId, balanceBeforeToman: null, balanceAfterToman: 90_000 });
       }),
       prisma.$transaction(async (tx) => {
         await tx.user.update({ where: { id: userId }, data: { balanceToman: 80_000 } });
-        await observeWalletBalance(tx, { userId, balanceAfterToman: 80_000 });
+        await observeWalletBalance(tx, { userId, balanceBeforeToman: null, balanceAfterToman: 80_000 });
       }),
     ]);
 
@@ -378,7 +391,7 @@ describe.runIf(hasDb)("low balance — concurrency and idempotency (§7)", () =>
         prisma.$transaction(async (tx) => {
           const to = 90_000 - i * 1_000;
           await tx.user.update({ where: { id: userId }, data: { balanceToman: to } });
-          await observeWalletBalance(tx, { userId, balanceAfterToman: to });
+          await observeWalletBalance(tx, { userId, balanceBeforeToman: null, balanceAfterToman: to });
         }),
       ),
     );
@@ -432,11 +445,11 @@ describe.runIf(hasDb)("low balance — concurrency and idempotency (§7)", () =>
     await Promise.all([
       prisma.$transaction(async (tx) => {
         await tx.user.update({ where: { id: userId }, data: { balanceToman: 50_000 } });
-        await observeWalletBalance(tx, { userId, balanceAfterToman: 50_000 });
+        await observeWalletBalance(tx, { userId, balanceBeforeToman: null, balanceAfterToman: 50_000 });
       }),
       prisma.$transaction(async (tx) => {
         await tx.user.update({ where: { id: userId }, data: { balanceToman: 400_000 } });
-        await observeWalletBalance(tx, { userId, balanceAfterToman: 400_000 });
+        await observeWalletBalance(tx, { userId, balanceBeforeToman: null, balanceAfterToman: 400_000 });
       }),
     ]);
 
@@ -462,7 +475,7 @@ describe.runIf(hasDb)("low balance — concurrency and idempotency (§7)", () =>
     await expect(
       prisma.$transaction(async (tx) => {
         await tx.user.update({ where: { id: userId }, data: { balanceToman: 90_000 } });
-        await observeWalletBalance(tx, { userId, balanceAfterToman: 90_000 });
+        await observeWalletBalance(tx, { userId, balanceBeforeToman: null, balanceAfterToman: 90_000 });
         throw new Error("payment failed after the notification was prepared");
       }),
     ).rejects.toThrow();
@@ -490,7 +503,7 @@ describe.runIf(hasDb)("low balance — financial invariants (§14)", () => {
     const ledgerBefore = await prisma.walletTransaction.count({ where: { userId } });
 
     await prisma.$transaction(async (tx) => {
-      await observeWalletBalance(tx, { userId, balanceAfterToman: 90_000 });
+      await observeWalletBalance(tx, { userId, balanceBeforeToman: null, balanceAfterToman: 90_000 });
     });
 
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
@@ -522,6 +535,7 @@ describe.runIf(hasDb)("low balance — financial invariants (§14)", () => {
       await tx.user.update({ where: { id: userId }, data: { balanceToman: 90_000 } });
       await onWalletBalanceChanged(brokenTx, {
         userId,
+        balanceBeforeToman: 150_000,
         balanceAfterToman: 90_000,
         source: "TEST",
       });
@@ -558,6 +572,7 @@ describe.runIf(hasDb)("low balance — financial invariants (§14)", () => {
         await tx.user.update({ where: { id: userId }, data: { balanceToman: 90_000 } });
         await onWalletBalanceChanged(tx, {
           userId: poisonedUserId,
+          balanceBeforeToman: 150_000,
           balanceAfterToman: 90_000,
           source: "TEST",
         });

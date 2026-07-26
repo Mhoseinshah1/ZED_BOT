@@ -304,20 +304,61 @@ d("low balance — backfill (§12)", () => {
     expect(await notificationsFor(low)).toBe(1);
   });
 
-  it("L47 skips users who already have an open alert cycle", async () => {
+  it("L47 skips a user whose current cycle already produced its message", async () => {
     await enableFeature();
-    const alreadyAlerted = await makeUser(30_000);
-    await seedState(alreadyAlerted, LowBalanceAlertStateValue.ALERTED, 5);
+    const alreadyNotified = await makeUser(30_000);
+    await seedState(alreadyNotified, LowBalanceAlertStateValue.ALERTED, 5);
+    // The deterministic key — not the state alone — is the authority on whether
+    // this user has already been told.
+    await prisma.automatedNotification.create({
+      data: {
+        type: AutomatedNotificationType.WALLET_LOW_BALANCE,
+        category: "PAYMENT",
+        status: AutomatedNotificationStatus.SENT,
+        userId: alreadyNotified,
+        dedupeKey: lowBalanceDedupeKey(alreadyNotified, 5),
+        ruleVersion: 1,
+        scheduledFor: new Date(),
+        payloadSnapshot: {} as never,
+      },
+    });
 
     await startLowBalanceBackfill("admin-1");
     await runLowBalanceBackfillTick();
 
-    expect(await notificationsFor(alreadyAlerted)).toBe(0);
+    // Exactly the one that already existed; no second message.
+    expect(await notificationsFor(alreadyNotified)).toBe(1);
     const state = await prisma.lowBalanceAlertState.findUnique({
-      where: { userId: alreadyAlerted },
+      where: { userId: alreadyNotified },
     });
-    // Untouched: the observer owns cycle 5 and its message.
     expect(state?.alertCycle).toBe(5);
+  });
+
+  it("L47b notifies a silent baseline user (cycle 0) — the whole point of the run", async () => {
+    await enableFeature();
+    // This is what enabling the feature leaves behind, so if the backfill
+    // skipped it the OWNER action would complete having sent almost nothing.
+    const baseline = await makeUser(30_000);
+    await seedState(baseline, LowBalanceAlertStateValue.ALERTED, 0);
+
+    await startLowBalanceBackfill("admin-1");
+    await runLowBalanceBackfillTick();
+
+    expect(await notificationsFor(baseline)).toBe(1);
+    const state = await prisma.lowBalanceAlertState.findUnique({ where: { userId: baseline } });
+    expect(state?.alertCycle).toBe(1);
+  });
+
+  it("L47c notifies a low user who has no state row at all", async () => {
+    await enableFeature();
+    const noState = await makeUser(25_000);
+
+    await startLowBalanceBackfill("admin-1");
+    await runLowBalanceBackfillTick();
+
+    expect(await notificationsFor(noState)).toBe(1);
+    const state = await prisma.lowBalanceAlertState.findUnique({ where: { userId: noState } });
+    expect(state?.alertCycle).toBe(1);
   });
 
   it("L48 skips users who opted out, and inactive users", async () => {

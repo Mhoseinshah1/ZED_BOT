@@ -1,16 +1,16 @@
 import {
-  AutomatedNotificationCategory,
-  AutomatedNotificationStatus,
-  AutomatedNotificationType,
+  applyLowBalanceObservation,
   LowBalanceAlertStateValue,
   prisma,
   UserStatus,
+  type Prisma,
 } from "@zedbot/database";
 import {
   buildLowBalanceSnapshot,
   createLogger,
   DEFAULT_LOW_BALANCE_REARM_MARGIN_TOMAN,
   DEFAULT_LOW_BALANCE_THRESHOLD_TOMAN,
+  errorMessage,
   LOW_BALANCE_CONFIG_VERSION_KEY,
   LOW_BALANCE_ENABLED_KEY,
   LOW_BALANCE_REARM_MARGIN_KEY,
@@ -21,31 +21,38 @@ import {
   lowBalanceDedupeKey,
 } from "@zedbot/shared";
 
+import { acquireLease, releaseLease, renewLease, saveProgress } from "./low-balance-lease.js";
+
 // =============================================================================
 // Low-balance RECONCILIATION (§6).
 //
 // A REPAIR mechanism, not the primary trigger. The event-driven observer in the
 // wallet transaction is authoritative; this sweep exists for the gaps it cannot
 // cover: rows written before the feature shipped, a legacy code path that
-// bypasses the observer, and the (transaction-aborting) failure modes where the
-// observer's own write was lost.
+// bypasses the observer, and the failure modes where the observer's own write
+// was lost.
 //
-// SCALE. It never scans `User`. It pages `LowBalanceAlertState` by keyset on the
-// primary key in bounded batches, and only joins back to the user's balance for
-// the rows in the current page. Users with no state row at all are discovered
-// through a separate bounded keyset page over ACTIVE users, so first-time
-// initialisation is also incremental.
+// SCALE. It never scans `User` for repairs. It pages by keyset in bounded
+// batches and persists its cursor after every committed batch, so a large
+// installation actually reaches its later rows instead of rescanning the first
+// page forever. Reaching the end wraps the cursor back to the start.
 //
-// SAFETY. It advances the machine exactly like the observer does, through the
-// same dedupe key, so it can never produce a second message for a cycle that
-// already has one. A user it initialises for the first time who is ALREADY low
-// is recorded ALERTED WITHOUT a message — the future-crossings-only rule.
+// COORDINATION. A durable lease, not a pooled session advisory lock — see
+// low-balance-lease.ts for why the latter is unsafe through a connection pool.
+//
+// ATOMICITY. Each user is one transaction: locked state, transition, outbox row
+// and cursor commit together. A committed alert cycle therefore ALWAYS has its
+// deterministic notification. Splitting them would let a crash leave a user
+// ALERTED with nothing queued — and every later pass would skip them as
+// "already alerted", so they would never be warned again.
+//
+// SAFETY. It shares ONE transition primitive with the observer and the
+// backfill, through the same dedupe key, so it cannot produce a second message
+// for a cycle that already has one. A user it initialises for the first time
+// who is ALREADY low is recorded ALERTED WITHOUT a message.
 // =============================================================================
 
 const log = createLogger("worker:low-balance-reconcile");
-
-/** Advisory-lock key: one reconciliation sweep across all replicas. */
-const RECONCILE_LOCK_KEY = "zedbot-low-balance-reconcile";
 
 export interface ReconcileStats {
   examined: number;
@@ -54,6 +61,8 @@ export interface ReconcileStats {
   initialised: number;
   enqueued: number;
   durationMs: number;
+  /** True when both phases reached the end and the cursors wrapped. */
+  completed: boolean;
   skipped?: "disabled" | "locked";
 }
 
@@ -98,10 +107,9 @@ async function loadConfig(): Promise<{ enabled: boolean; config: Config }> {
 /**
  * One bounded reconciliation pass.
  *
- * Multi-replica safe: the whole pass runs under a transaction-level advisory
- * lock, so a second replica finds it taken and returns immediately rather than
- * duplicating work. Restart-safe: every batch commits on its own, and the sweep
- * is idempotent, so an interrupted pass simply resumes next tick.
+ * Multi-replica safe: a second replica finds the lease held and returns
+ * immediately. Restart-safe: progress is durable, so an interrupted pass
+ * resumes from its cursor rather than from the beginning.
  */
 export async function runLowBalanceReconciliation(): Promise<ReconcileStats> {
   const startedAt = Date.now();
@@ -112,6 +120,7 @@ export async function runLowBalanceReconciliation(): Promise<ReconcileStats> {
     initialised: 0,
     enqueued: 0,
     durationMs: 0,
+    completed: false,
   };
 
   const { enabled, config } = await loadConfig();
@@ -119,26 +128,34 @@ export async function runLowBalanceReconciliation(): Promise<ReconcileStats> {
     return { ...empty, durationMs: Date.now() - startedAt, skipped: "disabled" };
   }
 
-  // pg_try_advisory_lock: never block a worker tick waiting for a peer.
-  const [lock] = await prisma.$queryRaw<{ acquired: boolean }[]>`
-    SELECT pg_try_advisory_lock(hashtext(${RECONCILE_LOCK_KEY})) AS "acquired"
-  `;
-  if (lock?.acquired !== true) {
+  const lease = await acquireLease(new Date());
+  if (lease === null) {
     return { ...empty, durationMs: Date.now() - startedAt, skipped: "locked" };
   }
 
   const stats = { ...empty };
+  let completed = false;
   try {
-    stats.initialised = await initialiseMissingStates(config);
-    const repaired = await repairInconsistentStates(config);
+    const init = await initialiseMissingStates(config, lease.ownerToken, lease.initCursorUserId);
+    stats.initialised = init.initialised;
+    stats.enqueued += init.enqueued;
+
+    const repaired = await repairInconsistentStates(config, lease.ownerToken, lease.repairCursorId);
     stats.examined = repaired.examined;
     stats.repairedAlerted = repaired.alerted;
     stats.repairedRearmed = repaired.rearmed;
-    stats.enqueued = repaired.enqueued;
+    stats.enqueued += repaired.enqueued;
+
+    // Only a pass that drained BOTH phases wraps the cursors.
+    completed = init.done && repaired.done;
+  } catch (err) {
+    // Safe code only: never a balance, user id or telegram id.
+    log.warn("low-balance reconciliation pass failed", { error: errorMessage(err) });
   } finally {
-    await prisma.$queryRaw`SELECT pg_advisory_unlock(hashtext(${RECONCILE_LOCK_KEY}))`;
+    await releaseLease(lease.ownerToken, new Date(), completed);
   }
 
+  stats.completed = completed;
   stats.durationMs = Date.now() - startedAt;
   log.info("low-balance reconciliation pass", {
     examined: stats.examined,
@@ -146,56 +163,105 @@ export async function runLowBalanceReconciliation(): Promise<ReconcileStats> {
     repairedRearmed: stats.repairedRearmed,
     initialised: stats.initialised,
     enqueued: stats.enqueued,
+    completed: stats.completed,
     durationMs: stats.durationMs,
   });
   return stats;
 }
 
+interface EligibleUser {
+  id: string;
+  balanceToman: number;
+  status: UserStatus;
+  lowBalanceNotificationsEnabled: boolean;
+  paymentNotificationsEnabled: boolean;
+}
+
+function isEligible(user: EligibleUser): boolean {
+  return (
+    user.status === UserStatus.ACTIVE &&
+    user.lowBalanceNotificationsEnabled &&
+    user.paymentNotificationsEnabled
+  );
+}
+
+function draftFor(userId: string, balance: number, config: Config, origin: "reconcile") {
+  return (cycle: number) => ({
+    dedupeKey: lowBalanceDedupeKey(userId, cycle),
+    ruleVersion: LOW_BALANCE_RULE_VERSION,
+    payloadSnapshot: buildLowBalanceSnapshot({
+      balanceToman: balance,
+      thresholdToman: config.thresholdToman,
+      rearmBoundaryToman: config.rearmBoundaryToman,
+      configVersion: config.configVersion,
+      alertCycle: cycle,
+      origin,
+    }) as unknown as Prisma.InputJsonValue,
+  });
+}
+
 /**
  * Creates missing state rows for ACTIVE users, in bounded keyset pages.
  *
- * Rows are seeded to the state the CURRENT balance implies, and a user already
- * below the threshold is seeded ALERTED with NO notification — initialisation
- * must never generate a message (§16).
+ * A user is seeded to the state their CURRENT balance implies, and one already
+ * below the threshold is seeded ALERTED with NO notification — there was no
+ * witnessed crossing, so claiming one would be a lie (§16). This is exactly the
+ * silent baseline, cycle 0.
  */
-async function initialiseMissingStates(config: Config): Promise<number> {
-  let cursor: string | undefined;
-  let created = 0;
+async function initialiseMissingStates(
+  config: Config,
+  ownerToken: string,
+  startCursor: string | null,
+): Promise<{ initialised: number; enqueued: number; done: boolean }> {
+  let cursor = startCursor ?? undefined;
+  let initialised = 0;
+  let enqueued = 0;
+  let done = false;
+
   for (let batch = 0; batch < LOW_BALANCE_RECONCILE_MAX_BATCHES; batch += 1) {
     const users = await prisma.user.findMany({
       where: { status: UserStatus.ACTIVE, lowBalanceAlertState: { is: null } },
-      select: { id: true, balanceToman: true },
+      select: {
+        id: true,
+        balanceToman: true,
+        status: true,
+        lowBalanceNotificationsEnabled: true,
+        paymentNotificationsEnabled: true,
+      },
       orderBy: { id: "asc" },
       take: LOW_BALANCE_RECONCILE_BATCH,
       ...(cursor === undefined ? {} : { cursor: { id: cursor }, skip: 1 }),
     });
     if (users.length === 0) {
+      done = true;
       break;
     }
+
+    for (const user of users) {
+      const outcome = await processOne(user, config, null, false);
+      if (outcome === null) {
+        continue;
+      }
+      initialised += 1;
+      if (outcome.kind === "alerted" && outcome.notificationId !== null) {
+        enqueued += 1;
+      }
+    }
+
     cursor = users[users.length - 1].id;
-    const now = new Date();
-    const result = await prisma.lowBalanceAlertState.createMany({
-      data: users.map((u) => {
-        const low = u.balanceToman <= config.thresholdToman;
-        return {
-          userId: u.id,
-          state: low ? LowBalanceAlertStateValue.ALERTED : LowBalanceAlertStateValue.ARMED,
-          alertCycle: 0,
-          lastObservedBalanceToman: u.balanceToman,
-          lastThresholdToman: config.thresholdToman,
-          lastRearmBoundaryToman: config.rearmBoundaryToman,
-          lastConfigVersion: config.configVersion,
-          alertedAt: low ? now : null,
-        };
-      }),
-      skipDuplicates: true,
-    });
-    created += result.count;
+    // Durable progress after every committed batch.
+    if (!(await saveProgress(ownerToken, { initCursorUserId: cursor }))) {
+      break; // lease lost: stop touching shared state.
+    }
+    if (!(await renewLease(ownerToken, new Date()))) {
+      break;
+    }
     if (users.length < LOW_BALANCE_RECONCILE_BATCH) {
+      done = true;
       break;
     }
   }
-  return created;
+  return { initialised, enqueued, done };
 }
 
 /**
@@ -204,17 +270,20 @@ async function initialiseMissingStates(config: Config): Promise<number> {
  * ARMED + balance <= threshold  -> a crossing the observer missed: alert.
  * ALERTED + balance >  boundary -> a recovery the observer missed: re-arm.
  *
- * The alert path reuses the SAME cycle counter and dedupe key as the observer,
- * so it cannot re-notify a cycle that already produced a message.
+ * Each row is one transaction, so the state change and its notification are
+ * never split.
  */
 async function repairInconsistentStates(
   config: Config,
-): Promise<{ examined: number; alerted: number; rearmed: number; enqueued: number }> {
-  let cursor: string | undefined;
+  ownerToken: string,
+  startCursor: string | null,
+): Promise<{ examined: number; alerted: number; rearmed: number; enqueued: number; done: boolean }> {
+  let cursor = startCursor ?? undefined;
   let examined = 0;
   let alerted = 0;
   let rearmed = 0;
   let enqueued = 0;
+  let done = false;
 
   for (let batch = 0; batch < LOW_BALANCE_RECONCILE_MAX_BATCHES; batch += 1) {
     const rows = await prisma.lowBalanceAlertState.findMany({
@@ -222,11 +291,11 @@ async function repairInconsistentStates(
         id: true,
         userId: true,
         state: true,
-        alertCycle: true,
         user: {
           select: {
-            status: true,
+            id: true,
             balanceToman: true,
+            status: true,
             lowBalanceNotificationsEnabled: true,
             paymentNotificationsEnabled: true,
           },
@@ -237,88 +306,93 @@ async function repairInconsistentStates(
       ...(cursor === undefined ? {} : { cursor: { id: cursor }, skip: 1 }),
     });
     if (rows.length === 0) {
+      done = true;
       break;
     }
-    cursor = rows[rows.length - 1].id;
     examined += rows.length;
 
     for (const row of rows) {
       const balance = row.user.balanceToman;
       const isLow = balance <= config.thresholdToman;
       const isAbove = balance > config.rearmBoundaryToman;
-
-      if (row.state === LowBalanceAlertStateValue.ALERTED && isAbove) {
-        await prisma.lowBalanceAlertState.updateMany({
-          where: { id: row.id, state: LowBalanceAlertStateValue.ALERTED },
-          data: {
-            state: LowBalanceAlertStateValue.ARMED,
-            lastObservedBalanceToman: balance,
-            rearmedAt: new Date(),
-          },
-        });
+      // Nothing to repair: skip the transaction entirely.
+      if (
+        (row.state === LowBalanceAlertStateValue.ALERTED && !isAbove) ||
+        (row.state === LowBalanceAlertStateValue.ARMED && !isLow)
+      ) {
+        continue;
+      }
+      const outcome = await processOne(row.user, config, null, false);
+      if (outcome === null) {
+        continue;
+      }
+      if (outcome.kind === "rearmed") {
         rearmed += 1;
-        continue;
+      } else if (outcome.kind === "alerted") {
+        alerted += 1;
+        if (outcome.notificationId !== null) {
+          enqueued += 1;
+        }
       }
-
-      if (row.state !== LowBalanceAlertStateValue.ARMED || !isLow) {
-        continue;
-      }
-      // A missed crossing. Ineligible users still get their state corrected —
-      // the machine must reflect reality — but no notification is produced.
-      const eligible =
-        row.user.status === UserStatus.ACTIVE &&
-        row.user.lowBalanceNotificationsEnabled &&
-        row.user.paymentNotificationsEnabled;
-
-      const cycle = row.alertCycle + 1;
-      const advanced = await prisma.lowBalanceAlertState.updateMany({
-        where: { id: row.id, state: LowBalanceAlertStateValue.ARMED, alertCycle: row.alertCycle },
-        data: {
-          state: LowBalanceAlertStateValue.ALERTED,
-          alertCycle: cycle,
-          lastObservedBalanceToman: balance,
-          lastThresholdToman: config.thresholdToman,
-          lastRearmBoundaryToman: config.rearmBoundaryToman,
-          lastConfigVersion: config.configVersion,
-          alertedAt: new Date(),
-        },
-      });
-      // A concurrent observer won the race; it owns the cycle and its message.
-      if (advanced.count !== 1) {
-        continue;
-      }
-      alerted += 1;
-      if (!eligible) {
-        continue;
-      }
-      const created = await prisma.automatedNotification.createMany({
-        data: [
-          {
-            type: AutomatedNotificationType.WALLET_LOW_BALANCE,
-            category: AutomatedNotificationCategory.PAYMENT,
-            status: AutomatedNotificationStatus.SCHEDULED,
-            userId: row.userId,
-            dedupeKey: lowBalanceDedupeKey(row.userId, cycle),
-            ruleVersion: LOW_BALANCE_RULE_VERSION,
-            scheduledFor: new Date(),
-            payloadSnapshot: buildLowBalanceSnapshot({
-              balanceToman: balance,
-              thresholdToman: config.thresholdToman,
-              rearmBoundaryToman: config.rearmBoundaryToman,
-              configVersion: config.configVersion,
-              alertCycle: cycle,
-              origin: "reconcile",
-            }),
-          },
-        ],
-        skipDuplicates: true,
-      });
-      enqueued += created.count;
     }
 
+    cursor = rows[rows.length - 1].id;
+    if (!(await saveProgress(ownerToken, { repairCursorId: cursor }))) {
+      break;
+    }
+    if (!(await renewLease(ownerToken, new Date()))) {
+      break;
+    }
     if (rows.length < LOW_BALANCE_RECONCILE_BATCH) {
+      done = true;
       break;
     }
   }
-  return { examined, alerted, rearmed, enqueued };
+  return { examined, alerted, rearmed, enqueued, done };
+}
+
+/**
+ * One user, one transaction.
+ *
+ * The balance is RE-READ inside the transaction rather than trusted from the
+ * page: a wallet mutation may have moved it since. Returns null when the unit
+ * failed, which rolls the whole unit back — state, outbox and all.
+ */
+async function processOne(
+  user: EligibleUser,
+  config: Config,
+  balanceBeforeToman: number | null,
+  forceAlert: boolean,
+): Promise<Awaited<ReturnType<typeof applyLowBalanceObservation>> | null> {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const live = await tx.user.findUnique({
+        where: { id: user.id },
+        select: {
+          id: true,
+          balanceToman: true,
+          status: true,
+          lowBalanceNotificationsEnabled: true,
+          paymentNotificationsEnabled: true,
+        },
+      });
+      if (live === null || live.status !== UserStatus.ACTIVE) {
+        return null;
+      }
+      return applyLowBalanceObservation(tx, {
+        userId: live.id,
+        balanceBeforeToman,
+        balanceAfterToman: live.balanceToman,
+        thresholdToman: config.thresholdToman,
+        rearmBoundaryToman: config.rearmBoundaryToman,
+        configVersion: config.configVersion,
+        eligible: isEligible(live),
+        forceAlert,
+        buildNotification: draftFor(live.id, live.balanceToman, config, "reconcile"),
+      });
+    });
+  } catch (err) {
+    log.warn("low-balance reconciliation unit failed", { error: errorMessage(err) });
+    return null;
+  }
 }

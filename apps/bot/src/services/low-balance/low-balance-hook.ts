@@ -32,6 +32,13 @@ import { observeWalletBalance } from "./low-balance.service.js";
 
 export interface WalletBalanceObservation {
   userId: string;
+  /**
+   * The AUTHORITATIVE pre-mutation balance — the same value the caller wrote to
+   * `WalletTransaction.balanceBeforeToman`. Every wallet site already computes
+   * it for the ledger row, so this asks for nothing new; it is what lets a
+   * FIRST observation tell a genuine crossing apart from an already-low user.
+   */
+  balanceBeforeToman: number;
   /** The committed post-mutation balance, as recorded on the ledger row. */
   balanceAfterToman: number;
   /** Safe provenance label for metrics (never a user identifier). */
@@ -49,6 +56,7 @@ export async function onWalletBalanceChanged(
   try {
     await observeWalletBalance(tx, {
       userId: observation.userId,
+      balanceBeforeToman: observation.balanceBeforeToman,
       balanceAfterToman: observation.balanceAfterToman,
       source: observation.source,
     });

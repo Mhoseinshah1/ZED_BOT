@@ -448,13 +448,14 @@ async function executeWalletOrderPayment(
           relatedOrderId: order.id,
           relatedPaymentId: payment.id,
           balanceBeforeToman: balanceBefore,
-          balanceAfterToman: balanceAfter,
+        balanceAfterToman: balanceAfter,
         },
       });
 
       // Low-balance state machine: same transaction, committed balance, no I/O.
       await onWalletBalanceChanged(tx, {
         userId: user.id,
+        balanceBeforeToman: balanceBefore,
         balanceAfterToman: balanceAfter,
         source: "ORDER",
       });

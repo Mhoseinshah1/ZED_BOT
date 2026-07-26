@@ -1,5 +1,5 @@
 import {
-  AutomatedNotificationCategory,
+  applyLowBalanceObservation,
   AutomatedNotificationStatus,
   AutomatedNotificationType,
   LowBalanceAlertStateValue,
@@ -12,7 +12,6 @@ import {
   DEFAULT_LOW_BALANCE_REARM_MARGIN_TOMAN,
   DEFAULT_LOW_BALANCE_THRESHOLD_TOMAN,
   buildLowBalanceSnapshot,
-  evaluateLowBalanceTransition,
   isLowBalance,
   isRearmed,
   LOW_BALANCE_CONFIG_VERSION_KEY,
@@ -23,7 +22,6 @@ import {
   lowBalanceDedupeKey,
   rearmBoundaryToman,
   type LowBalanceConfig,
-  type LowBalanceState,
 } from "@zedbot/shared";
 
 import { getBooleanSetting, getSetting, isTruthySettingValue } from "../settings.service.js";
@@ -117,6 +115,17 @@ async function getConfigInTransaction(tx: Prisma.TransactionClient): Promise<Low
 
 export interface ObserveArgs {
   userId: string;
+  /**
+   * The AUTHORITATIVE pre-mutation balance — the same value the caller wrote to
+   * `WalletTransaction.balanceBeforeToman`.
+   *
+   * It is required, not decorative. A user can have no state row yet (the
+   * feature was enabled and the sweep has not reached them), and without the
+   * before value a genuine first crossing from above the threshold to below it
+   * is indistinguishable from a user who was already low — so the alert would
+   * be silently swallowed. `null` is accepted only where no edge exists.
+   */
+  balanceBeforeToman: Toman | null;
   /** The COMMITTED post-mutation balance, read back under the row lock. */
   balanceAfterToman: Toman;
   /** Safe provenance label for metrics only (e.g. "ORDER", "TOPUP"). */
@@ -126,24 +135,27 @@ export interface ObserveArgs {
 export type ObserveOutcome =
   | { kind: "disabled" }
   | { kind: "ineligible" }
-  | { kind: "alerted"; cycle: number; notificationId: string }
+  | { kind: "alerted"; cycle: number; notificationId: string | null }
   | { kind: "rearmed"; cycle: number }
+  | { kind: "seeded"; cycle: number }
   | { kind: "unchanged" };
 
 /**
  * THE wallet integration point (§4).
  *
  * Called from inside the SAME transaction that just moved a balance and wrote
- * its WalletTransaction row, with the exact committed `balanceAfterToman` that
- * ledger row recorded. Every wallet path funnels through here, so the state
- * machine sees checkout, renewal, auto-renewal, extra volume/time, admin
- * credit/debit, approved receipts, gateway and Stars fulfilment, referral
- * rewards, refunds and settlements identically.
+ * its WalletTransaction row, with the exact before/after pair that ledger row
+ * recorded. Every wallet path funnels through here, so the state machine sees
+ * checkout, renewal, auto-renewal, extra volume/time, admin credit/debit,
+ * approved receipts, gateway and Stars fulfilment, referral rewards, refunds
+ * and settlements identically.
  *
- * It writes at most two rows (the state row and one notification) and performs
- * no network I/O, so it cannot fail a financial transaction for an external
- * reason. It deliberately does NOT throw on its own errors — see the callers'
- * wrapper — because a wallet mutation must never be lost to a notification bug.
+ * The transition itself lives in ONE place — `applyLowBalanceObservation` in
+ * @zedbot/database — shared with the reconciliation sweep and the backfill, so
+ * there is no second implementation of "when do we alert" to drift.
+ *
+ * It writes at most two rows and performs no network I/O, so it cannot fail a
+ * financial transaction for an external reason.
  */
 export async function observeWalletBalance(
   tx: Prisma.TransactionClient,
@@ -154,160 +166,56 @@ export async function observeWalletBalance(
     return { kind: "disabled" };
   }
 
-  // Serialize this user's machine. Two concurrent debits both crossing the
-  // threshold contend here, so exactly one observes ARMED and alerts; the other
-  // observes ALERTED and stays silent. Without the lock both could read ARMED.
-  const [existing] = await tx.$queryRaw<
-    { id: string; state: LowBalanceAlertStateValue; alertCycle: number }[]
-  >`
-    SELECT "id", "state", "alertCycle"
-    FROM "LowBalanceAlertState"
-    WHERE "userId" = ${args.userId}
-    FOR UPDATE
-  `;
-
-  const boundary = rearmBoundaryToman(config);
-  const balance = args.balanceAfterToman;
-
-  if (existing === undefined) {
-    // First observation for this user. A user who is ALREADY low when the
-    // machine first sees them is recorded as ALERTED *without* a message: that
-    // is the "future crossings only" rule (§16) and it is what stops enabling
-    // the feature from blasting the historical low-balance population. An
-    // explicit OWNER backfill is the only way to notify them.
-    const initial: LowBalanceState = isLowBalance(balance, config) ? "ALERTED" : "ARMED";
-    await tx.lowBalanceAlertState.create({
-      data: {
-        userId: args.userId,
-        state: initial as LowBalanceAlertStateValue,
-        alertCycle: 0,
-        lastObservedBalanceToman: balance,
-        lastThresholdToman: config.thresholdToman,
-        lastRearmBoundaryToman: boundary,
-        lastConfigVersion: config.configVersion,
-        alertedAt: initial === "ALERTED" ? new Date() : null,
-      },
-    });
-    return { kind: initial === "ALERTED" ? "unchanged" : "unchanged" };
-  }
-
-  const transition = evaluateLowBalanceTransition(
-    existing.state as LowBalanceState,
-    balance,
-    config,
-  );
-
-  if (transition.kind === "none") {
-    await tx.lowBalanceAlertState.update({
-      where: { id: existing.id },
-      data: { lastObservedBalanceToman: balance },
-    });
-    return { kind: "unchanged" };
-  }
-
-  if (transition.kind === "rearm") {
-    await tx.lowBalanceAlertState.update({
-      where: { id: existing.id },
-      data: {
-        state: LowBalanceAlertStateValue.ARMED,
-        lastObservedBalanceToman: balance,
-        lastThresholdToman: config.thresholdToman,
-        lastRearmBoundaryToman: boundary,
-        lastConfigVersion: config.configVersion,
-        rearmedAt: new Date(),
-      },
-    });
-    return { kind: "rearmed", cycle: existing.alertCycle };
-  }
-
-  // --- ARMED -> ALERTED: the one transition that produces a message ----------
-  const cycle = existing.alertCycle + 1;
-  await tx.lowBalanceAlertState.update({
-    where: { id: existing.id },
-    data: {
-      state: LowBalanceAlertStateValue.ALERTED,
-      alertCycle: cycle,
-      lastObservedBalanceToman: balance,
-      lastThresholdToman: config.thresholdToman,
-      lastRearmBoundaryToman: boundary,
-      lastConfigVersion: config.configVersion,
-      alertedAt: new Date(),
+  // Eligibility is an ENQUEUE-time optimisation only; delivery re-checks it
+  // authoritatively. An ineligible user still gets a correct state transition.
+  const user = await tx.user.findUnique({
+    where: { id: args.userId },
+    select: {
+      status: true,
+      lowBalanceNotificationsEnabled: true,
+      paymentNotificationsEnabled: true,
     },
   });
-
-  const notificationId = await enqueueLowBalanceNotification(tx, {
-    userId: args.userId,
-    cycle,
-    balanceToman: balance,
-    config,
-    origin: "event",
-  });
-  return notificationId === null
-    ? { kind: "unchanged" }
-    : { kind: "alerted", cycle, notificationId };
-}
-
-// --- the outbox --------------------------------------------------------------
-
-interface EnqueueArgs {
-  userId: string;
-  cycle: number;
-  balanceToman: Toman;
-  config: LowBalanceConfig;
-  origin: "event" | "backfill" | "reconcile";
-}
-
-/**
- * Writes the durable outbox row (§4/§5) in the caller's transaction.
- *
- * `AutomatedNotification` IS the outbox: it already carries a unique dedupeKey,
- * a status lifecycle, retry counters and crash-safe re-claim. Re-using it means
- * no parallel send subsystem, and it means the notification commits or rolls
- * back atomically with the state transition that justified it.
- *
- * The snapshot holds ONLY safe render data — two Toman figures the user is about
- * to be shown. No name, username, phone number, chat id, ledger id or payment
- * token ever enters it.
- */
-async function enqueueLowBalanceNotification(
-  tx: Prisma.TransactionClient,
-  args: EnqueueArgs,
-): Promise<string | null> {
-  const dedupeKey = lowBalanceDedupeKey(args.userId, args.cycle);
-  const now = new Date();
-  // skipDuplicates compiles to INSERT ... ON CONFLICT DO NOTHING. A raised
-  // unique violation would ABORT the surrounding financial transaction, so a
-  // duplicate must be absorbed by the index and never by a caught error.
-  const created = await tx.automatedNotification.createMany({
-    data: [
-      {
-        type: AutomatedNotificationType.WALLET_LOW_BALANCE,
-        category: AutomatedNotificationCategory.PAYMENT,
-        status: AutomatedNotificationStatus.SCHEDULED,
-        userId: args.userId,
-        dedupeKey,
-        ruleVersion: LOW_BALANCE_RULE_VERSION,
-        scheduledFor: now,
-        payloadSnapshot: buildLowBalanceSnapshot({
-          balanceToman: args.balanceToman,
-          thresholdToman: args.config.thresholdToman,
-          rearmBoundaryToman: rearmBoundaryToman(args.config),
-          configVersion: args.config.configVersion,
-          alertCycle: args.cycle,
-          origin: args.origin,
-        }) as unknown as Prisma.InputJsonValue,
-      },
-    ],
-    skipDuplicates: true,
-  });
-  if (created.count === 0) {
-    return null;
+  if (user === null) {
+    return { kind: "ineligible" };
   }
-  const row = await tx.automatedNotification.findUnique({
-    where: { dedupeKey },
-    select: { id: true },
+  const eligibility = evaluateEligibility(user);
+
+  const outcome = await applyLowBalanceObservation(tx, {
+    userId: args.userId,
+    balanceBeforeToman: args.balanceBeforeToman,
+    balanceAfterToman: args.balanceAfterToman,
+    thresholdToman: config.thresholdToman,
+    rearmBoundaryToman: rearmBoundaryToman(config),
+    configVersion: config.configVersion,
+    eligible: eligibility.eligible,
+    buildNotification: (cycle) => ({
+      dedupeKey: lowBalanceDedupeKey(args.userId, cycle),
+      ruleVersion: LOW_BALANCE_RULE_VERSION,
+      payloadSnapshot: buildLowBalanceSnapshot({
+        balanceToman: args.balanceAfterToman,
+        thresholdToman: config.thresholdToman,
+        rearmBoundaryToman: rearmBoundaryToman(config),
+        configVersion: config.configVersion,
+        alertCycle: cycle,
+        origin: "event",
+      }) as unknown as Prisma.InputJsonValue,
+    }),
   });
-  return row?.id ?? null;
+
+  switch (outcome.kind) {
+    case "alerted":
+      return eligibility.eligible
+        ? { kind: "alerted", cycle: outcome.cycle, notificationId: outcome.notificationId }
+        : { kind: "ineligible" };
+    case "rearmed":
+      return { kind: "rearmed", cycle: outcome.cycle };
+    case "seeded-armed":
+    case "seeded-baseline":
+      return { kind: "seeded", cycle: outcome.cycle };
+    default:
+      return { kind: "unchanged" };
+  }
 }
 
 // --- eligibility -------------------------------------------------------------

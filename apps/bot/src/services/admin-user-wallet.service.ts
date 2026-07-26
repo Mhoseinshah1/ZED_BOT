@@ -446,13 +446,14 @@ export async function adjustUserWallet(
           reason,
           adminId: args.adminId,
           balanceBeforeToman: balanceBefore,
-          balanceAfterToman: balanceAfter,
+        balanceAfterToman: balanceAfter,
         },
       });
 
       // Low-balance state machine: same transaction, committed balance, no I/O.
       await onWalletBalanceChanged(tx, {
         userId: args.targetUserId,
+        balanceBeforeToman: balanceBefore,
         balanceAfterToman: balanceAfter,
         source: "ADMIN_ADJUSTMENT",
       });
