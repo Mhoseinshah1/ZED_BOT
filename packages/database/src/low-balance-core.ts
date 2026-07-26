@@ -95,6 +95,17 @@ export interface LowBalanceObservationInput {
    * backfill sets this; nothing automatic may.
    */
   forceAlert?: boolean;
+  /**
+   * Final authorisation for `forceAlert`, evaluated AFTER the state row is
+   * locked and given the LOCKED current cycle.
+   *
+   * This exists because "does this cycle already have its message" cannot be
+   * answered before the lock. A live wallet crossing can open the cycle in the
+   * gap between an unlocked pre-check and the transition, and `forceAlert`
+   * would then open a SECOND cycle for one episode. Deciding here means no
+   * observation made before the lock can authorise a new cycle.
+   */
+  authorizeForceAlert?: (lockedCycle: number) => Promise<boolean>;
   /** Called at most once, only when a cycle is opened. */
   buildNotification: (cycle: number) => LowBalanceNotificationDraft;
 }
@@ -156,10 +167,21 @@ export async function applyLowBalanceObservation(
     // silent baseline (cycle 0). It can also be an older cycle that carries no
     // message — only reachable in data written before the state change and the
     // outbox insert were made atomic — and repairing that is exactly what the
-    // OWNER asked for. The caller checks "does this cycle already have its
-    // message" before ever setting the flag, so this cannot re-notify.
+    // OWNER asked for.
+    //
+    // The authorisation is re-asked HERE, under the lock, against the cycle the
+    // lock actually revealed. Anything the caller observed beforehand is stale
+    // by definition: a live crossing may have opened this very cycle since.
     if (input.forceAlert === true && isLow) {
-      return openCycle(tx, seeded.state, effective);
+      const authorized =
+        input.authorizeForceAlert === undefined
+          ? true
+          : await input.authorizeForceAlert(seeded.state.alertCycle);
+      if (authorized) {
+        return openCycle(tx, seeded.state, effective);
+      }
+      await touch(tx, seeded.state.id, effective);
+      return { kind: "unchanged", cycle: seeded.state.alertCycle };
     }
     await touch(tx, seeded.state.id, effective);
     // A row this call just created, still low: the silent baseline. No message,

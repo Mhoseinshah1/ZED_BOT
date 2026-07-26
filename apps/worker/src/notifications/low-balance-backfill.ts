@@ -48,7 +48,7 @@ import {
 const log = createLogger("worker:low-balance-backfill");
 
 export interface BackfillTickResult {
-  status: "idle" | "advanced" | "completed" | "cancelled" | "locked";
+  status: "idle" | "advanced" | "completed" | "cancelled" | "locked" | "lost-claim";
   runId?: string;
   processed: number;
   queued: number;
@@ -133,6 +133,12 @@ export async function runLowBalanceBackfillTick(): Promise<BackfillTickResult> {
       queued += page.queued;
       skipped += page.skipped;
 
+      // A unit reported the claim gone. Return immediately WITHOUT releasing —
+      // the run belongs to someone else now, or the OWNER cancelled it.
+      if (page.lostClaim) {
+        return { status: "lost-claim", runId: run.id, processed, queued, skipped };
+      }
+
       if (page.done) {
         await prisma.lowBalanceBackfillRun.updateMany({
           where: {
@@ -152,10 +158,21 @@ export async function runLowBalanceBackfillTick(): Promise<BackfillTickResult> {
       }
       cursor = page.cursor;
 
-      await prisma.lowBalanceBackfillRun.updateMany({
-        where: { id: run.id, ownerToken },
+      // Renewal requires the lease to be STILL VALID. Renewing on the token
+      // alone would let a worker whose lease already expired silently reclaim a
+      // run another worker has since taken over.
+      const renewed = await prisma.lowBalanceBackfillRun.updateMany({
+        where: {
+          id: run.id,
+          ownerToken,
+          status: LowBalanceBackfillStatus.RUNNING,
+          leaseExpiresAt: { gt: new Date() },
+        },
         data: { leaseExpiresAt: new Date(Date.now() + CLAIM_DURATION_MS) },
       });
+      if (renewed.count !== 1) {
+        return { status: "lost-claim", runId: run.id, processed, queued, skipped };
+      }
     }
   } catch (err) {
     // Safe code only — never a balance, a user id or a telegram id.
@@ -181,12 +198,17 @@ interface FrozenConfig {
   configVersion: number;
 }
 
+/** Per-user result. `lost-claim` means STOP: this worker no longer owns the run. */
+type UnitOutcome = "queued" | "skipped" | "lost-claim";
+
 interface BatchResult {
   processed: number;
   queued: number;
   skipped: number;
   cursor?: string;
   done: boolean;
+  /** Set when a unit found the claim gone; the worker must stop entirely. */
+  lostClaim: boolean;
 }
 
 /**
@@ -210,15 +232,30 @@ async function advanceOneBatch(
   });
 
   if (users.length === 0) {
-    return { processed: 0, queued: 0, skipped: 0, done: true };
+    return { processed: 0, queued: 0, skipped: 0, done: true, lostClaim: false };
   }
 
   const nextCursor = users[users.length - 1].id;
   let queued = 0;
   let skipped = 0;
+  let processedHere = 0;
 
   for (const { id } of users) {
-    const result = await processOneUser(id, config);
+    const result = await processOneUser(runId, ownerToken, id, config);
+    // The claim is gone — lease expired and taken over, or the OWNER cancelled.
+    // Stop here and do NOT advance the cursor or the counters past this point:
+    // whoever holds the run now owns the rest of this page.
+    if (result === "lost-claim") {
+      return {
+        processed: processedHere,
+        queued,
+        skipped,
+        cursor,
+        done: false,
+        lostClaim: true,
+      };
+    }
+    processedHere += 1;
     if (result === "queued") {
       queued += 1;
     } else {
@@ -228,39 +265,70 @@ async function advanceOneBatch(
 
   // The cursor and the counters commit with the run row, after the units they
   // describe have already committed.
+  // Counters and cursor commit only while we still hold the claim, and only for
+  // units that actually committed — so they can never move backwards or be
+  // incremented twice by a worker that lost the run mid-page.
   await prisma.lowBalanceBackfillRun.updateMany({
-    where: { id: runId, ownerToken },
+    where: { id: runId, ownerToken, status: LowBalanceBackfillStatus.RUNNING },
     data: {
       cursorUserId: nextCursor,
-      processedCount: { increment: users.length },
+      processedCount: { increment: processedHere },
       queuedCount: { increment: queued },
       skippedCount: { increment: skipped },
     },
   });
 
   return {
-    processed: users.length,
+    processed: processedHere,
     queued,
     skipped,
     cursor: nextCursor,
     done: users.length < LOW_BALANCE_BACKFILL_BATCH,
+    lostClaim: false,
   };
 }
 
 /**
- * One user, one transaction: live balance re-read, locked state, transition and
- * outbox row all commit together or not at all.
+ * One user, one transaction — and one CLAIM CHECK.
  *
- * `forceAlert` is what lets this open a cycle from a silent baseline — the one
- * place in the whole feature allowed to notify without a witnessed crossing,
- * because an OWNER explicitly asked for it on a confirmation screen.
+ * Everything that authorises a message happens inside this transaction:
+ *
+ *   1. the run is still ours: id, RUNNING, our owner token, lease not expired,
+ *      and no committed cancellation;
+ *   2. the user is still eligible and still low;
+ *   3. the state row is LOCKED and its current cycle read;
+ *   4. that locked cycle is checked for an existing message;
+ *   5. the transition and the outbox row are written.
+ *
+ * Checking the claim only between batches is not enough. A worker whose lease
+ * expired mid-batch keeps going, another worker takes over the same run, and
+ * both process the same page — and a cancellation committed mid-batch still
+ * lets a whole bounded batch of messages out. Verifying per unit makes both
+ * impossible, and it costs one indexed read per user.
  */
 async function processOneUser(
+  runId: string,
+  ownerToken: string,
   userId: string,
   config: FrozenConfig,
-): Promise<"queued" | "skipped"> {
+): Promise<UnitOutcome> {
   try {
     return await prisma.$transaction(async (tx) => {
+      // (1) Still our run, still running, lease still valid. A cancellation is
+      // a status change, so this same read enforces it.
+      const claim = await tx.lowBalanceBackfillRun.findFirst({
+        where: {
+          id: runId,
+          status: LowBalanceBackfillStatus.RUNNING,
+          ownerToken,
+          leaseExpiresAt: { gt: new Date() },
+        },
+        select: { id: true },
+      });
+      if (claim === null) {
+        return "lost-claim";
+      }
+
       const user = await tx.user.findUnique({
         where: { id: userId },
         select: {
@@ -278,23 +346,7 @@ async function processOneUser(
       if (user.balanceToman > config.thresholdToman) {
         return "skipped";
       }
-      const eligible =
-        user.lowBalanceNotificationsEnabled && user.paymentNotificationsEnabled;
-      if (!eligible) {
-        return "skipped";
-      }
-
-      // A cycle that already produced its message must not produce another. The
-      // deterministic key is the authority, so ask it directly.
-      const state = await tx.lowBalanceAlertState.findUnique({
-        where: { userId },
-        select: { alertCycle: true },
-      });
-      if (
-        state !== null &&
-        state.alertCycle > 0 &&
-        (await hasNotificationForCycle(tx, lowBalanceDedupeKey(userId, state.alertCycle)))
-      ) {
+      if (!user.lowBalanceNotificationsEnabled || !user.paymentNotificationsEnabled) {
         return "skipped";
       }
 
@@ -308,6 +360,11 @@ async function processOneUser(
         configVersion: config.configVersion,
         eligible: true,
         forceAlert: true,
+        // (4) Asked with the LOCKED cycle, so a live crossing that opened this
+        // cycle a moment ago cannot be turned into a second cycle.
+        authorizeForceAlert: async (lockedCycle) =>
+          lockedCycle === 0 ||
+          !(await hasNotificationForCycle(tx, lowBalanceDedupeKey(userId, lockedCycle))),
         buildNotification: (cycle) => ({
           dedupeKey: lowBalanceDedupeKey(userId, cycle),
           ruleVersion: LOW_BALANCE_RULE_VERSION,

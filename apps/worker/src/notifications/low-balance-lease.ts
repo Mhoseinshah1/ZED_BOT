@@ -97,7 +97,10 @@ export async function saveProgress(
 /** Extends the lease mid-sweep. False means it was lost; stop working. */
 export async function renewLease(ownerToken: string, now: Date): Promise<boolean> {
   const updated = await prisma.lowBalanceReconciliationState.updateMany({
-    where: { singletonKey: "default", ownerToken },
+    // The lease must be STILL VALID to be renewed. Matching on the token alone
+    // would let a worker whose lease already expired silently reclaim the sweep
+    // after another worker had taken it over.
+    where: { singletonKey: "default", ownerToken, leaseExpiresAt: { gt: now } },
     data: { leaseExpiresAt: new Date(now.getTime() + LEASE_DURATION_MS) },
   });
   return updated.count === 1;
