@@ -78,6 +78,11 @@ export async function getLowBalanceConfig(): Promise<LowBalanceConfig> {
  * settings ROWS rather than the process cache so a wallet mutation cannot act on
  * a config the database has already moved past — the same reasoning the terms
  * acceptance path uses.
+ *
+ * Exported as `readLowBalanceConfigRows` because the admin surface needs the
+ * same thing for a different reason: a configuration mutation and a backfill
+ * snapshot must both see ONE coherent (threshold, margin, version) tuple, taken
+ * under the configuration lock. Four cached reads are not one tuple.
  */
 async function getConfigInTransaction(tx: Prisma.TransactionClient): Promise<LowBalanceConfig> {
   const rows = await tx.setting.findMany({
@@ -110,6 +115,8 @@ async function getConfigInTransaction(tx: Prisma.TransactionClient): Promise<Low
     ),
   };
 }
+
+export { getConfigInTransaction as readLowBalanceConfigRows };
 
 // --- the observer ------------------------------------------------------------
 

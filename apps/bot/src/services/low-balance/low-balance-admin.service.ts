@@ -19,8 +19,8 @@ import {
 } from "@zedbot/shared";
 
 import { logger } from "../../core/logger.js";
-import { clearSettingsCache, setSetting } from "../settings.service.js";
-import { getLowBalanceConfig } from "./low-balance.service.js";
+import { clearSettingsCache, setSettingWithClient } from "../settings.service.js";
+import { readLowBalanceConfigRows } from "./low-balance.service.js";
 
 // =============================================================================
 // Low wallet balance — ADMIN mutations (§11, §12, §13).
@@ -48,8 +48,85 @@ export type ConfigUpdateResult =
   | { ok: true; config: LowBalanceConfig }
   | { ok: false; reason: "out-of-range" | "would-overflow" };
 
-async function bumpConfigVersion(current: number): Promise<void> {
-  await setSetting(LOW_BALANCE_CONFIG_VERSION_KEY, String(current + 1), SettingType.NUMBER);
+/**
+ * ONE dedicated advisory-lock namespace serializing every low-balance
+ * CONFIGURATION mutation, and every read that must see a coherent tuple.
+ *
+ * The boundary and its config version are two rows in `Setting`, and they mean
+ * something only together: a version that did not move leaves alerts queued
+ * under the old boundary indistinguishable from alerts queued under the new
+ * one. Writing them as two independent statements has two failure modes — a
+ * database error between them commits a new boundary under an old version, and
+ * two concurrent admins can interleave read-read-write-write and lose an
+ * increment entirely.
+ *
+ * A row lock cannot fix this: the version row may not exist yet, and
+ * `SELECT … FOR UPDATE` over an absent row locks nothing at all. A
+ * transaction-level advisory lock exists independently of any row and is
+ * released at COMMIT or ROLLBACK, so the whole low-balance configuration
+ * behaves as one serialized resource — the convention the terms and force-join
+ * configuration surfaces already use.
+ *
+ * It is deliberately its OWN namespace: this subsystem must never block, or be
+ * blocked by, those two.
+ */
+const LOW_BALANCE_CONFIG_LOCK = "zedbot-low-balance-config";
+
+async function lockLowBalanceConfig(tx: Prisma.TransactionClient): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${LOW_BALANCE_CONFIG_LOCK}))`;
+}
+
+/**
+ * Applies one boundary change atomically.
+ *
+ * Under the lock it re-reads the configuration from the Setting ROWS — never
+ * the process cache, which may be up to its TTL out of date and belongs to this
+ * process alone — validates against that snapshot, and writes the changed
+ * boundary together with the incremented version in a single transaction.
+ * Either both land or neither does.
+ *
+ * The process cache is dropped AFTER the commit. Seeding it inside would
+ * advertise a value a rollback could take away.
+ */
+async function mutateBoundary(
+  key: typeof LOW_BALANCE_THRESHOLD_KEY | typeof LOW_BALANCE_REARM_MARGIN_KEY,
+  value: number,
+  max: number,
+): Promise<ConfigUpdateResult> {
+  if (!Number.isInteger(value) || value < 0 || value > max) {
+    return { ok: false, reason: "out-of-range" };
+  }
+  const result = await prisma.$transaction(async (tx) => {
+    await lockLowBalanceConfig(tx);
+    const current = await readLowBalanceConfigRows(tx);
+    const threshold = key === LOW_BALANCE_THRESHOLD_KEY ? value : current.thresholdToman;
+    const margin = key === LOW_BALANCE_REARM_MARGIN_KEY ? value : current.rearmMarginToman;
+    // Judged against the SAME locked snapshot both parts come from, so a
+    // concurrent change to the other half cannot slip past this check.
+    if (threshold + margin > INT32_MAX) {
+      return { ok: false, reason: "would-overflow" } as const;
+    }
+    await setSettingWithClient(tx, key, String(value), SettingType.NUMBER);
+    await setSettingWithClient(
+      tx,
+      LOW_BALANCE_CONFIG_VERSION_KEY,
+      String(current.configVersion + 1),
+      SettingType.NUMBER,
+    );
+    return {
+      ok: true,
+      config: {
+        enabled: current.enabled,
+        thresholdToman: threshold,
+        rearmMarginToman: margin,
+        configVersion: current.configVersion + 1,
+      },
+    } as const;
+  });
+  if (result.ok) {
+    clearSettingsCache();
+  }
+  return result;
 }
 
 /**
@@ -60,17 +137,7 @@ async function bumpConfigVersion(current: number): Promise<void> {
  * alerted user permanently stuck ALERTED.
  */
 export async function setLowBalanceThreshold(value: number): Promise<ConfigUpdateResult> {
-  if (!Number.isInteger(value) || value < 0 || value > MAX_THRESHOLD_TOMAN) {
-    return { ok: false, reason: "out-of-range" };
-  }
-  const current = await getLowBalanceConfig();
-  if (value + current.rearmMarginToman > INT32_MAX) {
-    return { ok: false, reason: "would-overflow" };
-  }
-  await setSetting(LOW_BALANCE_THRESHOLD_KEY, String(value), SettingType.NUMBER);
-  await bumpConfigVersion(current.configVersion);
-  clearSettingsCache();
-  return { ok: true, config: await getLowBalanceConfig() };
+  return mutateBoundary(LOW_BALANCE_THRESHOLD_KEY, value, MAX_THRESHOLD_TOMAN);
 }
 
 /**
@@ -81,17 +148,7 @@ export async function setLowBalanceThreshold(value: number): Promise<ConfigUpdat
  * an invalid one.
  */
 export async function setLowBalanceRearmMargin(value: number): Promise<ConfigUpdateResult> {
-  if (!Number.isInteger(value) || value < 0 || value > MAX_REARM_MARGIN_TOMAN) {
-    return { ok: false, reason: "out-of-range" };
-  }
-  const current = await getLowBalanceConfig();
-  if (current.thresholdToman + value > INT32_MAX) {
-    return { ok: false, reason: "would-overflow" };
-  }
-  await setSetting(LOW_BALANCE_REARM_MARGIN_KEY, String(value), SettingType.NUMBER);
-  await bumpConfigVersion(current.configVersion);
-  clearSettingsCache();
-  return { ok: true, config: await getLowBalanceConfig() };
+  return mutateBoundary(LOW_BALANCE_REARM_MARGIN_KEY, value, MAX_REARM_MARGIN_TOMAN);
 }
 
 /** Human-readable summary of what the current boundaries mean, for the UI. */
@@ -246,6 +303,12 @@ function isUniqueViolation(err: unknown): boolean {
  * Creates the single backfill run. The worker advances it; this only authorises
  * it, freezing the config it was authorised against.
  *
+ * ONE COHERENT TUPLE. The whole thing happens under the configuration lock, and
+ * the configuration is read from the Setting rows inside that transaction. A run
+ * frozen from four independent cached reads could pair a threshold with the
+ * version that preceded it, and every alert it queued would then be judged at
+ * delivery against a boundary it was never opened under.
+ *
  * `estimatedCount` is exactly that — an estimate. Balances move, users opt out,
  * and every unit re-checks eligibility before it queues anything, so the number
  * of messages actually sent can only be this or fewer.
@@ -256,23 +319,26 @@ function isUniqueViolation(err: unknown): boolean {
  * failure, never as a raw database error.
  */
 export async function startLowBalanceBackfill(adminId: string): Promise<StartBackfillResult> {
-  const config = await getLowBalanceConfig();
-  if (!config.enabled) {
-    return { ok: false, reason: "disabled" };
-  }
-  const candidates = await countBackfillCandidates(config);
   try {
-    const run = await prisma.lowBalanceBackfillRun.create({
-      data: {
-        status: LowBalanceBackfillStatus.PENDING,
-        thresholdToman: config.thresholdToman,
-        rearmBoundaryToman: rearmBoundaryToman(config),
-        configVersion: config.configVersion,
-        createdByAdminId: adminId,
-        estimatedCount: candidates.expectedRecipients,
-      },
+    return await prisma.$transaction(async (tx) => {
+      await lockLowBalanceConfig(tx);
+      const config = await readLowBalanceConfigRows(tx);
+      if (!config.enabled) {
+        return { ok: false, reason: "disabled" } as const;
+      }
+      const candidates = await countBackfillCandidates(config, tx);
+      const run = await tx.lowBalanceBackfillRun.create({
+        data: {
+          status: LowBalanceBackfillStatus.PENDING,
+          thresholdToman: config.thresholdToman,
+          rearmBoundaryToman: rearmBoundaryToman(config),
+          configVersion: config.configVersion,
+          createdByAdminId: adminId,
+          estimatedCount: candidates.expectedRecipients,
+        },
+      });
+      return { ok: true, run: toView(run), candidates } as const;
     });
-    return { ok: true, run: toView(run), candidates };
   } catch (err) {
     if (isUniqueViolation(err)) {
       // The partial unique index rejected it: a run is already PENDING/RUNNING.
