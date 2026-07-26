@@ -226,7 +226,9 @@ interface BatchResult {
  * One keyset page of ACTIVE users at or below the frozen threshold.
  *
  * The cursor advances over ALL users in the page — including skipped ones — so
- * a page full of ineligible users still makes progress.
+ * a page full of ineligible users still makes progress. It is advanced by each
+ * UNIT, inside that unit's own transaction, not once at the end of the page:
+ * see `processOneUser`.
  */
 async function advanceOneBatch(
   runId: string,
@@ -274,19 +276,8 @@ async function advanceOneBatch(
     }
   }
 
-  // The cursor and the counters commit with the run row, after the units they
-  // describe have already committed. They move only while we still hold the
-  // claim, and only for units that actually committed.
-  await prisma.lowBalanceBackfillRun.updateMany({
-    where: { id: runId, ownerToken, status: LowBalanceBackfillStatus.RUNNING },
-    data: {
-      cursorUserId: nextCursor,
-      processedCount: { increment: processedHere },
-      queuedCount: { increment: queued },
-      skippedCount: { increment: skipped },
-    },
-  });
-
+  // No end-of-page progress write: every unit already committed its own cursor
+  // and counter increment together with the transition it describes.
   return {
     processed: processedHere,
     queued,
@@ -315,7 +306,7 @@ interface LockedClaim {
  *   2. the user is still eligible and still low;
  *   3. the state row is LOCKED and its current cycle read;
  *   4. that locked cycle is checked for an existing message;
- *   5. the transition and the outbox row are written.
+ *   5. the transition, the outbox row AND this unit's progress are written.
  *
  * THE LOCK IS THE POINT. A plain read of the run row proves nothing: it sees a
  * snapshot, and a cancellation or a claim takeover can commit the instant after
@@ -331,6 +322,14 @@ interface LockedClaim {
  * than folding the conditions into the WHERE: a predicate that no longer matches
  * locks nothing, and "nothing was locked" cannot be told apart from "somebody
  * else holds it" without a second query.
+ *
+ * PROGRESS IS PART OF THE UNIT. The cursor and the counters are written here,
+ * in the same transaction, not once per page. Committing user units first and
+ * their bookkeeping afterwards means a crash in between re-processes the page:
+ * the dedupe key still prevents a second message, but `queuedCount` under-reports
+ * and `skippedCount` over-reports it, so the OWNER is shown a number that never
+ * happened. Written together, the counters describe exactly the units that
+ * committed, and the cursor never moves past work that did not.
  */
 async function processOneUser(
   runId: string,
@@ -375,6 +374,7 @@ async function processOneUser(
         !user.lowBalanceNotificationsEnabled ||
         !user.paymentNotificationsEnabled
       ) {
+        await recordProgress(tx, runId, userId, "skipped");
         return "skipped";
       }
 
@@ -406,12 +406,54 @@ async function processOneUser(
           }) as unknown as Prisma.InputJsonValue,
         }),
       });
-      return outcome.kind === "alerted" && outcome.notificationId !== null
-        ? "queued"
-        : "skipped";
+      const result: UnitOutcome =
+        outcome.kind === "alerted" && outcome.notificationId !== null ? "queued" : "skipped";
+      await recordProgress(tx, runId, userId, result);
+      return result;
     });
   } catch (err) {
     log.warn("low-balance backfill unit failed", { error: errorMessage(err) });
+    // The unit rolled back, so it recorded nothing — including its cursor. Mark
+    // it durably as attempted anyway, or the very next page would start at the
+    // same user and this run would never get past a row that always fails.
+    // Guarded on still holding the claim, so a worker that has lost the run
+    // cannot move a cursor it no longer owns.
+    await prisma.lowBalanceBackfillRun.updateMany({
+      where: { id: runId, ownerToken, status: LowBalanceBackfillStatus.RUNNING },
+      data: {
+        cursorUserId: userId,
+        processedCount: { increment: 1 },
+        skippedCount: { increment: 1 },
+        failedCount: { increment: 1 },
+        safeErrorCode: "unit-failed",
+      },
+    });
     return "skipped";
   }
+}
+
+/**
+ * This unit's durable progress, written inside the unit's own transaction while
+ * its run row is held locked.
+ *
+ * `processedCount` is always `queuedCount + skippedCount`, and the cursor is the
+ * user this unit just finished — so a resume, by this worker or a replacement,
+ * starts at the first user that has NOT been accounted for.
+ */
+async function recordProgress(
+  tx: Prisma.TransactionClient,
+  runId: string,
+  userId: string,
+  outcome: "queued" | "skipped",
+): Promise<void> {
+  await tx.lowBalanceBackfillRun.update({
+    where: { id: runId },
+    data: {
+      cursorUserId: userId,
+      processedCount: { increment: 1 },
+      ...(outcome === "queued"
+        ? { queuedCount: { increment: 1 } }
+        : { skippedCount: { increment: 1 } }),
+    },
+  });
 }
