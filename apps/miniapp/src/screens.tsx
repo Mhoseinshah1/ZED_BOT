@@ -106,6 +106,25 @@ export function OutsideTelegramScreen(): ReactNode {
   );
 }
 
+/**
+ * Where a logout lands when the host bridge has no `close`.
+ *
+ * Deliberately a dead end with one exit. The signed Telegram payload is still
+ * in the WebView, so anything that authenticated on render would undo the
+ * logout the moment it finished - the button below is the only path back in.
+ */
+export function SignedOutScreen(props: { onSignInAgain: () => void }): ReactNode {
+  return (
+    <div className="center">
+      <h1 className="center__title">{UI.signedOutTitle}</h1>
+      <p className="center__body">{UI.signedOutBody}</p>
+      <button type="button" className="button" onClick={props.onSignInAgain}>
+        {UI.signInAgain}
+      </button>
+    </div>
+  );
+}
+
 // --- 3. dashboard ------------------------------------------------------------
 
 export function DashboardScreen(props: { onOpenService: (id: string) => void }): ReactNode {

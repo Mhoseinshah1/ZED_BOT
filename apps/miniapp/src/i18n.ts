@@ -223,5 +223,8 @@ export const UI = {
   openBot: "باز کردن ربات",
   outsideTelegram: "این صفحه فقط داخل تلگرام کار می‌کند",
   outsideTelegramBody: "لطفاً مینی‌اپ را از داخل ربات باز کنید.",
+  signedOutTitle: "از حساب خارج شدید",
+  signedOutBody: "برای مشاهدهٔ اطلاعات حساب، دوباره وارد شوید.",
+  signInAgain: "ورود مجدد",
   days: "روز",
 } as const;

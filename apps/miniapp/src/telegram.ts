@@ -41,6 +41,7 @@ interface TelegramWebApp {
   openTelegramLink?: (url: string) => void;
   close?: () => void;
   onEvent?: (event: string, handler: () => void) => void;
+  offEvent?: (event: string, handler: () => void) => void;
 }
 
 declare global {
@@ -112,6 +113,59 @@ export function applyTelegramTheme(): void {
     }
   }
   root.dataset.theme = colorScheme();
+}
+
+/**
+ * Keeps the page in step with the host theme for as long as it is open.
+ *
+ * Applying the theme once at startup is not enough: the user can switch their
+ * client between light and dark while the Mini App is open, and Telegram
+ * announces that with a `themeChanged` event rather than reloading the WebView.
+ * Without this subscription the page keeps the colours it was born with — dark
+ * text on a dark background, or the reverse.
+ *
+ * The same validated writer runs on every event, so a host that sends nonsense
+ * on a later theme change is refused exactly as it is at startup.
+ *
+ * Returns an unsubscribe function. `offEvent` is optional in the bridge (older
+ * hosts expose only `onEvent`), so the returned function also flips a local
+ * flag: even where the listener cannot be detached, it stops touching the DOM
+ * after cleanup. React's StrictMode mounts effects twice in development, which
+ * is exactly the case a listener that can never be removed would leak on.
+ */
+export function subscribeToThemeChanges(apply: () => void = applyTelegramTheme): () => void {
+  const app = webApp();
+  if (app?.onEvent === undefined) {
+    return () => {};
+  }
+  let active = true;
+  const handler = (): void => {
+    if (active) {
+      apply();
+    }
+  };
+  app.onEvent("themeChanged", handler);
+  return () => {
+    active = false;
+    app.offEvent?.("themeChanged", handler);
+  };
+}
+
+/**
+ * Closes the Mini App through the host bridge.
+ *
+ * Used after signing out: the session is gone, and the honest thing to show is
+ * nothing at all rather than a shell that would immediately authenticate again.
+ * Returns false when the host provides no `close`, so the caller can fall back
+ * to an explicit signed-out screen instead of appearing to do nothing.
+ */
+export function closeMiniApp(): boolean {
+  const app = webApp();
+  if (app?.close === undefined) {
+    return false;
+  }
+  app.close();
+  return true;
 }
 
 /**

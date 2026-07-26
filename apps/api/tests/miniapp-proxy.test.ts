@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import Fastify, { type FastifyInstance } from "fastify";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 // =============================================================================
 // Trusted-proxy resolution and per-client rate limiting (P01-P12).
@@ -39,6 +39,12 @@ const { apiTrustedProxies, API_DEFAULT_TRUSTED_PROXIES } = await import(
   "../src/miniapp/trusted-proxy.js"
 );
 const { clientRateKey } = await import("../src/miniapp/security.js");
+const {
+  miniAppInitDataMaxAgeSeconds,
+  miniAppSessionTtlSeconds,
+  MINIAPP_INITDATA_MIN_MAX_AGE_SECONDS,
+  MINIAPP_INITDATA_MAX_MAX_AGE_SECONDS,
+} = await import("../src/miniapp/config.js");
 
 /** Addresses a hop can plausibly have in this repository's deployments. */
 const LOOPBACK_HOP = "127.0.0.1";
@@ -234,5 +240,79 @@ describe("mini app trusted proxy", () => {
       headers: { "x-forwarded-for": CLIENT_A, "x-real-ip": CLIENT_A },
     });
     expect(JSON.parse(res.body)).toMatchObject({ ip: CLIENT_A });
+  });
+});
+
+// =============================================================================
+// Configuration bounds (C01-C05).
+//
+// Two lifetimes were hard-coded: how old a signed Telegram payload may be at
+// sign-in, and how long a session cookie lasts. Both are now operator-tunable —
+// and both are CLAMPED, because a "0" or a "one week" here is a security
+// decision wearing the clothes of a tuning value.
+// =============================================================================
+
+describe("mini app lifetimes", () => {
+  const saved = {
+    initData: process.env.MINIAPP_INITDATA_MAX_AGE_SECONDS,
+    session: process.env.MINIAPP_SESSION_TTL_SECONDS,
+  };
+
+  afterEach(() => {
+    for (const [key, value] of [
+      ["MINIAPP_INITDATA_MAX_AGE_SECONDS", saved.initData],
+      ["MINIAPP_SESSION_TTL_SECONDS", saved.session],
+    ] as const) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+
+  it("C01 defaults to the documented values when unset", async () => {
+    delete process.env.MINIAPP_INITDATA_MAX_AGE_SECONDS;
+    delete process.env.MINIAPP_SESSION_TTL_SECONDS;
+    expect(miniAppInitDataMaxAgeSeconds()).toBe(300);
+    expect(miniAppSessionTtlSeconds()).toBe(900);
+  });
+
+  it("C02 honours a value inside the documented range", async () => {
+    process.env.MINIAPP_INITDATA_MAX_AGE_SECONDS = "600";
+    process.env.MINIAPP_SESSION_TTL_SECONDS = "1800";
+    expect(miniAppInitDataMaxAgeSeconds()).toBe(600);
+    expect(miniAppSessionTtlSeconds()).toBe(1800);
+  });
+
+  it("C03 clamps a value that would disable the protection", async () => {
+    // `0` would make every payload stale and lock everyone out; anything under
+    // the floor is the same mistake. (A leading "-" is not digits at all, so it
+    // takes the default — covered by C05.)
+    for (const bad of ["0", "1", "5"]) {
+      process.env.MINIAPP_INITDATA_MAX_AGE_SECONDS = bad;
+      expect(miniAppInitDataMaxAgeSeconds(), bad).toBe(MINIAPP_INITDATA_MIN_MAX_AGE_SECONDS);
+      process.env.MINIAPP_SESSION_TTL_SECONDS = bad;
+      expect(miniAppSessionTtlSeconds(), bad).toBe(60);
+    }
+  });
+
+  it("C04 clamps a value that would widen the window indefinitely", async () => {
+    for (const bad of ["86400", "999999999"]) {
+      process.env.MINIAPP_INITDATA_MAX_AGE_SECONDS = bad;
+      expect(miniAppInitDataMaxAgeSeconds(), bad).toBe(MINIAPP_INITDATA_MAX_MAX_AGE_SECONDS);
+      process.env.MINIAPP_SESSION_TTL_SECONDS = bad;
+      expect(miniAppSessionTtlSeconds(), bad).toBe(3600);
+    }
+  });
+
+  it("C05 falls back rather than throwing on nonsense", async () => {
+    for (const junk of ["", "   ", "abc", "10s", "NaN"]) {
+      process.env.MINIAPP_INITDATA_MAX_AGE_SECONDS = junk;
+      process.env.MINIAPP_SESSION_TTL_SECONDS = junk;
+      // A typo must not take the API down at boot; the safe default applies.
+      expect(miniAppInitDataMaxAgeSeconds(), JSON.stringify(junk)).toBe(300);
+      expect(miniAppSessionTtlSeconds(), JSON.stringify(junk)).toBe(900);
+    }
   });
 });

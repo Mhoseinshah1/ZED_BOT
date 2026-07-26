@@ -9,10 +9,17 @@ import {
   ProfileScreen,
   ServiceDetailScreen,
   ServicesScreen,
+  SignedOutScreen,
   SplashScreen,
   WalletScreen,
 } from "./screens";
-import { isTelegramEnvironment, rawInitData, signalReady } from "./telegram";
+import {
+  closeMiniApp,
+  isTelegramEnvironment,
+  rawInitData,
+  signalReady,
+  subscribeToThemeChanges,
+} from "./telegram";
 
 // =============================================================================
 // The shell: authentication, then a four-tab read-only app.
@@ -26,6 +33,14 @@ import { isTelegramEnvironment, rawInitData, signalReady } from "./telegram";
 // detail view - a routing library would be more code than the thing it routes,
 // and a URL-driven router inside a Telegram WebView adds history semantics
 // nobody asked for.
+//
+// SIGNING OUT STAYS SIGNED OUT. The shell must never re-authenticate on its
+// own after a logout: `initData` is still sitting in the WebView, so calling
+// `signIn` again would silently mint a fresh cookie and the user would watch
+// their own logout undo itself. A successful logout therefore closes the Mini
+// App through the host bridge, or - when the host has no `close` - shows a
+// signed-out screen whose "ورود مجدد" button is the ONLY thing that
+// authenticates again.
 // =============================================================================
 
 type Tab = "dashboard" | "services" | "wallet" | "profile";
@@ -34,7 +49,9 @@ type Session =
   | { phase: "starting" }
   | { phase: "outside" }
   | { phase: "failed"; failure: ApiFailure }
-  | { phase: "ready"; user: UserDto };
+  | { phase: "ready"; user: UserDto }
+  /** Terminal until the user explicitly asks to sign in again. */
+  | { phase: "signedOut" };
 
 export function App(): ReactNode {
   const [session, setSession] = useState<Session>({ phase: "starting" });
@@ -61,6 +78,10 @@ export function App(): ReactNode {
     void signIn();
   }, [signIn]);
 
+  // The host theme can change while the app is open; re-apply it whenever it
+  // does, and detach on unmount.
+  useEffect(() => subscribeToThemeChanges(), []);
+
   if (session.phase === "starting") {
     return <SplashScreen />;
   }
@@ -69,6 +90,12 @@ export function App(): ReactNode {
   }
   if (session.phase === "failed") {
     return <FailureScreen failure={session.failure} onRetry={() => void signIn()} />;
+  }
+  if (session.phase === "signedOut") {
+    // Reached only when the host could not close the app. Nothing here runs
+    // automatically - `signIn` fires on the explicit button press and nowhere
+    // else, so one logout produces one logout request and zero authentications.
+    return <SignedOutScreen onSignInAgain={() => void signIn()} />;
   }
 
   const showingDetail = openServiceId !== null;
@@ -98,7 +125,12 @@ export function App(): ReactNode {
             onSignedOut={() => {
               setOpenServiceId(null);
               setTab("dashboard");
-              void signIn();
+              // Close if the host allows it; otherwise park on the signed-out
+              // screen. Never `signIn()` - `initData` is still available and
+              // calling it would immediately undo the logout.
+              if (!closeMiniApp()) {
+                setSession({ phase: "signedOut" });
+              }
             }}
           />
         )}

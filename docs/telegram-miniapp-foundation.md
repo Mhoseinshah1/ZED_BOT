@@ -290,7 +290,17 @@ on.
 - **RTL is a document property** (`dir="rtl"` plus logical CSS properties), not a
   pile of `left`/`right` overrides.
 - **Telegram's theme** is copied into CSS custom properties after each value is
-  validated as a colour literal.
+  validated as a colour literal — at startup *and* on every `themeChanged`
+  event, because a user can switch their client between light and dark while
+  the app is open and Telegram does not reload the WebView. The subscription is
+  detached on unmount, and the detached handler stops writing even where the
+  host bridge offers no `offEvent`.
+- **Signing out stays signed out.** The signed `initData` never leaves the
+  WebView, so a shell that re-authenticated after a logout would silently undo
+  it. A successful logout closes the Mini App through the host bridge; where the
+  host has no `close`, it lands on a signed-out screen whose «ورود مجدد» button
+  is the only thing that authenticates again. One logout produces one logout
+  request and zero automatic sign-ins.
 - **No web font, one external script.** `https://telegram.org/js/telegram-web-app.js`
   is required: the native mobile clients inject `window.Telegram` themselves,
   but Telegram Desktop and Telegram Web run a Mini App in an *iframe* where
@@ -429,6 +439,9 @@ header into a combined policy nobody wrote.
 | `MINIAPP_PUBLIC_URL` | Public https URL, normally `https://<APP_DOMAIN>/miniapp`. **Empty disables the Mini App** — the bot hides its entry button. |
 | `MINIAPP_ALLOWED_ORIGINS` | Extra origins allowed to POST to auth/logout. Only for multi-hostname deployments. |
 | `MINIAPP_AUTH_RATE_LIMIT` | Auth attempts per minute per client (default 5). |
+| `MINIAPP_INITDATA_MAX_AGE_SECONDS` | How old a signed Telegram payload may be at sign-in. Default 300, **clamped to 30..3600** — it is the replay window on a bearer credential. |
+| `MINIAPP_SESSION_TTL_SECONDS` | Session cookie lifetime. Default 900, **clamped to 60..3600**. One value drives the token expiry, the cookie `Max-Age` and what the client is told, so the three cannot disagree. |
+| `API_TRUSTED_PROXIES` | Which forwarding hops may be believed (§4.3). Default `loopback, linklocal, uniquelocal`; `none` trusts nothing. |
 | `MINIAPP_DIST_DIR` | Overrides where the API looks for the built bundle. |
 | `VITE_BOT_USERNAME` | Public bot handle compiled into the bundle for its "open the bot" link. Build-time. |
 
@@ -437,14 +450,24 @@ throws rather than falling back to an unkeyed token.
 
 ### 7.2 Bot entry
 
-`/app` and the `user:miniapp` callback, both dispatched through the same gated
-user area as `/menu`. Deliberately separate from the main menu: that menu
-renders from one definition feeding both an inline and a reply keyboard, and a
-reply keyboard cannot carry a `web_app` button.
+Three ways in, all reaching the same screen: the **main-menu button**, `/app`,
+and the `user:miniapp` callback — all dispatched through the same gated user
+area as `/menu`.
+
+The main-menu entry is a `MINIAPP` action in the ONE shared menu definition, so
+it renders identically in INLINE and REPLY mode. It carries an ordinary
+callback, never a `web_app` button: a reply keyboard's buttons are text only, so
+a `web_app` entry in the shared definition could not exist in REPLY mode and the
+two modes would silently offer different features. The real `web_app` button
+lives on the intro page that callback opens.
 
 Gated on configuration rather than a database flag — Telegram rejects a
 `web_app` button whose URL is not https and rejects the whole keyboard with it,
 so a misconfiguration must yield a missing button, not an unrenderable menu.
+When `MINIAPP_PUBLIC_URL` is missing or not https the menu row is **hidden**,
+but the label stays **resolvable**: a persistent reply keyboard already sitting
+in someone's chat outlives the setting, and a tap on it should get the explicit
+"not enabled yet" answer rather than being silently ignored.
 
 ### 7.3 Docker
 
@@ -484,13 +507,16 @@ error message with no request payload and no user identity.
 
 | Suite | File | Cases |
 | --- | --- | --- |
-| initData validation | `apps/api/tests/miniapp-initdata.test.ts` | M01–M16 |
+| initData validation + external vectors | `apps/api/tests/miniapp-initdata.test.ts` | M01–M24 |
 | Session token & cookie | `apps/api/tests/miniapp-session.test.ts` | M17–M26 |
 | API isolation, gates, pagination | `apps/api/tests/miniapp-api.test.ts` | M27–M54 |
+| Force Join gate + grammY isolation | `apps/api/tests/miniapp-force-join.test.ts` | FJ01–FJ13b |
+| Trusted proxy, rate limiting, lifetimes | `apps/api/tests/miniapp-proxy.test.ts` | P01–P12, C01–C05 |
 | Static serving & SPA fallback | `apps/api/tests/miniapp-static.test.ts` | N05b, N07–N09 |
 | Nginx config & smoke script | `apps/bot/tests/miniapp-nginx.test.ts` | N01–N15 |
-| Bot entry point | `apps/bot/tests/miniapp-entry.test.ts` | B01–B06 |
+| Bot entry point + menu integration | `apps/bot/tests/miniapp-entry.test.ts` | B01–B10 |
 | Frontend formatting & client | `apps/miniapp/tests/` | F01–F20 |
+| Theme & logout lifecycle (jsdom) | `apps/miniapp/tests/lifecycle.test.tsx` | L01–L12 |
 
 The API suite needs a migrated PostgreSQL (`DATABASE_URL`); without it it skips
 itself. The Nginx suite runs a real `nginx -t` when the binary is present and

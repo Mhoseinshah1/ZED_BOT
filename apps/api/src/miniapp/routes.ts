@@ -5,7 +5,6 @@ import {
   getTelegramBotToken,
   issueMiniAppSession,
   MINIAPP_INITDATA_MAX_BYTES,
-  MINIAPP_SESSION_DEFAULT_TTL_SECONDS,
   optionalEnv,
   readMiniAppSessionCookie,
   serializeMiniAppSessionClearCookie,
@@ -16,6 +15,7 @@ import {
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import { evaluateMiniAppAccess, type MiniAppAccessUser } from "./access-policy.js";
+import { miniAppInitDataMaxAgeSeconds, miniAppSessionTtlSeconds } from "./config.js";
 import { clampPageSize, decodeCursor, encodeCursor } from "./cursor.js";
 import {
   checkRequestOrigin,
@@ -160,7 +160,12 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
         return fail(reply, 400, "BAD_REQUEST");
       }
 
-      const validated = validateMiniAppInitData(initData, { botToken });
+      // Freshness window read per request, so an operator change takes effect
+      // without a restart; the value is clamped to a documented range.
+      const validated = validateMiniAppInitData(initData, {
+        botToken,
+        maxAgeSeconds: miniAppInitDataMaxAgeSeconds(),
+      });
       if (!validated.ok) {
         // ONE code for every failure. The individual reasons are precise enough
         // to be an oracle ("your signature was fine but stale"), and the client
@@ -198,17 +203,20 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
           .send({ ok: false, code: access.code, requiresBot: access.requiresBot });
       }
 
-      const token = issueMiniAppSession(userId, MINIAPP_SESSION_DEFAULT_TTL_SECONDS);
+      // ONE value for the token expiry, the cookie Max-Age and what the client
+      // is told, so the three can never disagree.
+      const ttlSeconds = miniAppSessionTtlSeconds();
+      const token = issueMiniAppSession(userId, ttlSeconds);
       void reply.header(
         "Set-Cookie",
         serializeMiniAppSessionCookie(token, {
           secure: requireSecureCookie(request),
-          maxAgeSeconds: MINIAPP_SESSION_DEFAULT_TTL_SECONDS,
+          maxAgeSeconds: ttlSeconds,
         }),
       );
       return reply.send({
         ok: true,
-        expiresInSeconds: MINIAPP_SESSION_DEFAULT_TTL_SECONDS,
+        expiresInSeconds: ttlSeconds,
         user: toMiniAppUser(access.user),
       });
     },

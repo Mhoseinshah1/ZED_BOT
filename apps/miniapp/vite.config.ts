@@ -53,7 +53,11 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
+    // Node by default — most suites are pure logic and starting a DOM for them
+    // would only slow the run. The lifecycle suite, which has to render the
+    // real component and click real buttons, opts into jsdom with a
+    // `@vitest-environment jsdom` pragma at the top of the file.
     environment: "node",
   },
 });

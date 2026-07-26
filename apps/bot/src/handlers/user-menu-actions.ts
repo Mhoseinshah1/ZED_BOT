@@ -9,6 +9,7 @@ import { showAdminMenu } from "./admin.handler.js";
 import { isInterruptibleCheckoutFlow } from "./user-checkout/checkout-state.js";
 import { openOtherProductsSection, startBuyFlow } from "./user-checkout/checkout.handler.js";
 import { openFreeTrialSection } from "./user-free-trial/free-trial.handler.js";
+import { showMiniAppEntry } from "./miniapp.handler.js";
 import { renderOrdersHub } from "./user-orders/orders.handler.js";
 import { renderPricingRoot } from "./user-pricing/pricing.handler.js";
 import { renderPurchaseHub } from "./user-purchase-hub/purchase-hub.handler.js";
@@ -50,6 +51,11 @@ const ACTION_HANDLERS: Record<UserMainMenuAction, (ctx: BotContext) => Promise<v
   FREE_TRIAL: openFreeTrialSection,
   REFERRAL: (ctx) => renderReferralPage(ctx),
   REPRESENTATIVE: (ctx) => renderRepresentativeLanding(ctx),
+  // Opens the Mini App intro page — the same screen /app and the inline
+  // callback render, and the only place the `web_app` button exists. When
+  // MINIAPP_PUBLIC_URL is missing or not https it answers with the explicit
+  // "not enabled yet" text rather than a broken button.
+  MINIAPP: showMiniAppEntry,
 };
 
 /** Opens one main-menu section - the same entry the inline callback uses. */
