@@ -13,6 +13,7 @@ import {
 import Fastify from "fastify";
 import { Redis } from "ioredis";
 
+import { miniAppRoutes } from "./miniapp/routes.js";
 import { paymentRoutes } from "./payment-routes.js";
 
 const logger = createLogger("api");
@@ -71,6 +72,12 @@ const app = Fastify({ logger: false });
 // their raw-body JSON parser never affects the rest of the app. Fastify
 // resolves pending registrations before listen().
 void app.register(paymentRoutes);
+
+// Read-only Telegram Mini App API. Encapsulated so its no-store/nosniff hooks
+// and its 16 KiB body limit apply to nothing else, and mounted under a prefix
+// the session cookie is scoped to - payment callbacks, /health and /version
+// never receive it.
+void app.register(miniAppRoutes, { prefix: "/api/miniapp" });
 
 app.get("/health", async (_request, reply) => {
   let database = "ok";
