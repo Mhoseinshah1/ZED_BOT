@@ -9,21 +9,36 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 // page. Only the raw signed `initData` string proves anything, and only after
 // the HMAC below verifies against the bot token.
 //
-// The algorithm is Telegram's published one:
+// Telegram publishes TWO different validation schemes over the same payload,
+// and they exclude DIFFERENT fields. Mixing them up produces code that looks
+// right and rejects every real payload:
 //
-//   secret_key        = HMAC_SHA256(key="WebAppData", data=<bot token>)
-//   data_check_string = "<k>=<v>" for every field except `hash` and
-//                       `signature`, sorted by key, joined with "\n"
-//   expected          = HMAC_SHA256(key=secret_key, data=data_check_string)
+//   1. Bot-token HMAC-SHA256 — what this module implements.
 //
-// Two properties are load-bearing and easy to get wrong:
+//        secret_key        = HMAC_SHA256(key="WebAppData", data=<bot token>)
+//        data_check_string = "<k>=<v>" for every received field EXCEPT `hash`,
+//                            sorted by key, joined with "\n"
+//        expected          = HMAC_SHA256(key=secret_key, data=data_check_string)
+//
+//      `signature` is an ordinary signed field here: it IS part of the
+//      data-check-string. Telegram signs whatever it sends, `signature`
+//      included, so excluding it changes the bytes and fails every modern
+//      payload — which now always carries `signature`.
+//
+//   2. Third-party Ed25519 — NOT implemented here (it verifies the payload
+//      without holding the bot token, which is not this server's situation).
+//      That scheme excludes BOTH `hash` and `signature`, and prefixes the
+//      check string with "<bot_id>:WebAppData\n". `buildThirdPartyCheckString`
+//      below exists so the difference is executable and testable rather than a
+//      comment that can drift.
+//
+// Two further properties are load-bearing and easy to get wrong:
 //
 //   * The values fed into the check string are the DECODED values exactly as
 //     received. Re-encoding, trimming or normalising them changes the bytes
 //     Telegram signed and turns a valid payload invalid (or, worse, lets two
 //     different payloads produce one check string).
-//   * `signature` is Telegram's newer third-party Ed25519 field. It is excluded
-//     from the bot-token HMAC. Including it would break every real payload.
+//   * Sorting is by key over the decoded keys, not over the raw query order.
 //
 // Everything here is pure: no database, no environment reads, no I/O. That is
 // what makes the failure modes testable one at a time.
@@ -134,6 +149,41 @@ function parseStrict(
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 
 /**
+ * Data-check-string for the BOT-TOKEN HMAC scheme.
+ *
+ * Excludes exactly one field: `hash`. Everything else Telegram sent — including
+ * `signature` — is signed and must be present, byte for byte as received.
+ */
+export function buildBotTokenCheckString(pairs: Iterable<[string, string]>): string {
+  return [...pairs]
+    .filter(([key]) => key !== "hash")
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+}
+
+/**
+ * Data-check-string for the THIRD-PARTY Ed25519 scheme.
+ *
+ * Not used by this server — it holds the bot token and so uses the HMAC scheme
+ * above. It is written out here so the two field rules sit side by side and a
+ * test can prove they differ, instead of one silently drifting into the other.
+ *
+ * Excludes `hash` AND `signature`, and prefixes "<bot_id>:WebAppData\n".
+ */
+export function buildThirdPartyCheckString(
+  pairs: Iterable<[string, string]>,
+  botId: string,
+): string {
+  const body = [...pairs]
+    .filter(([key]) => key !== "hash" && key !== "signature")
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+  return `${botId}:WebAppData\n${body}`;
+}
+
+/**
  * Extracts the Telegram id from the raw `user` JSON WITHOUT going through a
  * double.
  *
@@ -214,13 +264,10 @@ export function validateMiniAppInitData(
   }
 
   // --- signature ------------------------------------------------------------
-  // Built from the values as received. `signature` is Telegram's third-party
-  // Ed25519 field and is excluded from the bot-token HMAC, as is `hash` itself.
-  const checkString = [...pairs.entries()]
-    .filter(([key]) => key !== "hash" && key !== "signature")
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, value]) => `${key}=${value}`)
-    .join("\n");
+  // Built from the values as received, excluding only `hash`. `signature`, when
+  // present, is a signed field like any other — see the header for why the
+  // third-party scheme's extra exclusion must not leak into this one.
+  const checkString = buildBotTokenCheckString(pairs);
 
   const secretKey = createHmac("sha256", "WebAppData").update(options.botToken).digest();
   const expected = createHmac("sha256", secretKey).update(checkString).digest();

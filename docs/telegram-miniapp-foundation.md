@@ -43,21 +43,42 @@ WebView. `Telegram.WebApp.initDataUnsafe` is never read — it is ordinary page
 state that anyone can edit from a console, which is what its name says.
 
 `packages/shared/src/miniapp-initdata.ts` implements Telegram's published
-algorithm:
+bot-token algorithm:
 
 ```
 secret_key        = HMAC_SHA256(key="WebAppData", data=<bot token>)
-data_check_string = "<k>=<v>" for every field except `hash` and `signature`,
+data_check_string = "<k>=<v>" for every received field EXCEPT `hash`,
                     sorted by key, joined with "\n"
 expected          = HMAC_SHA256(key=secret_key, data=data_check_string)
 ```
+
+#### Which fields each validation mode covers
+
+Telegram publishes **two** schemes over the same payload, and they exclude
+different fields. Confusing them yields code that looks correct and rejects
+every real user:
+
+| Mode | Excluded fields | Prefix | Key | Used here |
+| --- | --- | --- | --- | --- |
+| **Bot-token HMAC-SHA256** | `hash` only — `signature` **is signed** | none | `HMAC_SHA256("WebAppData", <bot token>)` | Yes — this is the server's authentication |
+| **Third-party Ed25519** | `hash` **and** `signature` | `"<bot_id>:WebAppData\n"` | Telegram's public key | No — the server holds the bot token, so it has no reason to. `buildThirdPartyCheckString` exists only so the difference is executable and a test can hold the two apart. |
+
+Every modern Telegram client sends `signature`. Excluding it from the bot-token
+HMAC therefore fails **all** production traffic, not an edge case — which is why
+the suite pins the rule with four fixed `initData` vectors published by two
+unrelated projects (aiogram and telegram-apps), together with the bot tokens
+that signed them. Those hashes are literals from other codebases, so no mistake
+here can agree with them. `M22` additionally verifies a genuine Telegram
+`signature` against Telegram's published production Ed25519 public key over the
+*third-party* check string, and shows the bot-token construction fails that same
+verification — proof the two rules are distinct rather than merely asserted.
 
 Details that are load-bearing:
 
 | Property | Why |
 | --- | --- |
 | Values are used **exactly as decoded** | Re-encoding or trimming changes the bytes Telegram signed. |
-| `signature` is excluded from the HMAC | It is Telegram's newer third-party Ed25519 field; including it breaks every real payload. |
+| `+` becomes a space **before** percent-decoding | Telegram signs the decoded value; the published aiogram vector pins this. |
 | Duplicate keys are **rejected**, not deduplicated | `URLSearchParams` keeps one of them, which lets an attacker append a second `user=` and have the verifier and the consumer disagree. |
 | The hash is length- and alphabet-checked first | `timingSafeEqual` throws on a length mismatch, and an uppercase hash would fail for the wrong reason. |
 | Comparison is `timingSafeEqual` | Not `===`. |
