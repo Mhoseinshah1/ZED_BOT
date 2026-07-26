@@ -189,6 +189,11 @@ d("low balance — multi-replica backfill (§4.3)", () => {
     ]);
     // Exactly one replica holds the claim; the others report it taken.
     expect(results.filter((r) => r.status === "locked").length).toBeGreaterThanOrEqual(3);
+    // The run is global, so on a shared database it may need more ticks.
+    for (let i = 0; i < 40; i += 1) {
+      const s = (await runLowBalanceBackfillTick()).status;
+      if (s !== "advanced") break;
+    }
 
     for (const id of ids) {
       const count = await prisma.automatedNotification.count({

@@ -232,16 +232,38 @@ silent forever.
 
 ## 6. Send-time policy
 
-A queued alert is a claim about the past. Before delivery,
-`revalidateLowBalanceForDelivery` re-checks against the **database**:
+A queued alert is valid for **exactly one state cycle** — the one that created
+it. Checking only the balance is not enough, because this sequence makes every
+balance claim in a stale message true:
 
-1. the feature is still enabled;
-2. the user still exists, is ACTIVE, and has not opted out;
-3. the balance is still low.
+1. cycle 1 is queued;
+2. the user tops up and the machine re-arms;
+3. the user crosses again and cycle 2 opens and is queued;
+4. cycle 1 is finally delivered while the balance happens to be low.
 
-A user who topped up between the crossing and the delivery must not receive a
-"you are running out of money" warning. Cancelling is always preferred to
-sending something already false.
+Sending both is two warnings for one episode. So delivery proceeds only when
+**all** of these hold:
+
+* the feature is enabled;
+* the user exists, is ACTIVE, and has not opted out;
+* the durable state is `ALERTED`;
+* the durable state's `alertCycle` **equals** the notification's;
+* the balance has not recovered above that cycle's snapshot boundary.
+
+Cancellation reasons, using the repository's existing short scrubbed markers:
+
+| Situation | Reason | State change |
+| --- | --- | --- |
+| Durable cycle is newer | `cycle-superseded` | **None.** Re-arming here would close the newer cycle and swallow the message it is waiting to send. |
+| State is ARMED on the same cycle | `cycle-closed` | None |
+| No state row at all | `state-missing` | None — delivery never invents state |
+| Recovered on the matching cycle | `balance-recovered` | Re-arm, scoped to that cycle |
+| Feature off / user gone / inactive / opted out | `low-balance-disabled`, `user-gone`, `user-inactive`, `low-balance-opted-out` | None |
+
+**One snapshot.** The state and the balance are read inside a single
+transaction with the state row held `FOR UPDATE`. Reading them independently is
+how an earlier version could re-arm against a state that no longer matched the
+balance it had judged.
 
 **Threshold-change policy.** The recovery test uses the re-arm boundary the
 cycle was *opened* under, carried in the notification snapshot — not whatever
@@ -346,6 +368,25 @@ says so in plain Persian.
 The other choice — "also tell the people who are already low" — is a separate,
 explicitly confirmed OWNER action with its own confirmation screen showing the
 exact candidate count before anything is queued.
+
+**Authorization happens under the lock.** Whether a cycle already has its
+message cannot be answered before the state row is locked: a live wallet
+crossing can open that cycle in the gap, and forcing an alert would then open a
+second one for a single decrease. The shared transition therefore takes an
+`authorizeForceAlert(lockedCycle)` callback, asked *after* the lock with the
+cycle the lock revealed. **Nothing observed before the lock may authorise a new
+cycle.**
+
+**Every user transaction re-verifies the claim** before it changes anything:
+run id, `RUNNING` status, our owner token, and an unexpired lease. The status
+check is what enforces cancellation. Checking only between batches let a worker
+whose lease expired mid-batch keep running while another took the run over, and
+let a cancellation committed mid-batch still emit a whole bounded batch.
+
+Losing the claim stops the worker immediately and advances neither the cursor
+nor the counters, so they cannot move backwards or be double-incremented. Lease
+renewal requires the lease to be **still valid**, so an expired owner cannot
+silently reclaim a run after a takeover.
 
 **Population.** Every ACTIVE, eligible user currently at or below the frozen
 threshold, whatever state the machine is in:
@@ -475,34 +516,33 @@ state or history is deleted.
 
 ## 15. Tests
 
-**92 numbered cases, `L01`–`L90`**, across four suites:
+**106 numbered cases, `L01`–`L104`**, across five suites:
 
 | Suite | Cases | Covers |
 | --- | --- | --- |
-| `low-balance.test.ts` | 34 | pure boundary/parsing contract, the DB-backed state machine, concurrency, financial invariants, admin read model |
-| `low-balance-worker.test.ts` | 33 | payload snapshot, admin mutations, backfill population, reconciliation, send-time policy |
-| `low-balance-first-observation.test.ts` | 18 | first-observation semantics, concurrent state creation, atomicity, lease behaviour |
-| `low-balance-multi-replica.test.ts` | 7 | concurrent replicas, cursor progress, constrained connection pool |
+| `low-balance.test.ts` | 34 | pure contract, DB state machine, concurrency, financial invariants |
+| `low-balance-worker.test.ts` | 33 | snapshot, admin mutations, backfill population, sweep, send-time policy |
+| `low-balance-first-observation.test.ts` | 18 | first-observation semantics, concurrent creation, atomicity, lease |
+| `low-balance-multi-replica.test.ts` | 7 | concurrent replicas, cursor progress, constrained pool |
+| `low-balance-cycle-authority.test.ts` | 14 | stale-cycle supersession, locked backfill authorization, claim enforcement |
 
 The load-bearing ones:
 
 | Case | What it proves |
 | --- | --- |
 | L25 / L26 | Two, then twelve, concurrent crossing debits produce exactly one alert |
-| L28 | A duplicate dedupe key inserts zero rows rather than raising |
 | L30 | A rolled-back transaction takes the notification with it |
 | L31 | The observer never changes a balance, a total or the ledger |
 | L32 / L32b | Logic errors are swallowed; DB errors roll back atomically |
-| L45 | A second backfill start is rejected by the database |
-| L47 / L47b / L47c | Already-notified skipped; silent baseline and no-state users notified |
-| L61 | Recovery is judged against the cycle's own boundary |
-| L65 | A stale alert re-arms only its own cycle |
-| **L66** | The first post-enable debit that crosses alerts exactly once |
-| **L67 / L68 / L69 / L70** | Historically low stays silent; above-threshold arms; a first-observation top-up never alerts; the hysteresis band arms silently |
-| **L72 / L73** | Two, then twelve, concurrent FIRST observations: no wallet mutation fails, one state row, one cycle |
-| **L76 / L77 / L78** | Failure after the transition, and after the outbox insert, rolls the whole unit back; every committed cycle has its message |
-| **L79 / L80** | One lease holder at a time; an expired lease is taken over |
-| **L83 / L86** | No advisory lock is left behind, including with `connection_limit=1` |
-| **L85** | Rows beyond one bounded pass are reached, not starved |
-| **L87 / L88 / L89** | Four replicas advance one backfill without double-notifying; an abandoned claim is taken over; a live claim is respected |
-| **L90** | A backfill interleaved with live crossings notifies each user exactly once |
+| L66 | The first post-enable debit that crosses alerts exactly once |
+| L72 / L73 | Concurrent FIRST observations: no wallet mutation fails, one cycle |
+| L76 / L77 / L78 | Failure after the transition, and after the outbox insert, rolls the unit back |
+| L85 | Rows beyond one bounded pass are reached, not starved |
+| L87–L90 | Four replicas advance one backfill without double-notifying |
+| **L91 / L92** | A stale cycle is cancelled as superseded while a newer one stays live, and cancelling it never re-arms the newer cycle |
+| **L94 / L95** | A missing or ARMED state cancels safely, creating and reopening nothing |
+| **L96** | Repeated delivery attempts are idempotent |
+| **L98 / L99 / L100** | Either ordering of a live crossing and the backfill yields exactly one cycle and one message |
+| **L101** | A committed cancellation stops every later unit in the batch |
+| **L102 / L103** | An expired lease is taken over; the expired owner cannot renew and reclaim |
+| **L104** | Counters and cursor never double-count under takeover |

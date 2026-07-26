@@ -109,6 +109,20 @@ async function seedState(
   });
 }
 
+/**
+ * Drives the backfill to completion in bounded ticks.
+ *
+ * The run is global by design, so on a shared database one tick need not drain
+ * it. Asserting on a single tick's status silently assumes an empty database.
+ */
+async function drainBackfill(maxTicks = 40): Promise<string> {
+  let status = "advanced";
+  for (let i = 0; i < maxTicks && status === "advanced"; i += 1) {
+    status = (await runLowBalanceBackfillTick()).status;
+  }
+  return status;
+}
+
 function notificationsFor(userId: string): Promise<number> {
   return prisma.automatedNotification.count({
     where: { userId, type: AutomatedNotificationType.WALLET_LOW_BALANCE },
@@ -324,7 +338,7 @@ d("low balance — backfill (§12)", () => {
     });
 
     await startLowBalanceBackfill("admin-1");
-    await runLowBalanceBackfillTick();
+    await drainBackfill();
 
     // Exactly the one that already existed; no second message.
     expect(await notificationsFor(alreadyNotified)).toBe(1);
@@ -342,7 +356,7 @@ d("low balance — backfill (§12)", () => {
     await seedState(baseline, LowBalanceAlertStateValue.ALERTED, 0);
 
     await startLowBalanceBackfill("admin-1");
-    await runLowBalanceBackfillTick();
+    await drainBackfill();
 
     expect(await notificationsFor(baseline)).toBe(1);
     const state = await prisma.lowBalanceAlertState.findUnique({ where: { userId: baseline } });
@@ -354,7 +368,7 @@ d("low balance — backfill (§12)", () => {
     const noState = await makeUser(25_000);
 
     await startLowBalanceBackfill("admin-1");
-    await runLowBalanceBackfillTick();
+    await drainBackfill();
 
     expect(await notificationsFor(noState)).toBe(1);
     const state = await prisma.lowBalanceAlertState.findUnique({ where: { userId: noState } });
@@ -371,7 +385,7 @@ d("low balance — backfill (§12)", () => {
     await seedState(blocked, LowBalanceAlertStateValue.ARMED);
 
     await startLowBalanceBackfill("admin-1");
-    await runLowBalanceBackfillTick();
+    await drainBackfill();
 
     expect(await notificationsFor(optedOut)).toBe(0);
     expect(await notificationsFor(categoryOff)).toBe(0);
@@ -397,8 +411,9 @@ d("low balance — backfill (§12)", () => {
     await makeUser(10_000);
     await makeUser(THRESHOLD); // exactly at the boundary counts as low
     await makeUser(THRESHOLD + 1);
-    const count = await countBackfillCandidates(await getLowBalanceConfig());
-    expect(count).toBeGreaterThanOrEqual(2);
+    const breakdown = await countBackfillCandidates(await getLowBalanceConfig());
+    expect(breakdown.belowThreshold).toBeGreaterThanOrEqual(2);
+    expect(breakdown.expectedRecipients).toBeGreaterThanOrEqual(2);
   });
 
   it("L51 freezes the config it was authorised against", async () => {
@@ -547,9 +562,10 @@ d("low balance — send-time policy (§8)", () => {
     };
   }
 
-  it("L59 delivers when the balance is still low", async () => {
+  it("L59 delivers when the balance is still low AND the cycle matches", async () => {
     await enableFeature();
     const user = await makeUser(30_000);
+    await seedState(user, LowBalanceAlertStateValue.ALERTED, 1);
     const id = await queueAlert(user, 1);
     const notification = await prisma.automatedNotification.findUniqueOrThrow({ where: { id } });
     expect(await revalidateLowBalanceForDelivery(notification, metaFor(1))).toBeNull();
@@ -575,6 +591,7 @@ d("low balance — send-time policy (§8)", () => {
     await enableFeature();
     // Balance sits above the ORIGINAL boundary but below a newly-raised one.
     const user = await makeUser(REARM_BOUNDARY + 1);
+    await seedState(user, LowBalanceAlertStateValue.ALERTED, 1);
     const id = await queueAlert(user, 1);
     const notification = await prisma.automatedNotification.findUniqueOrThrow({ where: { id } });
     await setLowBalanceThreshold(900_000); // operator raises it AFTER the fact
@@ -590,6 +607,7 @@ d("low balance — send-time policy (§8)", () => {
   it("L62 cancels when the feature was switched off after enqueue", async () => {
     await enableFeature();
     const user = await makeUser(10_000);
+    await seedState(user, LowBalanceAlertStateValue.ALERTED, 1);
     const id = await queueAlert(user, 1);
     const notification = await prisma.automatedNotification.findUniqueOrThrow({ where: { id } });
     await enableFeature(false);
@@ -603,6 +621,7 @@ d("low balance — send-time policy (§8)", () => {
   it("L63 honours an opt-out flipped AFTER the alert was queued", async () => {
     await enableFeature();
     const user = await makeUser(10_000);
+    await seedState(user, LowBalanceAlertStateValue.ALERTED, 1);
     const id = await queueAlert(user, 1);
     await prisma.user.update({
       where: { id: user },
@@ -619,6 +638,7 @@ d("low balance — send-time policy (§8)", () => {
   it("L64 cancels for a user who is no longer active", async () => {
     await enableFeature();
     const user = await makeUser(10_000);
+    await seedState(user, LowBalanceAlertStateValue.ALERTED, 1);
     const id = await queueAlert(user, 1);
     await prisma.user.update({ where: { id: user }, data: { status: UserStatus.BLOCKED } });
     const notification = await prisma.automatedNotification.findUniqueOrThrow({ where: { id } });
@@ -629,16 +649,19 @@ d("low balance — send-time policy (§8)", () => {
     });
   });
 
-  it("L65 re-arms only the cycle the cancelled alert belongs to", async () => {
+  it("L65 a stale cycle is cancelled as superseded and never touches the newer one", async () => {
     await enableFeature();
     const user = await makeUser(REARM_BOUNDARY + 5_000);
-    // The machine has moved on to cycle 4; a stale cycle-1 alert must not
-    // re-arm it and swallow the message cycle 4 is waiting to send.
+    // The machine has moved on to cycle 4. A stale cycle-1 alert must neither
+    // send nor re-arm cycle 4 and swallow the message it is waiting to deliver.
     await seedState(user, LowBalanceAlertStateValue.ALERTED, 4);
     const id = await queueAlert(user, 1);
     const notification = await prisma.automatedNotification.findUniqueOrThrow({ where: { id } });
 
-    await revalidateLowBalanceForDelivery(notification, metaFor(1));
+    expect(await revalidateLowBalanceForDelivery(notification, metaFor(1))).toEqual({
+      kind: "cancel",
+      reason: "cycle-superseded",
+    });
     const state = await prisma.lowBalanceAlertState.findUnique({ where: { userId: user } });
     expect(state?.state).toBe(LowBalanceAlertStateValue.ALERTED);
     expect(state?.alertCycle).toBe(4);
