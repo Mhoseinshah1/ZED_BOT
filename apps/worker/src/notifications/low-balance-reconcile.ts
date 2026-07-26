@@ -32,10 +32,18 @@ import { acquireLease, releaseLease, renewLease, saveProgress } from "./low-bala
 // bypasses the observer, and the failure modes where the observer's own write
 // was lost.
 //
-// SCALE. It never scans `User` for repairs. It pages by keyset in bounded
-// batches and persists its cursor after every committed batch, so a large
-// installation actually reaches its later rows instead of rescanning the first
-// page forever. Reaching the end wraps the cursor back to the start.
+// SCALE. It never scans `User` for repairs. Two phases, paged differently on
+// purpose:
+//
+//   INITIALISE — users with no state row. The predicate SHRINKS as it works, so
+//   it needs no cursor; each batch simply takes the next page of whatever is
+//   still missing. That also makes it self-healing: a unit that fails is picked
+//   up again next batch instead of being stranded behind a cursor.
+//
+//   REPAIR — every state row. This set does NOT shrink, so it pages by keyset
+//   and persists the cursor after every committed batch. Without that, a large
+//   installation rescans the first page forever and its later rows are never
+//   repaired. Draining both phases wraps the cursor back to the start.
 //
 // COORDINATION. A durable lease, not a pooled session advisory lock — see
 // low-balance-lease.ts for why the latter is unsafe through a connection pool.
@@ -108,8 +116,8 @@ async function loadConfig(): Promise<{ enabled: boolean; config: Config }> {
  * One bounded reconciliation pass.
  *
  * Multi-replica safe: a second replica finds the lease held and returns
- * immediately. Restart-safe: progress is durable, so an interrupted pass
- * resumes from its cursor rather than from the beginning.
+ * immediately. Restart-safe: the repair cursor is durable and initialisation is
+ * inherently resumable, so an interrupted pass continues rather than restarting.
  */
 export async function runLowBalanceReconciliation(): Promise<ReconcileStats> {
   const startedAt = Date.now();
@@ -136,7 +144,7 @@ export async function runLowBalanceReconciliation(): Promise<ReconcileStats> {
   const stats = { ...empty };
   let completed = false;
   try {
-    const init = await initialiseMissingStates(config, lease.ownerToken, lease.initCursorUserId);
+    const init = await initialiseMissingStates(config, lease.ownerToken);
     stats.initialised = init.initialised;
     stats.enqueued += init.enqueued;
 
@@ -201,7 +209,7 @@ function draftFor(userId: string, balance: number, config: Config, origin: "reco
 }
 
 /**
- * Creates missing state rows for ACTIVE users, in bounded keyset pages.
+ * Creates missing state rows for ACTIVE users, in bounded pages.
  *
  * A user is seeded to the state their CURRENT balance implies, and one already
  * below the threshold is seeded ALERTED with NO notification — there was no
@@ -211,14 +219,22 @@ function draftFor(userId: string, balance: number, config: Config, origin: "reco
 async function initialiseMissingStates(
   config: Config,
   ownerToken: string,
-  startCursor: string | null,
 ): Promise<{ initialised: number; enqueued: number; done: boolean }> {
-  let cursor = startCursor ?? undefined;
   let initialised = 0;
   let enqueued = 0;
   let done = false;
 
   for (let batch = 0; batch < LOW_BALANCE_RECONCILE_MAX_BATCHES; batch += 1) {
+    // NO keyset cursor here, deliberately. This predicate SHRINKS as the phase
+    // works: a user that gets a state row drops out of it. Paging a shrinking
+    // set by cursor silently strands any row whose unit failed, because the
+    // cursor has already moved past it and nothing revisits it — one user in
+    // several hundred, invisible in production and forever un-warned.
+    //
+    // Querying from the start each time is both simpler and self-healing: the
+    // successes leave the set, and a failed row is picked up by the next batch.
+    // Progress is therefore inherent, which is why this phase needs no durable
+    // cursor while the repair phase (whose set does not shrink) does.
     const users = await prisma.user.findMany({
       where: { status: UserStatus.ACTIVE, lowBalanceAlertState: { is: null } },
       select: {
@@ -230,31 +246,31 @@ async function initialiseMissingStates(
       },
       orderBy: { id: "asc" },
       take: LOW_BALANCE_RECONCILE_BATCH,
-      ...(cursor === undefined ? {} : { cursor: { id: cursor }, skip: 1 }),
     });
     if (users.length === 0) {
       done = true;
       break;
     }
 
+    let progressed = 0;
     for (const user of users) {
       const outcome = await processOne(user, config, null, false);
       if (outcome === null) {
         continue;
       }
+      progressed += 1;
       initialised += 1;
       if (outcome.kind === "alerted" && outcome.notificationId !== null) {
         enqueued += 1;
       }
     }
-
-    cursor = users[users.length - 1].id;
-    // Durable progress after every committed batch.
-    if (!(await saveProgress(ownerToken, { initCursorUserId: cursor }))) {
-      break; // lease lost: stop touching shared state.
-    }
-    if (!(await renewLease(ownerToken, new Date()))) {
+    // Every unit in the batch failed: retrying the identical page would spin.
+    if (progressed === 0) {
       break;
+    }
+
+    if (!(await renewLease(ownerToken, new Date()))) {
+      break; // lease lost: stop touching shared state.
     }
     if (users.length < LOW_BALANCE_RECONCILE_BATCH) {
       done = true;
