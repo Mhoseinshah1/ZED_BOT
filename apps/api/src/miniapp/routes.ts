@@ -1,8 +1,9 @@
-import { prisma, Prisma } from "@zedbot/database";
+import { prisma, Prisma, ServiceStatus } from "@zedbot/database";
 import {
   createLogger,
   errorMessage,
   getTelegramBotToken,
+  isServicePublicId,
   issueMiniAppSession,
   MINIAPP_INITDATA_MAX_BYTES,
   optionalEnv,
@@ -16,7 +17,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 
 import { evaluateMiniAppAccess, type MiniAppAccessUser } from "./access-policy.js";
 import { miniAppInitDataMaxAgeSeconds, miniAppSessionTtlSeconds } from "./config.js";
-import { clampPageSize, decodeCursor, encodeCursor } from "./cursor.js";
+import { clampPageSize, decodeCursor, encodeCursor, type CursorResource } from "./cursor.js";
 import {
   checkRequestOrigin,
   clientRateKey,
@@ -271,22 +272,26 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
         // Counts come from the database, never from a full fetch: a user with
         // hundreds of services must not cause hundreds of rows to be loaded so
         // three numbers can be derived in JavaScript.
+        const now = new Date();
         const [statusCounts, expiringSoon, recentServices, recentTransactions] = await Promise.all([
           prisma.service.groupBy({
             by: ["status"],
-            where: { userId: user.id, deletedAt: null },
+            where: ownedVisibleServices(user.id),
             _count: { _all: true },
           }),
           prisma.service.count({
             where: {
-              userId: user.id,
-              deletedAt: null,
+              ...ownedVisibleServices(user.id),
               status: "ACTIVE",
-              expiresAt: { not: null, lte: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) },
+              // STRICTLY IN THE FUTURE. `lte: now + 7d` alone also matches every
+              // timestamp already in the past, so a service that expired last
+              // month would be counted as "expiring soon" — a number the user
+              // reads as "act now" about something they can no longer save.
+              expiresAt: { gt: now, lte: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000) },
             },
           }),
           prisma.service.findMany({
-            where: { userId: user.id, deletedAt: null },
+            where: ownedVisibleServices(user.id),
             orderBy: [{ createdAt: "desc" }, { id: "desc" }],
             take: DASHBOARD_SERVICE_COUNT,
             select: SERVICE_SUMMARY_SELECT,
@@ -333,7 +338,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
         if (user === undefined) {
           return fail(reply, 401, "NOT_AUTHENTICATED");
         }
-        const page = readPage(request.query);
+        const page = readPage(request.query, "services");
         if (page === null) {
           return fail(reply, 400, "BAD_REQUEST");
         }
@@ -343,8 +348,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
               // EVERY query is scoped by the session's user id. The cursor is
               // a position, not an authority - a cursor minted for one account
               // still cannot read another's rows.
-              userId: user.id,
-              deletedAt: null,
+              ...ownedVisibleServices(user.id),
               ...keysetFilter(page.cursor),
             },
             orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -357,7 +361,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
           return reply.send({
             ok: true,
             items: items.map(toMiniAppServiceSummary),
-            nextCursor: nextCursorFor(rows, items, page.size),
+            nextCursor: nextCursorFor("services", rows, items, page.size),
           });
         } catch (err) {
           logger.error("mini app service list failed", { error: errorMessage(err) });
@@ -371,24 +375,32 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
       if (user === undefined) {
         return fail(reply, 401, "NOT_AUTHENTICATED");
       }
-      const serviceId = request.params.serviceId;
-      if (!/^[0-9a-fA-F-]{36}$/.test(serviceId)) {
+      const publicId = request.params.serviceId;
+      if (!isServicePublicId(publicId)) {
         // Rejected as NOT_FOUND, not BAD_REQUEST: whether an id is well-formed
-        // is not information a prober should get for free.
+        // is not information a prober should get for free. Malformed, unknown,
+        // ambiguous, deleted and someone else's all end here, identically.
         return fail(reply, 404, "NOT_FOUND");
       }
       try {
-        const service = await prisma.service.findFirst({
-          // userId in the WHERE, not checked afterwards. A findUnique followed
-          // by an ownership `if` is one forgotten branch away from an IDOR;
-          // this cannot return another user's row at all.
-          where: { id: serviceId, userId: user.id, deletedAt: null },
+        // `startsWith` on the uuid, scoped by userId IN THE WHERE — not checked
+        // afterwards. A findUnique followed by an ownership `if` is one
+        // forgotten branch away from an IDOR; this cannot return another user's
+        // row at all.
+        //
+        // `take: 2` is the ambiguity check. 8 hex characters collide only once
+        // in ~2^16 rows per account by the birthday bound, but "only rarely" is
+        // not an argument for serving the wrong service: two matches is a
+        // 404, exactly as an unknown id is.
+        const matches = await prisma.service.findMany({
+          where: { id: { startsWith: publicId.toLowerCase() }, ...ownedVisibleServices(user.id) },
+          take: 2,
           select: SERVICE_DETAIL_SELECT,
         });
-        if (service === null) {
+        if (matches.length !== 1) {
           return fail(reply, 404, "NOT_FOUND");
         }
-        return reply.send({ ok: true, service: toMiniAppServiceDetail(service) });
+        return reply.send({ ok: true, service: toMiniAppServiceDetail(matches[0]) });
       } catch (err) {
         logger.error("mini app service detail failed", { error: errorMessage(err) });
         return fail(reply, 503, "INTERNAL");
@@ -402,7 +414,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
         if (user === undefined) {
           return fail(reply, 401, "NOT_AUTHENTICATED");
         }
-        const page = readPage(request.query);
+        const page = readPage(request.query, "wallet-transactions");
         if (page === null) {
           return fail(reply, 400, "BAD_REQUEST");
         }
@@ -418,7 +430,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
             ok: true,
             balanceToman: user.balanceToman,
             items: items.map(toMiniAppTransaction),
-            nextCursor: nextCursorFor(rows, items, page.size),
+            nextCursor: nextCursorFor("wallet-transactions", rows, items, page.size),
           });
         } catch (err) {
           logger.error("mini app wallet history failed", { error: errorMessage(err) });
@@ -430,6 +442,25 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
 }
 
 // --- shared query pieces -----------------------------------------------------
+
+/**
+ * The ONE visibility filter every service read uses.
+ *
+ * Deletion is recorded two ways in this schema — the `deletedAt` timestamp and
+ * the terminal `DELETED` status — and they are not redundant: an
+ * admin-terminated service carries the status without necessarily carrying the
+ * timestamp. Filtering on `deletedAt` alone therefore still shows those rows,
+ * which the bot has never shown. Both conditions live here so no call site can
+ * remember one and forget the other; it mirrors `ownedVisibleWhere` in the
+ * bot's user-services service exactly.
+ */
+function ownedVisibleServices(userId: string) {
+  return {
+    userId,
+    deletedAt: null,
+    status: { not: ServiceStatus.DELETED },
+  } satisfies Prisma.ServiceWhereInput;
+}
 
 const SERVICE_SUMMARY_SELECT = {
   id: true,
@@ -457,6 +488,8 @@ const SERVICE_DETAIL_SELECT = {
 } satisfies Prisma.ServiceSelect;
 
 const TRANSACTION_SELECT = {
+  // `id` is selected because the KEYSET tie-breaker needs it, and for no other
+  // reason: the serializer never emits it and the cursor seals it.
   id: true,
   amountToman: true,
   type: true,
@@ -470,14 +503,21 @@ interface PageRequest {
   cursor: { createdAtMs: number; id: string } | null;
 }
 
-/** Returns `null` when a cursor was supplied but is not one we minted. */
-function readPage(query: Record<string, string | undefined>): PageRequest | null {
+/**
+ * Returns `null` when a cursor was supplied but is not one we minted FOR THIS
+ * collection — a services cursor replayed against the wallet ledger fails the
+ * same way a forged one does.
+ */
+function readPage(
+  query: Record<string, string | undefined>,
+  resource: CursorResource,
+): PageRequest | null {
   const size = clampPageSize(query.limit);
   const rawCursor = query.cursor;
   if (rawCursor === undefined || rawCursor === "") {
     return { size, cursor: null };
   }
-  const cursor = decodeCursor(rawCursor);
+  const cursor = decodeCursor(rawCursor, resource);
   return cursor === null ? null : { size, cursor };
 }
 
@@ -502,6 +542,7 @@ function keysetFilter(
 }
 
 function nextCursorFor(
+  resource: CursorResource,
   rows: Array<{ id: string; createdAt: Date }>,
   items: Array<{ id: string; createdAt: Date }>,
   size: number,
@@ -510,5 +551,6 @@ function nextCursorFor(
     return null;
   }
   const last = items[items.length - 1];
-  return encodeCursor({ createdAtMs: last.createdAt.getTime(), id: last.id });
+  // The row's uuid goes INTO the sealed cursor and never into the response.
+  return encodeCursor(resource, { createdAtMs: last.createdAt.getTime(), id: last.id });
 }

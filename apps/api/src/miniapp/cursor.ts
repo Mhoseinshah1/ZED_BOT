@@ -1,4 +1,10 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
 
 // =============================================================================
 // Opaque keyset cursors.
@@ -14,23 +20,37 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 // id) < (:createdAt, :id)`. Constant cost per page, and a concurrent insert
 // cannot perturb rows the client has already passed.
 //
-// The cursor is SIGNED, not merely encoded. It is a filter that goes straight
-// into a query, so an unsigned one is an invitation to hand-craft values and
-// probe. The signature also lets a tampered cursor be rejected with a clean 400
-// instead of surfacing as a confusing empty page. It is NOT a capability: the
-// owning user id is never inside it, and every query is scoped by the session's
-// user id regardless of what the cursor says.
+// WHY THE PAYLOAD IS ENCRYPTED, NOT MERELY SIGNED. The tie-breaker in that sort
+// key IS the row's database uuid — there is no other unique, stable column to
+// break a millisecond tie with. A signed-but-readable cursor therefore hands
+// the client a base64 uuid on the second page of any list: the identifier the
+// rest of this contract goes out of its way not to expose, arriving through the
+// back door. Signing stops forgery; it does nothing about disclosure. So the
+// payload is sealed with AES-256-GCM and the client receives ciphertext.
+//
+// BOUND TO ITS RESOURCE. The caller names the collection the cursor belongs to
+// and that name is the AEAD's additional data, so a cursor minted for the
+// service list cannot be replayed against the wallet ledger: the tag simply
+// fails to verify. Nothing has to remember to check it — the decryption either
+// happens or it does not.
+//
+// It is NOT a capability. The owning user id is never inside it, and every
+// query is scoped by the session's user id regardless of what the cursor says.
 // =============================================================================
 
-const CURSOR_KEY_CONTEXT = "zedbot.miniapp.cursor.v1";
-const CURSOR_VERSION = "c1";
-/** Truncated to 16 bytes: this authenticates a sort key, not a secret. */
-const SIGNATURE_BYTES = 16;
+/** The collections a cursor can belong to. Also the AEAD's additional data. */
+export type CursorResource = "services" | "wallet-transactions";
+
+const CURSOR_VERSION = "c2";
+const KEY_CONTEXT = "zedbot.miniapp.cursor.key.v2";
+/** AES-GCM standard nonce length; a fresh random nonce per cursor. */
+const IV_BYTES = 12;
+const TAG_BYTES = 16;
 
 export interface KeysetCursor {
   /** Unix milliseconds of the last row's `createdAt`. */
   createdAtMs: number;
-  /** Tie-breaker for rows sharing a millisecond. */
+  /** Tie-breaker for rows sharing a millisecond — never leaves this module. */
   id: string;
 }
 
@@ -39,59 +59,91 @@ let cachedKey: { secret: string; key: Buffer } | null = null;
 function cursorKey(): Buffer {
   const secret = process.env.APP_SECRET ?? "";
   if (secret.trim() === "") {
-    throw new Error("APP_SECRET is not set; Mini App cursors cannot be signed.");
+    throw new Error("APP_SECRET is not set; Mini App cursors cannot be sealed.");
   }
   if (cachedKey !== null && cachedKey.secret === secret) {
     return cachedKey.key;
   }
-  // HMAC over a context string rather than scrypt: this key is derived on a
-  // hot path and authenticates a public sort key, so a KDF would buy nothing.
-  const key = createHmac("sha256", secret).update(CURSOR_KEY_CONTEXT).digest();
+  // HMAC over a context string rather than a KDF: the input is already a
+  // high-entropy application secret, and this runs on a paginated hot path.
+  const key = createHmac("sha256", secret).update(KEY_CONTEXT).digest();
   cachedKey = { secret, key };
   return key;
 }
 
-function sign(body: string): string {
-  return createHmac("sha256", cursorKey()).update(body).digest().subarray(0, SIGNATURE_BYTES)
-    .toString("base64url");
-}
-
-/** Encodes a row's sort key into an opaque, tamper-evident string. */
-export function encodeCursor(cursor: KeysetCursor): string {
-  const body = `${CURSOR_VERSION}.${cursor.createdAtMs}.${Buffer.from(cursor.id, "utf8").toString("base64url")}`;
-  return `${body}.${sign(body)}`;
+/** Encodes a row's sort key into an opaque, resource-bound cursor. */
+export function encodeCursor(resource: CursorResource, cursor: KeysetCursor): string {
+  const iv = randomBytes(IV_BYTES);
+  const cipher = createCipheriv("aes-256-gcm", cursorKey(), iv);
+  // The resource name is authenticated but not encrypted: it is not a secret,
+  // and binding it here is what makes a cross-collection replay fail.
+  cipher.setAAD(Buffer.from(`${CURSOR_VERSION}.${resource}`, "utf8"));
+  const plaintext = Buffer.from(`${cursor.createdAtMs}.${cursor.id}`, "utf8");
+  const sealed = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${CURSOR_VERSION}.${Buffer.concat([iv, sealed, tag]).toString("base64url")}`;
 }
 
 /**
- * Decodes a cursor.
+ * Decodes a cursor minted for `resource`.
  *
- * Returns `null` for anything that is not a cursor this server minted —
- * malformed, wrong version, or wrong signature all collapse to the same
- * outcome so the shape of the failure teaches nothing.
+ * Returns `null` for anything else — malformed, wrong version, tampered, or
+ * minted for a different collection all collapse to the same outcome so the
+ * shape of the failure teaches nothing.
  */
-export function decodeCursor(raw: string): KeysetCursor | null {
+export function decodeCursor(raw: string, resource: CursorResource): KeysetCursor | null {
   if (typeof raw !== "string" || raw === "") {
     return null;
   }
-  const parts = raw.split(".");
-  if (parts.length !== 4) {
+  const separator = raw.indexOf(".");
+  if (separator === -1) {
     return null;
   }
-  const [version, rawMs, encodedId, signature] = parts;
-  if (version !== CURSOR_VERSION || !/^\d{1,15}$/.test(rawMs)) {
+  const version = raw.slice(0, separator);
+  // Constant-time on the version too: it costs nothing and keeps the whole
+  // comparison path uniform.
+  const versionBuf = Buffer.from(version, "utf8");
+  const expectedVersion = Buffer.from(CURSOR_VERSION, "utf8");
+  if (versionBuf.length !== expectedVersion.length || !timingSafeEqual(versionBuf, expectedVersion)) {
     return null;
   }
-  const expected = Buffer.from(sign(`${version}.${rawMs}.${encodedId}`), "utf8");
-  const received = Buffer.from(signature, "utf8");
-  if (received.length !== expected.length || !timingSafeEqual(received, expected)) {
+  const body = raw.slice(separator + 1);
+  if (!/^[A-Za-z0-9_-]{1,512}$/.test(body)) {
+    return null;
+  }
+  const bytes = Buffer.from(body, "base64url");
+  if (bytes.length <= IV_BYTES + TAG_BYTES) {
+    return null;
+  }
+
+  let plaintext: string;
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", cursorKey(), bytes.subarray(0, IV_BYTES));
+    decipher.setAAD(Buffer.from(`${CURSOR_VERSION}.${resource}`, "utf8"));
+    decipher.setAuthTag(bytes.subarray(bytes.length - TAG_BYTES));
+    plaintext = Buffer.concat([
+      decipher.update(bytes.subarray(IV_BYTES, bytes.length - TAG_BYTES)),
+      decipher.final(),
+    ]).toString("utf8");
+  } catch {
+    // Tampered, or minted for another resource. Same answer either way.
+    return null;
+  }
+
+  const dot = plaintext.indexOf(".");
+  if (dot === -1) {
+    return null;
+  }
+  const rawMs = plaintext.slice(0, dot);
+  const id = plaintext.slice(dot + 1);
+  if (!/^\d{1,15}$/.test(rawMs)) {
     return null;
   }
   const createdAtMs = Number.parseInt(rawMs, 10);
   if (!Number.isSafeInteger(createdAtMs) || createdAtMs <= 0) {
     return null;
   }
-  const id = Buffer.from(encodedId, "base64url").toString("utf8");
-  // Every paginated table is keyed by uuid; anything else was not minted here.
+  // Every paginated table is keyed by uuid; anything else was not sealed here.
   if (!/^[0-9a-fA-F-]{36}$/.test(id)) {
     return null;
   }

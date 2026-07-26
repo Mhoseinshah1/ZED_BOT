@@ -166,8 +166,12 @@ export function DashboardScreen(props: { onOpenService: (id: string) => void }):
           <p className="empty">{UI.empty}</p>
         ) : (
           <div className="list">
-            {data.wallet.recentTransactions.map((txn) => (
-              <TransactionRow key={txn.id} transaction={txn} />
+            {/* Keyed by position: a ledger row carries no public id (its
+                database uuid is deliberately not in the response), and this
+                list is a fixed, newest-first slice that is replaced wholesale
+                on every refresh. */}
+            {data.wallet.recentTransactions.map((txn, index) => (
+              <TransactionRow key={`${txn.createdAt}-${index}`} transaction={txn} />
             ))}
           </div>
         )}
@@ -373,8 +377,11 @@ export function WalletScreen(): ReactNode {
           <p className="empty">{UI.empty}</p>
         ) : (
           <div className="list">
-            {items.map((txn) => (
-              <TransactionRow key={txn.id} transaction={txn} />
+            {/* Same as the dashboard: no public id on a ledger row. Pages are
+                appended, never reordered or inserted into, so position is a
+                stable key for the row's whole life on screen. */}
+            {items.map((txn, index) => (
+              <TransactionRow key={`${txn.createdAt}-${index}`} transaction={txn} />
             ))}
           </div>
         )}

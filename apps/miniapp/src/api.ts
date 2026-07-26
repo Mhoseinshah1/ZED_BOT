@@ -141,6 +141,11 @@ export interface UserDto {
 }
 
 export interface ServiceSummaryDto {
+  /**
+   * The PUBLIC service id — the same short value the bot shows. It is NOT the
+   * database uuid, and the app has no way to obtain one: this is what goes in
+   * the detail URL and what the user sees.
+   */
   id: string;
   username: string;
   status: string;
@@ -164,8 +169,11 @@ export interface ServiceDetailDto extends ServiceSummaryDto {
   lastSubscriptionUpdateAt: string | null;
 }
 
+/**
+ * One wallet ledger row. Deliberately has NO id: nothing addresses a single
+ * transaction in this read-only surface, so the server does not send one.
+ */
 export interface TransactionDto {
-  id: string;
   amountToman: number;
   type: string;
   source: string;

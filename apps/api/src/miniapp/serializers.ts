@@ -1,4 +1,5 @@
 import type { ServiceStatus, UserGroup, UserStatus } from "@zedbot/database";
+import { serviceShortId } from "@zedbot/shared";
 
 // =============================================================================
 // Response shaping — an ALLOWLIST, never a redaction pass.
@@ -24,6 +25,14 @@ import type { ServiceStatus, UserGroup, UserStatus } from "@zedbot/database";
 //   raw Json columns        - namingStrategySnapshot, remoteMetadata,
 //                             capabilitySnapshot: internal structures whose
 //                             shape is not a public contract.
+//   database uuids          - the Service primary key and the WalletTransaction
+//                             primary key. A uuid is an INTERNAL handle that
+//                             also appears in operator logs, support
+//                             transcripts and admin screens, so putting it in a
+//                             page or a URL correlates those contexts for
+//                             anyone who sees both. Services carry the same
+//                             short public id the bot shows; ledger rows carry
+//                             none at all, because nothing addresses one.
 //
 // BigInt columns are emitted as decimal STRINGS. `JSON.stringify` throws on a
 // BigInt, and coercing through `Number` would round a byte count above 2^53 —
@@ -86,6 +95,11 @@ export interface MiniAppServiceSummarySource {
 }
 
 export interface MiniAppServiceSummaryDto {
+  /**
+   * The PUBLIC service id — the same 8-character value the bot shows, derived
+   * from the uuid by `serviceShortId`. Never the uuid itself; the detail route
+   * resolves this back, owner-scoped.
+   */
   id: string;
   username: string;
   status: ServiceStatus;
@@ -104,7 +118,7 @@ export function toMiniAppServiceSummary(
   service: MiniAppServiceSummarySource,
 ): MiniAppServiceSummaryDto {
   return {
-    id: service.id,
+    id: serviceShortId(service),
     username: service.username,
     status: service.status,
     productName: service.productNameSnapshot,
@@ -158,7 +172,6 @@ export function toMiniAppServiceDetail(
 }
 
 export interface MiniAppTransactionSource {
-  id: string;
   amountToman: number;
   type: string;
   source: string;
@@ -167,7 +180,6 @@ export interface MiniAppTransactionSource {
 }
 
 export interface MiniAppTransactionDto {
-  id: string;
   amountToman: number;
   type: string;
   source: string;
@@ -182,10 +194,14 @@ export interface MiniAppTransactionDto {
  * is operator free-text on manual adjustments; the type and source pair already
  * says what happened in terms the frontend can render in Persian, and it says
  * it without echoing whatever an admin typed into a support workflow.
+ *
+ * There is NO id. A ledger row is not addressable — nothing in this read-only
+ * surface takes one as input — so emitting its database uuid would hand out an
+ * internal identifier that buys the client nothing. The row's own fields are
+ * what the frontend renders and sorts by.
  */
 export function toMiniAppTransaction(row: MiniAppTransactionSource): MiniAppTransactionDto {
   return {
-    id: row.id,
     amountToman: row.amountToman,
     type: row.type,
     source: row.source,

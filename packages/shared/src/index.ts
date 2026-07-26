@@ -22,6 +22,7 @@ export * from "./purchase-menu.js";
 export * from "./stars-subscription.js";
 export * from "./template.js";
 export * from "./service-username.js";
+export * from "./public-ids.js";
 export * from "./low-balance.js";
 export * from "./miniapp-initdata.js";
 export * from "./miniapp-session.js";
