@@ -356,10 +356,17 @@ lowBalanceAdminHandler.callbackQuery(LB_ADMIN_CB.backfill, async (ctx) => {
       "حالت پیش‌فرض و امن «فقط کاهش‌های بعدی» است؛ این گزینه استثناست.",
       "",
       `حد هشدار: ${formatTomanAmount(config.thresholdToman)}`,
-      `کاربران واجد شرایط: <b>${candidates}</b>`,
       "",
-      "کاربرانی که این هشدار را خاموش کرده‌اند یا از قبل هشدار گرفته‌اند پیام نمی‌گیرند،",
-      "بنابراین تعداد پیام‌های واقعی می‌تواند کمتر از عدد بالا باشد.",
+      // The headline number is what will actually be SENT, not merely who is
+      // below the threshold — the breakdown below shows the difference, so the
+      // OWNER confirms a number the run can really deliver.
+      `<b>پیام‌هایی که ارسال می‌شود: ${candidates.expectedRecipients}</b>`,
+      "",
+      "<b>جزئیات:</b>",
+      `زیر حد هشدار: ${candidates.belowThreshold}`,
+      `خاموش‌کرده هشدار موجودی: ${candidates.lowBalanceOptOuts}`,
+      `خاموش‌کرده اعلان‌های پرداخت: ${candidates.paymentCategoryOptOuts}`,
+      `از قبل هشدار گرفته: ${candidates.alreadyNotified}`,
       "",
       "ادامه می‌دهید؟",
     ].join("\n"),
@@ -382,17 +389,21 @@ lowBalanceAdminHandler.callbackQuery(LB_ADMIN_CB.backfillConfirm, async (ctx) =>
   }
   const result = await startLowBalanceBackfill(admin.id);
   if (!result.ok) {
-    await renderOverview(
-      ctx,
+    // Three distinct reasons, three distinct messages. Reporting an unrelated
+    // database fault as "already running" told the OWNER a run existed when
+    // none did, and hid the real problem.
+    const toast =
       result.reason === "disabled"
         ? "ابتدا این قابلیت را فعال کنید."
-        : "یک اجرا از قبل در جریان است.",
-    );
+        : result.reason === "already-running"
+          ? "یک اجرا از قبل در جریان است."
+          : "اجرا آغاز نشد. لطفاً دوباره تلاش کنید.";
+    await renderOverview(ctx, toast);
     return;
   }
   logger.info("low-balance backfill started", {
     adminId: admin.id,
-    candidates: result.candidates,
+    expectedRecipients: result.candidates.expectedRecipients,
   });
   await renderOverview(ctx, "اجرا آغاز شد ✅");
 });

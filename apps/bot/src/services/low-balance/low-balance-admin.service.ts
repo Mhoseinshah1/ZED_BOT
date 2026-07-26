@@ -1,7 +1,15 @@
-import { LowBalanceBackfillStatus, prisma, SettingType } from "@zedbot/database";
 import {
+  LowBalanceBackfillStatus,
+  Prisma,
+  prisma,
+  SettingType,
+  UserStatus,
+} from "@zedbot/database";
+import {
+  errorMessage,
   formatTomanAmount,
   INT32_MAX,
+  lowBalanceDedupeKey,
   LOW_BALANCE_CONFIG_VERSION_KEY,
   LOW_BALANCE_REARM_MARGIN_KEY,
   LOW_BALANCE_THRESHOLD_KEY,
@@ -9,6 +17,7 @@ import {
   type LowBalanceConfig,
 } from "@zedbot/shared";
 
+import { logger } from "../../core/logger.js";
 import { clearSettingsCache, setSetting } from "../settings.service.js";
 import { getLowBalanceConfig } from "./low-balance.service.js";
 
@@ -108,28 +117,109 @@ export interface BackfillView {
   completedAt: Date | null;
 }
 
-export type StartBackfillResult =
-  | { ok: true; run: BackfillView; candidates: number }
-  | { ok: false; reason: "disabled" | "already-running" };
+/**
+ * Aggregate breakdown of who a backfill would actually reach.
+ *
+ * Every figure is a COUNT. No user identity is selected, so the confirmation
+ * screen cannot be used to find out who is short of money.
+ */
+export interface BackfillCandidateBreakdown {
+  /** ACTIVE users at or below the frozen threshold. */
+  belowThreshold: number;
+  /** Of those, how many silenced this specific alert. */
+  lowBalanceOptOuts: number;
+  /** Of those, how many silenced the whole PAYMENT category. */
+  paymentCategoryOptOuts: number;
+  /** Of those, how many already have the message for their current cycle. */
+  alreadyNotified: number;
+  /** What the run intends to queue. This is the number the OWNER is shown. */
+  expectedRecipients: number;
+}
 
 /**
- * How many ACTIVE users are currently at or below the threshold.
+ * Counts what a backfill would SEND, not merely who is poor.
  *
- * This is the number the confirmation screen shows an OWNER BEFORE anything is
- * sent. It is an aggregate count — the screen never lists who they are.
+ * The earlier version showed every ACTIVE user below the threshold, which
+ * over-promised: opted-out users and users already holding their current
+ * cycle's message were counted and then skipped, so the OWNER confirmed a
+ * number the run could not deliver.
  */
-export async function countBackfillCandidates(config: LowBalanceConfig): Promise<number> {
-  return prisma.user.count({
-    where: { status: "ACTIVE", balanceToman: { lte: config.thresholdToman } },
+export async function countBackfillCandidates(
+  config: LowBalanceConfig,
+): Promise<BackfillCandidateBreakdown> {
+  const lowFilter = {
+    status: UserStatus.ACTIVE,
+    balanceToman: { lte: config.thresholdToman },
+  } as const;
+
+  const [belowThreshold, lowBalanceOptOuts, paymentCategoryOptOuts] = await Promise.all([
+    prisma.user.count({ where: lowFilter }),
+    prisma.user.count({ where: { ...lowFilter, lowBalanceNotificationsEnabled: false } }),
+    prisma.user.count({
+      where: {
+        ...lowFilter,
+        lowBalanceNotificationsEnabled: true,
+        paymentNotificationsEnabled: false,
+      },
+    }),
+  ]);
+
+  // Eligible users whose CURRENT cycle already produced its message. The
+  // deterministic key is the authority, so this counts real notifications
+  // rather than inferring from the state row alone.
+  const eligible = await prisma.user.findMany({
+    where: {
+      ...lowFilter,
+      lowBalanceNotificationsEnabled: true,
+      paymentNotificationsEnabled: true,
+      lowBalanceAlertState: { is: { alertCycle: { gt: 0 } } },
+    },
+    select: { id: true, lowBalanceAlertState: { select: { alertCycle: true } } },
   });
+  let alreadyNotified = 0;
+  const keys = eligible
+    .map((u) =>
+      u.lowBalanceAlertState === null
+        ? null
+        : lowBalanceDedupeKey(u.id, u.lowBalanceAlertState.alertCycle),
+    )
+    .filter((k): k is string => k !== null);
+  if (keys.length > 0) {
+    alreadyNotified = await prisma.automatedNotification.count({
+      where: { dedupeKey: { in: keys } },
+    });
+  }
+
+  const expectedRecipients = Math.max(
+    0,
+    belowThreshold - lowBalanceOptOuts - paymentCategoryOptOuts - alreadyNotified,
+  );
+  return {
+    belowThreshold,
+    lowBalanceOptOuts,
+    paymentCategoryOptOuts,
+    alreadyNotified,
+    expectedRecipients,
+  };
+}
+
+export type StartBackfillResult =
+  | { ok: true; run: BackfillView; candidates: BackfillCandidateBreakdown }
+  | { ok: false; reason: "disabled" | "already-running" | "failed" };
+
+/** The repository's unique-violation convention (see attribution.ts). */
+function isUniqueViolation(err: unknown): boolean {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
 }
 
 /**
  * Creates the single backfill run. The worker advances it; this only authorises
  * it, freezing the config it was authorised against.
  *
- * A concurrent second attempt loses on the partial unique index and is reported
- * as `already-running` rather than silently creating a second run.
+ * Only the EXPECTED uniqueness violation becomes `already-running`. Reporting
+ * every database failure that way told the OWNER a run existed when none did,
+ * and hid real faults; anything else is logged safely and surfaced as a generic
+ * failure, never as a raw database error.
  */
 export async function startLowBalanceBackfill(adminId: string): Promise<StartBackfillResult> {
   const config = await getLowBalanceConfig();
@@ -145,13 +235,18 @@ export async function startLowBalanceBackfill(adminId: string): Promise<StartBac
         rearmBoundaryToman: rearmBoundaryToman(config),
         configVersion: config.configVersion,
         createdByAdminId: adminId,
-        estimatedCount: candidates,
+        estimatedCount: candidates.expectedRecipients,
       },
     });
     return { ok: true, run: toView(run), candidates };
-  } catch {
-    // The partial unique index rejected it: a run is already PENDING/RUNNING.
-    return { ok: false, reason: "already-running" };
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      // The partial unique index rejected it: a run is already PENDING/RUNNING.
+      return { ok: false, reason: "already-running" };
+    }
+    // Safe code only — never a raw database error, never a user identity.
+    logger.warn("low-balance backfill start failed", { error: errorMessage(err) });
+    return { ok: false, reason: "failed" };
   }
 }
 
