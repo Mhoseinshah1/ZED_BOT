@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <!--
+      No <meta http-equiv="Content-Security-Policy"> here on purpose. The CSP is
+      served as a header by Nginx, which is the one authority for it; a second
+      policy in the document would intersect with the header and produce a
+      combined policy nobody wrote, which is the classic way a CSP silently
+      stops doing what its author believes it does.
+    -->
+    <title>پنل کاربری</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!--
+      Vite rewrites this against `base` ("/miniapp/") for both the dev server
+      and the production build, so the emitted tag never points at the domain
+      root and the bundle keeps working from its sub-path.
+    -->
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
