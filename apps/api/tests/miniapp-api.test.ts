@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 
 import { prisma } from "@zedbot/database";
+import { serviceShortId } from "@zedbot/shared";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -37,6 +38,7 @@ process.env.MINIAPP_AUTH_RATE_LIMIT = "1000";
 // Imported after the environment is set: the session module derives its key
 // from APP_SECRET at first use, and the routes read the bot token per request.
 const { miniAppRoutes } = await import("../src/miniapp/routes.js");
+const { apiTrustedProxies } = await import("../src/miniapp/trusted-proxy.js");
 
 // Unique per run so reruns against the same database never collide, and far
 // enough from other suites' ranges that cleanup cannot sweep their rows.
@@ -55,7 +57,10 @@ let app: FastifyInstance;
 let ownerId = "";
 let otherId = "";
 let ownerServiceIds: string[] = [];
+/** What the API actually returns and accepts: the short PUBLIC ids. */
+let ownerPublicIds: string[] = [];
 let otherServiceId = "";
+let otherPublicId = "";
 let panelId = "";
 // Signed in once. Every read below reuses these, which keeps the suite honest
 // about the rate limiter instead of quietly depending on it being off.
@@ -108,7 +113,11 @@ beforeAll(async () => {
   if (!hasDb) {
     return;
   }
-  app = Fastify({ logger: false });
+  // Built EXACTLY as src/index.ts builds it. `trustProxy` is not cosmetic
+  // here: it is what decides whether a forwarding header is believed at all,
+  // so an app constructed without it would answer the transport questions
+  // below differently from production (M53).
+  app = Fastify({ logger: false, trustProxy: apiTrustedProxies() });
   await app.register(miniAppRoutes, { prefix: "/api/miniapp" });
   await app.ready();
 
@@ -170,6 +179,7 @@ beforeAll(async () => {
   }
   // Newest first is the API's order, so reverse to match what pages return.
   ownerServiceIds = [...ownerServiceIds].reverse();
+  ownerPublicIds = ownerServiceIds.map((id) => serviceShortId({ id }));
 
   const foreign = await prisma.service.create({
     data: {
@@ -186,6 +196,7 @@ beforeAll(async () => {
     },
   });
   otherServiceId = foreign.id;
+  otherPublicId = serviceShortId(foreign);
 
   for (let i = 0; i < 3; i += 1) {
     await prisma.walletTransaction.create({
@@ -404,7 +415,7 @@ describe.skipIf(!hasDb)("mini app API", () => {
       "/api/miniapp/me",
       "/api/miniapp/dashboard",
       "/api/miniapp/services",
-      `/api/miniapp/services/${ownerServiceIds[0]}`,
+      `/api/miniapp/services/${ownerPublicIds[0]}`,
       "/api/miniapp/wallet/transactions",
     ]) {
       const response = await app.inject({ method: "GET", url });
@@ -439,6 +450,8 @@ describe.skipIf(!hasDb)("mini app API", () => {
     expect(response.statusCode).toBe(200);
     const ids = response.json().items.map((item: { id: string }) => item.id);
     expect(ids).toHaveLength(3);
+    expect(ids).not.toContain(otherPublicId);
+    // And never the raw uuid, in any form.
     expect(ids).not.toContain(otherServiceId);
   });
 
@@ -446,7 +459,7 @@ describe.skipIf(!hasDb)("mini app API", () => {
     const cookie = ownerCookie;
     const response = await app.inject({
       method: "GET",
-      url: `/api/miniapp/services/${otherServiceId}`,
+      url: `/api/miniapp/services/${otherPublicId}`,
       headers: authed(cookie),
     });
     expect(response.statusCode).toBe(404);
@@ -471,7 +484,7 @@ describe.skipIf(!hasDb)("mini app API", () => {
     // The cursor is a POSITION, not an authority: it moves the window, and the
     // window is still bounded by the session's own user id.
     for (const item of response.json().items as Array<{ id: string }>) {
-      expect(ownerServiceIds).not.toContain(item.id);
+      expect(ownerPublicIds).not.toContain(item.id);
     }
   });
 
@@ -494,7 +507,7 @@ describe.skipIf(!hasDb)("mini app API", () => {
     const cookie = ownerCookie;
     const response = await app.inject({
       method: "GET",
-      url: `/api/miniapp/services/${ownerServiceIds[0]}`,
+      url: `/api/miniapp/services/${ownerPublicIds[0]}`,
       headers: authed(cookie),
     });
     expect(response.statusCode).toBe(200);
@@ -546,7 +559,7 @@ describe.skipIf(!hasDb)("mini app API", () => {
         break;
       }
     }
-    expect(seen).toEqual(ownerServiceIds);
+    expect(seen).toEqual(ownerPublicIds);
     expect(new Set(seen).size).toBe(seen.length);
   });
 
@@ -606,7 +619,7 @@ describe.skipIf(!hasDb)("mini app API", () => {
     const cookie = ownerCookie;
     const response = await app.inject({
       method: "GET",
-      url: `/api/miniapp/services/${ownerServiceIds[0]}`,
+      url: `/api/miniapp/services/${ownerPublicIds[0]}`,
       headers: authed(cookie),
     });
     const service = response.json().service;

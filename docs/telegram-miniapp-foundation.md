@@ -107,7 +107,7 @@ v1.<userId base64url>.<expiry unix seconds>.<HMAC-SHA256 base64url>
 | `Path` | `/api/miniapp` | Never attached to payment webhooks, `/health` or `/version`. |
 | `HttpOnly` | always | JavaScript cannot read it, so an XSS cannot steal it. |
 | `SameSite` | `Lax` | Same-origin app; `None` would weaken CSRF posture for nothing. |
-| `Secure` | when the request arrived over https | Follows `X-Forwarded-Proto`. In **production a session is not minted at all** over plain HTTP (`403 INSECURE_TRANSPORT`) — a cookie issued there could not carry `Secure` and would ride every later plaintext request. Outside production the flag simply follows the scheme, so local http still works. |
+| `Secure` | when the request arrived over https | Decided by `request.protocol` through the configured trusted-proxy chain — see §4.4. In **production a session is not minted at all** over plain HTTP (`403 INSECURE_TRANSPORT`) — a cookie issued there could not carry `Secure` and would ride every later plaintext request. Outside production the flag simply follows the scheme, so local http still works. |
 | Lifetime | 15 minutes (clamped to 60 s – 60 min) | |
 
 The key is derived from `APP_SECRET` through scrypt with its own context string
@@ -184,9 +184,9 @@ no-store`, `X-Content-Type-Options: nosniff` and `Vary: Cookie`, and **no**
 | POST | `/auth` | Sets the session cookie; returns the profile. |
 | POST | `/logout` | Clears the cookie. Always succeeds. |
 | GET | `/me` | The signed-in user's profile. |
-| GET | `/dashboard` | Balance, service counts by status, expiring-soon count, 3 recent services, 5 recent transactions. |
+| GET | `/dashboard` | Balance, service counts by status, expiring-soon count (strictly future expiries only), 3 recent services, 5 recent transactions. |
 | GET | `/services` | Keyset page of the caller's services. |
-| GET | `/services/:serviceId` | One service the caller owns. |
+| GET | `/services/:publicId` | One service the caller owns, addressed by its 8-character public id (§4.5). |
 | GET | `/wallet/transactions` | Keyset page of the caller's ledger. |
 
 ### 4.1 What never crosses the boundary
@@ -202,6 +202,7 @@ so a column added tomorrow cannot leak by default.
 | `namingStrategySnapshot`, `remoteMetadata`, `capabilitySnapshot` | Internal structures whose shape is not a public contract. |
 | `WalletTransaction.reason`, `adminId`, related ids | `reason` is operator text on manual adjustments; type + source already say what happened. |
 | `telegramId` | The client already knows who it is; returning it puts a stable cross-service identifier in a response body for no gain. |
+| `Service.id`, `WalletTransaction.id` (the database uuids) | Internal handles that also appear in operator logs, support transcripts and admin screens, so putting one in a page or a URL correlates those contexts for anyone who sees both. Services carry the short **public id** instead (§4.5); ledger rows carry no id at all, because nothing addresses one. |
 
 BigInt columns are emitted as decimal **strings**: `JSON.stringify` throws on a
 BigInt, and `Number` would round a large plan's byte count.
@@ -218,12 +219,25 @@ The predicate is a written-out row-value comparison, `(createdAt, id) <
 millisecond are common under load, and without it one of them is skipped or
 repeated at a page boundary.
 
-Cursors are **signed** (`apps/api/src/miniapp/cursor.ts`). They go straight into
-a query, so an unsigned one is an invitation to hand-craft values and probe; the
-signature also lets a tampered cursor be refused with a clean `400` instead of
-surfacing as a confusing empty page. A cursor is a **position, not an
-authority** — every query is scoped by the session's user id regardless of what
-the cursor says.
+Cursors are **sealed**, not merely signed (`apps/api/src/miniapp/cursor.ts`).
+The payload is encrypted with AES-256-GCM under a key derived from `APP_SECRET`,
+and the client receives ciphertext.
+
+Signing alone would have been the wrong bar. The tie-breaker in that sort key
+**is** the row's database uuid — there is no other unique, stable column to
+break a millisecond tie with — so a signed-but-readable cursor hands out a
+base64 uuid on the second page of any list: exactly the identifier §4.5 goes out
+of its way not to expose, arriving through the back door. Signing stops forgery;
+it does nothing about disclosure.
+
+Each cursor is also **bound to its collection**: the collection name is the
+AEAD's additional data, so a services cursor replayed against the wallet ledger
+fails to decrypt and is refused with a clean `400` rather than silently moving
+the wrong window. Tampering fails the same way — the GCM tag does not verify —
+so a mangled cursor is a `400` instead of a confusing empty page.
+
+A cursor is a **position, not an authority** — every query is scoped by the
+session's user id regardless of what the cursor says.
 
 Page size defaults to 20 and is clamped to 50. One extra row is fetched to
 answer "is there another page?" without a second `COUNT`.
@@ -269,6 +283,56 @@ limit misbehaves.
 It is in-process, not Redis: this bounds abuse of one replica's CPU, and routing
 the check through a network round-trip would add a dependency whose failure mode
 is "the login endpoint stops working".
+
+### 4.4 Which transport is "secure"
+
+Behind Nginx the socket is plaintext either way, so "did the browser use TLS?"
+can only be answered from a forwarding header — which makes it a question about
+**whom to believe**, not a string comparison. Reading `X-Forwarded-Proto` off
+the request answers it wrong twice over: the header is present on any request,
+including one that never passed a trusted hop, so a caller can simply assert
+`https`; and the first comma-separated entry is the *client-supplied* end of the
+chain, so `https, http` lets the caller's claim beat what the nearest proxy
+appended.
+
+There is therefore exactly one secure-transport decision
+(`apps/api/src/miniapp/transport.ts`), and it reads Fastify's
+`request.protocol`, which consults the header **only** when the socket peer is
+itself a trusted hop (§4.3's list) and takes the **last** entry — the one that
+hop appended. Untrusted peer, or no trust list at all, and it falls back to
+`socket.encrypted`, which cannot be spoofed.
+
+| Socket peer | `X-Forwarded-Proto` | Secure? |
+| --- | --- | --- |
+| trusted hop | `https` | yes |
+| trusted hop | `https, http` | **no** — the last entry is what the hop wrote |
+| trusted hop | *(absent)* | no |
+| `198.51.100.7` (direct) | `https` | **no** — nothing trusted in the path |
+
+All four decisions use it: the production plaintext refusal, the `Secure` flag
+on the minted cookie, the logout clear-cookie, and the clear-cookie issued when
+an invalid or expired cookie is seen.
+
+### 4.5 Public service identifiers
+
+A `Service` is addressed by its **public id**: the first 8 hex characters of the
+uuid, which is exactly what the bot has always displayed
+(`serviceShortId`, `packages/shared/src/public-ids.ts`). The format lives in the
+shared package because both must agree — a user reading «شناسه» in the bot and
+in the browser is reading one identifier, and a private copy in either app would
+be free to drift.
+
+Resolution is `startsWith` on the uuid, scoped by the session's user id **in the
+`WHERE`**, with `take: 2`. Malformed, unknown, ambiguous, deleted and someone
+else's all return one identical generic `404` — the shape of the failure teaches
+nothing. The route accepts exactly 8 hex characters: shorter prefixes would make
+it a prefix-enumeration oracle, and longer ones would let a caller keep a full
+uuid in circulation.
+
+Visibility excludes **both** deletion markers — `deletedAt != null` *and* the
+terminal `status = DELETED` — because an admin-terminated service carries the
+status without necessarily carrying the timestamp, and the bot has never shown
+those rows either.
 
 ---
 

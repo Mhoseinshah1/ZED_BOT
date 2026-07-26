@@ -279,9 +279,50 @@ locking users out.
   switch is disabled in the **same transaction** — the bot is never left switched
   on with nothing enforceable.
 - Retirement emits `force_join.channel_auto_deactivated` (SYSTEM topic, ERROR)
-  carrying only the channel DB id, `isPrivate`, `forceJoinDisabled`, and the
-  threshold/window values. The recurring unverifiable alert stays deduplicated;
-  the one-shot retirement alert is not.
+  carrying only the channel DB id, `isPrivate`, `errorClass`,
+  `forceJoinDisabled`, and the threshold/window values. When the retirement also
+  switched mandatory membership off, a **second** event
+  `force_join.auto_disabled` is emitted: losing the whole feature is a different
+  operational fact from losing one channel, and an operator may filter, alert on
+  or escalate the two differently. The recurring unverifiable alert stays
+  deduplicated; the one-shot retirement alerts are not.
+
+### Why the retirement alert is an outbox row, not a sink call
+
+The unhealthy-channel policy lives in `@zedbot/force-join` and is reached from
+**both** the bot and the API — a Mini App request runs the same gate. Only the
+bot owns the Telegram delivery queue, so an alert emitted *after* the mutation
+by whichever process installed an alert sink is missing in exactly the case that
+matters most: an API request quietly deactivating a required channel, or
+switching mandatory membership off for the whole platform, with nothing but a
+line on that process's stdout.
+
+So the retirement events are written as **outbox rows on the same transaction as
+the configuration change** (`packages/force-join/src/ops-outbox.ts`): a
+`SystemLog` row plus, when a delivery target is configured, its `PENDING`
+`SystemLogDelivery`.
+
+- They commit with the retirement or do not exist at all — no unannounced
+  automatic configuration change, and no alert about a change that rolled back.
+- A crash a millisecond after `COMMIT` loses nothing: the row is already durable.
+- Telegram is never called on the request path, so a delivery failure cannot
+  roll back or delay the membership decision.
+- Idempotency comes from the mutation itself: a retry re-reads the row, finds it
+  already inactive, and returns before reaching the write.
+
+The **worker** delivers them through the existing `SystemLog` →
+`SystemLogDelivery` → Telegram pipeline. Because a writer with no BullMQ
+connection cannot enqueue, `apps/worker/src/log-delivery-sweep.ts` re-enqueues
+owed rows on a fixed cadence — that sweep is also what recovers any delivery
+orphaned by a process dying between `COMMIT` and enqueue, or by Redis losing a
+delayed retry. The job id is derived from the delivery id, so re-enqueuing
+something already queued is a no-op rather than a double send.
+
+The process-local **alert sink** still exists, but only for the pre-retirement
+`force_join.channel_unverifiable` warning, which changes no configuration. The
+bot installs a sink that writes a `SystemLog`; the API keeps the package's
+logging default. That output is supplemental — it is never the authoritative
+record of a configuration change.
 
 **Recovery.** Re-grant the bot admin rights in the channel, then either press
 «تست دسترسی ربات ♻️» or re-activate the channel — both re-validate, and any
