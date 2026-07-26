@@ -1,5 +1,7 @@
-import { Prisma, prisma, type ForceJoinChannel } from "@zedbot/database";
+import { Prisma, SystemLogLevel, prisma, type ForceJoinChannel } from "@zedbot/database";
 import { createLogger, errorMessage } from "@zedbot/shared";
+
+import { FORCE_JOIN_OPS_EVENTS, writeForceJoinOpsEvent } from "./ops-outbox.js";
 
 // =============================================================================
 // Force Join: the channel-configuration primitives a MEMBERSHIP CHECK needs.
@@ -211,6 +213,47 @@ export async function recordChannelHealthFailure(
           lastValidationErrorCode: errorClass,
         },
       });
+
+      // The durable OWNER alert is written HERE, on this transaction, not by
+      // whoever happens to have installed an alert sink. This code path is
+      // reachable from the API as well as the bot, and only the bot owns the
+      // Telegram queue — so an alert emitted after the fact would be missing
+      // exactly when an API request silently deactivates a required channel,
+      // or switches mandatory membership off platform-wide.
+      //
+      // Committing the event with the mutation makes the two inseparable: no
+      // retirement without a record, no record without a retirement, and a
+      // crash a millisecond after COMMIT loses neither. If this write fails the
+      // transaction rolls back and the channel stays active, which is the safe
+      // direction — an unannounced automatic configuration change is worse than
+      // one more failed verification attempt.
+      await writeForceJoinOpsEvent(tx, {
+        level: SystemLogLevel.ERROR,
+        eventType: FORCE_JOIN_OPS_EVENTS.CHANNEL_RETIRED,
+        message: forceJoinDisabled
+          ? "Force-join channel stayed unverifiable and was deactivated; it was the last active channel, so mandatory membership was disabled too."
+          : "Force-join channel stayed unverifiable and was deactivated.",
+        metadata: {
+          channelId: id,
+          isPrivate: row.isPrivate,
+          errorClass,
+          forceJoinDisabled,
+          thresholdFailures: FORCE_JOIN_HEALTH_FAILURE_THRESHOLD,
+          windowMs: FORCE_JOIN_HEALTH_MIN_WINDOW_MS,
+        },
+      });
+      if (forceJoinDisabled) {
+        // A SECOND event, because losing the whole feature is a different
+        // operational fact from losing one channel and an operator may well
+        // filter, alert on or escalate the two differently.
+        await writeForceJoinOpsEvent(tx, {
+          level: SystemLogLevel.ERROR,
+          eventType: FORCE_JOIN_OPS_EVENTS.AUTO_DISABLED,
+          message:
+            "Mandatory channel membership was switched OFF automatically: the last active required channel was retired as unverifiable.",
+          metadata: { channelId: id, reason: "last_active_channel_retired" },
+        });
+      }
       return { action: "RETIRED" as const, forceJoinDisabled };
     });
   } catch (err) {

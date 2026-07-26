@@ -11,10 +11,20 @@ import { OPS_EVENTS, writeSystemLog } from "../system-log.service.js";
 // user who verifies in the bot is therefore admitted by the Mini App, and a
 // user who leaves a channel is refused by both.
 //
-// What stays here is the one thing that genuinely differs per process: where an
-// OWNER alert goes. The bot has the Telegram log-group pipeline (BullMQ), so it
+// What stays here is the pre-retirement WARNING — "the bot still cannot see
+// this channel". It changes no configuration, so a process-local sink is an
+// adequate home: the bot has the Telegram log-group pipeline (BullMQ) and
 // installs a sink that writes a system log; the API process, which runs no
 // queue, keeps the package's logging default. The DECISION never depends on it.
+//
+// The RETIREMENT alert is deliberately NOT installed here any more. Retiring a
+// channel — and, when it is the last one, switching mandatory membership off
+// platform-wide — is a configuration mutation now reachable from an API
+// request, and a sink installed by the bot process cannot fire for it. Those
+// events are written as outbox rows inside the mutation's own transaction by
+// `@zedbot/force-join`, and the worker delivers them through this same
+// SystemLog → SystemLogDelivery → Telegram pipeline. Re-adding a sink for them
+// here would only duplicate what is already durable.
 //
 // Everything else is re-exported unchanged, so every existing bot caller and
 // test keeps importing from this path.
@@ -29,17 +39,6 @@ setForceJoinAlertSink({
       // never appear (§4.11, T6).
       message: `Force-join required channel became unverifiable (${errorClass}).`,
       metadata: { channelId, errorClass, isPrivate },
-      topicKey: "SYSTEM",
-    });
-  },
-  async channelRetired({ channelId, isPrivate, forceJoinDisabled, thresholdFailures, windowMs }) {
-    await writeSystemLog({
-      level: "ERROR",
-      eventType: OPS_EVENTS.FORCE_JOIN_CHANNEL_RETIRED,
-      message: forceJoinDisabled
-        ? "Force-join channel stayed unverifiable and was deactivated; it was the last active channel, so mandatory membership was disabled too."
-        : "Force-join channel stayed unverifiable and was deactivated.",
-      metadata: { channelId, isPrivate, forceJoinDisabled, thresholdFailures, windowMs },
       topicKey: "SYSTEM",
     });
   },

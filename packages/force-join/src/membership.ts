@@ -3,8 +3,6 @@ import { createLogger, getRedisOptions, isForceJoinMembershipActive } from "@zed
 import { Redis } from "ioredis";
 
 import {
-  FORCE_JOIN_HEALTH_FAILURE_THRESHOLD,
-  FORCE_JOIN_HEALTH_MIN_WINDOW_MS,
   recordChannelHealthFailure,
   recordChannelHealthSuccess,
   recordValidationError,
@@ -99,16 +97,18 @@ export function resetForceJoinRedisForTests(): void {
 // --- OWNER alert sink ---------------------------------------------------------
 
 /**
- * Where an unverifiable/retired channel is reported.
+ * Where a repeatedly-unverifiable channel is reported, BEFORE it is retired.
  *
- * The bot and worker deliver these into the operator's Telegram log group via
- * BullMQ, which the API process does not run. Rather than duplicate that
- * pipeline (or drag a queue into an HTTP request path), the sink is injected:
- * the bot installs the real one at startup, and the default below only logs.
+ * This is the noisy, deduplicated warning — "the bot still cannot see this
+ * channel" — and it changes no configuration, so a process-local sink is an
+ * adequate home for it: the bot installs one that writes a SystemLog, the API
+ * keeps the logging default below.
  *
- * This is deliberately the ONLY thing that differs between processes. The
- * DECISION, the classification and the durable health bookkeeping in
- * `channel-policy.ts` are identical everywhere.
+ * The RETIREMENT alert deliberately does NOT live here. Retirement is a
+ * configuration mutation reachable from either process, so its alert is
+ * written as an outbox row inside the same transaction (`ops-outbox.ts`)
+ * rather than emitted afterwards by whoever happened to install a sink. See
+ * that file for why that distinction is load-bearing.
  */
 export interface ForceJoinAlertSink {
   channelUnverifiable(input: {
@@ -116,21 +116,11 @@ export interface ForceJoinAlertSink {
     errorClass: string;
     isPrivate: boolean;
   }): Promise<void>;
-  channelRetired(input: {
-    channelId: string;
-    isPrivate: boolean;
-    forceJoinDisabled: boolean;
-    thresholdFailures: number;
-    windowMs: number;
-  }): Promise<void>;
 }
 
 const LOGGING_ALERT_SINK: ForceJoinAlertSink = {
   async channelUnverifiable(input) {
     logger.warn("force-join: required channel became unverifiable", input);
-  },
-  async channelRetired(input) {
-    logger.error("force-join: required channel retired after sustained failures", input);
   },
 };
 
@@ -215,24 +205,23 @@ async function emitUnverifiableAlert(channel: ForceJoinChannel, errorClass: stri
 
 /**
  * Applies the bounded health policy to one PERMANENT unverifiable result and
- * alerts the OWNER. The alert itself is deduplicated per channel per rolling
- * window; the RETIREMENT alert is not deduplicated because it is a one-shot
- * configuration change the OWNER must always see.
+ * alerts the OWNER. The pre-retirement warning is deduplicated per channel per
+ * rolling window; the RETIREMENT alert is not emitted here at all — it is
+ * committed with the mutation itself, so it cannot be lost by a process that
+ * has no delivery pipeline, and cannot be duplicated by one that does.
  */
 async function handleUnverifiableChannel(channel: ForceJoinChannel): Promise<void> {
   const errorClass = "UNVERIFIABLE";
   await emitUnverifiableAlert(channel, errorClass);
   const outcome = await recordChannelHealthFailure(channel.id, errorClass);
-  if (outcome.action !== "RETIRED") {
-    return;
+  if (outcome.action === "RETIRED") {
+    // Local visibility only. The durable, deliverable record was written
+    // inside the retirement transaction.
+    logger.error("force-join: required channel retired after sustained failures", {
+      channelId: channel.id,
+      forceJoinDisabled: outcome.forceJoinDisabled,
+    });
   }
-  await alertSink.channelRetired({
-    channelId: channel.id,
-    isPrivate: channel.isPrivate,
-    forceJoinDisabled: outcome.forceJoinDisabled,
-    thresholdFailures: FORCE_JOIN_HEALTH_FAILURE_THRESHOLD,
-    windowMs: FORCE_JOIN_HEALTH_MIN_WINDOW_MS,
-  });
 }
 
 // --- per-user re-check debounce (§4.9) ---------------------------------------

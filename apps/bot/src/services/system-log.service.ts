@@ -1,4 +1,5 @@
 import { Prisma, prisma } from "@zedbot/database";
+import { FORCE_JOIN_OPS_EVENTS } from "@zedbot/force-join";
 import {
   sanitizeOpsMetadata,
   scrubSecretsFromText,
@@ -81,7 +82,16 @@ export const OPS_EVENTS = {
   // the master switch was disabled in the same transaction (metadata
   // forceJoinDisabled) so the bot is never enabled with nothing enforceable.
   // Same privacy envelope as the alert above: channel DB id + flags only.
-  FORCE_JOIN_CHANNEL_RETIRED: "force_join.channel_auto_deactivated",
+  //
+  // These two are NOT written by this logger. Retirement is a configuration
+  // mutation reachable from the API as well as the bot, so its event is
+  // committed inside the mutation's own transaction by
+  // `@zedbot/force-join`'s outbox. The markers are re-exported here — not
+  // retyped — so the catalog, the Telegram renderer and any query stay bound
+  // to the single definition and cannot drift apart.
+  FORCE_JOIN_CHANNEL_RETIRED: FORCE_JOIN_OPS_EVENTS.CHANNEL_RETIRED,
+  /** That retirement removed the last active channel, so the switch went off. */
+  FORCE_JOIN_AUTO_DISABLED: FORCE_JOIN_OPS_EVENTS.AUTO_DISABLED,
 } as const;
 export type OpsEventType = (typeof OPS_EVENTS)[keyof typeof OPS_EVENTS];
 
