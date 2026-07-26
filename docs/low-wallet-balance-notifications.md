@@ -59,6 +59,31 @@ the resulting re-arm boundary would exceed the INT32 range of `balanceToman` —
 a boundary no balance can ever reach would leave every alerted user permanently
 stuck ALERTED, unable to re-arm.
 
+**Every configuration mutation is one serialized transaction.** The boundary and
+its version are two `Setting` rows that only mean something together: a version
+that did not move leaves alerts queued under the old boundary indistinguishable
+from alerts queued under the new one. Written as two independent statements this
+had two failure modes — a database error between them commits a new boundary
+under an old version, and two concurrent admins can interleave read-read-write-
+write and lose an increment entirely.
+
+So each mutation takes `pg_advisory_xact_lock(hashtext('zedbot-low-balance-config'))`
+first, re-reads the configuration from the Setting **rows** (never the 30-second
+process cache, which is per-process and can be stale), validates the threshold and
+the margin against that one locked snapshot, and writes the changed boundary and
+the incremented version together. The process cache is dropped only *after* the
+commit — seeding it inside would advertise a value a rollback could take away.
+
+A row lock cannot do this job: the version row may not exist yet, and
+`SELECT … FOR UPDATE` over an absent row locks nothing. The advisory lock exists
+independently of any row and is released at COMMIT or ROLLBACK. It is its own
+namespace, so it never blocks — or is blocked by — the terms or force-join
+configuration locks that use the same convention.
+
+Creating a backfill run takes the same lock and reads the same rows, so the
+configuration it freezes is one coherent `(threshold, margin, version)` tuple
+rather than four independent cached reads that could straddle a change.
+
 ---
 
 ## 3. The state machine
@@ -366,8 +391,13 @@ message. Only future crossings alert. This is the default and the admin page
 says so in plain Persian.
 
 The other choice — "also tell the people who are already low" — is a separate,
-explicitly confirmed OWNER action with its own confirmation screen showing the
-exact candidate count before anything is queued.
+explicitly confirmed OWNER action with its own confirmation screen. That screen
+shows an **estimate**, and says so: balances move and preferences change, and
+every unit re-checks eligibility before it queues anything, so the number
+actually sent can only be that or lower. Four numbers are worth keeping apart —
+the *eligibility estimate at confirmation*, the *queued* count, the *sent* count
+and the *skipped/cancelled* count. Only the first is shown on the confirmation
+screen, and only as a forecast.
 
 **Authorization happens under the lock.** Whether a cycle already has its
 message cannot be answered before the state row is locked: a live wallet
@@ -377,16 +407,44 @@ second one for a single decrease. The shared transition therefore takes an
 cycle the lock revealed. **Nothing observed before the lock may authorise a new
 cycle.**
 
-**Every user transaction re-verifies the claim** before it changes anything:
-run id, `RUNNING` status, our owner token, and an unexpired lease. The status
-check is what enforces cancellation. Checking only between batches let a worker
-whose lease expired mid-batch keep running while another took the run over, and
-let a cancellation committed mid-batch still emit a whole bounded batch.
+**Every user transaction LOCKS the run row and then judges the claim** — run id,
+`RUNNING` status, our owner token, unexpired lease — before it changes anything.
+The status check is what enforces cancellation.
 
-Losing the claim stops the worker immediately and advances neither the cursor
-nor the counters, so they cannot move backwards or be double-incremented. Lease
-renewal requires the lease to be **still valid**, so an expired owner cannot
-silently reclaim a run after a takeover.
+The lock, not the check, is what makes this correct. A plain read sees a
+snapshot, and a cancellation or takeover can commit the instant afterwards while
+the transaction goes on to open a cycle and queue a message. `SELECT … FOR
+UPDATE` puts the unit and every mutation of the claim into **one serial order**:
+either the cancellation commits first, in which case the lock is granted only
+after it and PostgreSQL re-evaluates the row this unit then reads, so the unit
+stops; or the unit takes the lock first, in which case the cancellation waits and
+takes effect on the *next* unit, after this one has committed atomically. The row
+is locked by primary key and judged afterwards, because a predicate that no
+longer matches locks nothing at all — and "nothing was locked" cannot be told
+apart from "someone else holds it" without a second query.
+
+The lock order is fixed and acyclic: **run claim → alert state → outbox row**.
+Nothing takes them the other way — the wallet observer and the reconciliation
+sweep only ever take the state lock, and cancellation and takeover only ever take
+the run lock — so units cannot deadlock against a checkout or against the admin
+surface.
+
+Losing the claim stops the worker immediately, with no transition, no outbox row
+and a distinct `lost-claim` outcome. Lease renewal requires the lease to be
+**still valid**, so an expired owner cannot silently reclaim a run after a
+takeover.
+
+**Progress is part of the unit.** The cursor and the processed/queued/skipped
+counters are written in the same transaction as the transition they describe, not
+once per page. Committing units first and their bookkeeping afterwards means a
+crash in between re-processes the page: the dedupe key still prevents a second
+message, but `queuedCount` under-reports and `skippedCount` over-reports, so the
+OWNER is shown a run that never happened. Written together, the counters describe
+exactly the units that committed, `processedCount` is always
+`queuedCount + skippedCount`, and the cursor never moves past work that did not
+commit. A unit that throws records nothing — so it is marked durably as attempted
+in its own small statement, guarded on still holding the claim, otherwise a row
+that always fails would pin the run on it forever.
 
 **Population.** Every ACTIVE, eligible user currently at or below the frozen
 threshold, whatever state the machine is in:
@@ -415,8 +473,40 @@ The backfill is the most conservative thing in the feature:
   restart-safe and never loads the user table into memory.
 * Every message goes through the **same dedupe key** as the live observer, so a
   user the observer already alerted in this cycle cannot be alerted twice.
-* Cancellation takes effect between batches. Messages already queued are not
-  recalled.
+* Cancellation takes effect on the next unit that reaches the claim lock.
+  Messages already queued are not recalled.
+
+### The candidate count
+
+The confirmation screen's numbers come from **one aggregate query**. No user id
+and no dedupe key is ever loaded into the bot process, and the statement carries
+three bind parameters however many users exist — an earlier version materialised
+every eligible user and sent all their keys as a single `IN` list, which on a
+production-sized installation is tens of megabytes of strings and far past
+PostgreSQL's 65535-parameter ceiling, so the screen would simply fail.
+
+The classification mirrors the worker's rules case for case:
+
+| Situation | Counted as |
+| --- | --- |
+| no state row | expected recipient |
+| ARMED (any cycle) while at or below the threshold | expected recipient |
+| ALERTED, cycle 0 (the silent baseline) | expected recipient |
+| ALERTED, cycle > 0, that cycle has no message | expected recipient |
+| ALERTED, cycle > 0, that cycle has its message | already notified |
+| focused opt-out | opted out of this alert |
+| `PAYMENT` category off | opted out of the category |
+| not ACTIVE | outside the population entirely |
+
+The ARMED row is the one that used to be wrong. A user re-armed after cycle 3
+still has cycle 3's notification, and the old query called them already notified
+— while the worker would open cycle 4 and send. The screen therefore promised
+*fewer* messages than the run would deliver. Being ALERTED is now part of the
+condition, exactly as it is in the transition.
+
+"Recovered" needs no row: the population is `balance <= threshold` and the
+re-arm boundary is never below the threshold, so nobody inside the set can be
+recovered.
 
 ---
 
@@ -516,7 +606,7 @@ state or history is deleted.
 
 ## 15. Tests
 
-**106 numbered cases, `L01`–`L104`**, across five suites:
+**124 numbered cases, `L01`–`L122`**, across six suites:
 
 | Suite | Cases | Covers |
 | --- | --- | --- |
@@ -525,6 +615,7 @@ state or history is deleted.
 | `low-balance-first-observation.test.ts` | 18 | first-observation semantics, concurrent creation, atomicity, lease |
 | `low-balance-multi-replica.test.ts` | 7 | concurrent replicas, cursor progress, constrained pool |
 | `low-balance-cycle-authority.test.ts` | 14 | stale-cycle supersession, locked backfill authorization, claim enforcement |
+| `low-balance-linearizability.test.ts` | 18 | mid-unit cancellation and takeover, crash-consistent progress, bounded counting, atomic configuration |
 
 The load-bearing ones:
 
@@ -546,3 +637,20 @@ The load-bearing ones:
 | **L101** | A committed cancellation stops every later unit in the batch |
 | **L102 / L103** | An expired lease is taken over; the expired owner cannot renew and reclaim |
 | **L104** | Counters and cursor never double-count under takeover |
+| **L105 / L106** | A cancellation and a takeover landing MID-PAGE: the unit already holding the claim lock completes, everything after it writes nothing |
+| **L108** | An interrupted run resumes under another worker with no duplicate, nothing missed, and accurate durable totals |
+| **L110** | `queuedCount` equals the number of messages that actually appeared |
+| **L113** | An ARMED user holding an old cycle's notification is still an expected recipient |
+| **L118** | 100,000 users counted with bounded memory and no oversized statement |
+| **L119** | A failure between the boundary and the version write rolls both back |
+| **L120 / L121** | Concurrent configuration writers produce monotonic versions and one valid combined snapshot |
+| **L122** | A backfill freezes ONE coherent configuration tuple |
+
+The mid-unit races are pinned with real locks: a transaction holding
+`SELECT … FOR UPDATE` on a user's state row stops that user's unit *after* it has
+taken the claim lock, which is the only moment at which a cancellation or a
+takeover can be made to queue behind it. Waiting backends are detected through
+`pg_locks`, so nothing depends on a sleep. One run therefore exercises **both**
+orderings: the pinned unit takes the claim first and completes atomically while
+the interference waits, and the interference then commits before the next unit
+reaches the lock and stops it.
