@@ -14,6 +14,7 @@ import Fastify from "fastify";
 import { Redis } from "ioredis";
 
 import { miniAppRoutes } from "./miniapp/routes.js";
+import { apiTrustedProxies } from "./miniapp/trusted-proxy.js";
 import { miniAppStaticRoutes } from "./miniapp/static.js";
 import { paymentRoutes } from "./payment-routes.js";
 
@@ -67,7 +68,13 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-const app = Fastify({ logger: false });
+// `trustProxy` is what makes `request.ip` the real client rather than the local
+// Nginx hop — which is what makes the per-client authentication rate limit
+// per-client at all. It is a trusted-hop LIST, never `true`: see
+// `miniapp/trusted-proxy.ts` for why, and for why the default is not loopback
+// alone.
+const trustProxy = apiTrustedProxies();
+const app = Fastify({ logger: false, trustProxy });
 
 // Payment provider callbacks/webhooks live in an encapsulated plugin so
 // their raw-body JSON parser never affects the rest of the app. Fastify
@@ -156,8 +163,11 @@ async function main(): Promise<void> {
   }
   await app.listen({ port, host });
   // Every service must log its running SHA at startup (deploy diagnostics).
+  // The trusted-hop list is logged too: a misconfiguration here is invisible
+  // until a rate limit misbehaves, and it is not a secret.
   logger.info(`ZED_BOT api service started on http://${host}:${port}`, {
     gitSha: normalizeGitSha(process.env.GIT_SHA) ?? "unknown",
+    trustedProxies: trustProxy === false ? "none" : trustProxy,
   });
 }
 

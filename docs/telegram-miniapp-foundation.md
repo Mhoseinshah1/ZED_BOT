@@ -236,6 +236,36 @@ is bounded: a fixed-window counter, five per minute per client by default
 work. The key is a salted SHA-256 of the client address, never the address
 itself — a rate-limit map is durable state for as long as the window lasts.
 
+#### Which address is "the client"
+
+"Per client" is only true if `request.ip` is the client. Behind Nginx the socket
+peer is the proxy, identical for everyone, so without `trustProxy` the limit is
+**global**: one person signing in five times locks out the entire user base.
+
+Fastify is therefore configured with a trusted-hop **list**
+(`apps/api/src/miniapp/trusted-proxy.ts`), never `trustProxy: true`. The list
+makes `proxy-addr` walk `X-Forwarded-For` from the server end and stop at the
+first entry that is not a trusted hop:
+
+| Socket peer | `X-Forwarded-For` | `request.ip` | Why |
+| --- | --- | --- | --- |
+| local hop | `203.0.113.10` | `203.0.113.10` | the hop is trusted, so its appended value is believed |
+| local hop | `<forged>, 203.0.113.10` | `203.0.113.10` | Nginx appends the peer it saw; the forgery sits to the left and is never reached |
+| `198.51.100.7` (direct) | `203.0.113.10` | `198.51.100.7` | nothing trusted in the path, so the header is ignored entirely |
+
+The default (`API_TRUSTED_PROXIES`) is `loopback, linklocal, uniquelocal` rather
+than loopback alone. In production this API runs in a container whose port is
+published on `127.0.0.1` and proxied to by Nginx **on the host**, so inside the
+container the peer is the Docker bridge gateway — a private address. Trusting
+only loopback would leave the global-bucket bug in place on every real
+deployment while passing local tests. Those ranges are not routable from the
+Internet, so no remote caller can present itself as a trusted hop.
+
+Values meaning "trust everyone" (`true`, `all`, `*`, a hop count) are refused
+and fall back to the default; `none` trusts nothing. The resolved list is logged
+at startup, because a misconfiguration here is otherwise invisible until a rate
+limit misbehaves.
+
 It is in-process, not Redis: this bounds abuse of one replica's CPU, and routing
 the check through a network round-trip would add a dependency whose failure mode
 is "the login endpoint stops working".
