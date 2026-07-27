@@ -633,10 +633,18 @@ error message with no request payload and no user identity.
 | Force Join gate + grammY isolation | `apps/api/tests/miniapp-force-join.test.ts` | FJ01–FJ13b |
 | Trusted proxy, rate limiting, lifetimes | `apps/api/tests/miniapp-proxy.test.ts` | P01–P12, C01–C05 |
 | Static serving & SPA fallback | `apps/api/tests/miniapp-static.test.ts` | N05b, N07–N09 |
+| Secure-transport decision | `apps/api/tests/miniapp-transport.test.ts` | D2-1–D2-7 |
+| Public ids & sealed cursors | `apps/api/tests/miniapp-public-ids.test.ts` | D3-1–D3-11 |
+| Numeric configuration safety | `apps/api/tests/miniapp-config-safety.test.ts` | D4-1–D4-7 |
+| Response contract (§4.6) | `apps/api/tests/miniapp-contract.test.ts` | E3-1–E3-10 |
+| Durable Force Join alerts | `apps/bot/tests/force-join-durable-alerts.test.ts` | D1-1–D1-7 |
+| Health success vs. retirement race | `apps/bot/tests/force-join-health-race.test.ts` | E2-1–E2-6 |
+| Delivery sweep & stale recovery | `apps/bot/tests/log-delivery-sweep.test.ts` | D1-8–D1-12, E1-1–E1-8 |
 | Nginx config & smoke script | `apps/bot/tests/miniapp-nginx.test.ts` | N01–N15 |
 | Bot entry point + menu integration | `apps/bot/tests/miniapp-entry.test.ts` | B01–B10 |
 | Frontend formatting & client | `apps/miniapp/tests/` | F01–F20 |
 | Theme & logout lifecycle (jsdom) | `apps/miniapp/tests/lifecycle.test.tsx` | L01–L12 |
+| Bot-return actions & profile counts (jsdom) | `apps/miniapp/tests/bot-actions.test.tsx` | E4-1–E4-12 |
 
 The API suite needs a migrated PostgreSQL (`DATABASE_URL`); without it it skips
 itself. The Nginx suite runs a real `nginx -t` when the binary is present and
