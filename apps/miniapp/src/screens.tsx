@@ -443,7 +443,19 @@ export function ProfileScreen(props: { user: UserDto; onSignedOut: () => void })
   // here exactly as it is from the list. Failing to load them is not worth a
   // failure screen — the profile is still useful without two numbers.
   const { state: profile } = useResource<ProfileDto>(fetchMe);
-  const counts = profile.phase === "ready" ? profile.data.services : null;
+  // `useResource` casts the body to the DTO without validating it, so a
+  // response from an older API build — or one shaped differently than this
+  // build expects — arrives here as the wrong shape rather than as a failure.
+  // Two numbers are not worth crashing a screen over, so they render only when
+  // they really are numbers.
+  const maybe =
+    profile.phase === "loaded"
+      ? (profile.data.services as Partial<ProfileDto["services"]> | undefined)
+      : undefined;
+  const counts =
+    typeof maybe?.active === "number" && typeof maybe.total === "number"
+      ? { active: maybe.active, total: maybe.total }
+      : null;
   return (
     <>
       <Card>

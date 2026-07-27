@@ -5,6 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BotActions, botLink } from "../src/components";
 import { UI } from "../src/i18n";
+import type { UserDto } from "../src/api";
+
+const USER: UserDto = {
+  firstName: "زد",
+  lastName: null,
+  username: "zed",
+  status: "ACTIVE",
+  group: "NORMAL",
+  balanceToman: 12_000,
+  joinedAt: "2026-01-01T00:00:00.000Z",
+};
 
 // =============================================================================
 // E4 — the way back into the bot.
@@ -248,5 +259,64 @@ describe("bot-return actions", () => {
     } finally {
       Object.defineProperty(window, "location", { configurable: true, value: location });
     }
+  });
+
+  // E4-11 ----------------------------------------------------------------
+  it("E4-11: the profile renders the counts the server sends", async () => {
+    // The server-side contract is proved by E3-4; this proves the SCREEN
+    // actually shows it. The first version of this branch tested for a phase
+    // name the loader never emits, so the counts silently never rendered — a
+    // dead branch is invisible to every test that does not mount the screen.
+    setBotUsername("zedbot_public");
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push({ url: String(input), method: init?.method ?? "GET" });
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            user: USER,
+            services: { active: 3, total: 7 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    });
+
+    const { ProfileScreen } = await import("../src/screens");
+    await act(async () => {
+      root.render(<ProfileScreen user={USER} onSignedOut={() => {}} />);
+    });
+
+    expect(fetchCalls.map((c) => c.url)).toContain("/api/miniapp/me");
+    const text = container.textContent ?? "";
+    expect(text).toContain(UI.activeServices);
+    expect(text).toContain(UI.totalServices);
+    // Persian digits — the same formatter every other number goes through.
+    expect(text).toContain("۳");
+    expect(text).toContain("۷");
+  });
+
+  // E4-12 ----------------------------------------------------------------
+  it("E4-12: a failed count load costs the profile nothing else", async () => {
+    setBotUsername("zedbot_public");
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response(JSON.stringify({ ok: false, code: "INTERNAL" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    const { ProfileScreen } = await import("../src/screens");
+    await act(async () => {
+      root.render(<ProfileScreen user={USER} onSignedOut={() => {}} />);
+    });
+
+    const text = container.textContent ?? "";
+    // Two numbers are not worth a failure screen: the rest of the profile is
+    // rendered from data the caller already holds.
+    expect(text).toContain(UI.balance);
+    expect(text).not.toContain(UI.activeServices);
   });
 });
