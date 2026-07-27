@@ -13,6 +13,7 @@ import { Worker } from "bullmq";
 import { gitSha } from "./config.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { createLogDeliveryProcessor } from "./log-delivery.js";
+import { startLogDeliverySweep } from "./log-delivery-sweep.js";
 import { createLogGroupSetupProcessor } from "./log-group-setup.js";
 import { startNotificationEngine } from "./notifications/engine.js";
 import { startAutoRenewalEngine } from "./auto-renewal/engine.js";
@@ -88,6 +89,12 @@ async function run(options: RedisConnectionOptions): Promise<void> {
   // an unconditional bounded sweep that reclaims abandoned username holds. Runs on
   // its own fixed cadence, independent of any feature master switch.
   const stopReservationCleanup = startReservationCleanupLoop();
+
+  // Delivery of operational alerts is owed by the DATABASE row, not by the
+  // queue: writers that hold no BullMQ connection (the API's force-join outbox)
+  // and writers that crash between COMMIT and enqueue both leave a durable
+  // PENDING row and no job. This sweep is what makes those rows reach Telegram.
+  const stopLogDeliverySweep = startLogDeliverySweep(logQueue);
 
   // Wallet auto-renewal engine (own scan/reconcile/cleanup queue + scheduler).
   // Dormant until the operator enables the master switch. Started BEFORE the
@@ -175,6 +182,7 @@ async function run(options: RedisConnectionOptions): Promise<void> {
     stopHeartbeat();
     stopReconciler();
     stopReservationCleanup();
+    stopLogDeliverySweep();
     try {
       await notificationEngine.stop();
       await starsSubscriptionEngine.stop();

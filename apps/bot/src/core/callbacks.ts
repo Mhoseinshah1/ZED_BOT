@@ -24,6 +24,10 @@ export const CB = {
   // only and never gates the underlying VPN / Other-Products flows.
   USER_PURCHASE_HUB: "user:purchase",
   USER_ORDERS: "user:orders",
+  // Telegram Mini App entry (feat/telegram-miniapp-foundation): opens the
+  // read-only web panel. Rendered only when MINIAPP_PUBLIC_URL is a configured
+  // https URL - Telegram rejects a web_app button otherwise.
+  USER_MINIAPP: "user:miniapp",
   USER_EXTRA_VOLUME: "user:extra_volume",
   USER_EXTRA_TIME: "user:extra_time",
 

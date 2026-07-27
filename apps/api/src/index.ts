@@ -13,6 +13,10 @@ import {
 import Fastify from "fastify";
 import { Redis } from "ioredis";
 
+import { logMiniAppConfig } from "./miniapp/config.js";
+import { miniAppRoutes } from "./miniapp/routes.js";
+import { apiTrustedProxies } from "./miniapp/trusted-proxy.js";
+import { miniAppStaticRoutes } from "./miniapp/static.js";
 import { paymentRoutes } from "./payment-routes.js";
 
 const logger = createLogger("api");
@@ -65,12 +69,29 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-const app = Fastify({ logger: false });
+// `trustProxy` is what makes `request.ip` the real client rather than the local
+// Nginx hop — which is what makes the per-client authentication rate limit
+// per-client at all. It is a trusted-hop LIST, never `true`: see
+// `miniapp/trusted-proxy.ts` for why, and for why the default is not loopback
+// alone.
+const trustProxy = apiTrustedProxies();
+const app = Fastify({ logger: false, trustProxy });
 
 // Payment provider callbacks/webhooks live in an encapsulated plugin so
 // their raw-body JSON parser never affects the rest of the app. Fastify
 // resolves pending registrations before listen().
 void app.register(paymentRoutes);
+
+// Read-only Telegram Mini App API. Encapsulated so its no-store/nosniff hooks
+// and its 16 KiB body limit apply to nothing else, and mounted under a prefix
+// the session cookie is scoped to - payment callbacks, /health and /version
+// never receive it.
+void app.register(miniAppRoutes, { prefix: "/api/miniapp" });
+
+// The built Mini App bundle, served from the SAME origin as the API above -
+// which is what lets the session cookie stay SameSite=Lax with no CORS at all.
+// Encapsulated so its long-lived asset caching cannot reach any JSON route.
+void app.register(miniAppStaticRoutes);
 
 app.get("/health", async (_request, reply) => {
   let database = "ok";
@@ -143,9 +164,18 @@ async function main(): Promise<void> {
   }
   await app.listen({ port, host });
   // Every service must log its running SHA at startup (deploy diagnostics).
+  // The trusted-hop list is logged too: a misconfiguration here is invisible
+  // until a rate limit misbehaves, and it is not a secret.
   logger.info(`ZED_BOT api service started on http://${host}:${port}`, {
     gitSha: normalizeGitSha(process.env.GIT_SHA) ?? "unknown",
+    trustedProxies: trustProxy === false ? "none" : trustProxy,
   });
+  // The Mini App's numeric settings fail SOFT — an unusable value falls back to
+  // the documented default rather than throwing on a request path. That is the
+  // right failure mode, but it is a silent one, so the effective value of each
+  // is reported exactly here, once, where an operator can see that what they
+  // wrote is not what is running.
+  logMiniAppConfig();
 }
 
 main().catch((err: unknown) => {

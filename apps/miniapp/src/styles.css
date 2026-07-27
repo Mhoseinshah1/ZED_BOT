@@ -1,0 +1,412 @@
+/* =============================================================================
+   Layout and theme.
+
+   RTL is a document property (`dir="rtl"` on <html>), not a pile of overrides:
+   logical properties - inline-start, inline-end, margin-inline - do the right
+   thing in both directions without a single `left`/`right` rule to keep in
+   sync.
+
+   Colours come from Telegram's theme params, copied into these custom
+   properties at startup, with light/dark fallbacks so the app is readable
+   before - or without - the host telling us anything.
+
+   No web fonts. Telegram's own UI font is already the system font on every
+   platform this runs on, so the app inherits it; loading a remote font would
+   mean a third-party origin in the CSP and a flash of unstyled Persian text.
+   ============================================================================= */
+
+:root {
+  --tg-bg: #ffffff;
+  --tg-text: #14181f;
+  --tg-hint: #707a86;
+  --tg-link: #2678b6;
+  --tg-button: #2678b6;
+  --tg-button-text: #ffffff;
+  --tg-secondary-bg: #f2f4f7;
+  --danger: #c8372d;
+  --success: #2f7d43;
+  --warning: #b0700f;
+  --radius: 14px;
+  --gap: 12px;
+}
+
+:root[data-theme="dark"] {
+  --tg-bg: #17212b;
+  --tg-text: #f5f6f7;
+  --tg-hint: #8d9aa8;
+  --tg-link: #6ab3f3;
+  --tg-button: #4b8dd0;
+  --tg-button-text: #ffffff;
+  --tg-secondary-bg: #232e3c;
+  --danger: #ef6a5f;
+  --success: #63b97a;
+  --warning: #e0a145;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Vazirmatn, Tahoma, system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app__content {
+  flex: 1;
+  padding: var(--gap);
+  /* Room for the fixed tab bar plus the home indicator on notched devices. */
+  padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+}
+
+/* --- cards ---------------------------------------------------------------- */
+
+.card {
+  background: var(--tg-secondary-bg);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  margin-bottom: var(--gap);
+}
+
+.card__title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.card--tappable {
+  display: block;
+  width: 100%;
+  text-align: start;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.card--tappable:active {
+  opacity: 0.7;
+}
+
+/* --- balance -------------------------------------------------------------- */
+
+.balance {
+  text-align: center;
+  padding: 20px var(--gap);
+}
+
+.balance__label {
+  color: var(--tg-hint);
+  font-size: 13px;
+}
+
+.balance__value {
+  font-size: 26px;
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+/* --- stat grid ------------------------------------------------------------ */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: var(--gap);
+}
+
+.stat {
+  background: var(--tg-secondary-bg);
+  border-radius: var(--radius);
+  padding: 12px 8px;
+  text-align: center;
+}
+
+.stat__value {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.stat__label {
+  font-size: 12px;
+  color: var(--tg-hint);
+  margin-top: 2px;
+}
+
+/* --- key/value rows ------------------------------------------------------- */
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.row__key {
+  color: var(--tg-hint);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.row__value {
+  font-weight: 600;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+
+/* --- badges --------------------------------------------------------------- */
+
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--tg-bg);
+  color: var(--tg-hint);
+}
+
+.badge--active {
+  color: var(--success);
+}
+
+.badge--warning {
+  color: var(--warning);
+}
+
+.badge--danger {
+  color: var(--danger);
+}
+
+/* --- usage bar ------------------------------------------------------------ */
+
+.usage {
+  margin-top: 10px;
+}
+
+.usage__track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--tg-bg);
+  overflow: hidden;
+}
+
+.usage__fill {
+  height: 100%;
+  background: var(--tg-button);
+  border-radius: 999px;
+}
+
+.usage__legend {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--tg-hint);
+  margin-top: 4px;
+}
+
+/* --- buttons -------------------------------------------------------------- */
+
+.button {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button--ghost {
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+}
+
+.button:active {
+  opacity: 0.8;
+}
+
+.button + .button {
+  margin-top: 8px;
+}
+
+/* --- states --------------------------------------------------------------- */
+
+.center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap);
+  padding: 32px 20px;
+  text-align: center;
+}
+
+.center__title {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.center__body {
+  color: var(--tg-hint);
+  margin: 0;
+  max-width: 34ch;
+}
+
+.center__actions {
+  width: 100%;
+  max-width: 320px;
+}
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid var(--tg-secondary-bg);
+  border-top-color: var(--tg-button);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2.4s;
+  }
+}
+
+.empty {
+  color: var(--tg-hint);
+  text-align: center;
+  padding: 32px 0;
+}
+
+.notice {
+  font-size: 12px;
+  color: var(--tg-hint);
+  text-align: center;
+  padding: 4px 0 12px;
+}
+
+/* --- header --------------------------------------------------------------- */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px var(--gap) 0;
+}
+
+.header__title {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0;
+  flex: 1;
+}
+
+.header__back {
+  border: 0;
+  background: transparent;
+  color: var(--tg-link);
+  font: inherit;
+  cursor: pointer;
+  padding: 4px;
+}
+
+/* --- tab bar -------------------------------------------------------------- */
+
+.tabs {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  background: var(--tg-secondary-bg);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.tab {
+  border: 0;
+  background: transparent;
+  color: var(--tg-hint);
+  font: inherit;
+  font-size: 12px;
+  padding: 12px 4px;
+  cursor: pointer;
+}
+
+.tab--active {
+  color: var(--tg-link);
+  font-weight: 700;
+}
+
+/* --- lists ---------------------------------------------------------------- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+}
+
+.txn {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--tg-bg);
+}
+
+.txn:last-child {
+  border-bottom: 0;
+}
+
+.txn__meta {
+  font-size: 12px;
+  color: var(--tg-hint);
+}
+
+.txn__amount {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.txn__amount--credit {
+  color: var(--success);
+}
+
+.txn__amount--debit {
+  color: var(--danger);
+}

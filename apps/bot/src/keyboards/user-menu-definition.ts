@@ -2,6 +2,7 @@ import { Keyboard } from "grammy";
 
 import { CB } from "../core/callbacks.js";
 import { isFreeTrialVisible } from "../services/free-trial.service.js";
+import { isMiniAppAvailable } from "../services/miniapp.service.js";
 import { isCombinedPurchaseMenuEnabled } from "../services/purchase-menu-layout.service.js";
 import { isReferralSystemEnabled } from "../services/referral.service.js";
 import { isRepresentativeProgramEnabled } from "../services/representative-settings.service.js";
@@ -40,6 +41,7 @@ export type UserMainMenuAction =
   | "FREE_TRIAL"
   | "REFERRAL"
   | "REPRESENTATIVE"
+  | "MINIAPP"
   | "ADMIN_PANEL";
 
 export interface UserMainMenuButton {
@@ -79,6 +81,14 @@ export const MAIN_MENU_ACTION_WIRING: Record<
   // Representative Program: opens the real representative page. Visible only when
   // the OWNER has enabled the program master switch (§3) — hidden by default.
   REPRESENTATIVE: { buttonKey: "representative", callback: CB.USER_REPRESENTATIVE },
+  // Telegram Mini App: an ORDINARY callback that opens the intro page, which is
+  // where the real `web_app` button lives. It has to be ordinary — a reply
+  // keyboard's buttons are text only, so a `web_app` entry here could not exist
+  // in REPLY mode and the two modes would silently offer different features.
+  // Rendered only while MINIAPP_PUBLIC_URL is a valid https URL; still
+  // RESOLVABLE when it is not, so a stale reply keyboard gets the explicit
+  // "not enabled yet" answer instead of falling through as unrecognised text.
+  MINIAPP: { buttonKey: "miniapp", callback: CB.USER_MINIAPP },
   // Admin-entry phase: opens the EXISTING admin panel (same callback the
   // /admin menu uses). Visible only to active admins via the viewer-aware
   // definition below; the label is display-only and never authorization.
@@ -108,6 +118,7 @@ const SPLIT_ROWS: UserMainMenuAction[][] = [
   ["FREE_TRIAL"],
   ["REFERRAL"],
   ["REPRESENTATIVE"],
+  ["MINIAPP"],
   ["SUPPORT"],
   ["ADMIN_PANEL"],
 ];
@@ -127,6 +138,7 @@ const COMBINED_ROWS: UserMainMenuAction[][] = [
   ["FREE_TRIAL"],
   ["REFERRAL"],
   ["REPRESENTATIVE"],
+  ["MINIAPP"],
   ["SUPPORT"],
   ["ADMIN_PANEL"],
 ];
@@ -157,6 +169,8 @@ export async function buildUserMainMenuDefinition(
     isReferralSystemEnabled(),
     isRepresentativeProgramEnabled(),
   ]);
+  // Configuration, not a database flag — read synchronously alongside the rest.
+  const miniAppAvailable = isMiniAppAvailable();
   const layout = combined ? COMBINED_ROWS : SPLIT_ROWS;
   const rows: UserMainMenuButton[][] = [];
   for (const rowActions of layout) {
@@ -170,6 +184,9 @@ export async function buildUserMainMenuDefinition(
       }
       if (action === "REPRESENTATIVE" && !representativeVisible) {
         continue; // Hidden until the OWNER enables the representative program (§3).
+      }
+      if (action === "MINIAPP" && !miniAppAvailable) {
+        continue; // No https MINIAPP_PUBLIC_URL: no button rather than a dead one.
       }
       if (action === "ADMIN_PANEL" && !viewer.isActiveAdmin) {
         continue; // Fail closed: the default viewer never sees the admin row.
@@ -216,6 +233,11 @@ interface MenuResolutionCandidate {
  * setting is presentation only; both flows are always available). Feature-gated
  * actions (free trial / referral / representative) are included ONLY while their
  * live gate is open — a disabled feature is NEVER made generally resolvable.
+ * MINIAPP is deliberately NOT in that group: its gate is configuration rather
+ * than a business decision, and the entry screen already has a first-class
+ * "not enabled yet" answer. Keeping it resolvable means a stale reply keyboard
+ * from before MINIAPP_PUBLIC_URL was removed gets that explicit answer instead
+ * of being silently ignored.
  * ADMIN_PANEL resolves for everyone (viewer-blind) so a normal user typing it
  * receives the explicit admin denial; matching NEVER authorizes — the dispatcher
  * revalidates the active admin immediately before opening the panel.
@@ -230,7 +252,8 @@ async function buildMenuResolutionCandidates(): Promise<MenuResolutionCandidate[
     if (action === "FREE_TRIAL") return trialVisible;
     if (action === "REFERRAL") return referralVisible;
     if (action === "REPRESENTATIVE") return representativeVisible;
-    // Purchase actions, always-rendered non-gated actions, and ADMIN_PANEL.
+    // Purchase actions, always-rendered non-gated actions, MINIAPP (which
+    // refuses safely on its own screen) and ADMIN_PANEL.
     return true;
   };
   const candidates: MenuResolutionCandidate[] = [];

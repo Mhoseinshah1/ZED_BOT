@@ -1,4 +1,5 @@
 import { PanelStatus, prisma, ServiceStatus, type Service } from "@zedbot/database";
+import { serviceShortId } from "@zedbot/shared";
 
 import {
   panelOperationAvailable,
@@ -66,9 +67,12 @@ export async function getOwnedServiceByShortId(
   return matches.length === 1 ? matches[0] : null;
 }
 
-export function serviceShortId(service: Pick<Service, "id">): string {
-  return service.id.slice(0, 8);
-}
+/**
+ * Re-exported, not reimplemented. The Mini App shows the SAME identifier, so a
+ * user reading it in the bot and in the browser must be reading one value; a
+ * second copy of `slice(0, 8)` here would be free to drift from that.
+ */
+export { serviceShortId };
 
 /**
  * Resolves a service by its FULL id, scoped to the owner (same visibility

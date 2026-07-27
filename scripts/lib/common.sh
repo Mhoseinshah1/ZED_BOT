@@ -511,6 +511,57 @@ ${extra_ssl_include}
 
     client_max_body_size 20m;
 
+    # --- Telegram Mini App: the ONE framing exception -------------------------
+    #
+    # Everything else on this host keeps 'X-Frame-Options: DENY' from the server
+    # block above. The Mini App cannot: Telegram Desktop and Telegram Web render
+    # it inside an iframe, and DENY makes it a blank box on both.
+    #
+    # This location must re-declare EVERY header. Nginx's add_header inheritance
+    # is all-or-nothing per level: a location that declares any add_header of
+    # its own inherits NONE from the enclosing server. That is exactly how DENY
+    # is dropped here and nowhere else - and it is also why forgetting to repeat
+    # nosniff, Referrer-Policy or HSTS below would silently remove them from
+    # every Mini App response.
+    #
+    # The regex matches '/miniapp' and '/miniapp/...' and NOTHING else. It does
+    # not match '/miniappfoo', and it cannot match '/api/miniapp/...' - the JSON
+    # API keeps DENY. Nginx normalises '.' and '..' segments BEFORE matching, so
+    # a path-confusion attempt like '/miniapp/../api/miniapp/me' is resolved to
+    # '/api/miniapp/me' and lands in 'location /' with the strict headers. The
+    # proxy_pass below deliberately carries NO URI part, so the path reaches the
+    # API verbatim: '/miniapp/api/...' stays '/miniapp/api/...' (a 404) and can
+    # never be rewritten into '/api/miniapp/...'.
+    location ~ ^/miniapp(/|\$) {
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        # X-Frame-Options is INTENTIONALLY ABSENT. Framing is governed by
+        # frame-ancestors below, which is the more precise of the two mechanisms
+        # and the one browsers prefer when both are present. Re-adding DENY here
+        # would override it and break the app.
+        #
+        # frame-ancestors names Telegram's web clients explicitly - no wildcard,
+        # no '*'. The native Android/iOS/desktop clients open the Mini App as a
+        # TOP-LEVEL document, where frame-ancestors does not apply at all, so
+        # they are unaffected by this list.
+        #
+        # script-src names telegram.org because the WebApp bridge
+        # (/js/telegram-web-app.js) is what defines window.Telegram inside the
+        # iframe clients; there is no other third-party origin. No 'unsafe-eval'
+        # and no 'unsafe-inline': the bundle ships its CSS as a file and sets
+        # dynamic styles through the CSSOM, which CSP does not restrict.
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors https://web.telegram.org https://webk.telegram.org https://webz.telegram.org; base-uri 'none'; form-action 'none'; object-src 'none'" always;
+
+        proxy_pass http://127.0.0.1:${port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 60s;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:${port};
         proxy_http_version 1.1;

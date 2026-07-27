@@ -279,17 +279,108 @@ locking users out.
   switch is disabled in the **same transaction** — the bot is never left switched
   on with nothing enforceable.
 - Retirement emits `force_join.channel_auto_deactivated` (SYSTEM topic, ERROR)
-  carrying only the channel DB id, `isPrivate`, `forceJoinDisabled`, and the
-  threshold/window values. The recurring unverifiable alert stays deduplicated;
-  the one-shot retirement alert is not.
+  carrying only the channel DB id, `isPrivate`, `errorClass`,
+  `forceJoinDisabled`, and the threshold/window values. When the retirement also
+  switched mandatory membership off, a **second** event
+  `force_join.auto_disabled` is emitted: losing the whole feature is a different
+  operational fact from losing one channel, and an operator may filter, alert on
+  or escalate the two differently. The recurring unverifiable alert stays
+  deduplicated; the one-shot retirement alerts are not.
+
+### Why the retirement alert is an outbox row, not a sink call
+
+The unhealthy-channel policy lives in `@zedbot/force-join` and is reached from
+**both** the bot and the API — a Mini App request runs the same gate. Only the
+bot owns the Telegram delivery queue, so an alert emitted *after* the mutation
+by whichever process installed an alert sink is missing in exactly the case that
+matters most: an API request quietly deactivating a required channel, or
+switching mandatory membership off for the whole platform, with nothing but a
+line on that process's stdout.
+
+So the retirement events are written as **outbox rows on the same transaction as
+the configuration change** (`packages/force-join/src/ops-outbox.ts`): a
+`SystemLog` row plus, when a delivery target is configured, its `PENDING`
+`SystemLogDelivery`.
+
+- They commit with the retirement or do not exist at all — no unannounced
+  automatic configuration change, and no alert about a change that rolled back.
+- A crash a millisecond after `COMMIT` loses nothing: the row is already durable.
+- Telegram is never called on the request path, so a delivery failure cannot
+  roll back or delay the membership decision.
+- Idempotency comes from the mutation itself: a retry re-reads the row, finds it
+  already inactive, and returns before reaching the write.
+
+The **worker** delivers them through the existing `SystemLog` →
+`SystemLogDelivery` → Telegram pipeline. Because a writer with no BullMQ
+connection cannot enqueue, `apps/worker/src/log-delivery-sweep.ts` re-enqueues
+owed rows on a fixed cadence.
+
+### What delivery actually guarantees
+
+Three different guarantees live in this pipeline and they are not the same
+strength. Conflating them is how an operator ends up either trusting a lost
+alert or filing a bug about a duplicate one.
+
+| Stage | Guarantee | Why |
+| --- | --- | --- |
+| Durable record | **One** per committed retirement | The outbox row is written on the configuration transaction. It cannot exist without the retirement, and the retirement cannot commit without it. |
+| Job creation | **Idempotent** | The job id is derived from the delivery id (`logdel-<id>`), so re-enqueuing something already queued or delayed is a no-op. |
+| Terminal deliveries | **Never intentionally retried** | `SENT`, `DEAD_LETTER` and `SKIPPED` are excluded from the sweep, and the processor returns early on them. |
+| Telegram send | **At-least-once** | See below. A single Telegram message per alert is not promised. |
+
+The sweep recovers owed rows on this rule, and nothing else:
+
+| Status | Selected when | Reasoning |
+| --- | --- | --- |
+| `PENDING` | `createdAt` older than 30 s | Committed but, as far as we can tell, never enqueued — the API's outbox, or a crash between `COMMIT` and enqueue. The grace period keeps it from racing the writer that is enqueuing right now. |
+| `FAILED` | `nextAttemptAt` is due | A retry whose delayed job lived only in Redis. If that job still exists the id dedupe makes this a no-op. |
+| `SENDING` | `updatedAt` older than **10 minutes** | An abandoned claim: the worker died or Redis lost the job mid-send. |
+| `SENT` / `DEAD_LETTER` / `SKIPPED` | never | Terminal. |
+
+`SENDING` is keyed on `updatedAt` — the claim time — and never on `createdAt`,
+because a long-queued alert claimed one second ago is exactly the row that must
+not be disturbed. Ten minutes is an order of magnitude past any legitimate
+claim: the processor's Telegram call is hard-bounded by an AbortController at
+`TELEGRAM_API_TIMEOUT_MS`, whose ceiling is 60 s.
+
+**Why at-least-once, and no stronger.** If the worker dies after Telegram
+accepted the message but before the `SENT` status commits, the row is still
+`SENDING`. Ten minutes later the sweep hands it back and the message is sent a
+second time. That window cannot be closed — Telegram is not part of our
+transaction — so the honest statement is that an operational alert may arrive
+twice, and the system prefers that to losing one. The sweep itself never calls
+Telegram; it only re-enqueues, and the processor remains the sole owner of
+claiming, sending and status transitions.
+
+The process-local **alert sink** still exists, but only for the pre-retirement
+`force_join.channel_unverifiable` warning, which changes no configuration. The
+bot installs a sink that writes a `SystemLog`; the API keeps the package's
+logging default. That output is supplemental — it is never the authoritative
+record of a configuration change.
 
 **Recovery.** Re-grant the bot admin rights in the channel, then either press
-«تست دسترسی ربات ♻️» or re-activate the channel — both re-validate, and any
-success clears `healthFailureCount`/`healthFailureFirstAt`/`unhealthyAt`, so a
-repaired outage can never combine with a later one to cross the threshold.
-Activation additionally refuses to turn a still-inaccessible channel back on.
-A successful membership check clears the window on its own (guarded on the
-in-memory snapshot, so healthy channels cost no extra writes).
+«تست دسترسی ربات ♻️» or re-activate the channel — both re-validate, and a
+success on a **still-active** channel clears
+`healthFailureCount`/`healthFailureFirstAt`/`unhealthyAt`, so a repaired outage
+can never combine with a later one to cross the threshold. Activation
+additionally refuses to turn a still-inaccessible channel back on. A successful
+membership check clears the window on its own, guarded on the in-memory snapshot
+so healthy channels cost no extra writes on the hot path.
+
+**A success can never un-retire a channel, or erase the record of one.** The
+clearing update takes the same Force Join configuration advisory lock the
+retirement takes, and is additionally conditioned on `isActive: true`:
+
+| Order | Outcome |
+| --- | --- |
+| success commits first | the window is legitimately cleared; the retirement re-reads a healthy channel and declines |
+| retirement commits first | the success matches no row — the counters and `unhealthyAt` stay exactly as retirement left them |
+
+Without the lock the two writers could interleave; without the `isActive` guard
+a check that started before a retirement and landed after it would wipe the very
+evidence an operator reads when judging whether the retirement was justified.
+`isActive` is not in that update's `data` at all, so this path can only ever
+write *less* — it cannot reactivate anything.
 
 ## Caching (§4.12)
 

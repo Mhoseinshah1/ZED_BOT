@@ -1268,6 +1268,9 @@ export const INITIAL_BUTTON_TEXTS: ButtonTextSeed[] = [
   // its current text also drives combined-mode reply routing (never behaviour).
   { key: "purchase_hub", title: "خرید محصولات (یکپارچه)", text: "خرید محصولات 🛒" },
   { key: "my_orders", title: "سفارش‌های من", text: "سفارش‌های من 🧾" },
+  // Telegram Mini App entry. The label opens the intro page (which carries the
+  // real web_app button); it is display-only and never determines routing.
+  { key: "miniapp", title: "پنل کاربری تحت وب", text: "پنل کاربری تحت وب 🌐" },
   { key: "pricing", title: "تعرفه اشتراک‌ها", text: "تعرفه اشتراک‌ها 💵" },
   // Public retail Pricing Catalog (feat/public-pricing-catalog): the in-page
   // section/detail/back buttons. Editable labels never determine routing.
