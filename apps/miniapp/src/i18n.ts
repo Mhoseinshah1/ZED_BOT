@@ -221,10 +221,24 @@ export const UI = {
   readOnlyNotice:
     "این بخش فقط برای مشاهده است. خرید، پرداخت و تغییر سرویس‌ها در ربات انجام می‌شود.",
   openBot: "باز کردن ربات",
+  // Bot-return actions. Every one of these OPENS THE BOT and does nothing
+  // else: the Mini App is read-only, and the flow itself lives where the
+  // business logic, the notifications and the audit trail already are.
+  botActionsTitle: "انجام کارها در ربات",
+  botActionBuy: "خرید سرویس در ربات 🛒",
+  botActionCharge: "شارژ کیف پول در ربات 💳",
+  botActionRenew: "تمدید و مدیریت سرویس در ربات ♻️",
+  botActionSupport: "ارتباط با پشتیبانی در ربات 💬",
+  botActionsUnavailable: "آدرس ربات پیکربندی نشده است؛ لطفاً از همان چتی که این صفحه را باز کردید ادامه دهید.",
   outsideTelegram: "این صفحه فقط داخل تلگرام کار می‌کند",
   outsideTelegramBody: "لطفاً مینی‌اپ را از داخل ربات باز کنید.",
   signedOutTitle: "از حساب خارج شدید",
   signedOutBody: "برای مشاهدهٔ اطلاعات حساب، دوباره وارد شوید.",
   signInAgain: "ورود مجدد",
   days: "روز",
+  expired: "منقضی شده",
+  lastSynced: "آخرین بروزرسانی اطلاعات",
+  remainingDays: "روزهای باقی‌مانده",
+  activeServices: "سرویس‌های فعال",
+  totalServices: "کل سرویس‌ها",
 } as const;

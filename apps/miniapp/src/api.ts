@@ -151,19 +151,24 @@ export interface ServiceSummaryDto {
   status: string;
   productName: string | null;
   panelName: string | null;
+  /** Location set the plan covers — an enum label, never an address. */
+  location: string;
   volumeBytes: string;
   usedBytes: string;
   remainingBytes: string;
   durationDays: number;
+  /** Whole days left; `null` when the service never expires. */
+  remainingDays: number | null;
   startsAt: string;
   expiresAt: string | null;
   createdAt: string;
+  /** When the row was last written in OUR database — not panel freshness. */
+  lastSyncedAt: string;
 }
 
 export interface ServiceDetailDto extends ServiceSummaryDto {
   userNote: string | null;
   source: string;
-  location: string;
   firstConnectedAt: string | null;
   lastConnectedAt: string | null;
   lastSubscriptionUpdateAt: string | null;
@@ -182,6 +187,14 @@ export interface TransactionDto {
 }
 
 export interface DashboardDto {
+  /** When the server built this response. */
+  serverTimestamp: string;
+  /**
+   * The OLDEST database write among the services in this response, so
+   * "everything here is at least this fresh" is true of every row. Database
+   * freshness only — nothing in this app knows when a panel last changed.
+   */
+  dataFreshnessTimestamp: string;
   user: UserDto;
   services: {
     total: number;
@@ -208,7 +221,13 @@ export function logout(): Promise<ApiResult<Record<string, never>>> {
   return request("/logout", { method: "POST" });
 }
 
-export function fetchMe(): Promise<ApiResult<{ user: UserDto }>> {
+/** Counts come from the database and honour the same visibility rules as `/services`. */
+export interface ProfileDto {
+  user: UserDto;
+  services: { active: number; total: number };
+}
+
+export function fetchMe(): Promise<ApiResult<ProfileDto>> {
   return request("/me");
 }
 

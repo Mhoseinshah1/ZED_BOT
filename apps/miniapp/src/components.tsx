@@ -162,6 +162,60 @@ export function FailureScreen(props: { failure: ApiFailure; onRetry?: () => void
   );
 }
 
+/**
+ * The four ways back into the bot.
+ *
+ * READ-ONLY IS THE POINT, and these buttons are how it stays honest rather
+ * than becoming a dead end. Buying, charging a wallet, renewing a service and
+ * opening a support ticket all have real business logic behind them —
+ * pricing, stock, gates, notifications, an audit trail — and every bit of it
+ * lives in the bot. Reimplementing any of it here would create a second source
+ * of truth that drifts, so each action does exactly one thing: OPEN THE BOT.
+ *
+ * There is deliberately no `?start=` payload. That parameter is consumed by
+ * referral attribution, so a made-up value would be read as a referral code —
+ * a quiet lie in someone else's data to save a user one tap.
+ *
+ * NO CONFIGURATION, NO BUTTONS. `botLink()` returns null unless
+ * `VITE_BOT_USERNAME` is a syntactically valid public handle, and a null link
+ * renders an explanatory line instead of a button that goes nowhere. The
+ * username is never hard-coded: it is a build arg, and it is public by
+ * definition because the bundle is one artifact served to everyone.
+ */
+export function BotActions(props: { actions?: BotActionKey[] }): ReactNode {
+  const link = botLink();
+  const keys = props.actions ?? BOT_ACTION_ORDER;
+  if (link === null) {
+    return <p className="notice">{UI.botActionsUnavailable}</p>;
+  }
+  return (
+    <div className="bot-actions">
+      <h2 className="card__title">{UI.botActionsTitle}</h2>
+      {keys.map((key) => (
+        <button
+          key={key}
+          type="button"
+          className="button button--ghost"
+          onClick={() => openInTelegram(link)}
+        >
+          {BOT_ACTION_LABEL[key]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export type BotActionKey = "buy" | "charge" | "renew" | "support";
+
+const BOT_ACTION_ORDER: BotActionKey[] = ["buy", "charge", "renew", "support"];
+
+const BOT_ACTION_LABEL: Record<BotActionKey, string> = {
+  buy: UI.botActionBuy,
+  charge: UI.botActionCharge,
+  renew: UI.botActionRenew,
+  support: UI.botActionSupport,
+};
+
 export function Stat(props: { value: number; label: string }): ReactNode {
   return (
     <div className="stat">

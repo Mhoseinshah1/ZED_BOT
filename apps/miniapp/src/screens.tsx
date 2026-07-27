@@ -2,18 +2,21 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import {
   fetchDashboard,
+  fetchMe,
   fetchService,
   fetchServices,
   fetchTransactions,
   logout,
   type ApiFailure,
   type DashboardDto,
+  type ProfileDto,
   type ServiceDetailDto,
   type ServiceSummaryDto,
   type TransactionDto,
   type UserDto,
 } from "./api";
 import {
+  BotActions,
   Card,
   FailureScreen,
   Row,
@@ -24,10 +27,10 @@ import {
   UsageBar,
 } from "./components";
 import {
-  daysUntil,
   displayName,
   formatBytes,
   formatDate,
+  formatNumber,
   formatSignedToman,
   formatToman,
 } from "./format";
@@ -178,6 +181,10 @@ export function DashboardScreen(props: { onOpenService: (id: string) => void }):
       </Card>
 
       <p className="notice">{UI.readOnlyNotice}</p>
+      <p className="notice">
+        {UI.lastSynced}: {formatDate(data.dataFreshnessTimestamp)}
+      </p>
+      <BotActions />
     </>
   );
 }
@@ -237,6 +244,7 @@ export function ServicesScreen(props: { onOpenService: (id: string) => void }): 
         </button>
       ) : null}
       <p className="notice">{UI.readOnlyNotice}</p>
+      <BotActions actions={["buy", "renew"]} />
     </>
   );
 }
@@ -253,7 +261,10 @@ export function ServiceDetailScreen(props: { serviceId: string }): ReactNode {
     return <FailureScreen failure={state.failure} onRetry={reload} />;
   }
   const service = state.data.service;
-  const remainingDays = daysUntil(service.expiresAt);
+  // The SERVER's number, not a second computation. `remainingDays` has three
+  // documented cases (null / 0 / rounded up) and the list, the detail and the
+  // dashboard must all mean the same thing by them.
+  const remainingDays = service.remainingDays;
   return (
     <>
       <Card>
@@ -285,9 +296,11 @@ export function ServiceDetailScreen(props: { serviceId: string }): ReactNode {
               service.expiresAt === null
                 ? UI.neverExpires
                 : `${formatDate(service.expiresAt)}${
-                    remainingDays !== null && remainingDays >= 0
-                      ? ` (${remainingDays} ${UI.days})`
-                      : ""
+                    remainingDays === null
+                      ? ""
+                      : remainingDays === 0
+                        ? ` (${UI.expired})`
+                        : ` (${remainingDays} ${UI.days})`
                   }`
             }
           />
@@ -311,6 +324,9 @@ export function ServiceDetailScreen(props: { serviceId: string }): ReactNode {
             <Row label={UI.note} value={service.userNote} />
           ) : null}
           <Row label={UI.createdAt} value={formatDate(service.createdAt)} />
+          {/* OUR row's freshness, not the panel's — the API cannot speak for a
+              panel it never calls, and the label must not imply otherwise. */}
+          <Row label={UI.lastSynced} value={formatDate(service.lastSyncedAt)} />
         </div>
       </Card>
 
@@ -422,6 +438,12 @@ function TransactionRow(props: { transaction: TransactionDto }): ReactNode {
 export function ProfileScreen(props: { user: UserDto; onSignedOut: () => void }): ReactNode {
   const [busy, setBusy] = useState(false);
   const { user } = props;
+  // Counted by the SERVER under the same visibility rules as every other
+  // service read, so a soft-deleted or terminally DELETED service is absent
+  // here exactly as it is from the list. Failing to load them is not worth a
+  // failure screen — the profile is still useful without two numbers.
+  const { state: profile } = useResource<ProfileDto>(fetchMe);
+  const counts = profile.phase === "ready" ? profile.data.services : null;
   return (
     <>
       <Card>
@@ -438,6 +460,12 @@ export function ProfileScreen(props: { user: UserDto; onSignedOut: () => void })
           <Row label={UI.accountStatus} value={user.status === "ACTIVE" ? "فعال" : user.status} />
           <Row label={UI.balance} value={formatToman(user.balanceToman)} />
           <Row label={UI.joinedAt} value={formatDate(user.joinedAt)} />
+          {counts === null ? null : (
+            <>
+              <Row label={UI.activeServices} value={formatNumber(counts.active)} />
+              <Row label={UI.totalServices} value={formatNumber(counts.total)} />
+            </>
+          )}
         </div>
       </Card>
       <button
