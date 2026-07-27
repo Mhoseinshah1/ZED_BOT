@@ -639,6 +639,7 @@ model User {
   // above stays as the LATEST-acceptance timestamp for backwards compatibility and
   // is written atomically together with the row here.
   termsAcceptances            TermsAcceptance[]
+  miniAppIdempotency          MiniAppRequestIdempotency[]
 
   @@index([status])
   @@index([group])
@@ -2120,27 +2121,54 @@ model SupportMessage {
   // The inbound Telegram message_id (operational audit only; not an idempotency key).
   sourceMessageId Int?
 
-  // Mini App request idempotency. A browser retries: a flaky connection, a
-  // double tap, a user reloading a hung submit. Telegram's `sourceUpdateId`
-  // cannot help here — there is no update — so the CLIENT supplies one
-  // cryptographically random id per explicit submission attempt and reuses it
-  // for retries of that attempt.
-  //
-  // The uniqueness lives in PostgreSQL rather than in memory because the API
-  // may run as several processes and any of them may restart mid-request; an
-  // in-process cache would deduplicate only by luck. Every Mini App mutation
-  // writes exactly one USER message, so a unique constraint HERE is exactly a
-  // unique constraint on the mutation — the same shape `sourceUpdateId` already
-  // uses, for the same reason.
-  //
-  // Additive + nullable: every existing message, and every message the bot
-  // writes, keeps `clientRequestId = null`, and NULLs do not collide under a
-  // Postgres unique index.
-  clientRequestId String? @unique
-
   @@index([ticketId])
   @@index([createdAt])
   @@index([ticketId, createdAt])
+}
+
+// =============================================================================
+// Mini App request idempotency.
+//
+// A browser retries: a flaky connection, a double tap, a reload of a hung
+// submit. Telegram's `sourceUpdateId` cannot help — there is no update — so the
+// CLIENT supplies one cryptographically random id per explicit submission
+// attempt and reuses it for retries of THAT attempt.
+//
+// The key is scoped to the USER, never global. Two strangers who happen to
+// generate the same value must not interfere, and a global namespace would also
+// let anyone pre-claim keys and deny service to whoever drew one next.
+//
+// The row binds the key to what it was used FOR: the operation, the target
+// ticket for a reply, and a fingerprint of the normalized payload. A key
+// replayed with different content is a client bug (or an attack) and is
+// refused rather than silently returning someone else's answer.
+//
+// It stores RESULT REFERENCES, never the ticket text — the message is already
+// persisted once, and copying it here would double the blast radius of a leak
+// for no benefit.
+//
+// Written in the SAME transaction as the mutation it describes, so a committed
+// mutation always has its idempotency record and a rolled-back one has neither.
+// =============================================================================
+model MiniAppRequestIdempotency {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Client-supplied, unguessable, unique PER USER.
+  clientRequestId String
+  /// Stable operation code (MINIAPP_IDEMPOTENT_OPERATIONS in @zedbot/support-tickets).
+  operation       String
+  /// The ticket a reply targeted. Null for creation.
+  targetTicketId  String?
+  /// SHA-256 over the canonical normalized payload. Never the payload itself.
+  fingerprint     String
+  /// What the original attempt produced, so a retry can return it verbatim.
+  resultTicketId  String
+  resultMessageId String
+  createdAt       DateTime @default(now())
+
+  @@unique([userId, clientRequestId])
+  @@index([createdAt])
 }
 
 // =============================================================================

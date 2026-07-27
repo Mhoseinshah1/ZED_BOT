@@ -8,44 +8,49 @@ import {
 import { isServicePublicId, isTicketPublicId } from "@zedbot/shared";
 
 import {
-  type CreateTicketCommand,
   fail,
-  type ReplyCommand,
+  type IdempotentOutcome,
+  idempotentRecordMatches,
+  type MiniAppIdempotentOperation,
+  mutationFingerprint,
+  normalizeCategory,
+  normalizeMessage,
+  normalizeOrigin,
+  normalizeRequestId,
+  normalizeSubject,
   type SupportDomainResult,
   TICKET_STATUS_AFTER_CREATE,
   TICKET_STATUS_AFTER_USER_REPLY,
-  type TicketMutation,
   userMayReply,
 } from "./contract.js";
 
 // =============================================================================
 // The owner-scoped ticket operations.
 //
-// Three properties are load-bearing here and each one is a place this has gone
-// wrong in other systems:
+// Four properties are load-bearing, and each is somewhere this has gone wrong:
 //
-//   OWNER SCOPING IS IN THE QUERY. Not checked after the read — `userId` is in
-//   every `where`. A post-hoc check is one early `return` away from being
-//   skipped, and the failure is silent: the row was already fetched.
+//   OWNER SCOPING IS IN THE QUERY. `userId` is in every `where`, not checked
+//   after the read. A post-hoc check is one early return away from being
+//   skipped, and by then the row is already in memory.
 //
 //   AMBIGUITY IS A REFUSAL. A public id is a uuid PREFIX, so two rows can share
-//   one. `take: 2` and a length check turn that into the same generic
-//   not-found a stranger's id produces, rather than into "the first match".
+//   one. `take: 2` turns that into the same generic not-found a stranger's id
+//   produces, rather than into "the first match".
 //
-//   IDEMPOTENCY IS A CONSTRAINT, NOT A LOOKUP. Checking "does this request id
-//   exist?" before inserting is a race with itself: two concurrent retries both
-//   read nothing and both insert. The unique index decides, and the loser reads
-//   back what the winner wrote.
+//   NOTHING TRUSTS ITS CALLER. These take raw transport input and normalize it
+//   here. A TypeScript interface is a compile-time claim, not a check: JSON
+//   parses to `any`, and an object that satisfies the type checker can still
+//   carry a 90 KB subject. The normalized values are what get persisted AND
+//   what get fingerprinted, so the two can never describe different content.
+//
+//   IDEMPOTENCY IS RESOLVED BEFORE PRECONDITIONS. A retry must return the
+//   original result even after the world moved on — the linked Service deleted,
+//   the ticket closed by an admin. Re-checking preconditions first would turn a
+//   successful-but-retried create into INVALID_SERVICE, which is a lie: the
+//   ticket exists. The stored record answers first; only a MISMATCHED key is
+//   refused.
 // =============================================================================
 
-/** A client request id: opaque to us, but bounded and printable. */
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
-
-export function isClientRequestId(value: unknown): value is string {
-  return typeof value === "string" && REQUEST_ID_PATTERN.test(value);
-}
-
-/** Prisma's unique-constraint violation. */
 function isUniqueViolation(err: unknown): boolean {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
 }
@@ -55,19 +60,17 @@ function isUniqueViolation(err: unknown): boolean {
 /**
  * The caller's ticket, addressed by its public id.
  *
- * Returns null for malformed, unknown, ambiguous AND someone else's — one
- * outcome, so a caller cannot learn from the difference whether a foreign
- * ticket exists.
+ * Null for malformed, unknown, ambiguous AND someone else's — one outcome, so a
+ * caller cannot learn from the difference whether a foreign ticket exists.
  */
 export async function resolveOwnedTicket(
   userId: string,
-  ticketPublicId: string,
+  ticketPublicId: unknown,
 ): Promise<SupportTicket | null> {
   if (!isTicketPublicId(ticketPublicId)) {
     return null;
   }
   const matches = await prisma.supportTicket.findMany({
-    // Owner scoping IN the query, next to the prefix match.
     where: { id: { startsWith: ticketPublicId.toLowerCase() }, userId },
     take: 2,
   });
@@ -75,15 +78,15 @@ export async function resolveOwnedTicket(
 }
 
 /**
- * A Service the caller owns and can still see, addressed by its public id.
+ * A Service the caller owns and can still see.
  *
- * Re-resolved at submission time rather than trusted from the draft: a user can
- * sit on a new-ticket form while the Service is deleted or terminated, and a
- * stale link is worse than no link because it looks deliberate.
+ * The visibility rule (`deletedAt` null AND status not DELETED) is the same one
+ * every Mini App service read uses. It lives here so the API and the bot cannot
+ * hold different opinions about what "still exists" means.
  */
 export async function resolveOwnedService(
   userId: string,
-  servicePublicId: string,
+  servicePublicId: unknown,
 ): Promise<Service | null> {
   if (!isServicePublicId(servicePublicId)) {
     return null;
@@ -93,8 +96,6 @@ export async function resolveOwnedService(
       id: { startsWith: servicePublicId.toLowerCase() },
       userId,
       deletedAt: null,
-      // The terminal status an admin-terminated service carries even without a
-      // `deletedAt` — the same visibility rule every other Mini App read uses.
       status: { not: "DELETED" },
     },
     take: 2,
@@ -102,176 +103,306 @@ export async function resolveOwnedService(
   return matches.length === 1 ? matches[0] : null;
 }
 
-// --- create ------------------------------------------------------------------
+// --- idempotency -------------------------------------------------------------
+
+export interface IdempotentReplay {
+  ticket: SupportTicket;
+  messageId: string;
+}
 
 /**
- * A new ticket plus its first USER message, in one transaction.
+ * A prior completed attempt under this key, if it answers THIS request.
  *
- * Atomic because the two halves are meaningless apart: a ticket with no message
- * is an empty row an admin cannot action, and a message with no ticket is
- * unreachable. Either both land or neither does.
+ * Three outcomes, and the middle one matters: no record (proceed), a matching
+ * record (replay it), or a record for a different mutation (refuse). Returning
+ * the stored result for a mismatched key would answer a question nobody asked.
  */
-export async function createTicketFromCommand(
-  command: CreateTicketCommand,
-): Promise<SupportDomainResult<TicketMutation>> {
-  if (!isClientRequestId(command.clientRequestId)) {
-    return fail("INVALID_REQUEST_ID");
+async function replayIfCompleted(
+  userId: string,
+  clientRequestId: string,
+  operation: MiniAppIdempotentOperation,
+  targetTicketId: string | null,
+  fingerprint: string,
+): Promise<SupportDomainResult<IdempotentReplay> | null> {
+  const stored = await prisma.miniAppRequestIdempotency.findUnique({
+    where: { userId_clientRequestId: { userId, clientRequestId } },
+  });
+  if (stored === null) {
+    return null;
   }
+  const outcome: IdempotentOutcome = stored;
+  if (!idempotentRecordMatches(outcome, operation, targetTicketId, fingerprint)) {
+    return fail("IDEMPOTENCY_CONFLICT");
+  }
+  // Owner-scoped even though the key is unguessable: an idempotency key is a
+  // deduplication token, never an authorisation token.
+  const ticket = await prisma.supportTicket.findFirst({
+    where: { id: stored.resultTicketId, userId },
+  });
+  if (ticket === null) {
+    return fail("TICKET_NOT_FOUND");
+  }
+  return { ok: true, value: { ticket, messageId: stored.resultMessageId } };
+}
+
+// --- create ------------------------------------------------------------------
+
+export interface CreateTicketInput {
+  subject: unknown;
+  message: unknown;
+  category: unknown;
+  origin: unknown;
+  servicePublicId: unknown;
+  clientRequestId: unknown;
+}
+
+/**
+ * A new ticket, its first USER message and its idempotency record, atomically.
+ *
+ * All three commit together or none do. A ticket with no message is a row an
+ * admin cannot action; an idempotency record without its mutation would make a
+ * retry replay something that never happened.
+ */
+export async function createTicket(
+  userId: string,
+  input: CreateTicketInput,
+): Promise<SupportDomainResult<IdempotentReplay>> {
+  const requestId = normalizeRequestId(input.clientRequestId);
+  if (!requestId.ok) return requestId;
+  const subject = normalizeSubject(input.subject);
+  if (!subject.ok) return subject;
+  const message = normalizeMessage(input.message);
+  if (!message.ok) return message;
+  const category = normalizeCategory(input.category);
+  if (!category.ok) return category;
+  const origin = normalizeOrigin(input.origin);
+  if (!origin.ok) return origin;
+
+  const wantsService = input.servicePublicId !== null && input.servicePublicId !== undefined;
+  const fingerprint = mutationFingerprint([
+    "SUPPORT_TICKET_CREATE",
+    subject.value,
+    message.value,
+    category.value,
+    origin.value,
+    wantsService ? String(input.servicePublicId) : "",
+  ]);
+
+  // BEFORE preconditions: a retry must survive the Service being deleted since.
+  const replay = await replayIfCompleted(
+    userId,
+    requestId.value,
+    "SUPPORT_TICKET_CREATE",
+    null,
+    fingerprint,
+  );
+  if (replay !== null) return replay;
 
   let serviceId: string | null = null;
-  if (command.servicePublicId !== null) {
-    const service = await resolveOwnedService(command.userId, command.servicePublicId);
+  if (wantsService) {
+    const service = await resolveOwnedService(userId, input.servicePublicId);
     if (service === null) {
-      // Foreign, deleted, ambiguous and malformed are one answer.
       return fail("INVALID_SERVICE");
     }
     serviceId = service.id;
   }
 
   try {
-    const ticket = await prisma.$transaction(async (tx) => {
-      const created = await tx.supportTicket.create({
+    return await prisma.$transaction(async (tx) => {
+      const ticket = await tx.supportTicket.create({
         data: {
-          userId: command.userId,
-          subject: command.subject,
+          userId,
+          subject: subject.value,
           status: TICKET_STATUS_AFTER_CREATE,
-          category: command.category,
-          origin: command.origin,
+          category: category.value,
+          origin: origin.value,
           serviceId,
         },
       });
-      await tx.supportMessage.create({
+      const created = await tx.supportMessage.create({
         data: {
-          ticketId: created.id,
+          ticketId: ticket.id,
           senderType: "USER",
-          senderUserId: command.userId,
-          text: command.message,
-          clientRequestId: command.clientRequestId,
+          senderUserId: userId,
+          text: message.value,
         },
       });
-      return created;
+      await tx.miniAppRequestIdempotency.create({
+        data: {
+          userId,
+          clientRequestId: requestId.value,
+          operation: "SUPPORT_TICKET_CREATE",
+          targetTicketId: null,
+          fingerprint,
+          resultTicketId: ticket.id,
+          resultMessageId: created.id,
+        },
+      });
+      return { ok: true as const, value: { ticket, messageId: created.id } };
     });
-    return { ok: true, value: { ticket, created: true } };
   } catch (err) {
-    if (!isUniqueViolation(err)) {
-      throw err;
-    }
-    // A concurrent retry of the SAME attempt won. Hand back what it created, so
-    // the caller sees one ticket and notifies once.
-    const existing = await ticketByClientRequestId(command.userId, command.clientRequestId);
-    if (existing !== null) {
-      return { ok: true, value: { ticket: existing, created: false } };
-    }
+    if (!isUniqueViolation(err)) throw err;
+    // A concurrent retry of the same attempt won the unique index. Read back
+    // what it wrote rather than guessing.
+    const raced = await replayIfCompleted(
+      userId,
+      requestId.value,
+      "SUPPORT_TICKET_CREATE",
+      null,
+      fingerprint,
+    );
+    if (raced !== null) return raced;
     throw err;
   }
 }
 
 // --- reply -------------------------------------------------------------------
 
+export interface ReplyInput {
+  ticketPublicId: unknown;
+  message: unknown;
+  clientRequestId: unknown;
+}
+
 /**
  * One USER message on an open ticket, moving it back to WAITING_ADMIN.
  *
- * The close race is the interesting case. An admin may close the ticket between
- * the read that says "open" and the write that appends — so the status is
- * re-checked INSIDE the transaction with a guarded `updateMany`, and the reply
- * is refused when that update matches nothing. The two orders both end
- * somewhere valid: reply-then-close leaves a closed ticket carrying the reply,
- * close-then-reply refuses the reply and the ticket stays closed. What cannot
- * happen is a reply appended to a ticket that is already closed.
+ * The close race: an admin may close between the read that says "open" and the
+ * write that appends, so the status is re-checked INSIDE the transaction with a
+ * guarded `updateMany` and the reply is refused when that matches nothing. Both
+ * orders end somewhere valid — reply-then-close leaves a closed ticket carrying
+ * the reply; close-then-reply refuses it — and a reply is never appended to an
+ * already-closed ticket.
  */
-export async function replyToTicketFromCommand(
-  command: ReplyCommand,
-): Promise<SupportDomainResult<TicketMutation>> {
-  if (!isClientRequestId(command.clientRequestId)) {
-    return fail("INVALID_REQUEST_ID");
+export async function replyToTicket(
+  userId: string,
+  input: ReplyInput,
+): Promise<SupportDomainResult<IdempotentReplay>> {
+  const requestId = normalizeRequestId(input.clientRequestId);
+  if (!requestId.ok) return requestId;
+  const message = normalizeMessage(input.message);
+  if (!message.ok) return message;
+  if (!isTicketPublicId(input.ticketPublicId)) {
+    return fail("INVALID_TICKET_ID");
   }
-  const ticket = await resolveOwnedTicket(command.userId, command.ticketPublicId);
+
+  const ticket = await resolveOwnedTicket(userId, input.ticketPublicId);
   if (ticket === null) {
     return fail("TICKET_NOT_FOUND");
   }
+
+  const fingerprint = mutationFingerprint([
+    "SUPPORT_TICKET_REPLY",
+    ticket.id,
+    message.value,
+  ]);
+
+  // BEFORE the closed check: a retry of a reply that already succeeded must
+  // return that reply even though the admin has since closed the ticket.
+  const replay = await replayIfCompleted(
+    userId,
+    requestId.value,
+    "SUPPORT_TICKET_REPLY",
+    ticket.id,
+    fingerprint,
+  );
+  if (replay !== null) return replay;
+
   if (!userMayReply(ticket.status)) {
     return fail("TICKET_CLOSED");
   }
 
   try {
-    const outcome = await prisma.$transaction(async (tx) => {
-      // Status-guarded: re-reads the row under the transaction and refuses if
-      // an admin closed it in the meantime.
+    return await prisma.$transaction(async (tx) => {
       const moved = await tx.supportTicket.updateMany({
-        where: { id: ticket.id, userId: command.userId, status: { not: "CLOSED" } },
+        where: { id: ticket.id, userId, status: { not: "CLOSED" } },
         data: { status: TICKET_STATUS_AFTER_USER_REPLY },
       });
       if (moved.count === 0) {
-        return null;
+        return fail<IdempotentReplay>("TICKET_CLOSED");
       }
-      await tx.supportMessage.create({
+      const created = await tx.supportMessage.create({
         data: {
           ticketId: ticket.id,
           senderType: "USER",
-          senderUserId: command.userId,
-          text: command.message,
-          clientRequestId: command.clientRequestId,
+          senderUserId: userId,
+          text: message.value,
         },
       });
-      // Re-read so the caller sees the committed row, including the `updatedAt`
-      // the transition just bumped — which is what the list orders by.
-      return tx.supportTicket.findUnique({ where: { id: ticket.id } });
+      await tx.miniAppRequestIdempotency.create({
+        data: {
+          userId,
+          clientRequestId: requestId.value,
+          operation: "SUPPORT_TICKET_REPLY",
+          targetTicketId: ticket.id,
+          fingerprint,
+          resultTicketId: ticket.id,
+          resultMessageId: created.id,
+        },
+      });
+      const fresh = await tx.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } });
+      return { ok: true as const, value: { ticket: fresh, messageId: created.id } };
     });
-    if (outcome === null) {
-      return fail("TICKET_CLOSED");
-    }
-    return { ok: true, value: { ticket: outcome, created: true } };
   } catch (err) {
-    if (!isUniqueViolation(err)) {
-      throw err;
-    }
-    const existing = await ticketByClientRequestId(command.userId, command.clientRequestId);
-    if (existing !== null) {
-      return { ok: true, value: { ticket: existing, created: false } };
-    }
+    if (!isUniqueViolation(err)) throw err;
+    const raced = await replayIfCompleted(
+      userId,
+      requestId.value,
+      "SUPPORT_TICKET_REPLY",
+      ticket.id,
+      fingerprint,
+    );
+    if (raced !== null) return raced;
     throw err;
   }
 }
 
-/**
- * The ticket a previous attempt with this request id created or replied to.
- *
- * Owner-scoped even though the request id is unguessable: an idempotency key is
- * a deduplication token, never an authorisation token, and treating it as one
- * would make a leaked key a way to read someone else's ticket.
- */
-async function ticketByClientRequestId(
-  userId: string,
-  clientRequestId: string,
-): Promise<SupportTicket | null> {
-  const message = await prisma.supportMessage.findUnique({
-    where: { clientRequestId },
-    include: { ticket: true },
-  });
-  if (message === null || message.ticket.userId !== userId) {
-    return null;
-  }
-  return message.ticket;
+// --- message history ---------------------------------------------------------
+
+export interface MessagePage {
+  /** Chronological for display, oldest first WITHIN the page. */
+  messages: SupportMessage[];
+  /** Keyset position of the oldest row returned, or null at the beginning. */
+  older: { createdAt: Date; id: string } | null;
 }
 
-/** Messages of a ticket the caller owns, oldest first. */
+/**
+ * The latest messages of a ticket the caller owns, paging BACKWARDS.
+ *
+ * Selected descending and then reversed. A conversation is read from its end:
+ * the first page must be the newest messages, and "older" must walk backwards
+ * from there. Selecting oldest-first and paging with a `before` cursor would
+ * open the ticket at its beginning and could never reach the end in bounded
+ * time — and an insert between requests would shift an offset-style window,
+ * duplicating or skipping rows.
+ *
+ * Takes an OWNED TICKET, never a bare id. An exported helper accepting an
+ * arbitrary `ticketId` relies on every caller remembering an earlier
+ * authorization check, which is the same post-hoc pattern the resolver above
+ * exists to avoid.
+ */
 export async function listTicketMessages(
-  ticketId: string,
+  ticket: SupportTicket,
   limit: number,
-  before: { createdAt: Date; id: string } | null,
-): Promise<SupportMessage[]> {
-  return prisma.supportMessage.findMany({
+  olderThan: { createdAt: Date; id: string } | null,
+): Promise<MessagePage> {
+  const rows = await prisma.supportMessage.findMany({
     where:
-      before === null
-        ? { ticketId }
+      olderThan === null
+        ? { ticketId: ticket.id }
         : {
-            ticketId,
+            ticketId: ticket.id,
             OR: [
-              { createdAt: { lt: before.createdAt } },
-              { createdAt: before.createdAt, id: { lt: before.id } },
+              { createdAt: { lt: olderThan.createdAt } },
+              { createdAt: olderThan.createdAt, id: { lt: olderThan.id } },
             ],
           },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: limit,
   });
+  const oldest = rows.length === limit ? rows[rows.length - 1] : null;
+  return {
+    messages: rows.reverse(),
+    older: oldest === null ? null : { createdAt: oldest.createdAt, id: oldest.id },
+  };
 }

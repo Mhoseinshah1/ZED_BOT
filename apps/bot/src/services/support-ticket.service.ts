@@ -20,6 +20,12 @@ import {
   type SupportTicketCategory,
   type SupportTicketOrigin,
 } from "@zedbot/shared";
+import {
+  TICKET_MESSAGE_MAX,
+  TICKET_MESSAGE_MIN,
+  TICKET_SUBJECT_MAX,
+  TICKET_SUBJECT_MIN,
+} from "@zedbot/support-tickets";
 import { InlineKeyboard } from "grammy";
 
 import { logger } from "../core/logger.js";
@@ -39,10 +45,18 @@ import type { DeliverySendApi } from "./other-product-delivery.service.js";
 // No payment/order/service/financial row is touched anywhere here.
 // =============================================================================
 
-export const TICKET_SUBJECT_MIN = 3;
-export const TICKET_SUBJECT_MAX = 100;
-export const TICKET_MESSAGE_MIN = 1;
-export const TICKET_MESSAGE_MAX = 3000;
+// The bounds are NOT declared here any more. They live in
+// @zedbot/support-tickets and are re-exported so every existing importer of
+// this module keeps working unchanged. Two copies of "how long may a subject
+// be" is exactly how the bot and the Mini App would come to disagree about what
+// input is acceptable, and the user who hits the difference is the one who
+// typed a valid message into the wrong surface.
+export {
+  TICKET_SUBJECT_MIN,
+  TICKET_SUBJECT_MAX,
+  TICKET_MESSAGE_MIN,
+  TICKET_MESSAGE_MAX,
+} from "@zedbot/support-tickets";
 export const TICKETS_PAGE_SIZE = 10;
 export const TICKET_MESSAGES_PREVIEW_LIMIT = 10;
 
