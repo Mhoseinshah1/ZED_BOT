@@ -190,6 +190,46 @@ describe("documentation contract", () => {
     }
   });
 
+  // F1-7b -------------------------------------------------------------------
+  it("F1-7b: the documented per-screen placement matches what the screens mount", () => {
+    // Having the actions in the catalogue is NOT the same as having them on
+    // screen, and for a while it was not: all four existed while only the
+    // dashboard and the services list mounted any. A catalogue check could not
+    // see that, so this one reads the actual mounts.
+    //
+    // The semantic proof that each screen RENDERS these lives in
+    // `apps/miniapp/tests/screen-actions.test.tsx` (G1-1..G1-10), which drives
+    // the real components in jsdom and asserts on rendered labels. This test
+    // does the other half: that the document and the source agree, so neither
+    // can drift while the other stays right.
+    const documented: Record<string, string[]> = {
+      dashboard: ["buy", "charge", "renew", "support"],
+      "services list": ["buy", "renew"],
+      "service detail": ["renew", "support"],
+      wallet: ["charge", "support"],
+      profile: ["support"],
+    };
+
+    // Each row of the documentation table, as written.
+    for (const [screen, actions] of Object.entries(documented)) {
+      const row = new RegExp(`\\| ${screen} \\| ${actions.join(", ")} \\|`, "i");
+      expect(DESIGN, `undocumented placement for ${screen}`).toMatch(row);
+    }
+
+    // And the same sets as the source actually mounts them. `<BotActions />`
+    // with no props renders the full catalogue.
+    const mounts = [...SCREENS.matchAll(/<BotActions([^/>]*)\/>/g)].map((m) => {
+      const list = /actions=\{\[([^\]]*)\]\}/.exec(m[1]);
+      return list === null
+        ? ["buy", "charge", "renew", "support"]
+        : [...list[1].matchAll(/"([a-z]+)"/g)].map((x) => x[1]);
+    });
+    const documentedSets = Object.values(documented).map((a) => a.join(","));
+    const mountedSets = mounts.map((a) => a.join(","));
+    expect(mountedSets.length, "a screen lost its bot actions").toBe(documentedSets.length);
+    expect([...mountedSets].sort()).toEqual([...documentedSets].sort());
+  });
+
   // F1-8 --------------------------------------------------------------------
   it("F1-8: Telegram delivery is documented as at-least-once, with the duplicate stated", () => {
     // Pinned to the GUARANTEE TABLE ROW, not to the phrase appearing anywhere.

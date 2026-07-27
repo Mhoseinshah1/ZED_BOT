@@ -346,6 +346,14 @@ export function ServiceDetailScreen(props: { serviceId: string }): ReactNode {
         existing delivery flow already handles them.
       */}
       <p className="notice">{UI.readOnlyNotice}</p>
+      {/*
+        This is the screen where a user learns their service expires in two
+        days, so it is the screen that most needs a way to act on that. Renew
+        and support only - buying another service and charging a wallet are not
+        what this page is about, and padding it with unrelated buttons would
+        make the two that matter harder to find.
+      */}
+      <BotActions actions={["renew", "support"]} />
     </>
   );
 }
@@ -423,6 +431,12 @@ export function WalletScreen(): ReactNode {
         </button>
       ) : null}
       <p className="notice">{UI.readOnlyNotice}</p>
+      {/*
+        A user reading their balance and finding it short needs the top-up flow,
+        which lives in the bot. Support belongs here too: a wallet question is
+        the second most common reason someone opens a ticket from this screen.
+      */}
+      <BotActions actions={["charge", "support"]} />
     </>
   );
 }
@@ -504,6 +518,12 @@ export function ProfileScreen(props: { user: UserDto; onSignedOut: () => void })
         {UI.logout}
       </button>
       <p className="notice">{UI.readOnlyNotice}</p>
+      {/*
+        Support only. Someone on their own account page is looking at who they
+        are, not shopping - and "contact support" is the one thing a profile
+        screen genuinely leads to.
+      */}
+      <BotActions actions={["support"]} />
     </>
   );
 }

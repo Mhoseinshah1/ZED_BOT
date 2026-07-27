@@ -426,6 +426,27 @@ so a made-up value would be recorded as a referral code. When the handle is
 missing or malformed the actions render an explanatory line instead of a button:
 a dead button reads as a broken app.
 
+**Which actions appear where.** Having the component is not the same as having
+it on screen, and for a while it was not: all four actions existed but only the
+dashboard and the service list mounted them, so a user reading "expires in 2
+days" on a service detail was told the flow lives in the bot and given nothing
+to tap. Each screen now carries the actions its own content leads to, mounted
+next to the read-only notice that explains why the operation is not here:
+
+| Screen | Actions | Why these |
+| --- | --- | --- |
+| dashboard | buy, charge, renew, support | the overview; every flow is one tap away |
+| services list | buy, renew | a list of what you own leads to more of it, or to keeping it |
+| service detail | renew, support | the screen where an expiry is read is the screen where it should be actionable |
+| wallet | charge, support | a short balance leads to a top-up; wallet questions lead to support |
+| profile | support | an account page leads to help, not to shopping |
+
+Padding a screen with unrelated buttons would make the ones that matter harder
+to find, so the placement is deliberately narrow rather than uniform. Loading
+and failure states carry none of these: the shared failure screen owns its own
+bot handoff for gates that can only be cleared in the bot, and stapling a second
+set of actions onto it would offer two different ways out of one problem.
+
 ---
 
 ## 5. The frontend
