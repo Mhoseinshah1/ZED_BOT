@@ -248,6 +248,17 @@ export async function createTicket(
           resultMessageId: created.id,
         },
       });
+      // Same transaction as the message: a committed ticket always has its
+      // notification intent. The API cannot send anything itself — delivery is
+      // a separate, retryable step — so recording the DECISION here is the only
+      // thing that makes "support was told" survive a crash.
+      await tx.supportNotificationIntent.create({
+        data: {
+          ticketId: ticket.id,
+          messageId: created.id,
+          kind: "support.ticket_created",
+        },
+      });
       return { ok: true as const, value: { ticket, messageId: created.id } };
     });
   } catch (err) {
@@ -349,6 +360,13 @@ export async function replyToTicket(
           fingerprint,
           resultTicketId: ticket.id,
           resultMessageId: created.id,
+        },
+      });
+      await tx.supportNotificationIntent.create({
+        data: {
+          ticketId: ticket.id,
+          messageId: created.id,
+          kind: "support.user_replied",
         },
       });
       const fresh = await tx.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } });

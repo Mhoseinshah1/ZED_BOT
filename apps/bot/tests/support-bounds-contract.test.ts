@@ -1,15 +1,20 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+import { prisma } from "@zedbot/database";
 import {
+  createTicket,
+  replyToTicket,
   TICKET_MESSAGE_MAX,
   TICKET_MESSAGE_MIN,
   TICKET_SUBJECT_MAX,
   TICKET_SUBJECT_MIN,
 } from "@zedbot/support-tickets";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import * as botService from "../src/services/support-ticket.service.js";
+
+process.env.APP_SECRET ??= "support-bounds-contract-secret";
 
 // =============================================================================
 // S2 — one set of ticket bounds, for every surface.
@@ -120,5 +125,202 @@ describe("support bounds — one declaration, every surface", () => {
     expect(TICKET_MESSAGE_MIN).toBeGreaterThan(0);
     expect(TICKET_SUBJECT_MIN).toBeLessThan(TICKET_SUBJECT_MAX);
     expect(TICKET_MESSAGE_MIN).toBeLessThan(TICKET_MESSAGE_MAX);
+  });
+});
+
+// =============================================================================
+// The bounds agreeing is necessary but not sufficient: two surfaces can hold
+// the same numbers and still disagree about what they MEAN. Measuring before
+// trimming rather than after, using > rather than >=, treating a whitespace-only
+// subject as present — each keeps the constants identical and still produces a
+// message one surface accepts and the other refuses.
+//
+// So the agreement is asserted on OUTCOMES, at every boundary, through both
+// real entry points. Against a real database, because that is where a value
+// that passes validation and then violates a column constraint would show up.
+// =============================================================================
+
+const RUN = `s2-${process.pid}-${Date.now()}`;
+const users: string[] = [];
+
+async function makeUser(): Promise<string> {
+  const user = await prisma.user.create({
+    data: {
+      telegramId: BigInt(Date.now()) * 1000n + BigInt(users.length + 500),
+      firstName: "bounds",
+    },
+  });
+  users.push(user.id);
+  return user.id;
+}
+
+let requestSeq = 0;
+function requestId(): string {
+  requestSeq += 1;
+  return `bnd${RUN.replace(/[^A-Za-z0-9]/g, "")}${requestSeq}`.slice(0, 64).padEnd(16, "0");
+}
+
+/** Did the BOT accept this subject? */
+async function botAcceptsSubject(userId: string, subject: string): Promise<boolean> {
+  const outcome = await botService.createSupportTicket({
+    userId,
+    subject,
+    content: { text: "متن معتبر" },
+  });
+  return outcome.ok;
+}
+
+/** Did the DOMAIN accept this subject? */
+async function domainAcceptsSubject(userId: string, subject: string): Promise<boolean> {
+  const outcome = await createTicket(userId, {
+    subject,
+    message: "متن معتبر",
+    category: "ACCOUNT",
+    origin: "MINIAPP",
+    servicePublicId: null,
+    clientRequestId: requestId(),
+  });
+  return outcome.ok;
+}
+
+async function botAcceptsMessage(userId: string, text: string): Promise<boolean> {
+  const made = await botService.createSupportTicket({
+    userId,
+    subject: "موضوع معتبر",
+    content: { text: "متن اولیه" },
+  });
+  if (!made.ok) return false;
+  const reply = await botService.addUserTicketReply(userId, {
+    ticketId: made.ticket.id,
+    content: { text },
+  });
+  return reply.ok;
+}
+
+async function domainAcceptsMessage(userId: string, text: string): Promise<boolean> {
+  const made = await createTicket(userId, {
+    subject: "موضوع معتبر",
+    message: "متن اولیه",
+    category: "ACCOUNT",
+    origin: "MINIAPP",
+    servicePublicId: null,
+    clientRequestId: requestId(),
+  });
+  if (!made.ok) return false;
+  const reply = await replyToTicket(userId, {
+    ticketPublicId: made.value.ticket.id.slice(0, 8),
+    message: text,
+    clientRequestId: requestId(),
+  });
+  return reply.ok;
+}
+
+describe("support bounds — the two surfaces accept the same input", () => {
+  beforeAll(async () => {
+    // Nothing to set up beyond users, created per case so one case's tickets
+    // cannot make another's counts ambiguous.
+  });
+
+  afterAll(async () => {
+    if (users.length === 0) return;
+    await prisma.miniAppRequestIdempotency.deleteMany({ where: { userId: { in: users } } });
+    const tickets = await prisma.supportTicket.findMany({
+      where: { userId: { in: users } },
+      select: { id: true },
+    });
+    const ids = tickets.map((t) => t.id);
+    if (ids.length > 0) {
+      await prisma.supportMessage.deleteMany({ where: { ticketId: { in: ids } } });
+      await prisma.supportTicket.deleteMany({ where: { id: { in: ids } } });
+    }
+    await prisma.user.deleteMany({ where: { id: { in: users } } });
+  });
+
+  // S2-5 ----------------------------------------------------------------------
+  it("S2-5: subject boundaries — both surfaces draw the line in the same place", async () => {
+    const cases: { label: string; subject: string; accepted: boolean }[] = [
+      { label: "one below min", subject: "x".repeat(TICKET_SUBJECT_MIN - 1), accepted: false },
+      { label: "exactly min", subject: "x".repeat(TICKET_SUBJECT_MIN), accepted: true },
+      { label: "exactly max", subject: "x".repeat(TICKET_SUBJECT_MAX), accepted: true },
+      { label: "one above max", subject: "x".repeat(TICKET_SUBJECT_MAX + 1), accepted: false },
+    ];
+    for (const c of cases) {
+      const [bot, domain] = [await makeUser(), await makeUser()];
+      const botOk = await botAcceptsSubject(bot, c.subject);
+      const domainOk = await domainAcceptsSubject(domain, c.subject);
+      expect(botOk, `bot / ${c.label}`).toBe(c.accepted);
+      expect(domainOk, `domain / ${c.label}`).toBe(c.accepted);
+    }
+  });
+
+  // S2-6 ----------------------------------------------------------------------
+  it("S2-6: message boundaries — both surfaces draw the line in the same place", async () => {
+    const cases: { label: string; text: string; accepted: boolean }[] = [
+      { label: "empty", text: "", accepted: false },
+      { label: "exactly min", text: "y".repeat(TICKET_MESSAGE_MIN), accepted: true },
+      { label: "exactly max", text: "y".repeat(TICKET_MESSAGE_MAX), accepted: true },
+      { label: "one above max", text: "y".repeat(TICKET_MESSAGE_MAX + 1), accepted: false },
+    ];
+    for (const c of cases) {
+      const [bot, domain] = [await makeUser(), await makeUser()];
+      expect(await botAcceptsMessage(bot, c.text), `bot / ${c.label}`).toBe(c.accepted);
+      expect(await domainAcceptsMessage(domain, c.text), `domain / ${c.label}`).toBe(c.accepted);
+    }
+  });
+
+  // S2-7 ----------------------------------------------------------------------
+  it("S2-7: both TRIM before measuring, so padding never buys length", async () => {
+    // A subject of nothing but spaces is not a subject on either surface, and
+    // a subject that only reaches the minimum once its padding is counted is
+    // not long enough on either.
+    const padded = ` ${"x".repeat(TICKET_SUBJECT_MIN - 1)} `;
+    const blank = " ".repeat(TICKET_SUBJECT_MAX);
+    for (const subject of [padded, blank]) {
+      const [bot, domain] = [await makeUser(), await makeUser()];
+      expect(await botAcceptsSubject(bot, subject), "bot refuses").toBe(false);
+      expect(await domainAcceptsSubject(domain, subject), "domain refuses").toBe(false);
+    }
+
+    // Padded past the maximum but exactly max once trimmed: BOTH must accept.
+    // The failure mode is one surface measuring the untrimmed string.
+    const overByPadding = `${"x".repeat(TICKET_SUBJECT_MAX)}   `;
+    const [bot, domain] = [await makeUser(), await makeUser()];
+    expect(await botAcceptsSubject(bot, overByPadding), "bot accepts trimmed-to-max").toBe(true);
+    expect(await domainAcceptsSubject(domain, overByPadding), "domain accepts trimmed-to-max").toBe(
+      true,
+    );
+
+    // And what they STORE is the trimmed value on both. Agreeing about
+    // acceptance while storing different strings is still drift: an operator
+    // searching for a subject finds it on one surface and not the other.
+    const [botStored, domainStored] = await Promise.all([
+      prisma.supportTicket.findFirstOrThrow({ where: { userId: bot } }),
+      prisma.supportTicket.findFirstOrThrow({ where: { userId: domain } }),
+    ]);
+    expect(botStored.subject).toBe("x".repeat(TICKET_SUBJECT_MAX));
+    expect(domainStored.subject).toBe(botStored.subject);
+  });
+
+  // S2-8 ----------------------------------------------------------------------
+  it("S2-8: a message at the maximum survives the round trip to the database", async () => {
+    // Validation agreeing is not the same as the column accepting: a bound
+    // raised past what the schema stores would pass every check above and then
+    // throw on write.
+    const user = await makeUser();
+    const text = "ز".repeat(TICKET_MESSAGE_MAX);
+    const made = await createTicket(user, {
+      subject: "پیام حداکثری",
+      message: text,
+      category: "ACCOUNT",
+      origin: "MINIAPP",
+      servicePublicId: null,
+      clientRequestId: requestId(),
+    });
+    expect(made.ok).toBe(true);
+    if (!made.ok) return;
+    const stored = await prisma.supportMessage.findUniqueOrThrow({
+      where: { id: made.value.messageId },
+    });
+    expect(stored.text, "stored verbatim, not truncated").toBe(text);
   });
 });

@@ -8,4 +8,5 @@
 // =============================================================================
 
 export * from "./contract.js";
+export * from "./notifications.js";
 export * from "./tickets.js";

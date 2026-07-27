@@ -2080,7 +2080,8 @@ model SupportTicket {
   category String?
   origin   String?
 
-  messages SupportMessage[]
+  messages            SupportMessage[]
+  notificationIntents SupportNotificationIntent[]
 
   @@index([userId])
   @@index([status])
@@ -2120,6 +2121,8 @@ model SupportMessage {
   sourceUpdateId  BigInt? @unique
   // The inbound Telegram message_id (operational audit only; not an idempotency key).
   sourceMessageId Int?
+
+  notificationIntents SupportNotificationIntent[]
 
   @@index([ticketId])
   @@index([createdAt])
@@ -2169,6 +2172,78 @@ model MiniAppRequestIdempotency {
 
   @@unique([userId, clientRequestId])
   @@index([createdAt])
+}
+
+// =============================================================================
+// Support notification intents.
+//
+// "Notify the admins" has always been a side effect the bot performed AFTER
+// committing: send to each active admin, log what failed, move on. That works
+// while the process that writes the ticket is also the process that can talk to
+// Telegram, and while nothing crashes in between. Neither holds any more.
+//
+// The API cannot send anything — it has no bot token and no business having
+// one. And even in the bot, a crash between the commit and the send loses the
+// notification with no trace: the ticket exists, nobody was told, and there is
+// nothing left to retry from.
+//
+// So the DECISION to notify is recorded in the same transaction as the message
+// it describes, and DELIVERY is a separate, retryable step. A committed message
+// always has its intent; a rolled-back one has neither. Which process delivers
+// it stops being part of the correctness argument.
+//
+// One intent per message, enforced by the unique constraint rather than by
+// checking first — the check-then-insert races itself, and two admins being
+// told twice about one reply is exactly the kind of noise that trains people to
+// ignore the channel.
+//
+// The intent holds REFERENCES only. Rendering reads the ticket and the message
+// at delivery time, so a subject is never copied into a second table, and an
+// intent that outlives its ticket renders nothing rather than a stale snapshot.
+// =============================================================================
+enum SupportNotificationStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+}
+
+model SupportNotificationIntent {
+  id String @id @default(uuid())
+
+  ticketId  String
+  ticket    SupportTicket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  /// The message that caused this intent. Cascades: an intent for a message
+  /// that no longer exists has nothing to render.
+  messageId String
+  message   SupportMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  /// Stable event code (SUPPORT_NOTIFICATION_KINDS in @zedbot/support-tickets):
+  /// support.ticket_created / support.user_replied.
+  kind String
+
+  status   SupportNotificationStatus @default(PENDING)
+  attempts Int                       @default(0)
+
+  /// How many active admins were reached on the successful attempt.
+  deliveredCount Int     @default(0)
+  /// Short scrubbed English marker only — never a Telegram payload, never
+  /// ticket text.
+  safeErrorCode  String?
+
+  nextAttemptAt DateTime?
+  /// Set when a worker claims the row; a claim older than the stale threshold
+  /// is recovered, because a process that dies mid-send leaves SENDING behind.
+  claimedAt     DateTime?
+  sentAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([messageId, kind])
+  @@index([status, nextAttemptAt])
+  @@index([status, claimedAt])
+  @@index([ticketId])
 }
 
 // =============================================================================

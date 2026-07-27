@@ -19,16 +19,29 @@ import {
   supportCategoryLabelFa,
   type SupportTicketCategory,
   type SupportTicketOrigin,
+  ticketShortId,
 } from "@zedbot/shared";
 import {
+  claimIntentForTicket,
+  markIntentFailed,
+  markIntentSent,
+  normalizeMessage,
+  normalizeSubject,
+  recordIntent,
   TICKET_MESSAGE_MAX,
   TICKET_MESSAGE_MIN,
+  TICKET_STATUS_AFTER_ADMIN_REPLY,
+  TICKET_STATUS_AFTER_CREATE,
+  TICKET_STATUS_AFTER_USER_REPLY,
   TICKET_SUBJECT_MAX,
   TICKET_SUBJECT_MIN,
+  type SupportNotificationKind,
+  userMayReply,
 } from "@zedbot/support-tickets";
 import { InlineKeyboard } from "grammy";
 
 import { logger } from "../core/logger.js";
+import { supportNotificationErrorCode } from "./support-notification-errors.js";
 import type { DeliverySendApi } from "./other-product-delivery.service.js";
 
 // =============================================================================
@@ -124,26 +137,28 @@ export interface SupportMessageContent {
   sourceMessageId?: number;
 }
 
-function validSubject(subject: string): boolean {
-  return subject.length >= TICKET_SUBJECT_MIN && subject.length <= TICKET_SUBJECT_MAX;
-}
-
-function validMessage(text: string): boolean {
-  return text.length >= TICKET_MESSAGE_MIN && text.length <= TICKET_MESSAGE_MAX;
-}
+// Normalization is DELEGATED to @zedbot/support-tickets, and the normalizer's
+// output is what gets stored. Importing the bounds but keeping a local
+// comparison against them would leave a second place deciding whether input is
+// acceptable; keeping a local trim would leave a second place deciding what the
+// value IS. Both drift silently — one surface storing "موضوع   " where the
+// other stores "موضوع" is invisible until someone matches on the text.
 
 /** A valid message needs non-empty text (1..3000) OR a validated attachment.
  * When an attachment is present the text is an OPTIONAL caption (0..1000). */
 function validateContent(
   content: SupportMessageContent,
 ): { ok: true; text: string | null } | { ok: false; safeMessage: string } {
-  const trimmed = typeof content.text === "string" ? content.text.trim() : "";
   if (content.attachment === undefined) {
-    if (!validMessage(trimmed)) {
+    const message = normalizeMessage(content.text);
+    if (!message.ok) {
       return { ok: false, safeMessage: INVALID_TICKET_MESSAGE_TEXT };
     }
-    return { ok: true, text: trimmed };
+    return { ok: true, text: message.value };
   }
+  // A caption is not a message: it is optional and has its own, shorter bound,
+  // so it is trimmed here rather than run through the message normalizer.
+  const trimmed = typeof content.text === "string" ? content.text.trim() : "";
   if (trimmed.length > SUPPORT_CAPTION_MAX) {
     return { ok: false, safeMessage: INVALID_TICKET_CAPTION_TEXT };
   }
@@ -246,10 +261,11 @@ export interface CreateSupportTicketInput {
 export async function createSupportTicket(
   input: CreateSupportTicketInput,
 ): Promise<TicketMutationOutcome> {
-  const cleanSubject = input.subject.trim();
-  if (!validSubject(cleanSubject)) {
+  const subject = normalizeSubject(input.subject);
+  if (!subject.ok) {
     return { ok: false, safeMessage: INVALID_TICKET_SUBJECT_TEXT };
   }
+  const cleanSubject = subject.value;
   const content = validateContent(input.content);
   if (!content.ok) {
     return content;
@@ -268,16 +284,20 @@ export async function createSupportTicket(
         data: {
           userId: input.userId,
           subject: cleanSubject,
-          status: "WAITING_ADMIN",
+          status: TICKET_STATUS_AFTER_CREATE,
           category,
           origin,
           serviceId,
           ...(snapshot === undefined ? {} : { diagnosticSnapshot: snapshot }),
         },
       });
-      await tx.supportMessage.create({
+      const message = await tx.supportMessage.create({
         data: { ticketId: created.id, senderType: "USER", senderUserId: input.userId, ...fields },
       });
+      // Same transaction as the message. The bot could send immediately and
+      // usually does — but a crash between this commit and that send used to
+      // lose the notification with nothing left to retry from.
+      await recordIntent(tx, created.id, message.id, "support.ticket_created");
       return created;
     });
     logger.info("support ticket created", {
@@ -352,7 +372,7 @@ export async function addUserTicketReply(
   if (ticket === null) {
     return { ok: false, safeMessage: TICKET_NOT_FOUND_TEXT };
   }
-  if (ticket.status === "CLOSED") {
+  if (!userMayReply(ticket.status)) {
     return { ok: false, safeMessage: TICKET_CLOSED_TEXT };
   }
   const fields = messageWriteFields(input.content, content.text);
@@ -363,14 +383,15 @@ export async function addUserTicketReply(
       // update rolls back the whole tx — including the status flip.
       const flipped = await tx.supportTicket.updateMany({
         where: { id: input.ticketId, userId, status: { not: "CLOSED" } },
-        data: { status: "WAITING_ADMIN" },
+        data: { status: TICKET_STATUS_AFTER_USER_REPLY },
       });
       if (flipped.count !== 1) {
         return null;
       }
-      await tx.supportMessage.create({
+      const message = await tx.supportMessage.create({
         data: { ticketId: input.ticketId, senderType: "USER", senderUserId: userId, ...fields },
       });
+      await recordIntent(tx, input.ticketId, message.id, "support.user_replied");
       return tx.supportTicket.findUniqueOrThrow({ where: { id: input.ticketId } });
     });
     if (updated === null) {
@@ -479,7 +500,7 @@ export async function addAdminTicketReply(
     const updated = await prisma.$transaction(async (tx) => {
       const flipped = await tx.supportTicket.updateMany({
         where: { id: input.ticketId, status: { not: "CLOSED" } },
-        data: { status: "WAITING_USER" },
+        data: { status: TICKET_STATUS_AFTER_ADMIN_REPLY },
       });
       if (flipped.count !== 1) {
         return null;
@@ -688,47 +709,112 @@ function ticketAttachmentLine(
   return null;
 }
 
-/** Sends one text to every ACTIVE admin; returns how many were reached. */
-async function notifyActiveAdmins(
+/** The Persian title for each notification KIND. Presentation only — the stored
+ * value is the stable code, so re-wording these never touches a database row. */
+const NOTIFICATION_TITLE_FA: Record<SupportNotificationKind, string> = {
+  "support.ticket_created": "🎫 تیکت جدید",
+  "support.user_replied": "💬 پاسخ جدید کاربر در تیکت",
+};
+
+/** One rendered admin notification: what to say, and who to say it to. */
+export interface RenderedAdminNotification {
+  text: string;
+  keyboard: InlineKeyboard;
+  adminChatIds: string[];
+}
+
+/**
+ * Render an admin notification from the CURRENT state of the ticket.
+ *
+ * Read at delivery time rather than snapshotted into the intent, so a retry a
+ * minute later describes the ticket as it is rather than as it was. Null when
+ * the ticket no longer exists — there is nothing to say, and no retry will
+ * change that.
+ *
+ * Never includes a fileId, a caption, a config, a subscription URL or any
+ * Service field beyond the public username: this text lands in admin chats and
+ * in screenshots.
+ */
+export async function renderAdminTicketNotification(
+  ticketId: string,
+  kind: SupportNotificationKind,
+): Promise<RenderedAdminNotification | null> {
+  const ticket = await loadTicketForNotify(ticketId);
+  if (ticket === null) {
+    return null;
+  }
+  const sid = ticketShortId(ticket);
+  const text = [
+    NOTIFICATION_TITLE_FA[kind],
+    "",
+    `تیکت: ${sid}`,
+    ticketUserLine(ticket.user),
+    `موضوع: ${ticket.subject ?? "-"}`,
+    ticketCategoryLine(ticket.category),
+    ticketServiceLine(ticket.service),
+    ticketAttachmentLine(ticket.messages),
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+  const admins = await prisma.admin.findMany({
+    where: { isActive: true },
+    select: { telegramId: true },
+  });
+  return {
+    text,
+    keyboard: new InlineKeyboard().text("مشاهده تیکت 🎫", `admin:sup:view:${sid}`),
+    adminChatIds: admins.map((admin) => admin.telegramId.toString()),
+  };
+}
+
+/**
+ * Deliver the pending intent for this ticket NOW, and report admins reached.
+ *
+ * The intent already exists — it was written in the same transaction as the
+ * message — so this does not DECIDE to notify, it only tries to be quicker than
+ * the sweep. It claims first: if the sweep got there already the claim takes
+ * nothing and this returns 0 without sending, rather than telling every admin
+ * twice.
+ *
+ * Never throws. The mutation that caused this is committed, and the intent
+ * guarantees another attempt; failing the caller here would turn a delayed
+ * notification into a failed ticket.
+ */
+async function deliverTicketNotification(
   api: DeliverySendApi,
   ticketId: string,
-  title: string,
+  kind: SupportNotificationKind,
 ): Promise<number> {
   let reached = 0;
   try {
-    const ticket = await loadTicketForNotify(ticketId);
-    if (ticket === null) {
+    const intent = await claimIntentForTicket(ticketId, kind);
+    if (intent === null) {
       return 0;
     }
-    const sid = ticket.id.slice(0, 8);
-    const text = [
-      title,
-      "",
-      `تیکت: ${sid}`,
-      ticketUserLine(ticket.user),
-      `موضوع: ${ticket.subject ?? "-"}`,
-      ticketCategoryLine(ticket.category),
-      ticketServiceLine(ticket.service),
-      ticketAttachmentLine(ticket.messages),
-    ]
-      .filter((line): line is string => line !== null)
-      .join("\n");
-    const keyboard = new InlineKeyboard().text("مشاهده تیکت 🎫", `admin:sup:view:${sid}`);
-    const admins = await prisma.admin.findMany({
-      where: { isActive: true },
-      select: { telegramId: true },
-    });
-    for (const admin of admins) {
+    const rendered = await renderAdminTicketNotification(ticketId, kind);
+    if (rendered === null) {
+      await markIntentSent(intent.id, 0);
+      return 0;
+    }
+    let lastError: unknown = null;
+    for (const chatId of rendered.adminChatIds) {
       try {
-        await api.sendMessage(admin.telegramId.toString(), text, { reply_markup: keyboard });
+        await api.sendMessage(chatId, rendered.text, { reply_markup: rendered.keyboard });
         reached += 1;
       } catch (err) {
+        lastError = err;
         logger.warn("support ticket admin notification failed", {
           ticketId,
-          adminTelegramId: admin.telegramId.toString(),
           error: errorMessage(err),
         });
       }
+    }
+    if (reached > 0 || rendered.adminChatIds.length === 0) {
+      await markIntentSent(intent.id, reached);
+    } else {
+      // Left PENDING with backoff: the sweep will try again rather than this
+      // being the only chance anyone had to hear about the ticket.
+      await markIntentFailed(intent.id, intent.attempts, supportNotificationErrorCode(lastError));
     }
   } catch (err) {
     logger.warn("support ticket admin notification failed", {
@@ -743,14 +829,14 @@ export async function notifyAdminsAboutNewTicket(
   api: DeliverySendApi,
   ticketId: string,
 ): Promise<number> {
-  return notifyActiveAdmins(api, ticketId, "🎫 تیکت جدید");
+  return deliverTicketNotification(api, ticketId, "support.ticket_created");
 }
 
 export async function notifyAdminsAboutUserReply(
   api: DeliverySendApi,
   ticketId: string,
 ): Promise<number> {
-  return notifyActiveAdmins(api, ticketId, "💬 پاسخ جدید کاربر در تیکت");
+  return deliverTicketNotification(api, ticketId, "support.user_replied");
 }
 
 /** Sends one text + view button to the ticket's owner; returns success. */
