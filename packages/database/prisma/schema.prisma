@@ -2120,6 +2120,24 @@ model SupportMessage {
   // The inbound Telegram message_id (operational audit only; not an idempotency key).
   sourceMessageId Int?
 
+  // Mini App request idempotency. A browser retries: a flaky connection, a
+  // double tap, a user reloading a hung submit. Telegram's `sourceUpdateId`
+  // cannot help here — there is no update — so the CLIENT supplies one
+  // cryptographically random id per explicit submission attempt and reuses it
+  // for retries of that attempt.
+  //
+  // The uniqueness lives in PostgreSQL rather than in memory because the API
+  // may run as several processes and any of them may restart mid-request; an
+  // in-process cache would deduplicate only by luck. Every Mini App mutation
+  // writes exactly one USER message, so a unique constraint HERE is exactly a
+  // unique constraint on the mutation — the same shape `sourceUpdateId` already
+  // uses, for the same reason.
+  //
+  // Additive + nullable: every existing message, and every message the bot
+  // writes, keeps `clientRequestId = null`, and NULLs do not collide under a
+  // Postgres unique index.
+  clientRequestId String? @unique
+
   @@index([ticketId])
   @@index([createdAt])
   @@index([ticketId, createdAt])
