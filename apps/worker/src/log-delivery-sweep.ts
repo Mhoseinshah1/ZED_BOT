@@ -23,16 +23,42 @@ import { enqueueLogDelivery } from "./queues.js";
 //   * a LOST DELAYED JOB. A FAILED row's retry lives only in Redis. If Redis is
 //     flushed or replaced, the retry evaporates while the row still says the
 //     alert is owed.
+//   * an ABANDONED CLAIM. The processor moves a row to SENDING and then calls
+//     Telegram. If the worker is killed, or Redis loses the job, in that window
+//     the row sits in SENDING forever: the database says the alert is not
+//     terminal, and nothing recreates the job. Without this branch an automatic
+//     Force Join deactivation alert could stay permanently undelivered despite
+//     the outbox having done its part.
 //
 // The sweep is deliberately dumb: find rows that are still owed, enqueue them,
-// let the existing processor do everything else. Two properties keep it safe to
-// run on a fixed cadence next to the normal path:
+// let the existing processor do everything else. It never talks to Telegram.
+// Two properties keep it safe to run on a fixed cadence next to the normal
+// path:
 //
 //   * the job id is derived from the delivery id (`logdel-<id>`), so enqueuing
 //     one that is already queued or delayed is a no-op — no duplicate sends;
 //   * the processor re-reads the row and returns early on any terminal status,
 //     and claims work with a CAS, so even a genuinely duplicated job cannot
 //     send twice.
+//
+// WHAT THIS ACTUALLY GUARANTEES. Stated honestly, because the difference
+// matters when an operator is reasoning about a duplicate alert:
+//
+//   * ONE durable record per committed retirement — the outbox writes it on the
+//     configuration transaction, so it cannot be lost or doubled;
+//   * DETERMINISTIC, IDEMPOTENT job creation — the same delivery id always
+//     produces the same job id, so re-enqueuing is a no-op while that job
+//     exists;
+//   * terminal deliveries (SENT / DEAD_LETTER / SKIPPED) are never intentionally
+//     retried;
+//   * Telegram delivery is AT-LEAST-ONCE. A single delivery per alert is NOT
+//     promised and cannot be: there is an unavoidable ambiguous window where
+//     the process dies after Telegram accepted the message but before the
+//     `SENT` status commits. The row is still SENDING, so this sweep will —
+//     correctly — hand it back to the processor, which sends it again. A
+//     duplicate operational alert is the right trade against a silently lost
+//     one, and no amount of bookkeeping on this side of the network can close
+//     that window.
 //
 // ANTI-RECURSION: like the delivery processor, nothing here ever writes a
 // SystemLog row. A failing sweep reports to stdout only.
@@ -49,6 +75,27 @@ export const LOG_DELIVERY_SWEEP_BATCH = 200;
  * pointless Redis round-trip on every normal ops log.
  */
 export const LOG_DELIVERY_SWEEP_MIN_AGE_MS = 30_000;
+
+/**
+ * How long a row may sit in SENDING before it is treated as abandoned.
+ *
+ * SENDING is a CLAIM, not a state a healthy delivery lingers in. The processor
+ * sets it, does one Redis aggregation check, makes one Telegram call and writes
+ * a terminal status. That Telegram call is hard-bounded by an AbortController
+ * at `TELEGRAM_API_TIMEOUT_MS`, whose own ceiling is 60 s — so a live claim
+ * cannot outlive roughly a minute even in the worst configured case.
+ *
+ * Ten minutes is therefore an order of magnitude past any legitimate claim,
+ * which is the point: the cost of being wrong in one direction is a DUPLICATE
+ * operational alert, and in the other a PERMANENTLY LOST one. Being generous
+ * here makes the first essentially impossible while still bounding the second
+ * to one sweep interval past the threshold.
+ *
+ * Measured against `updatedAt`, never `createdAt`: the row's age says nothing
+ * about when it was claimed, and a long-queued alert claimed one second ago is
+ * exactly the row that must NOT be disturbed.
+ */
+export const LOG_DELIVERY_SENDING_STALE_MS = 10 * 60_000;
 
 /**
  * One bounded pass. Returns how many deliveries were enqueued — the tests use
@@ -70,6 +117,14 @@ export async function sweepOrphanedLogDeliveries(logQueue: Queue): Promise<numbe
         {
           status: LogDeliveryStatus.FAILED,
           nextAttemptAt: { lte: new Date(now) },
+        },
+        // An ABANDONED CLAIM: moved to SENDING and then left there, which only
+        // happens if the worker died or Redis lost the job mid-send. Keyed on
+        // `updatedAt` — the claim time — so a delivery being processed right
+        // now is never disturbed no matter how old the row itself is.
+        {
+          status: LogDeliveryStatus.SENDING,
+          updatedAt: { lt: new Date(now - LOG_DELIVERY_SENDING_STALE_MS) },
         },
       ],
     },
