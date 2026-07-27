@@ -49,6 +49,28 @@ export function isServicePublicId(value: unknown): value is string {
   return typeof value === "string" && SERVICE_PUBLIC_ID_PATTERN.test(value);
 }
 
+/**
+ * The ONE canonical form of a public id, or null when it is not one.
+ *
+ * Hex is case-insensitive, so `AB12CD34` and `ab12cd34` name the same row —
+ * and anything that treats them as different strings will eventually treat one
+ * request as two. That bit us: an idempotency fingerprint built from the raw
+ * transport value made a retry that changed case look like a different
+ * mutation, so a user who resubmitted from a client that upper-cased the id
+ * would have been told their retry conflicted.
+ *
+ * So there is exactly one place that decides what a public id "is", and both
+ * the lookup and the fingerprint use its output. Never the raw value.
+ */
+export function canonicalPublicId(value: unknown, pattern: RegExp): string | null {
+  return typeof value === "string" && pattern.test(value) ? value.toLowerCase() : null;
+}
+
+/** Canonical lowercase service public id, or null. */
+export function canonicalServicePublicId(value: unknown): string | null {
+  return canonicalPublicId(value, SERVICE_PUBLIC_ID_PATTERN);
+}
+
 // --- support tickets ---------------------------------------------------------
 //
 // The same reasoning, for the same reason. A SupportTicket's primary key is a
@@ -83,4 +105,9 @@ export const TICKET_PUBLIC_ID_PATTERN = /^[0-9a-f]{8}$/i;
 /** True when `value` could be a public ticket id (format only, no lookup). */
 export function isTicketPublicId(value: unknown): value is string {
   return typeof value === "string" && TICKET_PUBLIC_ID_PATTERN.test(value);
+}
+
+/** Canonical lowercase ticket public id, or null. Same discipline as services. */
+export function canonicalTicketPublicId(value: unknown): string | null {
+  return canonicalPublicId(value, TICKET_PUBLIC_ID_PATTERN);
 }

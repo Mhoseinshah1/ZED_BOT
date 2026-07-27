@@ -5,7 +5,7 @@ import {
   type SupportMessage,
   type SupportTicket,
 } from "@zedbot/database";
-import { isServicePublicId, isTicketPublicId } from "@zedbot/shared";
+import { canonicalServicePublicId, canonicalTicketPublicId } from "@zedbot/shared";
 
 import {
   fail,
@@ -67,11 +67,12 @@ export async function resolveOwnedTicket(
   userId: string,
   ticketPublicId: unknown,
 ): Promise<SupportTicket | null> {
-  if (!isTicketPublicId(ticketPublicId)) {
+  const canonical = canonicalTicketPublicId(ticketPublicId);
+  if (canonical === null) {
     return null;
   }
   const matches = await prisma.supportTicket.findMany({
-    where: { id: { startsWith: ticketPublicId.toLowerCase() }, userId },
+    where: { id: { startsWith: canonical }, userId },
     take: 2,
   });
   return matches.length === 1 ? matches[0] : null;
@@ -88,12 +89,13 @@ export async function resolveOwnedService(
   userId: string,
   servicePublicId: unknown,
 ): Promise<Service | null> {
-  if (!isServicePublicId(servicePublicId)) {
+  const canonical = canonicalServicePublicId(servicePublicId);
+  if (canonical === null) {
     return null;
   }
   const matches = await prisma.service.findMany({
     where: {
-      id: { startsWith: servicePublicId.toLowerCase() },
+      id: { startsWith: canonical },
       userId,
       deletedAt: null,
       status: { not: "DELETED" },
@@ -178,14 +180,22 @@ export async function createTicket(
   const origin = normalizeOrigin(input.origin);
   if (!origin.ok) return origin;
 
+  // The canonical id drives BOTH the fingerprint and the lookup, so a retry
+  // that changes case is the same mutation rather than a conflict. "No service"
+  // is its own canonical state, distinct from any id — linking one and linking
+  // none must never fingerprint alike.
   const wantsService = input.servicePublicId !== null && input.servicePublicId !== undefined;
+  const canonicalService = wantsService ? canonicalServicePublicId(input.servicePublicId) : null;
+  if (wantsService && canonicalService === null) {
+    return fail("INVALID_SERVICE");
+  }
   const fingerprint = mutationFingerprint([
     "SUPPORT_TICKET_CREATE",
     subject.value,
     message.value,
     category.value,
     origin.value,
-    wantsService ? String(input.servicePublicId) : "",
+    canonicalService === null ? "\u0000none" : canonicalService,
   ]);
 
   // BEFORE preconditions: a retry must survive the Service being deleted since.
@@ -199,8 +209,8 @@ export async function createTicket(
   if (replay !== null) return replay;
 
   let serviceId: string | null = null;
-  if (wantsService) {
-    const service = await resolveOwnedService(userId, input.servicePublicId);
+  if (canonicalService !== null) {
+    const service = await resolveOwnedService(userId, canonicalService);
     if (service === null) {
       return fail("INVALID_SERVICE");
     }
@@ -282,11 +292,12 @@ export async function replyToTicket(
   if (!requestId.ok) return requestId;
   const message = normalizeMessage(input.message);
   if (!message.ok) return message;
-  if (!isTicketPublicId(input.ticketPublicId)) {
+  const canonicalTicket = canonicalTicketPublicId(input.ticketPublicId);
+  if (canonicalTicket === null) {
     return fail("INVALID_TICKET_ID");
   }
 
-  const ticket = await resolveOwnedTicket(userId, input.ticketPublicId);
+  const ticket = await resolveOwnedTicket(userId, canonicalTicket);
   if (ticket === null) {
     return fail("TICKET_NOT_FOUND");
   }
@@ -362,30 +373,45 @@ export async function replyToTicket(
 export interface MessagePage {
   /** Chronological for display, oldest first WITHIN the page. */
   messages: SupportMessage[];
-  /** Keyset position of the oldest row returned, or null at the beginning. */
+  /** True only when an older row actually exists. */
+  hasMore: boolean;
+  /** Keyset position of the oldest row returned, or null when there is no more. */
   older: { createdAt: Date; id: string } | null;
 }
 
 /**
  * The latest messages of a ticket the caller owns, paging BACKWARDS.
  *
- * Selected descending and then reversed. A conversation is read from its end:
- * the first page must be the newest messages, and "older" must walk backwards
- * from there. Selecting oldest-first and paging with a `before` cursor would
- * open the ticket at its beginning and could never reach the end in bounded
- * time — and an insert between requests would shift an offset-style window,
- * duplicating or skipping rows.
+ * OWNERSHIP IS RE-ESTABLISHED HERE, on every page. It takes a `userId` and a
+ * PUBLIC id and does the owner-scoped lookup itself, because a
+ * `SupportTicket` object is not proof of anything: it is a plain row that any
+ * caller can construct or carry over from an earlier, unrelated check. The
+ * previous signature relied on every caller remembering to have authorized
+ * first, which is the post-hoc pattern the resolver exists to avoid — and a
+ * cursor must never be the thing that grants access, only the thing that says
+ * where to continue.
  *
- * Takes an OWNED TICKET, never a bare id. An exported helper accepting an
- * arbitrary `ticketId` relies on every caller remembering an earlier
- * authorization check, which is the same post-hoc pattern the resolver above
- * exists to avoid.
+ * Selected DESCENDING and reversed for display. A conversation is read from its
+ * end: the first page must be the newest messages and "older" must walk
+ * backwards. Selecting oldest-first would open a ticket at its beginning and
+ * could never reach the end in bounded time.
+ *
+ * `limit + 1` rows are fetched so "is there another page?" is answered by a row
+ * that actually exists. Returning a cursor whenever `rows.length === limit`
+ * hands out a cursor for a page that is empty exactly when the conversation
+ * length is a multiple of the page size — a bug that hides until it doesn't.
  */
-export async function listTicketMessages(
-  ticket: SupportTicket,
+export async function listOwnedTicketMessages(
+  userId: string,
+  ticketPublicId: unknown,
   limit: number,
   olderThan: { createdAt: Date; id: string } | null,
-): Promise<MessagePage> {
+): Promise<MessagePage | null> {
+  const ticket = await resolveOwnedTicket(userId, ticketPublicId);
+  if (ticket === null) {
+    // Malformed, unknown, ambiguous and foreign are one answer.
+    return null;
+  }
   const rows = await prisma.supportMessage.findMany({
     where:
       olderThan === null
@@ -398,11 +424,14 @@ export async function listTicketMessages(
             ],
           },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: limit,
+    take: limit + 1,
   });
-  const oldest = rows.length === limit ? rows[rows.length - 1] : null;
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const oldest = page.length === 0 ? null : page[page.length - 1];
   return {
-    messages: rows.reverse(),
-    older: oldest === null ? null : { createdAt: oldest.createdAt, id: oldest.id },
+    messages: page.reverse(),
+    hasMore,
+    older: hasMore && oldest !== null ? { createdAt: oldest.createdAt, id: oldest.id } : null,
   };
 }
