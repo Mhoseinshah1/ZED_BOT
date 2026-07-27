@@ -359,12 +359,28 @@ logging default. That output is supplemental — it is never the authoritative
 record of a configuration change.
 
 **Recovery.** Re-grant the bot admin rights in the channel, then either press
-«تست دسترسی ربات ♻️» or re-activate the channel — both re-validate, and any
-success clears `healthFailureCount`/`healthFailureFirstAt`/`unhealthyAt`, so a
-repaired outage can never combine with a later one to cross the threshold.
-Activation additionally refuses to turn a still-inaccessible channel back on.
-A successful membership check clears the window on its own (guarded on the
-in-memory snapshot, so healthy channels cost no extra writes).
+«تست دسترسی ربات ♻️» or re-activate the channel — both re-validate, and a
+success on a **still-active** channel clears
+`healthFailureCount`/`healthFailureFirstAt`/`unhealthyAt`, so a repaired outage
+can never combine with a later one to cross the threshold. Activation
+additionally refuses to turn a still-inaccessible channel back on. A successful
+membership check clears the window on its own, guarded on the in-memory snapshot
+so healthy channels cost no extra writes on the hot path.
+
+**A success can never un-retire a channel, or erase the record of one.** The
+clearing update takes the same Force Join configuration advisory lock the
+retirement takes, and is additionally conditioned on `isActive: true`:
+
+| Order | Outcome |
+| --- | --- |
+| success commits first | the window is legitimately cleared; the retirement re-reads a healthy channel and declines |
+| retirement commits first | the success matches no row — the counters and `unhealthyAt` stay exactly as retirement left them |
+
+Without the lock the two writers could interleave; without the `isActive` guard
+a check that started before a retirement and landed after it would wipe the very
+evidence an operator reads when judging whether the retirement was justified.
+`isActive` is not in that update's `data` at all, so this path can only ever
+write *less* — it cannot reactivate anything.
 
 ## Caching (§4.12)
 

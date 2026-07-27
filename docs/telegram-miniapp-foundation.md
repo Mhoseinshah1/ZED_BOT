@@ -6,6 +6,11 @@ their wallet balance, their services and their transaction history. It is
 service; those flows stay in the bot, where the existing business logic,
 notifications and audit trail already live.
 
+Read-only does not mean a dead end. Every screen that raises an action — buying,
+charging the wallet, renewing or managing a service, contacting support — offers
+it as a button that **opens the configured bot and does nothing else** (§4.7).
+None of them call a write-capable Mini App endpoint, because there is none.
+
 ---
 
 ## 1. Why the pieces are where they are
@@ -151,7 +156,7 @@ request, in the same order the bot uses.
 | 2 | status `BLOCKED` | `USER_BLOCKED` | 403 | yes |
 | 2 | any status other than `ACTIVE` | `USER_DISABLED` | 403 | yes |
 | 3 | `terms_required` + unaccepted published `TermsDocument` | `TERMS_REQUIRED` | 428 | **yes** |
-| 4 | `force_join_enabled` + ≥1 active channel, no bypass | `FORCE_JOIN_REQUIRED` | 403 | **yes** |
+| 4 | `force_join_enabled` + ≥1 active channel, no bypass, **and a live check says the user is not a member** | `FORCE_JOIN_REQUIRED` | 403 | **yes** |
 | – | any gate that could not be read | `ACCESS_CHECK_UNAVAILABLE` | 503 | – |
 
 **Fail closed.** A read that throws returns a retryable code rather than a
@@ -159,13 +164,44 @@ verdict. A helper that swallowed the error and returned its fallback would make
 a database blip indistinguishable from "maintenance is off", and would wave
 through exactly the request the gate exists to stop.
 
-**Force-join is the one gate the API cannot clear.** The bot verifies membership
-by calling Telegram's `getChatMember`; the API must not talk to the Bot API, a
-frontend claim of "I joined" is worth nothing, and there is no durable per-user
-membership row to consult (the bot caches its verdict in Redis, which is a cache
-and not an authority). So an armed gate returns `FORCE_JOIN_REQUIRED` with
-`requiresBot: true` and the frontend offers an "open the bot" action. The worst
-case is telling an already-joined user to tap through the bot once.
+**Force join is checked for real, and is satisfiable.** An earlier design
+answered `FORCE_JOIN_REQUIRED` whenever the gate was *armed*, without ever
+establishing membership. That is not a stricter gate — it is a broken one: a
+user who joined every channel and verified it in the bot was refused by the Mini
+App forever, with no action available anywhere that could clear it.
+
+The API now performs a **live `getChatMember` for every currently active
+required channel**, through the same decision procedure the bot uses. What is
+shared is everything that decides the answer; what differs is only how the call
+leaves the process:
+
+| Part | Where it lives |
+| --- | --- |
+| decision procedure, Redis verdict cache, Telegram error classification, bounded channel-health policy | `@zedbot/force-join`, shared by both processes |
+| Telegram transport | **injected per process** — grammY's `ctx.api` in the bot, a plain fetch client in the API, because grammY must not enter `apps/api` |
+
+| Situation | Result |
+| --- | --- |
+| member of every active required channel | allowed |
+| not a member of some active required channel | `FORCE_JOIN_REQUIRED` (403, `requiresBot: true`) |
+| operator `forceJoinBypass` | allowed, with no Telegram traffic at all |
+| transient Telegram failure, unreadable setting or channel list, no bot token in this process | `ACCESS_CHECK_UNAVAILABLE` (503) — uncertainty, never an accusation |
+| every active channel permanently unverifiable | allowed — the bot's D4 rule, so a broken configuration cannot brick users; the retirement is recorded durably and alerted |
+| switch off, or on with zero active channels | allowed, no Telegram traffic |
+
+Two properties are worth stating because they are what make the gate meaningful:
+
+- **Nothing the frontend says is consulted.** There is no "I joined" claim to
+  trust, and no membership fact is cached in the session — every request
+  re-derives the verdict from the authority.
+- **Redis is a bounded cache, not the authority.** It holds short-lived verdicts
+  so a page reload does not hammer the Bot API; it never *supplies* an answer
+  the Bot API has not given. The Mini App has no "بررسی عضویت" button, so a user
+  who just joined clears the short negative TTL on their next request, exactly as
+  the bot's middleware does.
+
+The gate still fails **closed** on uncertainty: `ACCESS_CHECK_UNAVAILABLE` is
+retryable and is never rendered as "you are not a member".
 
 **Unknown users are never created.** Registration happens in the bot, where
 terms, referral attribution and force-join are established. A Mini App visitor
@@ -183,8 +219,8 @@ no-store`, `X-Content-Type-Options: nosniff` and `Vary: Cookie`, and **no**
 | --- | --- | --- |
 | POST | `/auth` | Sets the session cookie; returns the profile. |
 | POST | `/logout` | Clears the cookie. Always succeeds. |
-| GET | `/me` | The signed-in user's profile. |
-| GET | `/dashboard` | Balance, service counts by status, expiring-soon count (strictly future expiries only), 3 recent services, 5 recent transactions. |
+| GET | `/me` | The signed-in user's profile, **plus active and total visible-service counts** (§4.6). |
+| GET | `/dashboard` | `serverTimestamp` and `dataFreshnessTimestamp` (§4.6), balance, service counts by status, expiring-soon count (strictly future expiries only), up to **5** recent services, up to **5** recent transactions. |
 | GET | `/services` | Keyset page of the caller's services. |
 | GET | `/services/:publicId` | One service the caller owns, addressed by its 8-character public id (§4.5). |
 | GET | `/wallet/transactions` | Keyset page of the caller's ledger. |
@@ -396,9 +432,9 @@ a dead button reads as a broken app.
 
 `apps/miniapp` — React 19 + Vite 7 + TypeScript, Persian, RTL.
 
-Eight screens: splash, outside-Telegram, dashboard, service list, service
-detail, wallet history, profile, and the failure screen every error path lands
-on.
+Nine screens: splash, outside-Telegram, signed-out, dashboard, service list,
+service detail, wallet history, profile, and the failure screen every error path
+lands on.
 
 - **No token anywhere, and nowhere to put one.** The session is an HttpOnly
   cookie the script cannot read; requests carry it with `credentials:

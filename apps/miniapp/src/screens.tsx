@@ -39,11 +39,21 @@ import { lookup, SERVICE_SOURCE_TEXT, UI, USER_GROUP_TEXT, WALLET_TYPE_TEXT } fr
 // =============================================================================
 // Screens.
 //
-// Read-only, all of them. There is no form, no mutation and no button that
-// changes anything a user owns - the only action in the whole app is signing
-// out, which destroys a cookie. Purchases, renewals, payments and support all
-// stay in the bot, and the notice at the bottom of the dashboard says so rather
-// than leaving the user hunting for a button that does not exist.
+// Read-only, all of them. There is no form, no mutation and no request that
+// changes anything a user owns: purchases, renewals, payments and support all
+// stay in the bot, where the business logic, the notifications and the audit
+// trail already are.
+//
+// Read-only is not the same as a dead end, though. The buttons a screen does
+// carry are of exactly two kinds, and neither writes anything here:
+//
+//   - SIGNING OUT, which destroys a cookie; and
+//   - BOT-RETURN ACTIONS (`BotActions`) — buy, charge the wallet, renew,
+//     contact support — every one of which only OPENS THE CONFIGURED BOT.
+//
+// So a user looking at a service that expires in two days has somewhere to go,
+// and the notice explaining that those flows live in the bot sits next to the
+// button that takes them there rather than leaving them hunting for it.
 //
 // Every screen handles three states explicitly: loading, failed, loaded. A
 // screen that renders "0 services" while a request is still in flight tells the
