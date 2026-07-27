@@ -3,13 +3,11 @@ import {
   claimDueIntents,
   claimIntentForTicket,
   createTicket,
-  markIntentFailed,
-  markIntentSent,
-  NOTIFICATION_MAX_ATTEMPTS,
   NOTIFICATION_STALE_CLAIM_MS,
   notificationRetryDelayMs,
   recoverStaleClaims,
   replyToTicket,
+  settleIntent,
 } from "@zedbot/support-tickets";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -264,7 +262,7 @@ describe("support notification intents", () => {
   });
 
   // S3-10 ---------------------------------------------------------------------
-  it("S3-10: a settled intent is never claimed again", async () => {
+  it("S3-10: a completed intent is terminal and never claimed again", async () => {
     const made = await createTicket(userId, domainCreate());
     expect(made.ok).toBe(true);
     if (!made.ok) return;
@@ -272,55 +270,68 @@ describe("support notification intents", () => {
     expect(claimed).not.toBeNull();
     if (claimed === null) return;
 
-    await markIntentSent(claimed.id, 3);
+    // No obligations at all: nobody to tell, so the aggregate is complete
+    // immediately rather than looping forever on an empty administrator table.
+    const outcome = await settleIntent(claimed.id, claimed.attempts);
+    expect(outcome.complete).toBe(true);
+    expect(outcome.pending).toBe(0);
+
     const row = await prisma.supportNotificationIntent.findUniqueOrThrow({
       where: { id: claimed.id },
     });
     expect(row.status).toBe("SENT");
-    expect(row.deliveredCount).toBe(3);
     expect(row.sentAt).not.toBeNull();
 
-    expect(await claimIntentForTicket(made.value.ticket.id, "support.ticket_created")).toBeNull();
+    expect(
+      await claimIntentForTicket(made.value.ticket.id, "support.ticket_created"),
+      "terminal",
+    ).toBeNull();
     expect(await recoverStaleClaims(), "SENT is not a stale claim").toBe(0);
   });
 
   // S3-11 ---------------------------------------------------------------------
-  it("S3-11: a failure retries with backoff until the attempts run out", async () => {
-    const made = await createTicket(userId, domainCreate());
-    expect(made.ok).toBe(true);
-    if (!made.ok) return;
-
-    const claimed = await claimIntentForTicket(made.value.ticket.id, "support.ticket_created");
-    expect(claimed).not.toBeNull();
-    if (claimed === null) return;
-
-    const now = new Date();
-    await markIntentFailed(claimed.id, 1, "rate-limited", now);
-    let row = await prisma.supportNotificationIntent.findUniqueOrThrow({
-      where: { id: claimed.id },
+  it("S3-11: an intent with work still outstanding is rescheduled, not completed", async () => {
+    const admin = await prisma.admin.create({
+      data: { telegramId: BigInt(Date.now()) * 1000n + 31n, role: "SUPPORT", isActive: false },
     });
-    expect(row.status, "retryable").toBe("PENDING");
-    expect(row.safeErrorCode).toBe("rate-limited");
-    expect(row.nextAttemptAt?.getTime()).toBe(now.getTime() + notificationRetryDelayMs(1));
+    try {
+      const made = await createTicket(userId, domainCreate());
+      expect(made.ok).toBe(true);
+      if (!made.ok) return;
+      const claimed = await claimIntentForTicket(made.value.ticket.id, "support.ticket_created");
+      expect(claimed).not.toBeNull();
+      if (claimed === null) return;
 
-    // Not due yet: the backoff has to actually hold the row back.
-    const early = await claimDueIntents(20, now);
-    expect(early.some((i) => i.id === claimed.id), "held back by backoff").toBe(false);
+      // One obligation left unfinished — the shape a partial fan-out leaves.
+      await prisma.supportNotificationRecipient.create({
+        data: { intentId: claimed.id, adminId: admin.id, status: "PENDING" },
+      });
 
-    // Due later.
-    const later = new Date(now.getTime() + notificationRetryDelayMs(1) + 1000);
-    const due = await claimDueIntents(20, later);
-    expect(due.some((i) => i.id === claimed.id), "picked up once due").toBe(true);
+      const now = new Date();
+      const outcome = await settleIntent(claimed.id, claimed.attempts, now);
+      expect(outcome.complete, "somebody is still owed").toBe(false);
+      expect(outcome.pending).toBe(1);
 
-    // Exhausted: parked, and kept for an operator to find.
-    await markIntentFailed(claimed.id, NOTIFICATION_MAX_ATTEMPTS, "send-failed", later);
-    row = await prisma.supportNotificationIntent.findUniqueOrThrow({ where: { id: claimed.id } });
-    expect(row.status).toBe("FAILED");
-    expect(row.nextAttemptAt, "not scheduled again").toBeNull();
-    expect(
-      await prisma.supportNotificationIntent.count({ where: { id: claimed.id } }),
-      "kept, not deleted",
-    ).toBe(1);
+      const row = await prisma.supportNotificationIntent.findUniqueOrThrow({
+        where: { id: claimed.id },
+      });
+      // Back to PENDING rather than SENT: an aggregate must not claim delivery
+      // while an obligation is outstanding.
+      expect(row.status).toBe("PENDING");
+      expect(row.nextAttemptAt?.getTime()).toBe(
+        now.getTime() + notificationRetryDelayMs(claimed.attempts),
+      );
+
+      // Held back by the backoff, then due.
+      const early = await claimDueIntents(50, now);
+      expect(early.some((i) => i.id === claimed.id), "not yet due").toBe(false);
+      const later = new Date(now.getTime() + notificationRetryDelayMs(claimed.attempts) + 1000);
+      const due = await claimDueIntents(50, later);
+      expect(due.some((i) => i.id === claimed.id), "due later").toBe(true);
+    } finally {
+      await prisma.supportNotificationRecipient.deleteMany({ where: { adminId: admin.id } });
+      await prisma.admin.delete({ where: { id: admin.id } });
+    }
   });
 
   // S3-12 ---------------------------------------------------------------------

@@ -144,32 +144,97 @@ with nothing left to retry from.
 So the **decision** to notify is recorded in the same transaction as the message
 (`SupportNotificationIntent`), and **delivery** is a separate retryable step.
 
+### Two levels, because one was wrong
+
+The first version marked the whole intent `SENT` as soon as *any* administrator
+was reached. With three administrators and two failing sends, the database said
+delivered and the two who never heard about the ticket had no row anywhere
+recording that. The contract is that **active administrators are notified**, not
+that somebody was.
+
+So `SupportNotificationIntent` is now only an aggregate, and
+`SupportNotificationRecipient` carries one durable obligation per administrator.
+A retry reaches the administrators who did not get it, and only those.
+
 | Property | Guarantee |
 | --- | --- |
 | Intent write | Atomic with the message — both commit or neither |
-| Delivery | At-least-once |
-| Duplicate suppression | `@@unique([messageId, kind])` plus a status-guarded claim |
-| Stale claim recovery | `SENDING` older than 5 minutes returns to `PENDING` |
-| Retry | Exponential backoff, capped at 15 minutes, 6 attempts |
+| Delivery | At-least-once, **per recipient** |
+| Fan-out | One obligation per active administrator, `@@unique([intentId, adminId])` |
+| Duplicate suppression | The unique constraints plus a status-guarded claim at both levels |
+| Successful recipient | Terminal — never claimed or sent again |
+| Failed recipient | Exponential backoff, capped at 15 minutes, 6 attempts |
+| Deactivated administrator | `SKIPPED` — terminal, not a failure |
+| Stale claim recovery | `SENDING` older than 5 minutes returns to `PENDING`, recipients first |
+| Intent completion | Only when **every** obligation is terminal |
 | Exhausted | Parked as `FAILED` and kept, for an operator to find |
 
 Exactly-once is not available across a process boundary and a third-party API:
 the send happens either before the row is marked sent or after, and a crash in
-the gap picks the other failure. Telling support twice about one ticket is
-recoverable; never telling them is not.
+that window picks the other failure. We mark *after* sending, so the window
+produces a duplicate rather than a silent loss — telling one administrator twice
+is recoverable, never telling them is not.
 
 Two callers, one path. The handler that just wrote a ticket delivers
 immediately — an admin waiting a sweep interval for a new ticket is a worse
 product — and the sweep delivers whatever the immediate attempt did not. Both
 claim first, so an overlap is a no-op rather than a duplicate.
 
-Intents carry **references only**. Rendering reads the ticket at delivery time,
-so a subject is never copied into a second table and a retry describes the
-ticket as it is rather than as it was.
+### Why not `SystemLogDelivery`
 
-`safeErrorCode` stores a short scrubbed marker (`rate-limited`,
-`blocked-by-admin`, `chat-missing`, `timeout`, `send-failed`) — never a Telegram
-payload, never ticket text.
+That model is the right *shape* — one row per target, status-guarded claim,
+attempts, backoff, `safeErrorCode`. But it is foreign-keyed to a `SystemLog` row
+and its target is a `LogTopic` inside the Telegram log group. Reusing it would
+mean fabricating a system log for every support ticket and modelling an
+administrator as a topic. Both are lies that would then have to be maintained,
+so the shape is copied and the model is not.
+
+### Documented: no retroactive fan-out
+
+Obligations are materialized when the intent is **first claimed**, not when the
+ticket is written — a ticket write must not depend on reading the administrator
+table, and the API has no business knowing who the administrators are.
+
+The consequence is deliberate: **an administrator added after an event was first
+picked up gets no obligation for it.** Promoting someone notifies them about
+what happens next, not about the backlog. Expanding against the live
+administrator set on every retry would flood a new administrator with old
+tickets on their first day, and would make "was this event delivered?"
+unanswerable, because the answer would depend on when it was asked.
+
+### No chat id is stored
+
+The obligation points at the `Admin` row; the chat id is read from it at send
+time and lives only in memory. Storing it would put it in every backup, every
+query result and every dump of that table, and it would go stale.
+
+### What may appear in a notification log
+
+Only: the intent id, the stable event code, a classified failure code, an
+attempt count, and aggregate counts.
+
+Never: a raw Telegram error, a chat id, a username, a ticket subject, a ticket
+message, attachment metadata, a full ticket uuid, or an administrator id.
+
+A Telegram error string is arbitrary text written by a third party and can
+contain any of those. Path-based redaction in the logger cannot help — it can
+drop a field named `token`, but it cannot find an unknown substring inside a
+field named `error`. So the raw error never reaches the logger at all;
+`supportNotificationErrorCode` classifies it into one of `rate-limited`,
+`blocked-by-admin`, `chat-missing`, `timeout` or `send-failed`, and that code is
+what is stored and logged.
+
+### Who runs delivery
+
+The Bot process, started once from `apps/bot/src/index.ts` after the grammY
+`Api` exists, after the database connection has been attempted and after the
+shutdown handlers are armed. It runs one bounded tick immediately — a backlog
+left by a process that died is exactly what a restart should clear, not
+something to leave sitting for a full interval — and then sweeps every minute.
+
+The API never imports grammY and never calls Telegram. It writes intents; the
+Bot delivers them. That is the only reason an API-created ticket reaches an
+administrator at all.
 
 ## What is not here
 

@@ -451,23 +451,25 @@ enum SettingType {
 // =============================================================================
 
 model Admin {
-  id                   String                  @id @default(uuid())
-  telegramId           BigInt                  @unique
+  id                   String                         @id @default(uuid())
+  telegramId           BigInt                         @unique
   username             String?
   firstName            String?
   lastName             String?
   role                 AdminRole
-  isActive             Boolean                 @default(true)
+  isActive             Boolean                        @default(true)
   addedByAdminId       String?
-  addedByAdmin         Admin?                  @relation("AdminAddedBy", fields: [addedByAdminId], references: [id])
-  addedAdmins          Admin[]                 @relation("AdminAddedBy")
+  addedByAdmin         Admin?                         @relation("AdminAddedBy", fields: [addedByAdminId], references: [id])
+  addedAdmins          Admin[]                        @relation("AdminAddedBy")
   permissions          AdminPermission[]
   supportMessages      SupportMessage[]
-  closedSupportTickets SupportTicket[]         @relation("SupportTicketClosedBy")
+  closedSupportTickets SupportTicket[]                @relation("SupportTicketClosedBy")
   // Admin Service Operations: lifecycle/note audit rows this admin performed.
-  serviceOperations    AdminServiceOperation[] @relation("AdminServiceOperationActor")
-  createdAt            DateTime                @default(now())
-  updatedAt            DateTime                @updatedAt
+  serviceOperations    AdminServiceOperation[]        @relation("AdminServiceOperationActor")
+  // Support notifications: this admin's per-event delivery obligations.
+  supportNotifications SupportNotificationRecipient[]
+  createdAt            DateTime                       @default(now())
+  updatedAt            DateTime                       @updatedAt
 
   @@index([role])
 }
@@ -2208,6 +2210,17 @@ enum SupportNotificationStatus {
   FAILED
 }
 
+/// SKIPPED is terminal but not a failure: the administrator was deactivated
+/// between the fan-out and the send, so there is nobody to deliver to and
+/// retrying would never succeed.
+enum SupportRecipientStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
 model SupportNotificationIntent {
   id String @id @default(uuid())
 
@@ -2240,10 +2253,71 @@ model SupportNotificationIntent {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  recipients SupportNotificationRecipient[]
+
   @@unique([messageId, kind])
   @@index([status, nextAttemptAt])
   @@index([status, claimedAt])
   @@index([ticketId])
+}
+
+// =============================================================================
+// One durable delivery obligation per administrator.
+//
+// The intent says an event happened. It does not say whether Ali heard about
+// it. Marking the whole intent SENT once ANY administrator was reached made one
+// administrator's success erase every other administrator's failure — the
+// contract is that active administrators are notified, not that somebody was.
+//
+// WHY NOT SystemLogDelivery. That model is the right SHAPE — one row per
+// target, status-guarded claim, attempts, backoff, safeErrorCode — but it is
+// foreign-keyed to a SystemLog row and its target is a LogTopic inside the
+// Telegram log group. Reusing it would mean fabricating a SystemLog for every
+// support ticket and modelling an administrator as a topic. Both are lies that
+// would then have to be maintained, so the SHAPE is copied and the model is
+// not.
+//
+// NO CHAT ID IS STORED. The row points at the Admin; the chat id is read from
+// that row at send time. Copying the id here would put it in every backup,
+// every query result and every debug dump of this table, and would also go
+// stale the moment an administrator's Telegram account changes.
+//
+// FAN-OUT IS MATERIALIZED WHEN THE INTENT IS FIRST CLAIMED, not when the ticket
+// is written: a ticket write must not depend on reading the administrator
+// table. The consequence is deliberate and documented — an administrator added
+// AFTER an event was first picked up gets no obligation for it, so promoting
+// someone does not flood them with the backlog.
+// =============================================================================
+model SupportNotificationRecipient {
+  id String @id @default(uuid())
+
+  intentId String
+  intent   SupportNotificationIntent @relation(fields: [intentId], references: [id], onDelete: Cascade)
+
+  /// The administrator this obligation is for. Cascades: a deleted
+  /// administrator has no obligation left to satisfy.
+  adminId String
+  admin   Admin  @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  status   SupportRecipientStatus @default(PENDING)
+  attempts Int                    @default(0)
+
+  /// Short scrubbed marker only — never a Telegram payload, never ticket text.
+  safeErrorCode String?
+
+  nextAttemptAt DateTime?
+  claimedAt     DateTime?
+  sentAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One obligation per administrator per event. This is what makes a retry
+  /// skip the recipients that already succeeded.
+  @@unique([intentId, adminId])
+  @@index([status, nextAttemptAt])
+  @@index([status, claimedAt])
+  @@index([intentId, status])
 }
 
 // =============================================================================

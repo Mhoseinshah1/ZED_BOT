@@ -9,7 +9,6 @@ import {
   type User,
 } from "@zedbot/database";
 import {
-  errorMessage,
   isSupportAttachmentType,
   isSupportTicketCategory,
   isSupportTicketOrigin,
@@ -22,9 +21,6 @@ import {
   ticketShortId,
 } from "@zedbot/shared";
 import {
-  claimIntentForTicket,
-  markIntentFailed,
-  markIntentSent,
   normalizeMessage,
   normalizeSubject,
   recordIntent,
@@ -768,75 +764,26 @@ export async function renderAdminTicketNotification(
 }
 
 /**
- * Deliver the pending intent for this ticket NOW, and report admins reached.
+ * The single immediate-delivery entry point, kept as a thin re-export.
  *
- * The intent already exists — it was written in the same transaction as the
- * message — so this does not DECIDE to notify, it only tries to be quicker than
- * the sweep. It claims first: if the sweep got there already the claim takes
- * nothing and this returns 0 without sending, rather than telling every admin
- * twice.
- *
- * Never throws. The mutation that caused this is committed, and the intent
- * guarantees another attempt; failing the caller here would turn a delayed
- * notification into a failed ticket.
+ * The claim/fan-out/settle cycle lives in support-notification.service, which
+ * imports THIS module for rendering — so the dependency runs one way and these
+ * two wrappers exist only to keep every existing call site unchanged.
  */
-async function deliverTicketNotification(
-  api: DeliverySendApi,
-  ticketId: string,
-  kind: SupportNotificationKind,
-): Promise<number> {
-  let reached = 0;
-  try {
-    const intent = await claimIntentForTicket(ticketId, kind);
-    if (intent === null) {
-      return 0;
-    }
-    const rendered = await renderAdminTicketNotification(ticketId, kind);
-    if (rendered === null) {
-      await markIntentSent(intent.id, 0);
-      return 0;
-    }
-    let lastError: unknown = null;
-    for (const chatId of rendered.adminChatIds) {
-      try {
-        await api.sendMessage(chatId, rendered.text, { reply_markup: rendered.keyboard });
-        reached += 1;
-      } catch (err) {
-        lastError = err;
-        logger.warn("support ticket admin notification failed", {
-          ticketId,
-          error: errorMessage(err),
-        });
-      }
-    }
-    if (reached > 0 || rendered.adminChatIds.length === 0) {
-      await markIntentSent(intent.id, reached);
-    } else {
-      // Left PENDING with backoff: the sweep will try again rather than this
-      // being the only chance anyone had to hear about the ticket.
-      await markIntentFailed(intent.id, intent.attempts, supportNotificationErrorCode(lastError));
-    }
-  } catch (err) {
-    logger.warn("support ticket admin notification failed", {
-      ticketId,
-      error: errorMessage(err),
-    });
-  }
-  return reached;
-}
-
 export async function notifyAdminsAboutNewTicket(
   api: DeliverySendApi,
   ticketId: string,
 ): Promise<number> {
-  return deliverTicketNotification(api, ticketId, "support.ticket_created");
+  const { deliverTicketNotificationNow } = await import("./support-notification.service.js");
+  return deliverTicketNotificationNow(api, ticketId, "support.ticket_created");
 }
 
 export async function notifyAdminsAboutUserReply(
   api: DeliverySendApi,
   ticketId: string,
 ): Promise<number> {
-  return deliverTicketNotification(api, ticketId, "support.user_replied");
+  const { deliverTicketNotificationNow } = await import("./support-notification.service.js");
+  return deliverTicketNotificationNow(api, ticketId, "support.user_replied");
 }
 
 /** Sends one text + view button to the ticket's owner; returns success. */
@@ -866,9 +813,12 @@ async function notifyTicketUser(
     });
     return true;
   } catch (err) {
+    // Classified code only. The ticket uuid identifies the user's own ticket
+    // and the raw error can echo their chat id or the message text; neither
+    // belongs in an operational log, and no path-based redaction can find an
+    // arbitrary substring inside an arbitrary error string.
     logger.warn("support ticket user notification failed", {
-      ticketId,
-      error: errorMessage(err),
+      code: supportNotificationErrorCode(err),
     });
     return false;
   }

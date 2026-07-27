@@ -7,6 +7,7 @@ import { logger } from "./core/logger.js";
 import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
 import { startReferralExecuteConsumer } from "./services/referral-execute-consumer.js";
 import { startStarsSubscriptionConsumer } from "./services/stars-subscription-consumer.js";
+import { startSupportNotificationLoop } from "./services/support-notification.service.js";
 import { runningGitSha } from "./services/backup-health.service.js";
 import { startCheckoutInputRetentionLoop } from "./services/checkout-customer-input.service.js";
 import { startFreeTrialLoop } from "./services/free-trial.service.js";
@@ -130,6 +131,22 @@ async function run(botToken: string): Promise<void> {
 
   // Hourly redaction of dead-end pre-settlement customer-input rows (same never-throws loop contract).
   startCheckoutInputRetentionLoop();
+
+  // Durable support-notification delivery. This is the ONLY thing that can turn
+  // an intent written by the API — which has no bot token and never talks to
+  // Telegram — into a message an administrator actually receives, and it is
+  // what recovers a backlog left by a process that died mid-fan-out.
+  //
+  // Started HERE, after the Api exists, after the database connection has been
+  // attempted and after the shutdown handlers are registered, so a SIGTERM
+  // arriving during the first tick is handled rather than racing an unarmed
+  // handler. It runs one bounded tick immediately — a backlog from the previous
+  // process is exactly what a restart should clear, not something to leave
+  // sitting for a full interval — then sweeps periodically. The function
+  // latches, so a second call anywhere is a no-op; its timer is unref'd so it
+  // never holds the process open; and a failed tick is swallowed so it cannot
+  // stop the ones after it.
+  startSupportNotificationLoop(bot.api);
 
   await bot.start({
     onStart: (botInfo) => {
