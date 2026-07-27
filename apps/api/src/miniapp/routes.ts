@@ -66,7 +66,7 @@ const authLimiter = new FixedWindowRateLimiter(miniAppAuthRateLimit, AUTH_RATE_W
 
 /** Recent-activity slice on the dashboard. Fixed, not client-controlled. */
 const DASHBOARD_TRANSACTION_COUNT = 5;
-const DASHBOARD_SERVICE_COUNT = 3;
+const DASHBOARD_SERVICE_COUNT = 5;
 
 type ErrorCode =
   | "INVALID_INIT_DATA"
@@ -260,7 +260,27 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
       if (user === undefined) {
         return fail(reply, 401, "NOT_AUTHENTICATED");
       }
-      return reply.send({ ok: true, user: toMiniAppUser(user) });
+      try {
+        // COUNTED in the database, never derived from a fetched list: a user
+        // with hundreds of services must not cause hundreds of rows to be
+        // loaded so two numbers can be counted in JavaScript. Both counts use
+        // the same visibility filter as every other service read, so a
+        // soft-deleted or terminally DELETED service is invisible here too.
+        const [total, active] = await Promise.all([
+          prisma.service.count({ where: ownedVisibleServices(user.id) }),
+          prisma.service.count({
+            where: { ...ownedVisibleServices(user.id), status: ServiceStatus.ACTIVE },
+          }),
+        ]);
+        return reply.send({
+          ok: true,
+          user: toMiniAppUser(user),
+          services: { active, total },
+        });
+      } catch (err) {
+        logger.error("mini app profile read failed", { error: errorMessage(err) });
+        return fail(reply, 503, "INTERNAL");
+      }
     });
 
     secured.get("/dashboard", async (request, reply) => {
@@ -311,14 +331,29 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
           totalServices += row._count._all;
         }
 
+        const recent = recentServices.map((service) => toMiniAppServiceSummary(service, now.getTime()));
+
         return reply.send({
           ok: true,
+          // WHEN THIS RESPONSE WAS BUILT. Not a data timestamp — it exists so a
+          // client can tell a stale cached screen from a live one, and so an
+          // operator reading a bug report knows when the numbers were taken.
+          serverTimestamp: now.toISOString(),
+          // HOW FRESH THE SERVICE DATA IS, stated conservatively: the OLDEST
+          // `updatedAt` among the services in this response. The whole slice is
+          // therefore at least this fresh, which is the claim a reader can
+          // safely act on; reporting the newest instead would let one
+          // just-touched row vouch for four stale ones.
+          //
+          // This is DATABASE freshness. Nothing here calls a panel, so nothing
+          // here can speak for the panel's own state.
+          dataFreshnessTimestamp: oldestSyncTimestamp(recentServices, now),
           user: toMiniAppUser(user),
           services: {
             total: totalServices,
             byStatus,
             expiringWithin7Days: expiringSoon,
-            recent: recentServices.map(toMiniAppServiceSummary),
+            recent,
           },
           wallet: {
             balanceToman: user.balanceToman,
@@ -358,9 +393,14 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
             select: SERVICE_SUMMARY_SELECT,
           });
           const items = rows.slice(0, page.size);
+          // ONE `now` for the whole page, and passed EXPLICITLY: a bare
+          // `.map(toMiniAppServiceSummary)` would hand the serializer the array
+          // INDEX as its clock, which silently turns "10 days left" into
+          // "20672 days left" for the first row.
+          const nowMs = Date.now();
           return reply.send({
             ok: true,
-            items: items.map(toMiniAppServiceSummary),
+            items: items.map((service) => toMiniAppServiceSummary(service, nowMs)),
             nextCursor: nextCursorFor("services", rows, items, page.size),
           });
         } catch (err) {
@@ -444,6 +484,22 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
 // --- shared query pieces -----------------------------------------------------
 
 /**
+ * The conservative freshness of a set of service rows.
+ *
+ * The OLDEST write among them, so the statement "everything in this response is
+ * at least this fresh" is true of every row rather than of the luckiest one.
+ * With no services there is nothing whose age could be understated, so the
+ * response's own generation time is the honest answer.
+ */
+function oldestSyncTimestamp(rows: Array<{ updatedAt: Date }>, fallback: Date): string {
+  let oldest = fallback.getTime();
+  for (const row of rows) {
+    oldest = Math.min(oldest, row.updatedAt.getTime());
+  }
+  return new Date(oldest).toISOString();
+}
+
+/**
  * The ONE visibility filter every service read uses.
  *
  * Deletion is recorded two ways in this schema — the `deletedAt` timestamp and
@@ -468,6 +524,7 @@ const SERVICE_SUMMARY_SELECT = {
   status: true,
   productNameSnapshot: true,
   panelNameSnapshot: true,
+  serviceLocation: true,
   volumeBytes: true,
   usedBytes: true,
   remainingBytes: true,
@@ -475,13 +532,15 @@ const SERVICE_SUMMARY_SELECT = {
   startsAt: true,
   expiresAt: true,
   createdAt: true,
+  // The row's own last write — the only freshness this surface can honestly
+  // report, since nothing here calls a panel.
+  updatedAt: true,
 } satisfies Prisma.ServiceSelect;
 
 const SERVICE_DETAIL_SELECT = {
   ...SERVICE_SUMMARY_SELECT,
   userNote: true,
   source: true,
-  serviceLocation: true,
   firstConnectedAt: true,
   lastConnectedAt: true,
   lastSubscriptionUpdateAt: true,

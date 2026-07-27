@@ -85,6 +85,7 @@ export interface MiniAppServiceSummarySource {
   status: ServiceStatus;
   productNameSnapshot: string | null;
   panelNameSnapshot: string | null;
+  serviceLocation: string;
   volumeBytes: bigint;
   usedBytes: bigint;
   remainingBytes: bigint;
@@ -92,6 +93,33 @@ export interface MiniAppServiceSummarySource {
   startsAt: Date;
   expiresAt: Date | null;
   createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * Whole days left before a service expires.
+ *
+ * Three cases, defined once so the list, the detail and the dashboard cannot
+ * disagree about what "0" means:
+ *
+ *   - NEVER EXPIRES (`expiresAt === null`, i.e. unlimited duration) → `null`.
+ *     Not `0` and not a huge number: the field genuinely does not apply, and a
+ *     numeric answer would be rendered as a countdown that never moves.
+ *   - ALREADY EXPIRED → `0`. Never negative — "how much is left" is not a
+ *     debt, and a negative number invites a UI to render "-3 days remaining".
+ *   - IN THE FUTURE → rounded UP. A service expiring in three hours has one
+ *     day left, not zero; rounding down would make it indistinguishable from
+ *     one that already expired.
+ */
+export function remainingDaysUntil(expiresAt: Date | null, nowMs: number): number | null {
+  if (expiresAt === null) {
+    return null;
+  }
+  const remainingMs = expiresAt.getTime() - nowMs;
+  if (remainingMs <= 0) {
+    return 0;
+  }
+  return Math.ceil(remainingMs / (24 * 60 * 60 * 1000));
 }
 
 export interface MiniAppServiceSummaryDto {
@@ -105,17 +133,31 @@ export interface MiniAppServiceSummaryDto {
   status: ServiceStatus;
   productName: string | null;
   panelName: string | null;
+  /** Which location set the plan covers. An enum label, not an address. */
+  location: string;
   volumeBytes: string;
   usedBytes: string;
   remainingBytes: string;
   durationDays: number;
+  /** Whole days left; `null` when the service never expires. */
+  remainingDays: number | null;
   startsAt: string;
   expiresAt: string | null;
   createdAt: string;
+  /**
+   * When THIS DATABASE ROW was last written.
+   *
+   * Deliberately not called "last panel sync": it is the freshness of what we
+   * hold, which is the only thing this read-only surface can honestly report.
+   * Nothing here calls a panel, so nothing here knows when the panel last
+   * changed.
+   */
+  lastSyncedAt: string;
 }
 
 export function toMiniAppServiceSummary(
   service: MiniAppServiceSummarySource,
+  nowMs: number = Date.now(),
 ): MiniAppServiceSummaryDto {
   return {
     id: serviceShortId(service),
@@ -123,20 +165,22 @@ export function toMiniAppServiceSummary(
     status: service.status,
     productName: service.productNameSnapshot,
     panelName: service.panelNameSnapshot,
+    location: service.serviceLocation,
     volumeBytes: service.volumeBytes.toString(),
     usedBytes: service.usedBytes.toString(),
     remainingBytes: service.remainingBytes.toString(),
     durationDays: service.durationDays,
+    remainingDays: remainingDaysUntil(service.expiresAt, nowMs),
     startsAt: service.startsAt.toISOString(),
     expiresAt: service.expiresAt === null ? null : service.expiresAt.toISOString(),
     createdAt: service.createdAt.toISOString(),
+    lastSyncedAt: service.updatedAt.toISOString(),
   };
 }
 
 export interface MiniAppServiceDetailSource extends MiniAppServiceSummarySource {
   userNote: string | null;
   source: string;
-  serviceLocation: string;
   firstConnectedAt: Date | null;
   lastConnectedAt: Date | null;
   lastSubscriptionUpdateAt: Date | null;
@@ -146,7 +190,6 @@ export interface MiniAppServiceDetailDto extends MiniAppServiceSummaryDto {
   /** The BUYER's own note, not the internal `zedbot order:...` panel marker. */
   userNote: string | null;
   source: string;
-  location: string;
   firstConnectedAt: string | null;
   lastConnectedAt: string | null;
   lastSubscriptionUpdateAt: string | null;
@@ -154,12 +197,14 @@ export interface MiniAppServiceDetailDto extends MiniAppServiceSummaryDto {
 
 export function toMiniAppServiceDetail(
   service: MiniAppServiceDetailSource,
+  nowMs: number = Date.now(),
 ): MiniAppServiceDetailDto {
   return {
-    ...toMiniAppServiceSummary(service),
+    // `location`, `remainingDays` and `lastSyncedAt` come from the summary —
+    // the detail is a superset, so the two views can never disagree.
+    ...toMiniAppServiceSummary(service, nowMs),
     userNote: service.userNote,
     source: service.source,
-    location: service.serviceLocation,
     firstConnectedAt:
       service.firstConnectedAt === null ? null : service.firstConnectedAt.toISOString(),
     lastConnectedAt:
