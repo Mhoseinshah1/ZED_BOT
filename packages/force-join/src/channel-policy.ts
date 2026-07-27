@@ -268,17 +268,57 @@ export async function recordChannelHealthFailure(
   }
 }
 
-/** Clears the bounded failure window after any successful verification. */
+/**
+ * Clears the bounded failure window after any successful verification.
+ *
+ * SERIALIZED AGAINST RETIREMENT, which is the whole point of the transaction
+ * here. Success and retirement both rewrite the same health fields from
+ * different concurrent requests, and an unordered pair produces a state that
+ * is not merely stale but self-contradictory: a durable event saying the
+ * channel was retired after five sustained failures, next to a channel row
+ * saying there was never a failure window at all. An operator reading the two
+ * together cannot tell which is true.
+ *
+ * Both orderings are legitimate; what matters is that exactly one of them
+ * happens, and that each ends somewhere coherent:
+ *
+ *   SUCCESS FIRST — the failure window is cleared, and the retirement
+ *   transaction (which takes this same lock BEFORE reading the row) then sees
+ *   `healthFailureCount = 0`, recomputes, and does not retire. A channel that
+ *   just answered correctly is not retired for old failures, which is right.
+ *
+ *   RETIREMENT FIRST — the row is already inactive when this runs, and the
+ *   `isActive: true` guard makes the update match nothing. The retirement
+ *   metadata survives intact and the durable event still describes it
+ *   accurately. The channel is NOT reactivated and nothing here could
+ *   reactivate it: `isActive` is not in the `data` at all.
+ *
+ * The lock is the same advisory namespace every force-join configuration
+ * mutation takes, so this cannot deadlock against them — one lock, one order.
+ * It costs nothing on the hot path either: the caller only reaches this when
+ * its in-memory snapshot already showed a non-zero failure count, so a healthy
+ * channel never takes the lock.
+ *
+ * No setting is touched, so there is deliberately no cache invalidation here —
+ * only retirement can flip `force_join_enabled`, and that path already
+ * invalidates.
+ */
 export async function recordChannelHealthSuccess(id: string): Promise<void> {
   try {
-    await prisma.forceJoinChannel.updateMany({
-      where: { id, healthFailureCount: { gt: 0 } },
-      data: {
-        healthFailureCount: 0,
-        healthFailureFirstAt: null,
-        healthFailureLastAt: null,
-        unhealthyAt: null,
-      },
+    await prisma.$transaction(async (tx) => {
+      await lockForceJoinConfig(tx);
+      await tx.forceJoinChannel.updateMany({
+        // `isActive: true` is the guard that makes a LOST race harmless rather
+        // than destructive. `healthFailureCount > 0` merely avoids a pointless
+        // write on a channel with nothing to clear.
+        where: { id, isActive: true, healthFailureCount: { gt: 0 } },
+        data: {
+          healthFailureCount: 0,
+          healthFailureFirstAt: null,
+          healthFailureLastAt: null,
+          unhealthyAt: null,
+        },
+      });
     });
   } catch (err) {
     logger.warn("force-join: failed to clear channel health failures", {
