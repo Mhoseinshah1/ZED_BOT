@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -501,6 +501,32 @@ describe("Dockerfile workspace coverage", () => {
       const occurrences = dockerfile.split(line).length - 1;
       expect(occurrences, `${line} (expected in both install stages)`).toBe(2);
     }
+  });
+
+  it("every COPY source in the Dockerfile exists in the repository", () => {
+    // The image build resolves these paths; a typo produces a build that fails
+    // only in CI, minutes in. Sources coming from an earlier stage
+    // (--from=build) are produced by that stage rather than by the repo, so
+    // only the paths under the build context are checkable here — but those are
+    // exactly the manifest lines this file is about.
+    const missing: string[] = [];
+    for (const line of dockerfile.split("\n")) {
+      const match = /^COPY\s+(?!--from)(?:--chown=\S+\s+)?(.+)$/.exec(line.trim());
+      if (match === null) {
+        continue;
+      }
+      const parts = match[1].split(/\s+/);
+      // The last token is the destination.
+      for (const src of parts.slice(0, -1)) {
+        if (src.includes("*") || src === "." || src.startsWith("$")) {
+          continue;
+        }
+        if (!existsSync(path.join(repoRoot, src))) {
+          missing.push(src);
+        }
+      }
+    }
+    expect(missing, "Dockerfile COPY sources that do not exist").toEqual([]);
   });
 
   it("copies the built output of every member that produces one into Runtime", () => {

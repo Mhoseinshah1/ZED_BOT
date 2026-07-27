@@ -93,6 +93,19 @@ function fakeApi(behaviour: Record<string, "ok" | Error>) {
 const previouslyActive: string[] = [];
 
 beforeAll(async () => {
+  // SELF-HEAL FIRST. If a previous run of this file was killed between its
+  // deactivation and its restore, the set below would come back empty and the
+  // restore would become a permanent no-op — the database would stay with every
+  // administrator disabled, and every OTHER suite that needs one would fail
+  // somewhere unrelated. That happened. So an empty active set in a database
+  // that has administrators is treated as damage from a prior crash and
+  // repaired before anything else.
+  const total = await prisma.admin.count();
+  const activeCount = await prisma.admin.count({ where: { isActive: true } });
+  if (total > 0 && activeCount === 0) {
+    await prisma.admin.updateMany({ data: { isActive: true } });
+  }
+
   const active = await prisma.admin.findMany({ where: { isActive: true }, select: { id: true } });
   previouslyActive.push(...active.map((a) => a.id));
   await prisma.admin.updateMany({ where: { isActive: true }, data: { isActive: false } });
