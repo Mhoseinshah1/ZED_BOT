@@ -334,6 +334,62 @@ terminal `status = DELETED` — because an admin-terminated service carries the
 status without necessarily carrying the timestamp, and the bot has never shown
 those rows either.
 
+### 4.6 What each response actually says
+
+| Route | Carries |
+| --- | --- |
+| `GET /me` | the profile, plus `services: { active, total }` |
+| `GET /dashboard` | `serverTimestamp`, `dataFreshnessTimestamp`, balance, status counts, expiring-soon count, **5** recent services, 5 recent transactions |
+| `GET /services`, `/services/:publicId` | service summaries, the detail a superset of the summary |
+
+**The two timestamps are different questions** and are answered separately on
+purpose:
+
+- `serverTimestamp` — when the response was **generated**. It exists so a client
+  can tell a stale cached screen from a live one, and so a bug report carries
+  the moment its numbers were taken.
+- `dataFreshnessTimestamp` — the **oldest** `updatedAt` among the services in
+  the response. Stated conservatively so "everything here is at least this
+  fresh" is true of every row; reporting the newest instead would let one
+  just-touched row vouch for four stale ones. With no services in the slice
+  there is nothing whose age could be understated, so the response's own
+  generation time is the honest answer.
+
+Both are **database** freshness. Nothing in this surface calls a panel, so
+nothing here can speak for a panel's state, and `lastSyncedAt` on a service is
+named for what it is: when that row was last written here.
+
+`services.active` and `services.total` are `COUNT` queries under the same
+visibility filter as every other service read — never derived from a fetched
+list, because an account with hundreds of services must not load hundreds of
+rows so two numbers can be counted in JavaScript.
+
+**`remainingDays`** has three cases, defined once in the serializer so the list,
+the detail and the dashboard cannot disagree:
+
+| Case | Value | Why |
+| --- | --- | --- |
+| never expires (`expiresAt` null) | `null` | The field does not apply. A number would render as a countdown that never moves. |
+| already expired | `0` | Never negative — "how much is left" is not a debt. |
+| in the future | rounded **up** | Three hours left is one day, not zero; rounding down would make it indistinguishable from expired. |
+
+### 4.7 Getting back to the bot
+
+Read-only without a way out is a dead end: a user looks at an expiring service
+and has nowhere to go. So the frontend offers explicit actions for **buying**,
+**charging the wallet**, **renewing or managing a service** and **contacting
+support** — and each does exactly one thing: opens the bot.
+
+Nothing is reimplemented here. Those flows have pricing, stock, gates,
+notifications and an audit trail behind them, all of it in the bot, and a second
+copy in the Mini App would be a second source of truth that drifts.
+
+The link is built from `VITE_BOT_USERNAME`, validated as a public handle, with
+**no `?start=` payload** — that parameter is consumed by referral attribution,
+so a made-up value would be recorded as a referral code. When the handle is
+missing or malformed the actions render an explanatory line instead of a button:
+a dead button reads as a broken app.
+
 ---
 
 ## 5. The frontend

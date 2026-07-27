@@ -313,10 +313,44 @@ the configuration change** (`packages/force-join/src/ops-outbox.ts`): a
 The **worker** delivers them through the existing `SystemLog` →
 `SystemLogDelivery` → Telegram pipeline. Because a writer with no BullMQ
 connection cannot enqueue, `apps/worker/src/log-delivery-sweep.ts` re-enqueues
-owed rows on a fixed cadence — that sweep is also what recovers any delivery
-orphaned by a process dying between `COMMIT` and enqueue, or by Redis losing a
-delayed retry. The job id is derived from the delivery id, so re-enqueuing
-something already queued is a no-op rather than a double send.
+owed rows on a fixed cadence.
+
+### What delivery actually guarantees
+
+Three different guarantees live in this pipeline and they are not the same
+strength. Conflating them is how an operator ends up either trusting a lost
+alert or filing a bug about a duplicate one.
+
+| Stage | Guarantee | Why |
+| --- | --- | --- |
+| Durable record | **One** per committed retirement | The outbox row is written on the configuration transaction. It cannot exist without the retirement, and the retirement cannot commit without it. |
+| Job creation | **Idempotent** | The job id is derived from the delivery id (`logdel-<id>`), so re-enqueuing something already queued or delayed is a no-op. |
+| Terminal deliveries | **Never intentionally retried** | `SENT`, `DEAD_LETTER` and `SKIPPED` are excluded from the sweep, and the processor returns early on them. |
+| Telegram send | **At-least-once** | See below. A single Telegram message per alert is not promised. |
+
+The sweep recovers owed rows on this rule, and nothing else:
+
+| Status | Selected when | Reasoning |
+| --- | --- | --- |
+| `PENDING` | `createdAt` older than 30 s | Committed but, as far as we can tell, never enqueued — the API's outbox, or a crash between `COMMIT` and enqueue. The grace period keeps it from racing the writer that is enqueuing right now. |
+| `FAILED` | `nextAttemptAt` is due | A retry whose delayed job lived only in Redis. If that job still exists the id dedupe makes this a no-op. |
+| `SENDING` | `updatedAt` older than **10 minutes** | An abandoned claim: the worker died or Redis lost the job mid-send. |
+| `SENT` / `DEAD_LETTER` / `SKIPPED` | never | Terminal. |
+
+`SENDING` is keyed on `updatedAt` — the claim time — and never on `createdAt`,
+because a long-queued alert claimed one second ago is exactly the row that must
+not be disturbed. Ten minutes is an order of magnitude past any legitimate
+claim: the processor's Telegram call is hard-bounded by an AbortController at
+`TELEGRAM_API_TIMEOUT_MS`, whose ceiling is 60 s.
+
+**Why at-least-once, and no stronger.** If the worker dies after Telegram
+accepted the message but before the `SENT` status commits, the row is still
+`SENDING`. Ten minutes later the sweep hands it back and the message is sent a
+second time. That window cannot be closed — Telegram is not part of our
+transaction — so the honest statement is that an operational alert may arrive
+twice, and the system prefers that to losing one. The sweep itself never calls
+Telegram; it only re-enqueues, and the processor remains the sole owner of
+claiming, sending and status transitions.
 
 The process-local **alert sink** still exists, but only for the pre-retirement
 `force_join.channel_unverifiable` warning, which changes no configuration. The

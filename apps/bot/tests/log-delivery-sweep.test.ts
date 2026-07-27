@@ -1,10 +1,15 @@
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+
 import { LogDeliveryStatus, prisma } from "@zedbot/database";
+import { LOG_DELIVERY_JOB_NAME } from "@zedbot/shared";
 import type { Queue } from "bullmq";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 process.env.APP_SECRET ??= "log-delivery-sweep-tests-secret";
 
 import {
+  LOG_DELIVERY_SENDING_STALE_MS,
   LOG_DELIVERY_SWEEP_MIN_AGE_MS,
   sweepOrphanedLogDeliveries,
 } from "../../worker/src/log-delivery-sweep.js";
@@ -61,6 +66,11 @@ async function seedDelivery(input: {
   status: LogDeliveryStatus;
   ageMs: number;
   nextAttemptAt?: Date | null;
+  /**
+   * How long ago the row was last written — the CLAIM time for a SENDING row.
+   * Defaults to the row's own age, which is what an untouched row looks like.
+   */
+  claimedAgoMs?: number;
 }): Promise<string> {
   const log = await prisma.systemLog.create({
     data: {
@@ -83,6 +93,7 @@ async function seedDelivery(input: {
       status: input.status,
       nextAttemptAt: input.nextAttemptAt ?? null,
       createdAt: new Date(Date.now() - input.ageMs),
+      updatedAt: new Date(Date.now() - (input.claimedAgoMs ?? input.ageMs)),
     },
     select: { id: true },
   });
@@ -213,5 +224,194 @@ describe.runIf(hasDb)("orphaned log-delivery sweep", () => {
     const { queue, jobs } = fakeQueue();
     await sweepOrphanedLogDeliveries(queue);
     expect(sweptIds(jobs)).toContain(deliveryId);
+  });
+
+  // --- E1: abandoned SENDING claims ---------------------------------------
+  //
+  // SENDING is a CLAIM, not a resting state. The processor sets it, calls
+  // Telegram once (hard-bounded by an AbortController at <= 60s) and writes a
+  // terminal status. A row that sits in SENDING for ten minutes was abandoned
+  // — the worker died, or Redis lost the job — and the database still says the
+  // alert is owed while nothing is left to deliver it.
+
+  // E1-1 -----------------------------------------------------------------
+  it("E1-1: a RECENTLY claimed SENDING row is left alone", async () => {
+    // Old row, claimed a second ago: exactly the delivery being processed
+    // right now, which must not be handed to a second worker.
+    const inFlight = await seedDelivery({
+      status: LogDeliveryStatus.SENDING,
+      ageMs: ANCIENT_MS,
+      claimedAgoMs: 1_000,
+    });
+    // Just inside the threshold is still "recent".
+    const nearlyStale = await seedDelivery({
+      status: LogDeliveryStatus.SENDING,
+      ageMs: ANCIENT_MS,
+      claimedAgoMs: LOG_DELIVERY_SENDING_STALE_MS - 60_000,
+    });
+    const { queue, jobs } = fakeQueue();
+
+    await sweepOrphanedLogDeliveries(queue);
+
+    const ids = sweptIds(jobs);
+    expect(ids).not.toContain(inFlight);
+    expect(ids).not.toContain(nearlyStale);
+  });
+
+  // E1-2 -----------------------------------------------------------------
+  it("E1-2: a STALE SENDING row is re-enqueued, keyed on updatedAt not createdAt", async () => {
+    const abandoned = await seedDelivery({
+      status: LogDeliveryStatus.SENDING,
+      ageMs: ANCIENT_MS,
+      claimedAgoMs: LOG_DELIVERY_SENDING_STALE_MS + 60_000,
+    });
+    // A row CREATED long ago but claimed just now must still be spared — the
+    // decision is about the claim, not the row's age.
+    const freshlyClaimed = await seedDelivery({
+      status: LogDeliveryStatus.SENDING,
+      ageMs: ANCIENT_MS,
+      claimedAgoMs: 5_000,
+    });
+    const { queue, jobs } = fakeQueue();
+
+    await sweepOrphanedLogDeliveries(queue);
+
+    const ids = sweptIds(jobs);
+    expect(ids).toContain(abandoned);
+    expect(ids).not.toContain(freshlyClaimed);
+  });
+
+  // E1-3 -----------------------------------------------------------------
+  it("E1-3: recovery uses the same deterministic job id, so it cannot double-queue", async () => {
+    const abandoned = await seedDelivery({
+      status: LogDeliveryStatus.SENDING,
+      ageMs: ANCIENT_MS,
+      claimedAgoMs: LOG_DELIVERY_SENDING_STALE_MS + 60_000,
+    });
+    const { queue, jobs } = fakeQueue();
+
+    await sweepOrphanedLogDeliveries(queue);
+
+    const job = jobs.find((j) => (j.data as { deliveryId: string }).deliveryId === abandoned);
+    expect(job?.opts.jobId).toBe(`logdel-${abandoned}`);
+    expect(job?.name).toBe(LOG_DELIVERY_JOB_NAME);
+  });
+
+  // E1-4 -----------------------------------------------------------------
+  it("E1-4: a terminal row is never swept, however long ago it was written", async () => {
+    const seeded = await Promise.all(
+      [LogDeliveryStatus.SENT, LogDeliveryStatus.DEAD_LETTER, LogDeliveryStatus.SKIPPED].map(
+        (status) =>
+          seedDelivery({
+            status,
+            ageMs: ANCIENT_MS,
+            claimedAgoMs: LOG_DELIVERY_SENDING_STALE_MS * 100,
+          }),
+      ),
+    );
+    const { queue, jobs } = fakeQueue();
+
+    await sweepOrphanedLogDeliveries(queue);
+
+    const ids = sweptIds(jobs);
+    for (const id of seeded) {
+      expect(ids).not.toContain(id);
+    }
+  });
+
+  // E1-5 / E1-6 ----------------------------------------------------------
+  it("E1-5/6: a Redis failure leaves a stale SENDING row owed, and the next pass recovers it", async () => {
+    const abandoned = await seedDelivery({
+      status: LogDeliveryStatus.SENDING,
+      ageMs: ANCIENT_MS,
+      claimedAgoMs: LOG_DELIVERY_SENDING_STALE_MS + 60_000,
+    });
+    const broken = {
+      add() {
+        return Promise.reject(new Error("redis unavailable"));
+      },
+    } as unknown as Queue;
+
+    // The pass runs on a timer; it must not throw.
+    await expect(sweepOrphanedLogDeliveries(broken)).resolves.toBe(0);
+
+    // The sweep never mutates the row — only the processor owns status.
+    const row = await prisma.systemLogDelivery.findUnique({ where: { id: abandoned } });
+    expect(row?.status).toBe(LogDeliveryStatus.SENDING);
+
+    const { queue, jobs } = fakeQueue();
+    await sweepOrphanedLogDeliveries(queue);
+    expect(sweptIds(jobs)).toContain(abandoned);
+  });
+
+  // E1-7 -----------------------------------------------------------------
+  it("E1-7: the sweep never talks to Telegram — recovery goes through the processor's claim", async () => {
+    const abandoned = await seedDelivery({
+      status: LogDeliveryStatus.SENDING,
+      ageMs: ANCIENT_MS,
+      claimedAgoMs: LOG_DELIVERY_SENDING_STALE_MS + 60_000,
+    });
+    let telegramCalls = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      telegramCalls += 1;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const { queue, jobs } = fakeQueue();
+      await sweepOrphanedLogDeliveries(queue);
+      expect(sweptIds(jobs)).toContain(abandoned);
+      // Recovery is "hand the id back to the queue" and nothing else.
+      expect(telegramCalls).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    // And the processor — not the sweep — is what claims work: its CAS accepts
+    // SENDING precisely so an abandoned claim can be retried.
+    const processorSource = await readFile(
+      fileURLToPath(new URL("../../worker/src/log-delivery.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(processorSource).toMatch(/idempotency CAS/);
+    expect(processorSource).toMatch(/LogDeliveryStatus\.SENDING,?\s*\]/);
+    // The sweep itself contains no send path at all.
+    const sweepSource = await readFile(
+      fileURLToPath(new URL("../../worker/src/log-delivery-sweep.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(sweepSource).not.toMatch(/sendTelegramMessage|api\.telegram\.org/);
+  });
+
+  // E1-8 -----------------------------------------------------------------
+  it("E1-8: the delivery guarantee is documented as at-least-once, never exactly-once", async () => {
+    const sources = await Promise.all(
+      [
+        "../../worker/src/log-delivery-sweep.ts",
+        "../../../docs/mandatory-channel-membership.md",
+      ].map((rel) => readFile(fileURLToPath(new URL(rel, import.meta.url)), "utf8")),
+    );
+    for (const text of sources) {
+      // Claiming exactly-once over a network we cannot transact with would be
+      // false, and an operator debugging a duplicate alert would be misled.
+      expect(text.toLowerCase()).not.toMatch(/exactly[- ]once/);
+    }
+    const [sweep, doc] = sources;
+    expect(sweep).toMatch(/AT-LEAST-ONCE/);
+    expect(doc.toLowerCase()).toMatch(/at-least-once/);
+    // And the ambiguous window is named, not glossed over. Comment prefixes
+    // and wrapping are stripped so the assertion is about the STATEMENT rather
+    // than about where the line happens to break.
+    const prose = (text: string): string =>
+      text
+        .replace(/^\s*(\/\/|\*)\s?/gm, "")
+        .replace(/\s+/g, " ")
+        .toLowerCase();
+    for (const text of [prose(sweep), prose(doc)]) {
+      expect(text).toMatch(/before the `sent` status commits/);
+    }
+    // Both say plainly that one message per alert is not promised.
+    expect(prose(sweep)).toMatch(/a single delivery per alert is not promised/);
+    expect(prose(doc)).toMatch(/a single telegram message per alert is not promised/);
   });
 });
