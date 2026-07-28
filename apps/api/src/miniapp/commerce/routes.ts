@@ -27,7 +27,6 @@ import {
   normalizeServiceNote,
   validateServiceUsername,
 } from "@zedbot/shared";
-import type { CheckoutDraft } from "@zedbot/bot/core/session";
 import {
   getPurchasablePanelByShortId,
   isProductVisible,

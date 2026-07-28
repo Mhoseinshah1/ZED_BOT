@@ -49,7 +49,6 @@ import {
   createWalletTopupCheckout,
   walletTopupLimits,
 } from "@zedbot/bot/services/wallet-topup.service";
-import { isWalletPaymentEnabled } from "@zedbot/bot/services/payment-settings.service";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import { supportFailureLog } from "../support-errors.js";
