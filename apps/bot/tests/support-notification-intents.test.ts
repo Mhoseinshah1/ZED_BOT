@@ -86,6 +86,12 @@ function domainCreate(over: Record<string, unknown> = {}): Parameters<typeof cre
   } as Parameters<typeof createTicket>[1];
 }
 
+/** This ticket's intent status — the scoped way to observe a global sweep. */
+async function statusOf(ticketId: string): Promise<string> {
+  const row = await prisma.supportNotificationIntent.findFirstOrThrow({ where: { ticketId } });
+  return row.status;
+}
+
 describe("support notification intents", () => {
   // S3-1 ----------------------------------------------------------------------
   it("S3-1: a created ticket always has exactly one intent, bound to its message", async () => {
@@ -245,19 +251,26 @@ describe("support notification intents", () => {
 
     // A FRESH claim is not stale: recovering it would race the worker that is
     // still sending, which is the one path that can produce a duplicate.
-    expect(await recoverStaleClaims(), "fresh claim untouched").toBe(0);
+    //
+    // ASSERTED ON THIS ROW, NOT ON THE RETURN VALUE. `recoverStaleClaims()` is
+    // global by design — it recovers every abandoned claim in the database —
+    // so its count includes whatever other suites left behind, and comparing
+    // it to an exact number only passes on a database this file happens to
+    // have to itself. The property under test is about THIS claim.
+    await recoverStaleClaims();
+    expect(await statusOf(made.value.ticket.id), "fresh claim untouched").toBe("SENDING");
 
     // Age it past the threshold.
     await prisma.supportNotificationIntent.updateMany({
       where: { ticketId: made.value.ticket.id },
       data: { claimedAt: new Date(Date.now() - NOTIFICATION_STALE_CLAIM_MS - 1000) },
     });
-    expect(await recoverStaleClaims(), "abandoned claim returned").toBe(1);
+    expect(await recoverStaleClaims(), "abandoned claim returned").toBeGreaterThanOrEqual(1);
 
     const row = await prisma.supportNotificationIntent.findFirstOrThrow({
       where: { ticketId: made.value.ticket.id },
     });
-    expect(row.status).toBe("PENDING");
+    expect(row.status, "abandoned claim returned to PENDING").toBe("PENDING");
     expect(row.claimedAt).toBeNull();
   });
 
@@ -286,7 +299,10 @@ describe("support notification intents", () => {
       await claimIntentForTicket(made.value.ticket.id, "support.ticket_created"),
       "terminal",
     ).toBeNull();
-    expect(await recoverStaleClaims(), "SENT is not a stale claim").toBe(0);
+    // Again scoped to this row rather than to a global count: a SENT intent
+    // must not be dragged back into play, whatever else the database holds.
+    await recoverStaleClaims();
+    expect(await statusOf(made.value.ticket.id), "SENT is not a stale claim").toBe("SENT");
   });
 
   // S3-11 ---------------------------------------------------------------------
