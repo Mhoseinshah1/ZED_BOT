@@ -1,7 +1,5 @@
-import { PanelStatus, Prisma, prisma, type Panel, type Service } from "@zedbot/database";
+import { PanelStatus, Prisma, prisma, type Panel } from "@zedbot/database";
 import {
-  MARZBAN_CAPABILITIES,
-  XUI_CAPABILITIES,
   type PanelCapability,
   type PanelDiagnosticCode,
   type ProvisioningReadinessResult,
