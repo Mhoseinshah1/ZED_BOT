@@ -164,6 +164,7 @@ export function App(): ReactNode {
           supportView.kind === "home" ? (
             <SupportScreen
               onOpenTickets={() => setSupportView({ kind: "list" })}
+              onOpenTicket={(ticketId) => setSupportView({ kind: "ticket", ticketId })}
               onNewTicket={() => setSupportView({ kind: "new" })}
             />
           ) : supportView.kind === "list" ? (

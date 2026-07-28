@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 
 import {
   createSupportTicket,
+  fetchServices,
   fetchSupportMessages,
   fetchSupportSummary,
   fetchSupportTicket,
@@ -10,6 +11,7 @@ import {
   replySupportTicket,
   type ApiFailure,
   type MessageDto,
+  type ServiceSummaryDto,
   type SupportSummaryDto,
   type TicketDetailDto,
   type TicketSummaryDto,
@@ -19,10 +21,13 @@ import { formatDate, toPersianDigits } from "./format";
 import {
   FAILURE_TEXT,
   lookup,
+  SERVICE_STATUS_TEXT,
   SUPPORT_CATEGORIES,
   SUPPORT_CATEGORY_TEXT,
+  SUPPORT_CATEGORY_WANTS_SERVICE,
   TICKET_SENDER_TEXT,
   TICKET_STATUS_TEXT,
+  TICKET_WAITING_TEXT,
   UI,
   type SupportCategoryCode,
 } from "./i18n";
@@ -137,21 +142,31 @@ function counter(value: string, max: number): string {
 
 export function SupportScreen(props: {
   onOpenTickets: () => void;
+  onOpenTicket: (id: string) => void;
   onNewTicket: () => void;
 }): ReactNode {
-  const { state, reload } = useResource<{ summary: SupportSummaryDto }>(fetchSupportSummary);
+  const { state, reload } = useResource<{
+    summary: SupportSummaryDto;
+    recentTickets: TicketSummaryDto[];
+  }>(fetchSupportSummary);
   if (state.phase === "loading") {
     return <Spinner label={UI.loading} />;
   }
   if (state.phase === "failed") {
     return <FailureScreen failure={state.failure} onRetry={reload} />;
   }
-  const summary = state.data.summary;
+  const { summary, recentTickets } = state.data;
   return (
     <>
+      {/*
+        FOUR COUNTS, and the two in the middle are the point. "Open" was one
+        number for two very different situations — a ticket the team owes a
+        reply on and a ticket waiting on the user — and the second is the only
+        one a person can act on. They are split so the screen can say so.
+      */}
       <div className="stats stats--pair">
         <Stat value={summary.total} label={UI.supportTicketsTotal} />
-        <Stat value={summary.open} label={UI.supportTicketsOpen} />
+        <Stat value={summary.waitingSupport} label={UI.supportTicketsWaitingSupport} />
         <Stat value={summary.waitingUser} label={UI.supportTicketsWaitingUser} />
         <Stat value={summary.closed} label={UI.supportTicketsClosed} />
       </div>
@@ -159,6 +174,21 @@ export function SupportScreen(props: {
       <button type="button" className="button" onClick={props.onNewTicket}>
         {UI.supportNewTicket}
       </button>
+
+      {/*
+        The newest few, from the SAME response as the counts, so the two halves
+        of this screen can never describe different moments.
+      */}
+      {recentTickets.length === 0 ? (
+        <p className="empty">{UI.supportEmpty}</p>
+      ) : (
+        <Card title={UI.supportRecentTitle}>
+          {recentTickets.map((ticket) => (
+            <TicketCard key={ticket.id} ticket={ticket} onOpen={props.onOpenTicket} />
+          ))}
+        </Card>
+      )}
+
       <button type="button" className="button button--ghost" onClick={props.onOpenTickets}>
         {UI.supportOpenList}
       </button>
@@ -233,6 +263,15 @@ export function SupportTicketsScreen(props: {
   );
 }
 
+/**
+ * One row of the list — and the ONLY component that renders a ticket summary,
+ * so the landing preview and the full list cannot show different fields.
+ *
+ * Every value here comes from the eight the server sends. There is nothing else
+ * to render: no database id, no panel, no origin. `waitingParty` is displayed
+ * as the server sent it rather than re-derived from `status`, and the linked
+ * service is a public id with a name — never an internal handle.
+ */
 function TicketCard(props: {
   ticket: TicketSummaryDto;
   onOpen: (id: string) => void;
@@ -248,6 +287,15 @@ function TicketCard(props: {
         {ticket.category === null ? "—" : lookup(SUPPORT_CATEGORY_TEXT, ticket.category)} ·{" "}
         {toPersianDigits(ticket.id)}
       </div>
+      {ticket.waitingParty === null ? null : (
+        <div className="txn__meta">{lookup(TICKET_WAITING_TEXT, ticket.waitingParty)}</div>
+      )}
+      {ticket.service === null ? null : (
+        <div className="usage__legend">
+          <span>{UI.supportRelatedService}</span>
+          <span>{serviceLabel(ticket.service)}</span>
+        </div>
+      )}
       <div className="usage__legend">
         <span>{UI.supportOpenedAt}</span>
         <span>{formatDate(ticket.createdAt)}</span>
@@ -258,6 +306,17 @@ function TicketCard(props: {
       </div>
     </button>
   );
+}
+
+/**
+ * How a linked service is named on screen.
+ *
+ * The account name the user logs in with, then its public id — the same pair
+ * the bot shows, so "which one is this?" has one answer across both surfaces.
+ * The id is a PUBLIC short id; the Mini App never receives the other kind.
+ */
+function serviceLabel(service: { id: string; label: string }): string {
+  return `${service.label} · ${toPersianDigits(service.id)}`;
 }
 
 // --- 3. ticket detail --------------------------------------------------------
@@ -312,8 +371,8 @@ export function SupportTicketScreen(props: { ticketId: string }): ReactNode {
           {ticket.closedAt === null ? null : (
             <Row label={UI.supportClosedAt} value={formatDate(ticket.closedAt)} />
           )}
-          {ticket.serviceId === null ? null : (
-            <Row label={UI.supportRelatedService} value={toPersianDigits(ticket.serviceId)} />
+          {ticket.service === null ? null : (
+            <Row label={UI.supportRelatedService} value={serviceLabel(ticket.service)} />
           )}
         </div>
       </Card>
@@ -375,12 +434,13 @@ export function SupportTicketScreen(props: { ticketId: string }): ReactNode {
  * put the oldest messages at the bottom of the thread.
  */
 function TicketThread(props: { ticketId: string }): ReactNode {
-  const [items, setItems] = useState<MessageDto[]>([]);
+  const [items, setItems] = useState<KeyedMessage[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [loading, setLoading] = useState(true);
   const { ticketId } = props;
+  const mintKey = useLocalKeys();
 
   const loadPage = useCallback(
     async (older: string | null, reset: boolean) => {
@@ -392,11 +452,16 @@ function TicketThread(props: { ticketId: string }): ReactNode {
         return;
       }
       setFailure(null);
-      setItems((previous) => (reset ? result.items : [...result.items, ...previous]));
+      // KEYS ARE MINTED HERE, as the page is ingested. The server sends no
+      // message identifier at all, and React only needs a value that is stable
+      // for as long as this list is mounted — which a counter is, and which a
+      // database id was never needed for.
+      const keyed = result.items.map((message) => ({ key: mintKey(), message }));
+      setItems((previous) => (reset ? keyed : [...keyed, ...previous]));
       setCursor(result.nextCursor);
       setDone(result.nextCursor === null);
     },
-    [ticketId],
+    [mintKey, ticketId],
   );
 
   useEffect(() => {
@@ -421,14 +486,45 @@ function TicketThread(props: { ticketId: string }): ReactNode {
         <p className="empty">{UI.supportNoMessages}</p>
       ) : (
         <div className="thread">
-          {items.map((message) => (
-            <MessageBubble key={message.key} message={message} />
+          {items.map((entry) => (
+            <MessageBubble key={entry.key} message={entry.message} />
           ))}
         </div>
       )}
       {failure !== null ? <InlineFailure failure={failure} /> : null}
     </Card>
   );
+}
+
+/** A message and the render key this component gave it. */
+interface KeyedMessage {
+  key: string;
+  message: MessageDto;
+}
+
+/**
+ * React keys for a list whose rows have no identifier.
+ *
+ * A monotonic counter in a ref. Every message ever ingested by THIS mounted
+ * thread gets a distinct key, and a key never changes once assigned — which is
+ * exactly and only what React asks of a key.
+ *
+ * The alternatives are all worse. A server-sent uuid prefix put part of a
+ * primary key on the wire for a purpose that never needed one. The array index
+ * would be wrong here specifically: older pages are PREPENDED, so every
+ * existing row's index shifts on each "load older" and React would treat the
+ * whole thread as changed. `createdAt` is not unique — two messages can share a
+ * millisecond — and a duplicate key silently drops a message from the DOM.
+ *
+ * A ref, not `useState`: keys are minted during a state update and must not
+ * schedule another render to do it.
+ */
+function useLocalKeys(): () => string {
+  const next = useRef(0);
+  return useCallback(() => {
+    next.current += 1;
+    return `m${next.current}`;
+  }, []);
 }
 
 function MessageBubble(props: { message: MessageDto }): ReactNode {
@@ -534,7 +630,14 @@ function ReplyBox(props: {
 
 // --- 5. the new-ticket wizard ------------------------------------------------
 
-type WizardStep = "category" | "subject" | "message" | "review";
+type WizardStep = "category" | "service" | "subject" | "message" | "review";
+
+/** What the wizard remembers about a chosen service — public fields only. */
+interface ChosenService {
+  /** The PUBLIC short id. This is what gets sent, and it is all we ever hold. */
+  id: string;
+  label: string;
+}
 
 export function SupportNewTicketScreen(props: {
   onCreated: (ticketId: string) => void;
@@ -542,6 +645,7 @@ export function SupportNewTicketScreen(props: {
 }): ReactNode {
   const [step, setStep] = useState<WizardStep>("category");
   const [category, setCategory] = useState<SupportCategoryCode | null>(null);
+  const [service, setService] = useState<ChosenService | null>(null);
   const [subject, setSubject] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -570,6 +674,10 @@ export function SupportNewTicketScreen(props: {
       subject: subject.trim(),
       message: message.trim(),
       category,
+      // The PUBLIC id, or nothing. The server resolves it against the
+      // authenticated user inside the transaction that writes the ticket, so
+      // what this app sends is a request to link, never the link itself.
+      serviceId: service === null ? null : service.id,
       clientRequestId: requestId.current(),
     });
     setBusy(false);
@@ -581,6 +689,14 @@ export function SupportNewTicketScreen(props: {
     setFailure(result);
     if (result.code === "IDEMPOTENCY_CONFLICT") {
       requestId.reset();
+    }
+    if (result.code === "INVALID_SERVICE") {
+      // The server refused the link — the service was deleted, retired or was
+      // never the caller's. Send them back to the step that can fix it rather
+      // than leaving a dead selection on the review screen. The key is NOT
+      // reset: the content is unchanged, and a retry of the same mutation must
+      // stay the same mutation.
+      setStep("service");
     }
   };
 
@@ -595,7 +711,11 @@ export function SupportNewTicketScreen(props: {
               className={`button ${category === code ? "" : "button--ghost"}`}
               onClick={() => {
                 setCategory(code);
-                setStep("subject");
+                // A different category can mean a different question about
+                // services, so a selection made under the old one is dropped
+                // rather than silently carried into the new flow.
+                setService(null);
+                setStep("service");
               }}
             >
               {lookup(SUPPORT_CATEGORY_TEXT, code)}
@@ -606,6 +726,25 @@ export function SupportNewTicketScreen(props: {
           {UI.supportCancel}
         </button>
       </>
+    );
+  }
+
+  if (step === "service") {
+    return (
+      <ServiceStep
+        category={category}
+        selected={service}
+        onContinue={(chosen) => {
+          setService(chosen);
+          setHint(null);
+          setFailure(null);
+          setStep("subject");
+        }}
+        onBack={() => {
+          setHint(null);
+          setStep("category");
+        }}
+      />
     );
   }
 
@@ -646,7 +785,7 @@ export function SupportNewTicketScreen(props: {
           className="button button--ghost"
           onClick={() => {
             setHint(null);
-            setStep("category");
+            setStep("service");
           }}
         >
           {UI.supportPrevious}
@@ -712,6 +851,17 @@ export function SupportNewTicketScreen(props: {
             label={UI.supportCategory}
             value={category === null ? "—" : lookup(SUPPORT_CATEGORY_TEXT, category)}
           />
+          {/*
+            The linked service, shown as TEXT. `label` is the account username —
+            data, not markup — and it is rendered as a child so React escapes
+            it; nothing here interpolates it into HTML, a URL or an attribute.
+            The id beside it is the public short id, which is also the only one
+            this app was ever given.
+          */}
+          <Row
+            label={UI.supportRelatedService}
+            value={service === null ? UI.supportServiceNone : serviceLabel(service)}
+          />
           <Row label={UI.supportSubjectLabel} value={subject.trim()} />
         </div>
         <p className="form__label">{UI.supportMessageLabel}</p>
@@ -746,7 +896,141 @@ export function SupportNewTicketScreen(props: {
   );
 }
 
-// --- 6. the idempotency key --------------------------------------------------
+// --- 6. the service step -----------------------------------------------------
+
+/**
+ * "Which service is this about?" — asked once, never demanded.
+ *
+ * TWO PRESENTATIONS, ONE STEP. For CONNECTION and SERVICE_MANAGEMENT the
+ * question is nearly always "which of my accounts", so the list is fetched and
+ * shown on arrival. For PAYMENT, ACCOUNT and OTHER it usually is not, so the
+ * step OFFERS the link instead: continue, or open the picker. Either way the
+ * skip is a first-class button, because the person most likely to need support
+ * is the one whose service is broken, missing or expired — refusing them a
+ * ticket until they name one would lock out exactly the wrong people.
+ *
+ * ONLY PUBLIC IDS EXIST HERE. `/services` returns the same 8-character public
+ * id the bot shows; this component never sees a database uuid, so it cannot
+ * send one, and the server resolves what it does send against the authenticated
+ * user inside the transaction that writes the ticket.
+ *
+ * A LOAD FAILURE IS NOT A DEAD END. If the list cannot be fetched the skip
+ * stays, so an outage in one read cannot block the support channel.
+ */
+function ServiceStep(props: {
+  category: SupportCategoryCode | null;
+  selected: ChosenService | null;
+  /** The ONE way forward. `null` means "no service", which is always allowed. */
+  onContinue: (service: ChosenService | null) => void;
+  onBack: () => void;
+}): ReactNode {
+  const wantsService =
+    props.category !== null && SUPPORT_CATEGORY_WANTS_SERVICE[props.category];
+  const [picking, setPicking] = useState(wantsService);
+  /**
+   * The DRAFT selection, owned here and handed up only on continue.
+   *
+   * Seeded from the wizard so returning to this step shows what was chosen, but
+   * kept local so tapping around — pick one, change your mind, clear it — never
+   * writes to the wizard until the person actually moves on.
+   */
+  const [chosen, setChosen] = useState<ChosenService | null>(props.selected);
+  const [items, setItems] = useState<ServiceSummaryDto[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const [failure, setFailure] = useState<ApiFailure | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const loadPage = useCallback(async (after: string | null, reset: boolean) => {
+    setLoading(true);
+    const result = await fetchServices(after);
+    setLoading(false);
+    if (!result.ok) {
+      setFailure(result);
+      return;
+    }
+    setFailure(null);
+    setItems((previous) => (reset ? result.items : [...previous, ...result.items]));
+    setCursor(result.nextCursor);
+    setDone(result.nextCursor === null);
+  }, []);
+
+  useEffect(() => {
+    if (picking) {
+      void loadPage(null, true);
+    }
+  }, [loadPage, picking]);
+
+  return (
+    <>
+      <Card title={UI.supportStepService}>
+        <p className="form__lead">{UI.supportServiceLead}</p>
+
+        {chosen === null ? null : (
+          <>
+            <div className="rows">
+              <Row label={UI.supportRelatedService} value={serviceLabel(chosen)} />
+            </div>
+            {/* Undoing a choice must be as easy as making one. */}
+            <button type="button" className="button button--ghost" onClick={() => setChosen(null)}>
+              {UI.supportServiceClear}
+            </button>
+          </>
+        )}
+
+        {!picking ? (
+          // The OFFER, for the categories that are usually not about one
+          // service. Nothing is fetched until the user asks for the list.
+          <button type="button" className="button button--ghost" onClick={() => setPicking(true)}>
+            {UI.supportServiceChoose}
+          </button>
+        ) : loading && items.length === 0 ? (
+          <Spinner label={UI.loading} />
+        ) : items.length === 0 && failure === null ? (
+          <p className="empty">{UI.supportServiceEmpty}</p>
+        ) : (
+          <>
+            {items.map((service) => (
+              <button
+                key={service.id}
+                type="button"
+                className={`button ${chosen?.id === service.id ? "" : "button--ghost"}`}
+                onClick={() => setChosen({ id: service.id, label: service.username })}
+              >
+                {`${service.username} · ${lookup(SERVICE_STATUS_TEXT, service.status)}`}
+              </button>
+            ))}
+            {!done && items.length > 0 ? (
+              <button
+                type="button"
+                className="button button--ghost"
+                disabled={loading}
+                onClick={() => void loadPage(cursor, false)}
+              >
+                {loading ? UI.loading : UI.loadMore}
+              </button>
+            ) : null}
+          </>
+        )}
+
+        {/*
+          A failed list does not block the ticket — it is reported inline and
+          the continue below still works, with no service attached.
+        */}
+        {failure !== null ? <InlineFailure failure={failure} /> : null}
+      </Card>
+
+      <button type="button" className="button" onClick={() => props.onContinue(chosen)}>
+        {chosen === null ? UI.supportServiceSkip : UI.supportNext}
+      </button>
+      <button type="button" className="button button--ghost" onClick={props.onBack}>
+        {UI.supportPrevious}
+      </button>
+    </>
+  );
+}
+
+// --- 7. the idempotency key --------------------------------------------------
 
 /**
  * One `clientRequestId` per submission, reused across every retry of it.

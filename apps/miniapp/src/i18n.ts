@@ -263,6 +263,39 @@ export const SUPPORT_CATEGORY_TEXT: Record<string, string> = {
 };
 
 /**
+ * Which categories are ABOUT a particular service.
+ *
+ * `true` puts the service picker in front of the user straight away — a
+ * connection problem or a service-management request is nearly always about one
+ * account, and asking afterwards means asking again. `false` still offers the
+ * link, just as an optional step: a payment question or an account question
+ * usually is not about one service, and sometimes is.
+ *
+ * Linking is NEVER required. A person who cannot tell which service is broken —
+ * or whose problem is that they have none — must still be able to reach
+ * support, so every path has a way past this step.
+ */
+export const SUPPORT_CATEGORY_WANTS_SERVICE: Record<SupportCategoryCode, boolean> = {
+  CONNECTION: true,
+  SERVICE_MANAGEMENT: true,
+  PAYMENT: false,
+  ACCOUNT: false,
+  OTHER: false,
+};
+
+/**
+ * Whose turn it is, as the server decided it.
+ *
+ * Rendered from `waitingParty` rather than re-derived from `status` here: the
+ * status vocabulary has legacy values, the mapping lives in the domain, and two
+ * copies of it would eventually disagree about a ticket old enough to matter.
+ */
+export const TICKET_WAITING_TEXT: Record<string, string> = {
+  USER: "در انتظار پاسخ شما",
+  SUPPORT: "در انتظار پشتیبانی",
+};
+
+/**
  * Ticket lifecycle states.
  *
  * `ANSWERED` is a legacy value the enum still carries; it means the same thing
@@ -360,12 +393,13 @@ export const UI = {
   navSupport: "پشتیبانی",
   supportTitle: "مرکز پشتیبانی",
   supportTicketsTotal: "همهٔ تیکت‌ها",
-  supportTicketsOpen: "تیکت‌های باز",
+  supportTicketsWaitingSupport: "در انتظار پشتیبانی",
   supportTicketsWaitingUser: "در انتظار پاسخ شما",
   supportTicketsClosed: "بسته‌شده",
   supportOpenList: "مشاهدهٔ تیکت‌ها",
   supportNewTicket: "ثبت تیکت جدید",
   supportListTitle: "تیکت‌های من",
+  supportRecentTitle: "آخرین تیکت‌ها",
   supportEmpty: "هنوز تیکتی ثبت نکرده‌اید.",
   supportTicketId: "شناسهٔ تیکت",
   supportNoSubject: "بدون موضوع",
@@ -397,10 +431,19 @@ export const UI = {
   // The wizard. One decision per step, then a review of exactly what will be
   // sent, then one explicit confirmation - nothing is submitted before it.
   supportWizardTitle: "ثبت تیکت جدید",
-  supportStepCategory: "گام ۱ از ۴ — دسته‌بندی مشکل",
-  supportStepSubject: "گام ۲ از ۴ — موضوع",
-  supportStepMessage: "گام ۳ از ۴ — شرح مشکل",
-  supportStepReview: "گام ۴ از ۴ — بازبینی و تأیید",
+  supportStepCategory: "گام ۱ از ۵ — دسته‌بندی مشکل",
+  supportStepService: "گام ۲ از ۵ — سرویس مرتبط",
+  supportStepSubject: "گام ۳ از ۵ — موضوع",
+  supportStepMessage: "گام ۴ از ۵ — شرح مشکل",
+  supportStepReview: "گام ۵ از ۵ — بازبینی و تأیید",
+  // The service step. Optional on every path: a person whose problem is that
+  // they have no working service must still be able to open a ticket.
+  supportServiceLead: "اگر این تیکت دربارهٔ یکی از سرویس‌های شماست، آن را انتخاب کنید.",
+  supportServiceChoose: "انتخاب سرویس مرتبط",
+  supportServiceSkip: "بدون انتخاب سرویس ادامه بده",
+  supportServiceNone: "هیچ سرویسی انتخاب نشده است",
+  supportServiceEmpty: "سرویسی برای انتخاب ندارید. بدون انتخاب سرویس ادامه دهید.",
+  supportServiceClear: "برداشتن سرویس انتخاب‌شده",
   supportSubjectLabel: "موضوع تیکت",
   supportSubjectPlaceholder: "موضوع را کوتاه بنویسید",
   supportMessageLabel: "شرح مشکل",

@@ -260,10 +260,17 @@ export interface PageDto<T> {
 
 export interface SupportSummaryDto {
   total: number;
-  /** Everything not CLOSED — "does anything still need me or the team?" */
-  open: number;
+  /** Waiting on the team. */
+  waitingSupport: number;
+  /** Waiting on the user — the count that should draw the eye. */
   waitingUser: number;
   closed: number;
+}
+
+/** The linked service on a ticket: a public id to open it by, and a name. */
+export interface TicketServiceDto {
+  id: string;
+  label: string;
 }
 
 export interface TicketSummaryDto {
@@ -276,23 +283,39 @@ export interface TicketSummaryDto {
   status: string;
   /** A category CODE, never a label. Persian text is chosen in `i18n.ts`. */
   category: string | null;
-  origin: string | null;
+  /**
+   * Who the conversation is waiting on. The SERVER decides this from the stored
+   * status, legacy values included, so this app renders it rather than mapping
+   * statuses a second time and eventually disagreeing.
+   */
+  waitingParty: "USER" | "SUPPORT" | null;
+  service: TicketServiceDto | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface TicketDetailDto extends TicketSummaryDto {
+  /** Where the ticket was raised. Detail only — a list row does not show it. */
+  origin: string | null;
   closedAt: string | null;
   /** The SERVER decides whether a reply box may exist at all. */
   canReply: boolean;
   /** True when some message in the thread carries a file. Presence only. */
   hasAttachments: boolean;
-  serviceId: string | null;
 }
 
+/**
+ * One message in a thread.
+ *
+ * IT HAS NO IDENTIFIER, on purpose. An earlier version carried a "display key"
+ * cut from the message's database uuid; it was only ever used as a React key,
+ * but a uuid prefix on the wire is still part of a primary key, and it is
+ * stable enough to correlate one response against another. Nothing in this app
+ * addresses a single message, so there is nothing for an id to be for. React
+ * keys are minted in memory as a page is ingested (`support.tsx`), which is all
+ * a key has ever needed to be.
+ */
 export interface MessageDto {
-  /** A display key derived from the uuid, not the uuid. */
-  key: string;
   senderType: string;
   text: string | null;
   hasAttachment: boolean;
@@ -314,7 +337,16 @@ export interface ReplyBody {
   clientRequestId: string;
 }
 
-export function fetchSupportSummary(): Promise<ApiResult<{ summary: SupportSummaryDto }>> {
+/**
+ * The landing screen in one round trip: the counts AND the newest few tickets.
+ *
+ * Two requests to paint one screen is two chances to show a half-loaded page,
+ * and the two halves could disagree — a count taken before a ticket the list
+ * already shows.
+ */
+export function fetchSupportSummary(): Promise<
+  ApiResult<{ summary: SupportSummaryDto; recentTickets: TicketSummaryDto[] }>
+> {
   return request("/support/summary");
 }
 
