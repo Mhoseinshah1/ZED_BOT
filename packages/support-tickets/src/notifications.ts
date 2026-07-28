@@ -543,6 +543,28 @@ export async function abandonIntent(
 
 // --- stale recovery ----------------------------------------------------------
 
+export interface RecoverStaleClaimsOptions {
+  now?: Date;
+  /**
+   * Restrict recovery to the tickets named here.
+   *
+   * OMITTED IS THE PRODUCTION CALL: the loop sweeps everything, because a claim
+   * abandoned by a process that no longer exists has nobody left to name it.
+   *
+   * Supplying ids is for a caller that must not touch work it does not own —
+   * an operator recovering one known ticket, and any test that shares a
+   * database with other suites. An unbounded sweep from such a caller would
+   * un-claim rows another worker (or another suite) is in the middle of
+   * sending, which is precisely the duplicate-delivery window this mechanism
+   * exists to close.
+   *
+   * An EMPTY array recovers nothing. It means "these tickets", and there are
+   * none — treating it as "everything" would turn a caller's empty filter into
+   * a full-table sweep, which is the worst possible reading.
+   */
+  ticketIds?: readonly string[];
+}
+
 /**
  * Return claims that outlived the process holding them, at BOTH levels.
  *
@@ -553,14 +575,26 @@ export async function abandonIntent(
  * The count is worth logging — a non-zero value is the only signal that workers
  * are dying mid-send.
  */
-export async function recoverStaleClaims(now: Date = new Date()): Promise<number> {
+export async function recoverStaleClaims(
+  options: RecoverStaleClaimsOptions = {},
+): Promise<number> {
+  const now = options.now ?? new Date();
   const cutoff = new Date(now.getTime() - NOTIFICATION_STALE_CLAIM_MS);
+  const scope = options.ticketIds;
   const recipients = await prisma.supportNotificationRecipient.updateMany({
-    where: { status: "SENDING", claimedAt: { lt: cutoff } },
+    where: {
+      status: "SENDING",
+      claimedAt: { lt: cutoff },
+      ...(scope === undefined ? {} : { intent: { ticketId: { in: [...scope] } } }),
+    },
     data: { status: "PENDING", claimedAt: null, nextAttemptAt: now },
   });
   const intents = await prisma.supportNotificationIntent.updateMany({
-    where: { status: "SENDING", claimedAt: { lt: cutoff } },
+    where: {
+      status: "SENDING",
+      claimedAt: { lt: cutoff },
+      ...(scope === undefined ? {} : { ticketId: { in: [...scope] } }),
+    },
     data: { status: "PENDING", claimedAt: null, nextAttemptAt: now },
   });
   return recipients.count + intents.count;

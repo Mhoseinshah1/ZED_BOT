@@ -479,12 +479,20 @@ read the request, choose a status code, shape the response.
 | message | 1–3000 characters, trimmed first | same |
 | category | one of `CONNECTION`, `PAYMENT`, `SERVICE_MANAGEMENT`, `ACCOUNT`, `OTHER` | `packages/shared/src/support-tickets-v2.ts` |
 | `clientRequestId` | `/^[A-Za-z0-9_-]{16,64}$/` | `packages/support-tickets/src/contract.ts` |
-| request body | 8 KiB | `SUPPORT_BODY_LIMIT_BYTES` |
+| request body | 20 KiB, **derived** from the bounds above | `SUPPORT_MUTATION_BODY_LIMIT_BYTES` |
 | `origin` | forced to `MINIAPP`, never read from the body | the route |
 
 `origin` is forced rather than accepted because it is the only column that says
 where support requests actually come from; letting a client claim otherwise
 would corrupt the one field the answer depends on.
+
+The body limit is **derived, not chosen**. The domain bounds a message in UTF-16
+code units and HTTP bounds a body in bytes, and the old 8 KiB confused the two:
+3000 valid Persian characters are 6000 bytes, 3000 CJK characters are 9000, and
+a client that escapes non-ASCII as `\uXXXX` spends six bytes per code unit — so
+the transport was refusing text the domain would have accepted. The limit is now
+computed in `packages/support-tickets` from `TICKET_MESSAGE_MAX` and
+`TICKET_SUBJECT_MAX` and imported by the route, which restates nothing.
 
 **The frontend mirrors those bounds, it does not own them.** A 4000-character
 message is refused before the round trip so the user is not made to wait for a
@@ -551,8 +559,21 @@ a message to the administrators. That is why the intent exists at all, and it is
 why `apps/api` needs no grammY to make support work.
 
 **Ticket ids are public short ids**, resolved owner-scoped exactly as services
-are (§4.5). No uuid crosses this boundary, and a message carries a display key
-derived the same way rather than its primary key.
+are (§4.5). No uuid crosses this boundary, and no *part* of one: messages carry
+**no identifier at all**. An earlier version sent a "display key" cut from the
+message's uuid; it was only a React key, but a uuid prefix on the wire leaks the
+id space and is stable enough to correlate responses. Nothing addresses a single
+message, so nothing needs an id — the frontend mints render keys in memory as a
+page is ingested.
+
+**Linking a service.** The wizard asks which service a ticket is about:
+`CONNECTION` and `SERVICE_MANAGEMENT` show the picker on arrival, the other
+three categories offer it and fetch nothing until asked. Linking is optional on
+every path — the person most likely to need support is the one whose service is
+broken, missing or expired, so refusing a ticket until they name one would lock
+out exactly the wrong people. The picker is fed by the existing authenticated
+`/services` route, so only public service ids ever reach the browser, and the
+server resolves whatever is sent inside the transaction that writes the ticket.
 
 ---
 

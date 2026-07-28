@@ -252,12 +252,13 @@ describe("support notification intents", () => {
     // A FRESH claim is not stale: recovering it would race the worker that is
     // still sending, which is the one path that can produce a duplicate.
     //
-    // ASSERTED ON THIS ROW, NOT ON THE RETURN VALUE. `recoverStaleClaims()` is
-    // global by design — it recovers every abandoned claim in the database —
-    // so its count includes whatever other suites left behind, and comparing
-    // it to an exact number only passes on a database this file happens to
-    // have to itself. The property under test is about THIS claim.
-    await recoverStaleClaims();
+    // SCOPED TO THIS TICKET. The unbounded form of this call is what the loop
+    // runs in production, and running it HERE would un-claim every SENDING row
+    // in the database — including work another suite is in the middle of, and
+    // any pre-existing fixture. This file shares a database, so it recovers
+    // only what it created. The count is then exact and worth asserting.
+    const mine = [made.value.ticket.id];
+    expect(await recoverStaleClaims({ ticketIds: mine }), "nothing to recover yet").toBe(0);
     expect(await statusOf(made.value.ticket.id), "fresh claim untouched").toBe("SENDING");
 
     // Age it past the threshold.
@@ -265,13 +266,47 @@ describe("support notification intents", () => {
       where: { ticketId: made.value.ticket.id },
       data: { claimedAt: new Date(Date.now() - NOTIFICATION_STALE_CLAIM_MS - 1000) },
     });
-    expect(await recoverStaleClaims(), "abandoned claim returned").toBeGreaterThanOrEqual(1);
+    expect(await recoverStaleClaims({ ticketIds: mine }), "abandoned claim returned").toBe(1);
 
     const row = await prisma.supportNotificationIntent.findFirstOrThrow({
       where: { ticketId: made.value.ticket.id },
     });
     expect(row.status, "abandoned claim returned to PENDING").toBe("PENDING");
     expect(row.claimedAt).toBeNull();
+  });
+
+  // S3-9b ---------------------------------------------------------------------
+  it("S3-9b: scoped recovery leaves work it was not given, and an empty scope recovers nothing", async () => {
+    // TWO stale claims, both this file's own. Recovery is asked for ONE of
+    // them; the other stands in for every row this suite does not own — another
+    // suite's fixture, a pre-existing intent, a ticket a real user opened.
+    const asked = await createTicket(userId, domainCreate());
+    const untouched = await createTicket(userId, domainCreate());
+    expect(asked.ok && untouched.ok).toBe(true);
+    if (!asked.ok || !untouched.ok) return;
+
+    for (const made of [asked, untouched]) {
+      expect(
+        await claimIntentForTicket(made.value.ticket.id, "support.ticket_created"),
+      ).not.toBeNull();
+    }
+    const stale = new Date(Date.now() - NOTIFICATION_STALE_CLAIM_MS - 1000);
+    await prisma.supportNotificationIntent.updateMany({
+      where: { ticketId: { in: [asked.value.ticket.id, untouched.value.ticket.id] } },
+      data: { claimedAt: stale },
+    });
+
+    // An EMPTY scope means "these tickets, and there are none" — it must not
+    // be read as "everything", which is the failure mode that would make a
+    // caller's empty filter sweep the whole table.
+    expect(await recoverStaleClaims({ ticketIds: [] }), "empty scope is not everything").toBe(0);
+    expect(await statusOf(asked.value.ticket.id)).toBe("SENDING");
+    expect(await statusOf(untouched.value.ticket.id)).toBe("SENDING");
+
+    // And a scope of one recovers exactly one.
+    expect(await recoverStaleClaims({ ticketIds: [asked.value.ticket.id] })).toBe(1);
+    expect(await statusOf(asked.value.ticket.id), "the ticket asked for").toBe("PENDING");
+    expect(await statusOf(untouched.value.ticket.id), "work not asked for").toBe("SENDING");
   });
 
   // S3-10 ---------------------------------------------------------------------
@@ -299,9 +334,9 @@ describe("support notification intents", () => {
       await claimIntentForTicket(made.value.ticket.id, "support.ticket_created"),
       "terminal",
     ).toBeNull();
-    // Again scoped to this row rather than to a global count: a SENT intent
-    // must not be dragged back into play, whatever else the database holds.
-    await recoverStaleClaims();
+    // Again bounded to this ticket: recovery must not drag a SENT intent back
+    // into play, and proving that must not disturb anything else.
+    expect(await recoverStaleClaims({ ticketIds: [made.value.ticket.id] })).toBe(0);
     expect(await statusOf(made.value.ticket.id), "SENT is not a stale claim").toBe("SENT");
   });
 

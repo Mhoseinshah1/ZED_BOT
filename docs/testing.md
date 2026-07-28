@@ -76,6 +76,28 @@ Every run tags its rows with a timestamp-derived id, so re-running against
 the same throwaway database does not collide. Rows are intentionally left
 behind (disposable DB) — drop/recreate the database to reset.
 
+**Recreate it before a full battery run.** Most suites only touch rows they
+created, so accumulation is harmless to them. The **low-balance** suites are
+different by design: they drive the worker's reconcile and backfill, which sweep
+*every* active user and *every* `LowBalanceAlertState` row, one transaction per
+unit. That is the correct production behaviour — a reconciler that skipped rows
+it did not recognise would miss exactly the users nobody warned — but it means
+their runtime scales with whatever the database has accumulated, not with their
+own fixtures.
+
+Measured on this repository: on a database carrying 7,644 users and 7,441 state
+rows left by earlier runs, the six low-balance suites exceed vitest's timeouts
+and report ~15 failures; on a freshly migrated database the same 124 tests pass
+in ~34s. The failures are an artifact of a stale throwaway database, not of the
+code under test — so drop and recreate before running the battery, and do not
+"fix" them by raising a timeout.
+
+```bash
+psql "$ADMIN_URL" -c 'DROP DATABASE IF EXISTS zedbot_test WITH (FORCE);' \
+                  -c 'CREATE DATABASE zedbot_test;'
+DATABASE_URL="postgresql://postgres@127.0.0.1:5432/zedbot_test" pnpm db:deploy
+```
+
 ## Redis-backed suites
 
 The per-service operation lock suites

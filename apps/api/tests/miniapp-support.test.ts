@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 
 import { prisma } from "@zedbot/database";
+import { serviceShortId } from "@zedbot/shared";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -39,15 +40,49 @@ const { apiTrustedProxies } = await import("../src/miniapp/trusted-proxy.js");
 const runTag = BigInt(Date.now() % 1_000_000_000) * 1000n;
 const OWNER_TELEGRAM_ID = 9_400_000_000_000n + runTag;
 const STRANGER_TELEGRAM_ID = OWNER_TELEGRAM_ID + 1n;
+/**
+ * A user with EXACTLY ONE ticket, used only by the status-bucket scenario.
+ *
+ * The mapping is measured on a summary that describes one row and nothing
+ * else, so "which bucket did this status land in" is read directly off the
+ * response instead of inferred from a delta against a shared population.
+ */
+const LEGACY_TELEGRAM_ID = OWNER_TELEGRAM_ID + 2n;
 
 let app: FastifyInstance;
 let ownerId = "";
 let strangerId = "";
 let ownerCookie = "";
 let strangerCookie = "";
+let legacyId = "";
+let legacyCookie = "";
 let seq = 0;
+let panelId = "";
+/** Every Service row this file creates, so teardown can be exact. */
+const serviceIds: string[] = [];
+/** The owner's own live service — the one that may legitimately be linked. */
+let ownedServiceId = "";
+let ownedServicePublicId = "";
 
 const ORIGIN = "https://miniapp.test.example";
+
+/**
+ * EXACTLY the fields a ticket-list item may carry, sorted.
+ *
+ * Asserted as an equality, not a subset: a field added to the serializer
+ * without a decision — a database uuid, panel metadata, an internal note —
+ * fails here rather than shipping.
+ */
+const TICKET_SUMMARY_FIELDS = [
+  "category",
+  "createdAt",
+  "id",
+  "service",
+  "status",
+  "subject",
+  "updatedAt",
+  "waitingParty",
+].sort();
 
 function signInitData(fields: Record<string, string>, token = BOT_TOKEN): string {
   const checkString = Object.keys(fields)
@@ -133,15 +168,53 @@ beforeAll(async () => {
     data: { telegramId: STRANGER_TELEGRAM_ID, firstName: "SupportStranger" },
   });
   strangerId = stranger.id;
+  const legacy = await prisma.user.create({
+    data: { telegramId: LEGACY_TELEGRAM_ID, firstName: "SupportLegacy" },
+  });
+  legacyId = legacy.id;
 
   ownerCookie = await signIn(OWNER_TELEGRAM_ID);
   strangerCookie = await signIn(STRANGER_TELEGRAM_ID);
+  legacyCookie = await signIn(LEGACY_TELEGRAM_ID);
+
+  const panel = await prisma.panel.create({
+    data: {
+      type: "MARZBAN",
+      name: "Support Panel",
+      baseUrl: "https://support-panel.internal.example",
+      username: "panel-admin",
+      passwordEncrypted: "encrypted-blob",
+    },
+  });
+  panelId = panel.id;
+  const owned = await makeService(ownerId, "owned");
+  ownedServiceId = owned.id;
+  ownedServicePublicId = serviceShortId(owned);
 });
+
+/** One live Service, on the shared panel, owned by `userId`. */
+async function makeService(userId: string, label: string) {
+  const service = await prisma.service.create({
+    data: {
+      userId,
+      panelId,
+      panelType: "MARZBAN",
+      username: `sc-${runTag.toString()}-${label}`,
+      status: "ACTIVE",
+      volumeBytes: 1n,
+      usedBytes: 0n,
+      remainingBytes: 1n,
+      durationDays: 30,
+    },
+  });
+  serviceIds.push(service.id);
+  return service;
+}
 
 afterAll(async () => {
   if (!hasDb) return;
   await app?.close();
-  const ids = [ownerId, strangerId].filter((id) => id !== "");
+  const ids = [ownerId, strangerId, legacyId].filter((id) => id !== "");
   if (ids.length > 0) {
     const tickets = await prisma.supportTicket.findMany({
       where: { userId: { in: ids } },
@@ -159,7 +232,13 @@ afterAll(async () => {
       await prisma.supportTicket.deleteMany({ where: { id: { in: ticketIds } } });
     }
     await prisma.miniAppRequestIdempotency.deleteMany({ where: { userId: { in: ids } } });
+    if (serviceIds.length > 0) {
+      await prisma.service.deleteMany({ where: { id: { in: serviceIds } } });
+    }
     await prisma.user.deleteMany({ where: { id: { in: ids } } });
+  }
+  if (panelId !== "") {
+    await prisma.panel.deleteMany({ where: { id: panelId } });
   }
   await prisma.$disconnect();
 });
@@ -257,6 +336,184 @@ describe.skipIf(!hasDb)("mini app support center", () => {
     expect(response.json().code).toBe("INVALID_SERVICE");
   });
 
+  // --- linking a service -----------------------------------------------------
+  //
+  // The precondition is evaluated INSIDE the transaction that writes the
+  // ticket, so "the row that satisfied the check" and "the row the ticket
+  // points at" are the same row under one snapshot. These scenarios walk every
+  // way that check can fail, and prove each one leaves NOTHING behind.
+
+  it("SC-26: a service the caller owns is linked, and comes back as a public id", async () => {
+    const response = await createTicketVia(ownerCookie, {
+      subject: "با سرویس",
+      serviceId: ownedServicePublicId,
+    });
+    expect(response.statusCode).toBe(201);
+    const ticket = response.json().ticket;
+    expect(ticket.service).not.toBeNull();
+    expect(ticket.service.id).toBe(ownedServicePublicId);
+    expect(ticket.service.id).toMatch(/^[0-9a-f]{8}$/);
+    // The account name is the label; the database uuid appears nowhere.
+    expect(ticket.service.label).toBe(`sc-${runTag.toString()}-owned`);
+    expect(response.body).not.toContain(ownedServiceId);
+
+    const row = await prisma.supportTicket.findFirstOrThrow({
+      where: { userId: ownerId, subject: "با سرویس" },
+    });
+    expect(row.serviceId).toBe(ownedServiceId);
+  });
+
+  it("SC-27: foreign, missing, deleted, soft-deleted and ambiguous are ONE answer, and write nothing", async () => {
+    const foreign = await makeService(strangerId, "foreign");
+    const retired = await makeService(ownerId, "retired");
+    await prisma.service.update({ where: { id: retired.id }, data: { status: "DELETED" } });
+    const softDeleted = await makeService(ownerId, "soft");
+    await prisma.service.update({
+      where: { id: softDeleted.id },
+      data: { deletedAt: new Date() },
+    });
+
+    const cases: Array<[string, string]> = [
+      ["another user's service", serviceShortId(foreign)],
+      ["a service that never existed", "0123abcd"],
+      ["a service retired to DELETED", serviceShortId(retired)],
+      ["a soft-deleted service", serviceShortId(softDeleted)],
+      ["a malformed id", "not-hex!!"],
+    ];
+
+    for (const [label, serviceId] of cases) {
+      const before = await prisma.supportTicket.count({ where: { userId: ownerId } });
+      const response = await createTicketVia(ownerCookie, {
+        subject: `رد ${label}`,
+        serviceId,
+      });
+      // Identical code for all five: telling them apart would report which
+      // service ids exist and which of them belong to somebody else.
+      expect(response.statusCode, label).toBe(400);
+      expect(response.json().code, label).toBe("INVALID_SERVICE");
+      // AND the refusal rolled everything back. A returned failure inside a
+      // Prisma transaction COMMITS whatever the callback wrote, so this is the
+      // assertion that distinguishes a real rollback from a reported one.
+      expect(await prisma.supportTicket.count({ where: { userId: ownerId } }), label).toBe(before);
+      expect(
+        await prisma.supportTicket.count({ where: { userId: ownerId, subject: `رد ${label}` } }),
+        label,
+      ).toBe(0);
+    }
+  });
+
+  it("SC-28: an AMBIGUOUS prefix is refused rather than resolved to the first match", async () => {
+    // Two of the caller's own services sharing a public-id prefix. Both are
+    // legitimately linkable on their own; the prefix that names both names
+    // neither, because picking one would be a guess about what was meant.
+    const a = await makeService(ownerId, "ambig-a");
+    const b = await makeService(ownerId, "ambig-b");
+    const shared = "aaaaaaaa";
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Service" SET id = $1 WHERE id = $2`,
+      `${shared}-0000-4000-8000-000000000001`,
+      a.id,
+    );
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Service" SET id = $1 WHERE id = $2`,
+      `${shared}-0000-4000-8000-000000000002`,
+      b.id,
+    );
+    serviceIds.push(`${shared}-0000-4000-8000-000000000001`);
+    serviceIds.push(`${shared}-0000-4000-8000-000000000002`);
+
+    const before = await prisma.supportTicket.count({ where: { userId: ownerId } });
+    const response = await createTicketVia(ownerCookie, {
+      subject: "مبهم",
+      serviceId: shared,
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().code).toBe("INVALID_SERVICE");
+    expect(await prisma.supportTicket.count({ where: { userId: ownerId } })).toBe(before);
+  });
+
+  it("SC-29: a service retired between the read and the write cannot be linked", async () => {
+    // The transactional check exists for exactly this: a service that was
+    // linkable when the browser rendered the picker, and is not by the time
+    // the ticket is written.
+    const doomed = await makeService(ownerId, "doomed");
+    const publicId = serviceShortId(doomed);
+
+    // The picker's own read still shows it — this is the state the client saw.
+    const visible = await app.inject({
+      method: "GET",
+      url: `/api/miniapp/services/${publicId}`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(visible.statusCode).toBe(200);
+
+    // …and now it is retired, before the create lands.
+    await prisma.service.update({ where: { id: doomed.id }, data: { status: "DELETED" } });
+
+    const before = await prisma.supportTicket.count({ where: { userId: ownerId } });
+    const response = await createTicketVia(ownerCookie, {
+      subject: "بازنشسته",
+      serviceId: publicId,
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().code).toBe("INVALID_SERVICE");
+    // No committed ticket pointing at something the user may no longer link.
+    expect(await prisma.supportTicket.count({ where: { userId: ownerId } })).toBe(before);
+    expect(
+      await prisma.supportTicket.count({ where: { userId: ownerId, serviceId: doomed.id } }),
+    ).toBe(0);
+  });
+
+  it("SC-30: a replay returns the ORIGINAL ticket even after the linked service is retired", async () => {
+    // THE ORDERING PROPERTY. Idempotency is resolved BEFORE the mutable
+    // precondition is re-evaluated: the ticket already exists, so answering
+    // INVALID_SERVICE on the retry would be a lie about what happened.
+    const service = await makeService(ownerId, "replay");
+    const publicId = serviceShortId(service);
+    const key = requestId();
+
+    const first = await createTicketVia(ownerCookie, {
+      subject: "پخش دوباره",
+      serviceId: publicId,
+      clientRequestId: key,
+    });
+    expect(first.statusCode).toBe(201);
+    const originalId = first.json().ticket.id;
+
+    await prisma.service.update({ where: { id: service.id }, data: { status: "DELETED" } });
+
+    const replay = await createTicketVia(ownerCookie, {
+      subject: "پخش دوباره",
+      serviceId: publicId,
+      clientRequestId: key,
+    });
+    expect(replay.statusCode).toBe(201);
+    expect(replay.json().ticket.id).toBe(originalId);
+    expect(
+      await prisma.supportTicket.count({ where: { userId: ownerId, subject: "پخش دوباره" } }),
+    ).toBe(1);
+  });
+
+  it("SC-31: a retry that CHANGES the linked service is a conflict, not a second ticket", async () => {
+    const key = requestId();
+    const first = await createTicketVia(ownerCookie, {
+      subject: "تعویض سرویس",
+      serviceId: ownedServicePublicId,
+      clientRequestId: key,
+    });
+    expect(first.statusCode).toBe(201);
+
+    // Linking a service and linking NONE are different mutations, so the same
+    // key describing the second one must not replay the first.
+    const changed = await createTicketVia(ownerCookie, {
+      subject: "تعویض سرویس",
+      serviceId: null,
+      clientRequestId: key,
+    });
+    expect(changed.statusCode).toBe(409);
+    expect(changed.json().code).toBe("IDEMPOTENCY_CONFLICT");
+  });
+
   // --- reading ---------------------------------------------------------------
 
   it("SC-8: the summary counts only the caller's own tickets", async () => {
@@ -270,7 +527,75 @@ describe.skipIf(!hasDb)("mini app support center", () => {
     const summary = mine.json().summary;
     const ownTickets = await prisma.supportTicket.count({ where: { userId: ownerId } });
     expect(summary.total).toBe(ownTickets);
-    expect(summary.open + summary.closed).toBe(summary.total);
+    // The three buckets partition the total: every ticket is waiting on
+    // somebody or is closed, and none is counted twice.
+    expect(summary.waitingSupport + summary.waitingUser + summary.closed).toBe(summary.total);
+  });
+
+  it("SC-8b: every status lands in the right bucket, legacy values included", async () => {
+    // Rows carrying the pre-split enum values still have to land somewhere a
+    // person understands. `OPEN` meant "the team owes a reply" and `ANSWERED`
+    // meant "support has answered, over to you", so that is where they count.
+    //
+    // Measured on a user with EXACTLY ONE ticket, so the whole summary is
+    // about that one row and the assertion is an equality rather than a delta.
+    const created = await createTicketVia(legacyCookie, { subject: "قدیمی" });
+    expect(created.statusCode).toBe(201);
+    const ticketId = (
+      await prisma.supportTicket.findFirstOrThrow({ where: { userId: legacyId } })
+    ).id;
+
+    for (const [status, bucket] of [
+      ["OPEN", "waitingSupport"],
+      ["WAITING_ADMIN", "waitingSupport"],
+      ["ANSWERED", "waitingUser"],
+      ["WAITING_USER", "waitingUser"],
+      ["CLOSED", "closed"],
+    ] as const) {
+      await prisma.supportTicket.update({ where: { id: ticketId }, data: { status } });
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/miniapp/support/summary",
+        headers: { cookie: legacyCookie },
+      });
+      expect(response.json().summary, status).toEqual({
+        total: 1,
+        waitingSupport: bucket === "waitingSupport" ? 1 : 0,
+        waitingUser: bucket === "waitingUser" ? 1 : 0,
+        closed: bucket === "closed" ? 1 : 0,
+      });
+      // And the LIST agrees with the counts about the same row — one mapping,
+      // not two that can drift.
+      const list = await app.inject({
+        method: "GET",
+        url: "/api/miniapp/support/tickets",
+        headers: { cookie: legacyCookie },
+      });
+      const item = list.json().items[0];
+      expect(item.status, status).toBe(status);
+      expect(item.waitingParty, status).toBe(
+        bucket === "closed" ? null : bucket === "waitingUser" ? "USER" : "SUPPORT",
+      );
+    }
+  });
+
+  it("SC-8c: the summary carries the recent tickets, in the list's own shape", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/miniapp/support/summary",
+      headers: { cookie: ownerCookie },
+    });
+    const body = response.json();
+    expect(Array.isArray(body.recentTickets)).toBe(true);
+    expect(body.recentTickets.length).toBeGreaterThan(0);
+    // Bounded — this is a preview beside the counts, not the list.
+    expect(body.recentTickets.length).toBeLessThanOrEqual(5);
+    // Newest activity first, the same order the list uses.
+    const stamps = body.recentTickets.map((t: { updatedAt: string }) => Date.parse(t.updatedAt));
+    expect([...stamps].sort((a: number, b: number) => b - a)).toEqual(stamps);
+    for (const item of body.recentTickets) {
+      expect(Object.keys(item).sort()).toEqual(TICKET_SUMMARY_FIELDS);
+    }
   });
 
   it("SC-9: the list is newest-activity first and pages with an opaque cursor", async () => {
@@ -301,6 +626,34 @@ describe.skipIf(!hasDb)("mini app support center", () => {
       for (const item of second.json().items) {
         expect(firstIds.has(item.id), "no row appears on two pages").toBe(false);
       }
+    }
+  });
+
+  it("SC-9b: every list item carries EXACTLY the eight contract fields", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/miniapp/support/tickets?limit=50",
+      headers: { cookie: ownerCookie },
+    });
+    const items = response.json().items as Array<Record<string, unknown>>;
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      expect(Object.keys(item).sort()).toEqual(TICKET_SUMMARY_FIELDS);
+      expect(item.id).toMatch(/^[0-9a-f]{8}$/);
+      // `waitingParty` is a decided value, not the raw status echoed back.
+      expect([null, "USER", "SUPPORT"]).toContain(item.waitingParty);
+      expect(item.waitingParty === null).toBe(item.status === "CLOSED");
+      if (item.service !== null) {
+        const service = item.service as Record<string, unknown>;
+        // The linked service is a public id and a label — nothing else, and
+        // certainly no panel.
+        expect(Object.keys(service).sort()).toEqual(["id", "label"]);
+        expect(service.id).toMatch(/^[0-9a-f]{8}$/);
+      }
+    }
+    // Panel metadata never had a field here, and must never acquire one.
+    for (const forbidden of ["panel", "panelId", "panelName", "userId", "serviceId"]) {
+      expect(response.body, forbidden).not.toContain(`"${forbidden}"`);
     }
   });
 
@@ -386,9 +739,10 @@ describe.skipIf(!hasDb)("mini app support center", () => {
     expect(items[0].senderType).toBe("USER");
     expect(items[0].text).toBe("متن آزمایشی پشتیبانی");
     expect(items[0].hasAttachment).toBe(false);
-    // The DTO has no place to put one.
+    // FOUR FIELDS, and no identifier among them. The DTO has no place to put
+    // one, so a file id cannot leak through a field nobody thought about.
     expect(Object.keys(items[0]).sort()).toEqual(
-      ["createdAt", "hasAttachment", "key", "senderType", "text"].sort(),
+      ["createdAt", "hasAttachment", "senderType", "text"].sort(),
     );
 
     const asStranger = await app.inject({
@@ -397,6 +751,84 @@ describe.skipIf(!hasDb)("mini app support center", () => {
       headers: { cookie: strangerCookie },
     });
     expect(asStranger.statusCode).toBe(404);
+  });
+
+  it("SC-14b: a message response contains no part of the message's uuid", async () => {
+    // The defect this replaces: messages carried a "display key" that was the
+    // first twelve hex characters of the row's uuid. It was only ever a React
+    // key, but it was still a piece of a primary key on the wire — stable
+    // enough to correlate across responses, and short enough to invite the
+    // same startsWith lookup the ticket resolver uses.
+    const created = await createTicketVia(ownerCookie, { subject: "بدون شناسه" });
+    const publicId = created.json().ticket.id;
+    const ticket = await prisma.supportTicket.findFirstOrThrow({
+      where: { userId: ownerId, subject: "بدون شناسه" },
+    });
+    const messages = await prisma.supportMessage.findMany({
+      where: { ticketId: ticket.id },
+      select: { id: true },
+    });
+    expect(messages.length).toBeGreaterThan(0);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/miniapp/support/tickets/${publicId}/messages?limit=50`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.body;
+
+    for (const { id } of messages) {
+      const hex = id.replace(/-/g, "");
+      // The whole uuid, the unhyphenated form, and every prefix length that a
+      // "shortened" identifier might plausibly have been cut to.
+      expect(body, "full uuid").not.toContain(id);
+      expect(body, "uuid without hyphens").not.toContain(hex);
+      expect(body, "first 8 hex characters").not.toContain(hex.slice(0, 8));
+      expect(body, "first 12 hex characters").not.toContain(hex.slice(0, 12));
+      expect(body, "first 16 hex characters").not.toContain(hex.slice(0, 16));
+    }
+  });
+
+  it("SC-14c: the SAME absence holds for a long thread and for every page of it", async () => {
+    // One page could pass by luck; a thread deep enough to page proves the
+    // property is in the serializer rather than in this fixture.
+    const created = await createTicketVia(ownerCookie, { subject: "نخ بلند" });
+    const publicId = created.json().ticket.id;
+    const ticket = await prisma.supportTicket.findFirstOrThrow({
+      where: { userId: ownerId, subject: "نخ بلند" },
+    });
+    for (let i = 0; i < 6; i += 1) {
+      await prisma.supportMessage.create({
+        data: { ticketId: ticket.id, senderType: "ADMIN", text: `پاسخ ${i}` },
+      });
+    }
+    const ids = (
+      await prisma.supportMessage.findMany({
+        where: { ticketId: ticket.id },
+        select: { id: true },
+      })
+    ).map((row) => row.id.replace(/-/g, ""));
+
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const url =
+        cursor === null
+          ? `/api/miniapp/support/tickets/${publicId}/messages?limit=3`
+          : `/api/miniapp/support/tickets/${publicId}/messages?limit=3&cursor=${encodeURIComponent(cursor)}`;
+      const page = await app.inject({ method: "GET", url, headers: { cookie: ownerCookie } });
+      expect(page.statusCode).toBe(200);
+      for (const hex of ids) {
+        for (const width of [8, 12, 16, 32]) {
+          expect(page.body, `page ${pages} / ${width} chars`).not.toContain(hex.slice(0, width));
+        }
+      }
+      cursor = page.json().nextCursor;
+      pages += 1;
+    } while (cursor !== null && pages < 10);
+    // The thread really did page, so more than one response was inspected.
+    expect(pages).toBeGreaterThan(1);
   });
 
   it("SC-15: an attachment is announced but never described", async () => {
@@ -572,19 +1004,154 @@ describe.skipIf(!hasDb)("mini app support center", () => {
     expect(response.statusCode).toBe(415);
   });
 
-  it("SC-22: an oversized body is refused by the route's own limit", async () => {
+  // --- the body limit --------------------------------------------------------
+  //
+  // THE DOMAIN BOUNDS UTF-16 CODE UNITS; HTTP BOUNDS BYTES. The two were 3000
+  // and 8192, which is a contradiction: 3000 valid Persian characters are 6000
+  // bytes, 3000 CJK characters are 9000, and a client whose JSON serializer
+  // escapes non-ASCII spends six bytes per code unit. The transport was
+  // therefore refusing messages the domain would have accepted — a silent 413
+  // on text a user was told was within the limit.
+  //
+  // The limit is now DERIVED from the domain's own constants, so these tests
+  // are the proof that the derivation covers the worst case rather than a
+  // number somebody rounded up.
+
+  it("SC-22: 3000 Persian characters — the domain's exact maximum — is accepted", async () => {
+    // Persian is two bytes per character in UTF-8: 6000 bytes, past the old
+    // 8 KiB once the subject and envelope are added at scale.
+    const message = "ا".repeat(3000);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/miniapp/support/tickets",
+      headers: mutating(ownerCookie),
+      payload: {
+        subject: "ط".repeat(100),
+        message,
+        category: "ACCOUNT",
+        clientRequestId: requestId(),
+      },
+    });
+    expect(response.statusCode, response.body.slice(0, 200)).toBe(201);
+  });
+
+  it("SC-22b: 3000 three-byte CJK characters is accepted", async () => {
+    // 9000 bytes of message alone — comfortably over the old ceiling.
+    const message = "語".repeat(3000);
+    expect(Buffer.byteLength(message, "utf8")).toBe(9000);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/miniapp/support/tickets",
+      headers: mutating(ownerCookie),
+      payload: {
+        subject: "語".repeat(100),
+        message,
+        category: "ACCOUNT",
+        clientRequestId: requestId(),
+      },
+    });
+    expect(response.statusCode, response.body.slice(0, 200)).toBe(201);
+  });
+
+  it("SC-22c: newline-heavy valid input is accepted", async () => {
+    // Every newline is `\n` in JSON — two bytes for one code unit — so a
+    // message that is mostly line breaks costs nearly double what it looks.
+    const message = `${"سطر\n".repeat(749)}پایا`;
+    // Exactly at the bound, and roughly a quarter of it is escape sequences.
+    expect([...message].length).toBe(3000);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/miniapp/support/tickets",
+      headers: mutating(ownerCookie),
+      payload: {
+        subject: "چند خطی",
+        message,
+        category: "ACCOUNT",
+        clientRequestId: requestId(),
+      },
+    });
+    expect(response.statusCode, response.body.slice(0, 200)).toBe(201);
+  });
+
+  it("SC-22d: the WORST CASE — a maximal payload with every code unit JSON-escaped — is accepted", async () => {
+    // The actual bound the limit is derived from. Not every client serializes
+    // this way, but `JSON.stringify` with `ensure_ascii`-style escaping is
+    // common enough that a payload built this way must not be refused: six
+    // bytes (`\uXXXX`) per code unit, for the maximum subject AND message.
+    const escaped = (text: string): string =>
+      [...text].map((ch) => `\\u${ch.codePointAt(0)!.toString(16).padStart(4, "0")}`).join("");
+    const raw = `{"subject":"${escaped("ط".repeat(100))}","message":"${escaped(
+      "ا".repeat(3000),
+    )}","category":"ACCOUNT","clientRequestId":"${requestId()}"}`;
+    // This is the size the limit exists to admit — assert it, so a limit
+    // quietly lowered below the worst case fails here rather than in the field.
+    expect(Buffer.byteLength(raw, "utf8")).toBeGreaterThan(18_000);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/miniapp/support/tickets",
+      headers: mutating(ownerCookie),
+      payload: raw,
+    });
+    expect(response.statusCode, response.body.slice(0, 200)).toBe(201);
+    // And it really was the escaped text that landed, decoded correctly.
+    const ticket = response.json().ticket;
+    const messages = await app.inject({
+      method: "GET",
+      url: `/api/miniapp/support/tickets/${ticket.id}/messages`,
+      headers: { cookie: ownerCookie },
+    });
+    expect(messages.json().items[0].text).toBe("ا".repeat(3000));
+  });
+
+  it("SC-22e: 3001 characters is refused by the DOMAIN, with its own code", async () => {
+    // One character past the bound is a 400 INVALID_MESSAGE — a refusal the
+    // user can act on — and NOT a transport-level 413, which says nothing.
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/miniapp/support/tickets",
+      headers: mutating(ownerCookie),
+      payload: {
+        subject: "یک نویسه بیشتر",
+        message: "ا".repeat(3001),
+        category: "ACCOUNT",
+        clientRequestId: requestId(),
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().code).toBe("INVALID_MESSAGE");
+  });
+
+  it("SC-22f: a genuinely oversized body is still refused by the transport", async () => {
+    // The limit is bounded, not removed: a file-sized body never reaches the
+    // JSON parser, let alone the domain.
     const response = await app.inject({
       method: "POST",
       url: "/api/miniapp/support/tickets",
       headers: mutating(ownerCookie),
       payload: {
         subject: "بزرگ",
-        message: "x".repeat(20_000),
+        message: "x".repeat(2_000_000),
         category: "ACCOUNT",
         clientRequestId: requestId(),
       },
     });
     expect([400, 413]).toContain(response.statusCode);
+  });
+
+  it("SC-22g: the limit is derived from the domain's bounds, not chosen by eye", async () => {
+    const { SUPPORT_MUTATION_BODY_LIMIT_BYTES, SUPPORT_MUTATION_WORST_CASE_BYTES } = await import(
+      "@zedbot/support-tickets"
+    );
+    const { SUPPORT_BODY_LIMIT_BYTES } = await import("../src/miniapp/support-routes.js");
+    // ONE authoritative number: the route does not restate it.
+    expect(SUPPORT_BODY_LIMIT_BYTES).toBe(SUPPORT_MUTATION_BODY_LIMIT_BYTES);
+    // And it admits the worst case the domain can produce.
+    expect(SUPPORT_MUTATION_BODY_LIMIT_BYTES).toBeGreaterThanOrEqual(
+      SUPPORT_MUTATION_WORST_CASE_BYTES,
+    );
+    // Still bounded: a limit large enough to accept an upload is not a limit.
+    expect(SUPPORT_MUTATION_BODY_LIMIT_BYTES).toBeLessThan(256 * 1024);
   });
 
   it("SC-23: an unauthenticated caller reaches nothing", async () => {

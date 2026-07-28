@@ -249,6 +249,28 @@ The API never imports grammY and never calls Telegram. It writes intents; the
 Bot delivers them. That is the only reason an API-created ticket reaches an
 administrator at all.
 
+### Stale-claim recovery is global — and callers can bound it
+
+`recoverStaleClaims()` returns claims that outlived the process holding them, at
+both levels, recipients first. The production call passes no scope, and must
+not: a claim abandoned by a process that no longer exists has nobody left to
+name it.
+
+It also accepts `{ ticketIds }`, for a caller that must not touch work it does
+not own — an operator recovering one known ticket, and any test sharing a
+database with other suites. An unbounded sweep from such a caller un-claims rows
+another worker is in the middle of sending, which is precisely the
+duplicate-delivery window the claim mechanism exists to close. An **empty**
+array recovers nothing: it means "these tickets, and there are none", and
+reading it as "everything" would turn a caller's empty filter into a full-table
+sweep.
+
+The same rule governs the test suites. No suite may delete, settle, retry,
+deactivate or otherwise mutate notification work owned by another suite or by a
+pre-existing fixture: cleanup is scoped by the ids the suite created, fixtures
+carry durable ownership tags, and the fan-out suite plants unrelated PENDING
+work as a canary that fails if anything global slips back in.
+
 ## What is not here
 
 - No file bytes, object storage or base64. Attachments remain Telegram file
@@ -333,17 +355,46 @@ owner-scoped in the query rather than filtered afterwards:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/support/summary` | counts for the landing page |
+| GET | `/support/summary` | counts **and** the newest five tickets |
 | GET | `/support/tickets` | the caller's tickets, newest activity first |
 | GET | `/support/tickets/:ticketId` | one ticket, by public short id |
 | GET | `/support/tickets/:ticketId/messages` | the thread, paged backwards |
 | POST | `/support/tickets` | create a text-only ticket |
 | POST | `/support/tickets/:ticketId/replies` | append a text-only reply |
 
-**Identifiers.** No database uuid crosses this boundary. Tickets are addressed
-by an 8-hex-character public id resolved through the domain's owner-scoped
-resolver; a malformed, unknown, ambiguous or foreign id is the same 404, so the
-response shape never confirms which ticket ids exist.
+**Identifiers.** No database uuid crosses this boundary, and no *part* of one.
+Tickets are addressed by an 8-hex-character public id resolved through the
+domain's owner-scoped resolver; a malformed, unknown, ambiguous or foreign id is
+the same 404, so the response shape never confirms which ticket ids exist.
+
+Messages carry **no identifier at all**. An earlier version returned a "display
+key" that was the first twelve hex characters of the message's uuid. It was only
+ever used as a React key, but a uuid prefix on the wire is still a piece of a
+primary key: it leaks the id space, it is stable enough to correlate one
+response against another, and a prefix that short invites exactly the
+`startsWith` lookup the ticket resolver performs. There is no ticket-style
+public id for messages either — inventing one would put the same information
+back through a different door. Nothing in the Mini App addresses a single
+message, so there is nothing for an id to be for; React keys are minted in
+memory as a page is ingested. `SC-14b`/`SC-14c` assert the absence directly: no
+response may contain a message's uuid, its unhyphenated form, or its first 8,
+12 or 16 hex characters, on any page of a thread long enough to page.
+
+**The ticket-list contract.** A list item carries exactly eight fields — public
+ticket id, subject, category, status, `waitingParty`, the linked service (public
+id and a safe label) or `null`, `createdAt`, `updatedAt` — and the test asserts
+that set as an equality, so a field added to the serializer without a decision
+fails rather than ships. Panel metadata and database uuids have no field here
+and must never acquire one. The landing summary returns the same shape for its
+recent tickets, so the two screens cannot describe a ticket differently.
+
+**Who is waiting.** `waitingParty` is decided in the domain
+(`ticketWaitingParty`) from the stored status, legacy values included: `OPEN`
+counts as waiting on **support** (that is what it meant before the enum was
+split) and `ANSWERED` as waiting on the **user**. `CLOSED` is `null` — nobody is
+waiting. The summary's `waitingSupport`/`waitingUser`/`closed` buckets derive
+from the same function, so a count and a row can never disagree about a ticket
+old enough to predate the split.
 
 **Paging.** Sealed AES-GCM cursors bound to their collection —
 `support-tickets` and `support-messages` are separate resources, so a cursor
@@ -366,7 +417,25 @@ a second place, who may read a file.
    body and reach the handler looking well-formed;
 4. rate, per user **and** per client, both consumed on every attempt.
 
-Body size is enforced by Fastify per route (8 KiB) before any of it runs.
+**Body size** is enforced by Fastify per route before any of that runs, from
+`SUPPORT_MUTATION_BODY_LIMIT_BYTES` — **derived in the domain package**, not
+chosen by eye.
+
+The previous 8 KiB was wrong, and wrong in the direction that hurts: the domain
+bounds a message in **UTF-16 code units** (3000) and HTTP bounds a body in
+**bytes**. 3000 valid Persian characters are 6000 bytes; 3000 CJK characters are
+9000; and a client whose JSON serializer escapes non-ASCII as `\uXXXX` spends
+six bytes per code unit. Text the domain would have accepted was being refused
+by the transport, which reports nothing a user can act on.
+
+The limit is therefore computed from the same constants the validator uses —
+`(TICKET_MESSAGE_MAX + TICKET_SUBJECT_MAX) × 6` bytes, plus the request id,
+category, service id and a kilobyte of JSON envelope, rounded up to a whole KiB
+(20 KiB today). `SUPPORT_MUTATION_WORST_CASE_BYTES` is exported so a test can
+assert the limit covers the worst case rather than re-deriving the arithmetic
+and agreeing with itself. It is still bounded: a file-sized body never reaches
+the JSON parser, and one character past the domain's bound is a `400
+INVALID_MESSAGE` — a refusal the user can act on — not a silent `413`.
 
 `MINIAPP_SUPPORT_RATE_LIMIT` sets the per-user per-minute ceiling (default 10,
 clamped, never throwing); the per-client ceiling is three times it, so raising
@@ -382,6 +451,27 @@ is deliberately distinguishable from a missing one: the Mini App has to tell
 **Idempotency.** Every mutation carries a `clientRequestId`; replaying it
 returns the original ticket, and reusing it with a different payload is a
 409 rather than a silent second write.
+
+**Linking a service.** The Service is resolved **inside the transaction that
+writes the ticket**, not before it. Resolving beforehand left a window: a
+service retired between the check and the insert produced a committed ticket
+pointing at something the user may no longer link. Four conditions, all in the
+query — the authenticated `userId`, `deletedAt` null, status not `DELETED`, and
+exactly one row matching the public prefix (`take: 2`, so an ambiguous prefix
+resolves to nothing rather than to the first match). Foreign, missing, deleted,
+soft-deleted, ambiguous and concurrently-retired are one answer,
+`INVALID_SERVICE`, because telling them apart would report which service ids
+exist and whose they are.
+
+Failure **throws** rather than returning: a returned failure inside a Prisma
+`$transaction` resolves the callback, and Prisma commits whatever the callback
+already wrote. `SC-27`/`SC-29` assert the ticket count is unchanged after each
+refusal, which is what distinguishes a real rollback from a reported one.
+
+Idempotency is still resolved **before** the precondition. A retry of a create
+that already succeeded returns the original ticket even though the linked
+service has since been retired — the ticket exists, and answering
+`INVALID_SERVICE` would be a lie about what happened.
 
 **The API still cannot reach Telegram.** Creating a ticket writes a
 notification intent in the same transaction as the message; the bot's sweep
