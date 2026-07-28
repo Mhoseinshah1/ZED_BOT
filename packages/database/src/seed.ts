@@ -136,6 +136,20 @@ const INITIAL_SETTINGS: SettingSeed[] = [
   // enables it. Enabling moves no money and mutates no Service; disabling deletes
   // no operation history.
   { key: "admin_service_mutations_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  // Mini App commerce rollout (miniapp-commerce-parity, Phase 1). Nine
+  // independently-controlled OWNER switches; every one seeds FALSE so merging
+  // the code activates nothing. Keys are defined in
+  // packages/shared/src/miniapp-commerce.ts and gated fresh + fail-closed at
+  // every Mini App mutation boundary.
+  { key: "miniapp_commerce_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "miniapp_wallet_topup_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "miniapp_card_to_card_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "miniapp_online_payments_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "miniapp_service_delivery_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "miniapp_service_renewal_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "miniapp_extra_volume_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "miniapp_extra_time_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
+  { key: "miniapp_other_products_enabled", value: "false", type: SettingType.BOOLEAN, isPublic: false },
   // Low wallet balance alerts. The MASTER switch seeds FALSE: shipping this code
   // notifies nobody, and even enabling it only arms FUTURE crossings — existing
   // low-balance users are seeded silently. Telling the people who are ALREADY low

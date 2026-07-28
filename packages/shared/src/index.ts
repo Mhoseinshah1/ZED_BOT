@@ -24,5 +24,6 @@ export * from "./template.js";
 export * from "./service-username.js";
 export * from "./public-ids.js";
 export * from "./low-balance.js";
+export * from "./miniapp-commerce.js";
 export * from "./miniapp-initdata.js";
 export * from "./miniapp-session.js";
