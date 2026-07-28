@@ -60,7 +60,7 @@ import { lookup, SERVICE_SOURCE_TEXT, UI, USER_GROUP_TEXT, WALLET_TYPE_TEXT } fr
 // user something false, so the loading state is never skipped.
 // =============================================================================
 
-type LoadState<T> =
+export type LoadState<T> =
   | { phase: "loading" }
   | { phase: "failed"; failure: ApiFailure }
   | { phase: "loaded"; data: T };
@@ -71,8 +71,12 @@ type LoadState<T> =
  * `load` must be stable (a module-level function or a `useCallback`), because
  * it is a dependency of the effect: a function rebuilt on every render would
  * refetch on every render.
+ *
+ * Exported so the Support Centre (`support.tsx`) loads its data the same way
+ * rather than growing a second, subtly different hook — the cancellation rule
+ * below is the kind of thing a copy gets wrong.
  */
-function useResource<T>(load: () => Promise<({ ok: true } & T) | ApiFailure>): {
+export function useResource<T>(load: () => Promise<({ ok: true } & T) | ApiFailure>): {
   state: LoadState<T>;
   reload: () => void;
 } {
