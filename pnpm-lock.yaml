@@ -38,6 +38,9 @@ importers:
       '@zedbot/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@zedbot/support-tickets':
+        specifier: workspace:*
+        version: link:../../packages/support-tickets
       fastify:
         specifier: ^5.2.0
         version: 5.10.0
@@ -75,6 +78,9 @@ importers:
       '@zedbot/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@zedbot/support-tickets':
+        specifier: workspace:*
+        version: link:../../packages/support-tickets
       bullmq:
         specifier: ^5.34.0
         version: 5.79.3
@@ -223,6 +229,22 @@ importers:
         version: 5.9.3
 
   packages/shared:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.0
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/support-tickets:
+    dependencies:
+      '@zedbot/database':
+        specifier: workspace:*
+        version: link:../database
+      '@zedbot/shared':
+        specifier: workspace:*
+        version: link:../shared
     devDependencies:
       '@types/node':
         specifier: ^22.10.0

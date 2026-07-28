@@ -67,7 +67,10 @@ describe("HTTPS deploy scripts (Phase 37)", () => {
     const conf = result.stdout;
     expect(conf).toContain("server_name bot.example.com;");
     expect(conf).toContain("return 301 https://$host$request_uri;");
-    expect(conf).toContain("listen 443 ssl;");
+    // HTTP/2 is requested on the listen line, because the standalone
+    // `http2 on;` directive only exists from nginx 1.25.1 and the deployed
+    // server runs 1.24, where it is a fatal "unknown directive". See N10b.
+    expect(conf).toContain("listen 443 ssl http2;");
     expect(conf).toContain("ssl_certificate /etc/letsencrypt/live/bot.example.com/fullchain.pem;");
     expect(conf).toContain("ssl_certificate_key /etc/letsencrypt/live/bot.example.com/privkey.pem;");
     expect(conf).toContain('add_header X-Content-Type-Options "nosniff" always;');

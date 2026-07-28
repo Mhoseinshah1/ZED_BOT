@@ -45,7 +45,19 @@ export type ApiFailureCode =
   | "USER_UNAVAILABLE"
   | "TERMS_REQUIRED"
   | "FORCE_JOIN_REQUIRED"
-  | "ACCESS_CHECK_UNAVAILABLE";
+  | "ACCESS_CHECK_UNAVAILABLE"
+  // support-centre writes. The mutation gate speaks the first one; the rest
+  // come from the support domain, which refuses in codes rather than prose.
+  | "UNSUPPORTED_MEDIA_TYPE"
+  | "INVALID_SUBJECT"
+  | "INVALID_MESSAGE"
+  | "INVALID_CATEGORY"
+  | "INVALID_SERVICE"
+  | "INVALID_REQUEST_ID"
+  | "INVALID_TICKET_ID"
+  | "TICKET_NOT_FOUND"
+  | "TICKET_CLOSED"
+  | "IDEMPOTENCY_CONFLICT";
 
 export interface ApiFailure {
   ok: false;
@@ -57,7 +69,19 @@ export interface ApiFailure {
 
 export type ApiResult<T> = ({ ok: true } & T) | ApiFailure;
 
-const KNOWN_CODES = new Set<string>([
+/**
+ * Every code this client is willing to believe from the server.
+ *
+ * Exported and typed as `ApiFailureCode[]` for two reasons. The compiler
+ * rejects a code that is not in the union, so the list cannot drift from the
+ * type; and a test can walk it to prove every one of them has Persian text
+ * waiting in `FAILURE_TEXT` — a code with no text renders `undefined` and takes
+ * the screen down, which is the worst possible way to report an error.
+ *
+ * Anything NOT in this list collapses to `INTERNAL`. The frontend never renders
+ * a string it did not author, so an unrecognised code is not a code at all.
+ */
+export const SERVER_FAILURE_CODES: readonly ApiFailureCode[] = [
   "INVALID_INIT_DATA",
   "NOT_REGISTERED",
   "NOT_AUTHENTICATED",
@@ -75,7 +99,19 @@ const KNOWN_CODES = new Set<string>([
   "TERMS_REQUIRED",
   "FORCE_JOIN_REQUIRED",
   "ACCESS_CHECK_UNAVAILABLE",
-]);
+  "UNSUPPORTED_MEDIA_TYPE",
+  "INVALID_SUBJECT",
+  "INVALID_MESSAGE",
+  "INVALID_CATEGORY",
+  "INVALID_SERVICE",
+  "INVALID_REQUEST_ID",
+  "INVALID_TICKET_ID",
+  "TICKET_NOT_FOUND",
+  "TICKET_CLOSED",
+  "IDEMPOTENCY_CONFLICT",
+];
+
+const KNOWN_CODES = new Set<string>(SERVER_FAILURE_CODES);
 
 function failure(code: ApiFailureCode, status = 0, requiresBot = false): ApiFailure {
   return { ok: false, code, requiresBot, status };
@@ -209,6 +245,185 @@ export interface PageDto<T> {
   items: T[];
   nextCursor: string | null;
 }
+
+// --- support tickets ---------------------------------------------------------
+//
+// The ONE part of this client that writes. Two endpoints create something — a
+// ticket and a reply — and both are idempotent on a `clientRequestId` the
+// CALLER mints. That key is the only reason a retry after a timeout is safe:
+// the request may well have been applied already, and replaying the same key
+// returns the original outcome instead of opening a second ticket.
+//
+// TEXT ONLY. `hasAttachments` says a file exists somewhere in the thread; there
+// is no file id, no name, no size and no download route, because a Mini App
+// that cannot show a file has no use for its metadata.
+
+export interface SupportSummaryDto {
+  total: number;
+  /** Waiting on the team. */
+  waitingSupport: number;
+  /** Waiting on the user — the count that should draw the eye. */
+  waitingUser: number;
+  closed: number;
+}
+
+/** The linked service on a ticket: a public id to open it by, and a name. */
+export interface TicketServiceDto {
+  id: string;
+  label: string;
+}
+
+export interface TicketSummaryDto {
+  /**
+   * The PUBLIC ticket id — 8 hex characters, the same value the bot shows.
+   * Never the database uuid; the detail route resolves this back, owner-scoped.
+   */
+  id: string;
+  subject: string | null;
+  status: string;
+  /** A category CODE, never a label. Persian text is chosen in `i18n.ts`. */
+  category: string | null;
+  /**
+   * Who the conversation is waiting on. The SERVER decides this from the stored
+   * status, legacy values included, so this app renders it rather than mapping
+   * statuses a second time and eventually disagreeing.
+   */
+  waitingParty: "USER" | "SUPPORT" | null;
+  service: TicketServiceDto | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TicketDetailDto extends TicketSummaryDto {
+  /** Where the ticket was raised. Detail only — a list row does not show it. */
+  origin: string | null;
+  closedAt: string | null;
+  /** The SERVER decides whether a reply box may exist at all. */
+  canReply: boolean;
+  /** True when some message in the thread carries a file. Presence only. */
+  hasAttachments: boolean;
+}
+
+/**
+ * One message in a thread.
+ *
+ * IT HAS NO IDENTIFIER, on purpose. An earlier version carried a "display key"
+ * cut from the message's database uuid; it was only ever used as a React key,
+ * but a uuid prefix on the wire is still part of a primary key, and it is
+ * stable enough to correlate one response against another. Nothing in this app
+ * addresses a single message, so there is nothing for an id to be for. React
+ * keys are minted in memory as a page is ingested (`support.tsx`), which is all
+ * a key has ever needed to be.
+ */
+export interface MessageDto {
+  senderType: string;
+  text: string | null;
+  hasAttachment: boolean;
+  createdAt: string;
+}
+
+export interface CreateTicketBody {
+  subject: string;
+  message: string;
+  /** One of the shared category codes; the server re-validates it. */
+  category: string;
+  /** Public id of a related service, when the ticket is about one. */
+  serviceId?: string | null;
+  clientRequestId: string;
+}
+
+export interface ReplyBody {
+  message: string;
+  clientRequestId: string;
+}
+
+/**
+ * The landing screen in one round trip: the counts AND the newest few tickets.
+ *
+ * Two requests to paint one screen is two chances to show a half-loaded page,
+ * and the two halves could disagree — a count taken before a ticket the list
+ * already shows.
+ */
+export function fetchSupportSummary(): Promise<
+  ApiResult<{ summary: SupportSummaryDto; recentTickets: TicketSummaryDto[] }>
+> {
+  return request("/support/summary");
+}
+
+export function fetchSupportTickets(
+  cursor: string | null,
+): Promise<ApiResult<PageDto<TicketSummaryDto>>> {
+  return request(`/support/tickets${cursorQuery(cursor)}`);
+}
+
+export function fetchSupportTicket(id: string): Promise<ApiResult<{ ticket: TicketDetailDto }>> {
+  return request(`/support/tickets/${encodeURIComponent(id)}`);
+}
+
+/**
+ * One page of a thread.
+ *
+ * Messages arrive OLDEST-FIRST within a page, and `nextCursor` walks BACKWARDS
+ * — the next page is older still. A thread is therefore assembled by prepending
+ * each page, not appending it.
+ */
+export function fetchSupportMessages(
+  id: string,
+  cursor: string | null,
+): Promise<ApiResult<PageDto<MessageDto>>> {
+  return request(`/support/tickets/${encodeURIComponent(id)}/messages${cursorQuery(cursor)}`);
+}
+
+export function createSupportTicket(
+  body: CreateTicketBody,
+): Promise<ApiResult<{ ticket: TicketDetailDto }>> {
+  return request("/support/tickets", { method: "POST", body });
+}
+
+export function replySupportTicket(
+  id: string,
+  body: ReplyBody,
+): Promise<ApiResult<{ ticket: TicketDetailDto }>> {
+  return request(`/support/tickets/${encodeURIComponent(id)}/replies`, {
+    method: "POST",
+    body,
+  });
+}
+
+/**
+ * A fresh idempotency key.
+ *
+ * `crypto.getRandomValues`, never `Math.random`: this value is what stops a
+ * retried submission from opening a second ticket, so two users (or two tabs)
+ * minting the same one would be a collision with a visible, wrong outcome. The
+ * PRNG behind `Math.random` is seeded per context and is not required to be
+ * unpredictable or well-distributed across contexts.
+ *
+ * 24 base64url characters over 18 random bytes — 144 bits, comfortably inside
+ * the server's `/^[A-Za-z0-9_-]{16,64}$/` and with no padding to strip.
+ *
+ * NOT STORED. The key lives in React state for exactly as long as the draft it
+ * belongs to; nothing writes it to `localStorage`, and a reload legitimately
+ * starts a new draft.
+ */
+export function newClientRequestId(): string {
+  const bytes = new Uint8Array(18);
+  crypto.getRandomValues(bytes);
+  let text = "";
+  for (const byte of bytes) {
+    text += REQUEST_ID_ALPHABET[byte % REQUEST_ID_ALPHABET.length];
+  }
+  return text;
+}
+
+/**
+ * The 64 characters the server's pattern accepts.
+ *
+ * A power of two, so `byte % 64` is an exact, unbiased fold of a uniform byte —
+ * a non-power-of-two alphabet would make the first few symbols slightly more
+ * likely, which is a needless dent in the entropy of a collision-critical value.
+ */
+const REQUEST_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 // --- endpoints ---------------------------------------------------------------
 

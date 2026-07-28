@@ -1,7 +1,6 @@
 import { prisma, Prisma, ServiceStatus } from "@zedbot/database";
 import {
   createLogger,
-  errorMessage,
   getTelegramBotToken,
   isServicePublicId,
   issueMiniAppSession,
@@ -31,6 +30,8 @@ import {
   toMiniAppTransaction,
   toMiniAppUser,
 } from "./serializers.js";
+import { supportFailureLog } from "./support-errors.js";
+import { registerSupportRoutes } from "./support-routes.js";
 import { isSecureRequest } from "./transport.js";
 
 const logger = createLogger("api");
@@ -184,7 +185,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
         }
         userId = found.id;
       } catch (err) {
-        logger.error("mini app auth lookup failed", { error: errorMessage(err) });
+        logger.error("mini app auth lookup failed", supportFailureLog("auth", err));
         return fail(reply, 503, "INTERNAL");
       }
 
@@ -278,7 +279,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
           services: { active, total },
         });
       } catch (err) {
-        logger.error("mini app profile read failed", { error: errorMessage(err) });
+        logger.error("mini app profile read failed", supportFailureLog("profile", err));
         return fail(reply, 503, "INTERNAL");
       }
     });
@@ -361,7 +362,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
           },
         });
       } catch (err) {
-        logger.error("mini app dashboard read failed", { error: errorMessage(err) });
+        logger.error("mini app dashboard read failed", supportFailureLog("dashboard", err));
         return fail(reply, 503, "INTERNAL");
       }
     });
@@ -404,7 +405,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
             nextCursor: nextCursorFor("services", rows, items, page.size),
           });
         } catch (err) {
-          logger.error("mini app service list failed", { error: errorMessage(err) });
+          logger.error("mini app service list failed", supportFailureLog("service-list", err));
           return fail(reply, 503, "INTERNAL");
         }
       },
@@ -442,7 +443,7 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
         }
         return reply.send({ ok: true, service: toMiniAppServiceDetail(matches[0]) });
       } catch (err) {
-        logger.error("mini app service detail failed", { error: errorMessage(err) });
+        logger.error("mini app service detail failed", supportFailureLog("service-detail", err));
         return fail(reply, 503, "INTERNAL");
       }
     });
@@ -473,11 +474,21 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
             nextCursor: nextCursorFor("wallet-transactions", rows, items, page.size),
           });
         } catch (err) {
-          logger.error("mini app wallet history failed", { error: errorMessage(err) });
+          logger.error("mini app wallet history failed", supportFailureLog("wallet-history", err));
           return fail(reply, 503, "INTERNAL");
         }
       },
     );
+
+    // The Support Center. Registered INSIDE the secured plugin so it inherits
+    // the same session hook every other authenticated route uses — a support
+    // route that had to remember to authenticate itself would eventually
+    // forget. It brings its own mutation gate, because it is the only part of
+    // this API that writes something a user owns.
+    registerSupportRoutes(secured, {
+      allowedOrigins,
+      production: process.env.NODE_ENV === "production",
+    });
   });
 }
 

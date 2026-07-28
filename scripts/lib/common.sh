@@ -494,9 +494,19 @@ server {
 }
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    # HTTP/2 is requested on the listen line, NOT with the standalone \`http2 on;\`
+    # directive. That directive only exists from nginx 1.25.1; the Ubuntu LTS
+    # release this project installs on ships 1.24, where it is an unknown
+    # directive and \`nginx -t\` fails outright — so the reverse proxy never comes
+    # up and the whole panel is unreachable behind a config that looks fine in a
+    # diff. The \`listen ... http2\` form has worked since 1.9.5 and is merely
+    # deprecated (a warning, not an error) on newer builds, so it is the only
+    # spelling that is correct on every version this repository targets.
+    #
+    # Exactly one style, never both: nginx rejects a server block that requests
+    # HTTP/2 twice.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name ${domain};
     server_tokens off;
 

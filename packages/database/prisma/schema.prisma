@@ -451,23 +451,25 @@ enum SettingType {
 // =============================================================================
 
 model Admin {
-  id                   String                  @id @default(uuid())
-  telegramId           BigInt                  @unique
+  id                   String                         @id @default(uuid())
+  telegramId           BigInt                         @unique
   username             String?
   firstName            String?
   lastName             String?
   role                 AdminRole
-  isActive             Boolean                 @default(true)
+  isActive             Boolean                        @default(true)
   addedByAdminId       String?
-  addedByAdmin         Admin?                  @relation("AdminAddedBy", fields: [addedByAdminId], references: [id])
-  addedAdmins          Admin[]                 @relation("AdminAddedBy")
+  addedByAdmin         Admin?                         @relation("AdminAddedBy", fields: [addedByAdminId], references: [id])
+  addedAdmins          Admin[]                        @relation("AdminAddedBy")
   permissions          AdminPermission[]
   supportMessages      SupportMessage[]
-  closedSupportTickets SupportTicket[]         @relation("SupportTicketClosedBy")
+  closedSupportTickets SupportTicket[]                @relation("SupportTicketClosedBy")
   // Admin Service Operations: lifecycle/note audit rows this admin performed.
-  serviceOperations    AdminServiceOperation[] @relation("AdminServiceOperationActor")
-  createdAt            DateTime                @default(now())
-  updatedAt            DateTime                @updatedAt
+  serviceOperations    AdminServiceOperation[]        @relation("AdminServiceOperationActor")
+  // Support notifications: this admin's per-event delivery obligations.
+  supportNotifications SupportNotificationRecipient[]
+  createdAt            DateTime                       @default(now())
+  updatedAt            DateTime                       @updatedAt
 
   @@index([role])
 }
@@ -639,6 +641,7 @@ model User {
   // above stays as the LATEST-acceptance timestamp for backwards compatibility and
   // is written atomically together with the row here.
   termsAcceptances            TermsAcceptance[]
+  miniAppIdempotency          MiniAppRequestIdempotency[]
 
   @@index([status])
   @@index([group])
@@ -2079,7 +2082,8 @@ model SupportTicket {
   category String?
   origin   String?
 
-  messages SupportMessage[]
+  messages            SupportMessage[]
+  notificationIntents SupportNotificationIntent[]
 
   @@index([userId])
   @@index([status])
@@ -2120,9 +2124,210 @@ model SupportMessage {
   // The inbound Telegram message_id (operational audit only; not an idempotency key).
   sourceMessageId Int?
 
+  notificationIntents SupportNotificationIntent[]
+
   @@index([ticketId])
   @@index([createdAt])
   @@index([ticketId, createdAt])
+}
+
+// =============================================================================
+// Mini App request idempotency.
+//
+// A browser retries: a flaky connection, a double tap, a reload of a hung
+// submit. Telegram's `sourceUpdateId` cannot help — there is no update — so the
+// CLIENT supplies one cryptographically random id per explicit submission
+// attempt and reuses it for retries of THAT attempt.
+//
+// The key is scoped to the USER, never global. Two strangers who happen to
+// generate the same value must not interfere, and a global namespace would also
+// let anyone pre-claim keys and deny service to whoever drew one next.
+//
+// The row binds the key to what it was used FOR: the operation, the target
+// ticket for a reply, and a fingerprint of the normalized payload. A key
+// replayed with different content is a client bug (or an attack) and is
+// refused rather than silently returning someone else's answer.
+//
+// It stores RESULT REFERENCES, never the ticket text — the message is already
+// persisted once, and copying it here would double the blast radius of a leak
+// for no benefit.
+//
+// Written in the SAME transaction as the mutation it describes, so a committed
+// mutation always has its idempotency record and a rolled-back one has neither.
+// =============================================================================
+model MiniAppRequestIdempotency {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Client-supplied, unguessable, unique PER USER.
+  clientRequestId String
+  /// Stable operation code (MINIAPP_IDEMPOTENT_OPERATIONS in @zedbot/support-tickets).
+  operation       String
+  /// The ticket a reply targeted. Null for creation.
+  targetTicketId  String?
+  /// SHA-256 over the canonical normalized payload. Never the payload itself.
+  fingerprint     String
+  /// What the original attempt produced, so a retry can return it verbatim.
+  resultTicketId  String
+  resultMessageId String
+  createdAt       DateTime @default(now())
+
+  @@unique([userId, clientRequestId])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Support notification intents.
+//
+// "Notify the admins" has always been a side effect the bot performed AFTER
+// committing: send to each active admin, log what failed, move on. That works
+// while the process that writes the ticket is also the process that can talk to
+// Telegram, and while nothing crashes in between. Neither holds any more.
+//
+// The API cannot send anything — it has no bot token and no business having
+// one. And even in the bot, a crash between the commit and the send loses the
+// notification with no trace: the ticket exists, nobody was told, and there is
+// nothing left to retry from.
+//
+// So the DECISION to notify is recorded in the same transaction as the message
+// it describes, and DELIVERY is a separate, retryable step. A committed message
+// always has its intent; a rolled-back one has neither. Which process delivers
+// it stops being part of the correctness argument.
+//
+// One intent per message, enforced by the unique constraint rather than by
+// checking first — the check-then-insert races itself, and two admins being
+// told twice about one reply is exactly the kind of noise that trains people to
+// ignore the channel.
+//
+// The intent holds REFERENCES only. Rendering reads the ticket and the message
+// at delivery time, so a subject is never copied into a second table, and an
+// intent that outlives its ticket renders nothing rather than a stale snapshot.
+// =============================================================================
+enum SupportNotificationStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+}
+
+/// SKIPPED is terminal but not a failure: the administrator was deactivated
+/// between the fan-out and the send, so there is nobody to deliver to and
+/// retrying would never succeed.
+enum SupportRecipientStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+model SupportNotificationIntent {
+  id String @id @default(uuid())
+
+  ticketId  String
+  ticket    SupportTicket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  /// The message that caused this intent. Cascades: an intent for a message
+  /// that no longer exists has nothing to render.
+  messageId String
+  message   SupportMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  /// Stable event code (SUPPORT_NOTIFICATION_KINDS in @zedbot/support-tickets):
+  /// support.ticket_created / support.user_replied.
+  kind String
+
+  status   SupportNotificationStatus @default(PENDING)
+  attempts Int                       @default(0)
+
+  /// How many active admins were reached on the successful attempt.
+  deliveredCount Int     @default(0)
+  /// Short scrubbed English marker only — never a Telegram payload, never
+  /// ticket text.
+  safeErrorCode  String?
+
+  nextAttemptAt DateTime?
+  /// Set when a worker claims the row; a claim older than the stale threshold
+  /// is recovered, because a process that dies mid-send leaves SENDING behind.
+  claimedAt     DateTime?
+  sentAt        DateTime?
+
+  /// When the recipient set was FROZEN. Null = not yet expanded. This is the
+  /// one durable signal that expansion happened: it is stamped in the SAME
+  /// transaction that inserts the recipient rows, so a crash mid-expansion
+  /// rolls both back and the next attempt freezes one coherent set. "There is
+  /// at least one recipient row" is deliberately NOT the signal — a crash after
+  /// a partial insert would make that lie. Once set, retries never re-read the
+  /// administrator table, so an administrator promoted after this moment can
+  /// never receive the old event.
+  recipientsExpandedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  recipients SupportNotificationRecipient[]
+
+  @@unique([messageId, kind])
+  @@index([status, nextAttemptAt])
+  @@index([status, claimedAt])
+  @@index([ticketId])
+}
+
+// =============================================================================
+// One durable delivery obligation per administrator.
+//
+// The intent says an event happened. It does not say whether Ali heard about
+// it. Marking the whole intent SENT once ANY administrator was reached made one
+// administrator's success erase every other administrator's failure — the
+// contract is that active administrators are notified, not that somebody was.
+//
+// WHY NOT SystemLogDelivery. That model is the right SHAPE — one row per
+// target, status-guarded claim, attempts, backoff, safeErrorCode — but it is
+// foreign-keyed to a SystemLog row and its target is a LogTopic inside the
+// Telegram log group. Reusing it would mean fabricating a SystemLog for every
+// support ticket and modelling an administrator as a topic. Both are lies that
+// would then have to be maintained, so the SHAPE is copied and the model is
+// not.
+//
+// NO CHAT ID IS STORED. The row points at the Admin; the chat id is read from
+// that row at send time. Copying the id here would put it in every backup,
+// every query result and every debug dump of this table, and would also go
+// stale the moment an administrator's Telegram account changes.
+//
+// FAN-OUT IS MATERIALIZED WHEN THE INTENT IS FIRST CLAIMED, not when the ticket
+// is written: a ticket write must not depend on reading the administrator
+// table. The consequence is deliberate and documented — an administrator added
+// AFTER an event was first picked up gets no obligation for it, so promoting
+// someone does not flood them with the backlog.
+// =============================================================================
+model SupportNotificationRecipient {
+  id String @id @default(uuid())
+
+  intentId String
+  intent   SupportNotificationIntent @relation(fields: [intentId], references: [id], onDelete: Cascade)
+
+  /// The administrator this obligation is for. Cascades: a deleted
+  /// administrator has no obligation left to satisfy.
+  adminId String
+  admin   Admin  @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  status   SupportRecipientStatus @default(PENDING)
+  attempts Int                    @default(0)
+
+  /// Short scrubbed marker only — never a Telegram payload, never ticket text.
+  safeErrorCode String?
+
+  nextAttemptAt DateTime?
+  claimedAt     DateTime?
+  sentAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One obligation per administrator per event. This is what makes a retry
+  /// skip the recipients that already succeeded.
+  @@unique([intentId, adminId])
+  @@index([status, nextAttemptAt])
+  @@index([status, claimedAt])
+  @@index([intentId, status])
 }
 
 // =============================================================================

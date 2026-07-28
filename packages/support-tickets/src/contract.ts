@@ -1,0 +1,372 @@
+import { createHash } from "node:crypto";
+
+import type { SupportTicketStatus } from "@zedbot/database";
+import {
+  isSupportTicketCategory,
+  isSupportTicketOrigin,
+  type SupportTicketCategory,
+  type SupportTicketOrigin,
+  supportCategoryPrefersService,
+} from "@zedbot/shared";
+
+// =============================================================================
+// The support-ticket contract, with no transport in it.
+//
+// This package exists because the same rules have to hold in two processes that
+// share nothing else. The bot receives a Telegram update; the API receives a
+// JSON body. If each validated a subject, decided a transition and scoped a
+// query its own way, the two would agree today and drift the first time someone
+// edited one of them — and the drift is not symmetric. A bot bug annoys a user;
+// an API bug is reachable by anyone holding a session cookie.
+//
+// Everything that decides an OUTCOME lives here. Everything that decides a
+// PRESENTATION — Persian strings, keyboards, HTTP statuses — stays outside.
+//
+// THESE BOUNDS ARE AUTHORITATIVE. The bot's constants now re-export from here
+// rather than declaring their own, because "the two surfaces accept the same
+// input" is only true if one of them is not free to have an opinion. A user who
+// typed a 3000-character message in the bot yesterday must be able to type one
+// in the Mini App today.
+// =============================================================================
+
+export const TICKET_SUBJECT_MIN = 3;
+export const TICKET_SUBJECT_MAX = 100;
+export const TICKET_MESSAGE_MIN = 1;
+export const TICKET_MESSAGE_MAX = 3000;
+
+/** Every way a domain command can be refused, as a STABLE code. */
+export const SUPPORT_DOMAIN_ERRORS = [
+  "INVALID_SUBJECT",
+  "INVALID_MESSAGE",
+  "INVALID_CATEGORY",
+  "INVALID_ORIGIN",
+  "INVALID_SERVICE",
+  "INVALID_TICKET_ID",
+  "TICKET_NOT_FOUND",
+  "TICKET_CLOSED",
+  "INVALID_REQUEST_ID",
+  /** The key is known, but it was first used for a different mutation. */
+  "IDEMPOTENCY_CONFLICT",
+] as const;
+export type SupportDomainError = (typeof SUPPORT_DOMAIN_ERRORS)[number];
+
+export type SupportDomainResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: SupportDomainError };
+
+export function fail<T>(error: SupportDomainError): SupportDomainResult<T> {
+  return { ok: false, error };
+}
+
+// --- normalization -----------------------------------------------------------
+//
+// Each of these takes `unknown`, because that is what a transport actually has.
+// A TypeScript interface is a compile-time claim about a value, not a check on
+// it: `JSON.parse` produces `any`, and a hand-built object that satisfies the
+// type checker can still carry a 90 KB subject. The domain therefore never
+// accepts a pre-normalized command — it normalizes, and the SAME normalized
+// values are what get persisted and what get fingerprinted.
+
+/** Trim first, then measure: a subject of a hundred spaces is not a subject. */
+export function normalizeSubject(raw: unknown): SupportDomainResult<string> {
+  if (typeof raw !== "string") {
+    return fail("INVALID_SUBJECT");
+  }
+  const clean = raw.trim();
+  if (clean.length < TICKET_SUBJECT_MIN || clean.length > TICKET_SUBJECT_MAX) {
+    return fail("INVALID_SUBJECT");
+  }
+  return { ok: true, value: clean };
+}
+
+export function normalizeMessage(raw: unknown): SupportDomainResult<string> {
+  if (typeof raw !== "string") {
+    return fail("INVALID_MESSAGE");
+  }
+  const clean = raw.trim();
+  if (clean.length < TICKET_MESSAGE_MIN || clean.length > TICKET_MESSAGE_MAX) {
+    return fail("INVALID_MESSAGE");
+  }
+  return { ok: true, value: clean };
+}
+
+/** A category CODE, never a label: labels are display text and can change. */
+export function normalizeCategory(raw: unknown): SupportDomainResult<SupportTicketCategory> {
+  return isSupportTicketCategory(raw) ? { ok: true, value: raw } : fail("INVALID_CATEGORY");
+}
+
+export function normalizeOrigin(raw: unknown): SupportDomainResult<SupportTicketOrigin> {
+  return isSupportTicketOrigin(raw) ? { ok: true, value: raw } : fail("INVALID_ORIGIN");
+}
+
+/**
+ * A client request id: opaque to us, but bounded and printable.
+ *
+ * Bounded because it is stored and indexed, and printable because an unbounded
+ * or binary value is a way to write junk into a unique index.
+ */
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
+
+export function normalizeRequestId(raw: unknown): SupportDomainResult<string> {
+  return typeof raw === "string" && REQUEST_ID_PATTERN.test(raw)
+    ? { ok: true, value: raw }
+    : fail("INVALID_REQUEST_ID");
+}
+
+// --- the Service-link policy -------------------------------------------------
+
+/**
+ * Whether a category leads with the Service picker.
+ *
+ * MIRRORED, not re-decided — delegated to the bot's own predicate so the two
+ * surfaces cannot disagree. CONNECTION and SERVICE_MANAGEMENT show the picker
+ * first; the rest offer an explicit opt-in, so an unrelated Service is never
+ * stapled onto a PAYMENT or ACCOUNT ticket.
+ */
+export function categoryPrefersService(category: SupportTicketCategory): boolean {
+  return supportCategoryPrefersService(category);
+}
+
+/**
+ * No category makes a Service mandatory.
+ *
+ * Verified against the bot rather than assumed: its flow offers the picker and
+ * lets the user proceed without one. A Mini App that required a Service for
+ * CONNECTION would reject tickets the bot accepts.
+ */
+export function categoryRequiresService(_category: SupportTicketCategory): boolean {
+  return false;
+}
+
+// --- status ------------------------------------------------------------------
+
+/**
+ * "Not CLOSED" rather than a list of open statuses: the enum still carries a
+ * legacy `ANSWERED` value, and a whitelist would silently lock those tickets.
+ */
+export function userMayReply(status: SupportTicketStatus): boolean {
+  return status !== "CLOSED";
+}
+
+export const TICKET_STATUS_AFTER_CREATE: SupportTicketStatus = "WAITING_ADMIN";
+export const TICKET_STATUS_AFTER_USER_REPLY: SupportTicketStatus = "WAITING_ADMIN";
+export const TICKET_STATUS_AFTER_ADMIN_REPLY: SupportTicketStatus = "WAITING_USER";
+
+/** True when the ticket is waiting on the USER rather than on support. */
+export function isWaitingForUser(status: SupportTicketStatus): boolean {
+  return status === "WAITING_USER" || status === "ANSWERED";
+}
+
+// --- idempotency -------------------------------------------------------------
+
+/** What a stored idempotency key was used for. Stable codes. */
+export const MINIAPP_IDEMPOTENT_OPERATIONS = [
+  "SUPPORT_TICKET_CREATE",
+  "SUPPORT_TICKET_REPLY",
+] as const;
+export type MiniAppIdempotentOperation = (typeof MINIAPP_IDEMPOTENT_OPERATIONS)[number];
+
+/**
+ * The field separator inside a fingerprint: exactly one U+0000.
+ *
+ * WRITTEN AS AN ESCAPE, NEVER AS A LITERAL. A raw NUL byte in a source file
+ * makes Git classify the file as binary — diffs stop rendering, review tools
+ * show "Bin 12020 -> 14412 bytes" instead of the change, and a modification to
+ * anything else in this file becomes invisible to a reviewer. The escape
+ * compiles to the identical single character, so the hash is unchanged; only
+ * the bytes on disk differ. `SEP-1` in the tests asserts both halves of that:
+ * the file has no NUL bytes, and the runtime separator still is one.
+ *
+ * The value itself is chosen because it cannot occur in the normalized inputs
+ * — a subject or message that reached here has been through `normalizeSubject`
+ * / `normalizeMessage`, and JSON cannot carry an unescaped NUL.
+ */
+export const FINGERPRINT_SEPARATOR = "\u0000";
+
+/**
+ * A fingerprint of the NORMALIZED mutation.
+ *
+ * Canonical by construction: the fields are listed in a fixed order, each is
+ * length-prefixed, and they are joined with a separator that cannot occur in
+ * the values — so two encodings of the same mutation are byte-identical and no
+ * field boundary can be shifted by content (the classic `"a" + "bc"` versus
+ * `"ab" + "c"` collision).
+ *
+ * Hashed rather than stored, because the point is comparison, not recall — and
+ * the ticket text already exists once in the database. Keeping a second copy
+ * here to answer "is this the same request?" would double the blast radius of a
+ * leak in exchange for nothing.
+ */
+export function mutationFingerprint(parts: readonly string[]): string {
+  const canonical = parts.map((p) => `${p.length}:${p}`).join(FINGERPRINT_SEPARATOR);
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+// --- notification intents ----------------------------------------------------
+//
+// Which events support must hear about, as STABLE codes. They are stored, so
+// renaming one is a migration, not a refactor — and they are deliberately not
+// the Persian titles, because the message an admin reads is presentation and
+// may be re-worded at any time without touching a stored value.
+
+export const SUPPORT_NOTIFICATION_KINDS = [
+  "support.ticket_created",
+  "support.user_replied",
+] as const;
+export type SupportNotificationKind = (typeof SUPPORT_NOTIFICATION_KINDS)[number];
+
+export function isSupportNotificationKind(value: unknown): value is SupportNotificationKind {
+  return (
+    typeof value === "string" &&
+    (SUPPORT_NOTIFICATION_KINDS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * How long a claimed intent may stay claimed before it is presumed abandoned.
+ *
+ * A worker that dies between claiming a row and finishing the send leaves it in
+ * SENDING forever. Some threshold has to declare that dead, and the cost of
+ * being wrong is asymmetric: recovering too early risks a duplicate admin
+ * message, recovering too late means nobody is told at all. Generous enough
+ * that a slow Telegram call is never mistaken for a crash.
+ */
+export const NOTIFICATION_STALE_CLAIM_MS = 5 * 60 * 1000;
+
+/** Attempts before an intent is parked as FAILED for an operator to look at. */
+export const NOTIFICATION_MAX_ATTEMPTS = 6;
+
+/**
+ * Backoff for attempt N (1-based), capped.
+ *
+ * Exponential because the usual cause is a transient outage that resolves on
+ * its own, and capped because an admin waiting an hour for a ticket alert is
+ * indistinguishable from never being told.
+ */
+export function notificationRetryDelayMs(attempts: number): number {
+  const step = Math.max(1, attempts);
+  return Math.min(15 * 60 * 1000, 10_000 * 2 ** (step - 1));
+}
+
+/** A completed prior attempt, as stored. */
+export interface IdempotentOutcome {
+  operation: string;
+  targetTicketId: string | null;
+  fingerprint: string;
+  resultTicketId: string;
+  resultMessageId: string;
+}
+
+/**
+ * Whether a stored record answers THIS request.
+ *
+ * All three must match. A key replayed for a different operation, a different
+ * target or different content is a client bug or an attack, and returning the
+ * original answer would be answering a question nobody asked.
+ */
+export function idempotentRecordMatches(
+  stored: IdempotentOutcome,
+  operation: MiniAppIdempotentOperation,
+  targetTicketId: string | null,
+  fingerprint: string,
+): boolean {
+  return (
+    stored.operation === operation &&
+    stored.targetTicketId === targetTicketId &&
+    stored.fingerprint === fingerprint
+  );
+}
+
+// --- transport mapping -------------------------------------------------------
+
+/**
+ * The HTTP status each domain error deserves.
+ *
+ * It lives in the domain package, not in the route file, because the mapping
+ * is a property of what the error MEANS and there is more than one transport.
+ * A route that invents its own status for `TICKET_CLOSED` will eventually pick
+ * 400, and a client cannot distinguish "you sent nonsense" from "this
+ * conversation is over" — which are different things to show a person.
+ *
+ * The domain package still imports nothing from Fastify: this is a number.
+ *
+ *   400 — the request is malformed. Fix the input and it will work.
+ *   404 — no such ticket FOR THIS OWNER. Unknown, malformed, ambiguous and
+ *         somebody else's collapse into one answer on purpose: distinguishing
+ *         them tells an attacker which ticket ids exist.
+ *   409 — the request was well-formed but conflicts with durable state: the
+ *         ticket is closed, or this idempotency key was already used for a
+ *         different payload. Retrying it unchanged will never succeed.
+ */
+const DOMAIN_ERROR_STATUS: Record<SupportDomainError, number> = {
+  INVALID_SUBJECT: 400,
+  INVALID_MESSAGE: 400,
+  INVALID_CATEGORY: 400,
+  INVALID_ORIGIN: 400,
+  INVALID_SERVICE: 400,
+  INVALID_REQUEST_ID: 400,
+  INVALID_TICKET_ID: 404,
+  TICKET_NOT_FOUND: 404,
+  TICKET_CLOSED: 409,
+  IDEMPOTENCY_CONFLICT: 409,
+};
+
+export function supportDomainErrorStatus(error: SupportDomainError): number {
+  return DOMAIN_ERROR_STATUS[error];
+}
+
+/** Every error code is mapped — exhaustively, checked by the type above. */
+export function isSupportDomainError(value: unknown): value is SupportDomainError {
+  return typeof value === "string" && (SUPPORT_DOMAIN_ERRORS as readonly string[]).includes(value);
+}
+
+// --- the transport body bound -------------------------------------------------
+
+/**
+ * The largest a Support Center mutation body may be, in BYTES.
+ *
+ * WHY THIS IS DERIVED RATHER THAN CHOSEN. The domain bounds a message at
+ * TICKET_MESSAGE_MAX **UTF-16 code units**; HTTP bounds a body in **bytes**.
+ * Those are different units, and picking a byte number by eye gets it wrong in
+ * the direction that matters: a limit that looks generous against ASCII
+ * rejects perfectly valid text the domain would have accepted. 3000 Persian
+ * characters are 6000 bytes of UTF-8; 3000 CJK characters are 9000; and a
+ * client whose JSON serializer escapes non-ASCII — which `JSON.stringify` does
+ * under `ensure_ascii`-style settings, and which several HTTP libraries do by
+ * default — sends every one of those code units as the six ASCII bytes
+ * `\uXXXX`. The worst case is therefore six bytes per code unit, and the only
+ * safe limit is one computed from the same constants the validator uses.
+ *
+ * WHAT IT MUST STILL REJECT. A file. The largest legitimate body is under
+ * 20 KiB; images, archives and documents are orders of magnitude larger, so
+ * this stays a real bound rather than a formality.
+ */
+const JSON_ESCAPE_BYTES_PER_CODE_UNIT = 6;
+/** `clientRequestId` is `[A-Za-z0-9_-]{16,64}` — ASCII, never escaped. */
+const REQUEST_ID_MAX_BYTES = 64;
+/** The longest category enum value, with room for a longer one later. */
+const CATEGORY_MAX_BYTES = 64;
+/** A service public id is eight hex characters. */
+const SERVICE_ID_MAX_BYTES = 16;
+/**
+ * Field names, quotes, colons, commas, braces — and whitespace, because a
+ * pretty-printing client is sending valid JSON and must not be refused for it.
+ */
+const JSON_ENVELOPE_HEADROOM_BYTES = 1024;
+
+const WORST_CASE_MUTATION_BYTES =
+  (TICKET_MESSAGE_MAX + TICKET_SUBJECT_MAX) * JSON_ESCAPE_BYTES_PER_CODE_UNIT +
+  REQUEST_ID_MAX_BYTES +
+  CATEGORY_MAX_BYTES +
+  SERVICE_ID_MAX_BYTES +
+  JSON_ENVELOPE_HEADROOM_BYTES;
+
+/** Rounded up to a whole KiB so the configured value reads like a limit. */
+export const SUPPORT_MUTATION_BODY_LIMIT_BYTES =
+  Math.ceil(WORST_CASE_MUTATION_BYTES / 1024) * 1024;
+
+/**
+ * The worst case itself, exported so a test can assert the limit covers it
+ * rather than re-deriving the arithmetic and agreeing with itself.
+ */
+export const SUPPORT_MUTATION_WORST_CASE_BYTES = WORST_CASE_MUTATION_BYTES;
