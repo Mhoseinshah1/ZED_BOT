@@ -1,4 +1,4 @@
-import { createLogger, errorMessage } from "@zedbot/shared";
+import { createLogger } from "@zedbot/shared";
 import {
   createTicket,
   isSupportDomainError,
@@ -21,6 +21,7 @@ import {
   toMiniAppTicketDetail,
   toMiniAppTicketSummary,
 } from "./serializers.js";
+import { supportFailureLog } from "./support-errors.js";
 import {
   checkSupportMutation,
   createSupportMutationLimiters,
@@ -151,7 +152,7 @@ export function registerSupportRoutes(secured: FastifyInstance, options: Support
         recentTickets: recent.tickets.map(toMiniAppTicketSummary),
       });
     } catch (err) {
-      logger.error("mini app support summary failed", { error: errorMessage(err) });
+      logger.error("mini app support read failed", supportFailureLog("summary", err));
       return fail(reply, 503, "INTERNAL");
     }
   });
@@ -191,7 +192,7 @@ export function registerSupportRoutes(secured: FastifyInstance, options: Support
                 }),
         });
       } catch (err) {
-        logger.error("mini app support list failed", { error: errorMessage(err) });
+        logger.error("mini app support read failed", supportFailureLog("list", err));
         return fail(reply, 503, "INTERNAL");
       }
     },
@@ -222,7 +223,7 @@ export function registerSupportRoutes(secured: FastifyInstance, options: Support
           }),
         });
       } catch (err) {
-        logger.error("mini app support detail failed", { error: errorMessage(err) });
+        logger.error("mini app support read failed", supportFailureLog("detail", err));
         return fail(reply, 503, "INTERNAL");
       }
     },
@@ -268,7 +269,7 @@ export function registerSupportRoutes(secured: FastifyInstance, options: Support
               }),
       });
     } catch (err) {
-      logger.error("mini app support messages failed", { error: errorMessage(err) });
+      logger.error("mini app support read failed", supportFailureLog("messages", err));
       return fail(reply, 503, "INTERNAL");
     }
   });
@@ -367,6 +368,6 @@ function handleWriteFailure(reply: FastifyReply, err: unknown, operation: string
     const code = (err as { code: string }).code;
     return fail(reply, supportDomainErrorStatus(code as never), code);
   }
-  logger.error("mini app support write failed", { operation, error: errorMessage(err) });
+  logger.error("mini app support write failed", supportFailureLog(operation, err));
   return fail(reply, 503, "INTERNAL");
 }
