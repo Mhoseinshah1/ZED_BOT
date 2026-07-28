@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import { authenticate, type ApiFailure, type UserDto } from "./api";
+import { fetchCommerceFlags } from "./commerce-api";
+import {
+  AddonsSection,
+  BuyScreen,
+  DeliverySection,
+  flagsFromResponse,
+  OrdersScreen,
+  type BuyView,
+  type CommerceFlags,
+  type OrdersView,
+} from "./commerce";
 import { FailureScreen } from "./components";
-import { UI } from "./i18n";
+import { COMMERCE_UI, UI } from "./i18n";
 import {
   DashboardScreen,
   OutsideTelegramScreen,
@@ -54,7 +65,7 @@ import {
 // authenticates again.
 // =============================================================================
 
-type Tab = "dashboard" | "services" | "wallet" | "support" | "profile";
+type Tab = "dashboard" | "buy" | "services" | "orders" | "wallet" | "support" | "profile";
 
 /**
  * Where the Support tab currently is.
@@ -83,6 +94,11 @@ export function App(): ReactNode {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [openServiceId, setOpenServiceId] = useState<string | null>(null);
   const [supportView, setSupportView] = useState<SupportView>({ kind: "home" });
+  // Commerce rollout flags — fetched once per session; everything commercial
+  // stays hidden until the OWNER switches arrive as true (fail closed).
+  const [commerceFlags, setCommerceFlags] = useState<CommerceFlags | null>(null);
+  const [buyView, setBuyView] = useState<BuyView>({ kind: "hub" });
+  const [ordersView, setOrdersView] = useState<OrdersView>({ kind: "list" });
 
   const signIn = useCallback(async () => {
     setSession({ phase: "starting" });
@@ -97,6 +113,10 @@ export function App(): ReactNode {
     setSession(
       result.ok ? { phase: "ready", user: result.user } : { phase: "failed", failure: result },
     );
+    if (result.ok) {
+      const flags = await fetchCommerceFlags();
+      setCommerceFlags(flags.ok ? flagsFromResponse(flags.flags) : null);
+    }
   }, []);
 
   useEffect(() => {
@@ -153,13 +173,63 @@ export function App(): ReactNode {
 
       <main className="app__content">
         {showingDetail ? (
-          <ServiceDetailScreen serviceId={openServiceId} />
+          <>
+            <ServiceDetailScreen serviceId={openServiceId} />
+            {commerceFlags !== null && commerceFlags.commerce && openServiceId !== null ? (
+              <>
+                {commerceFlags.serviceDelivery ? (
+                  <DeliverySection servicePublicId={openServiceId} />
+                ) : null}
+                <AddonsSection
+                  servicePublicId={openServiceId}
+                  onPayment={(publicId) => {
+                    setOpenServiceId(null);
+                    setTab("buy");
+                    setBuyView({ kind: "payment", paymentPublicId: publicId });
+                  }}
+                  onCheckout={(publicId) => {
+                    setOpenServiceId(null);
+                    setTab("buy");
+                    setBuyView({ kind: "checkout", checkoutPublicId: publicId });
+                  }}
+                />
+              </>
+            ) : null}
+          </>
+        ) : tab === "buy" && commerceFlags !== null ? (
+          <BuyScreen
+            flags={commerceFlags}
+            view={buyView}
+            onView={setBuyView}
+            onOrders={() => {
+              setOrdersView({ kind: "list" });
+              setTab("orders");
+            }}
+          />
+        ) : tab === "orders" && commerceFlags !== null ? (
+          <OrdersScreen view={ordersView} onView={setOrdersView} />
         ) : tab === "dashboard" ? (
           <DashboardScreen onOpenService={setOpenServiceId} />
         ) : tab === "services" ? (
           <ServicesScreen onOpenService={setOpenServiceId} />
         ) : tab === "wallet" ? (
-          <WalletScreen />
+          <>
+            <WalletScreen />
+            {commerceFlags !== null && commerceFlags.commerce && commerceFlags.walletTopup ? (
+              <div className="actions">
+                <button
+                  type="button"
+                  className="button"
+                  onClick={() => {
+                    setTab("buy");
+                    setBuyView({ kind: "topup" });
+                  }}
+                >
+                  {COMMERCE_UI.topupTitle}
+                </button>
+              </div>
+            ) : null}
+          </>
         ) : tab === "support" ? (
           supportView.kind === "home" ? (
             <SupportScreen
@@ -204,7 +274,13 @@ export function App(): ReactNode {
         {(
           [
             ["dashboard", UI.navDashboard],
+            ...(commerceFlags !== null && commerceFlags.commerce
+              ? ([["buy", COMMERCE_UI.buyTab]] as Array<[Tab, string]>)
+              : []),
             ["services", UI.navServices],
+            ...(commerceFlags !== null && commerceFlags.commerce
+              ? ([["orders", COMMERCE_UI.ordersTab]] as Array<[Tab, string]>)
+              : []),
             ["wallet", UI.navWallet],
             ["support", UI.navSupport],
             ["profile", UI.navProfile],
@@ -236,6 +312,10 @@ function titleFor(tab: Tab): string {
   switch (tab) {
     case "dashboard":
       return UI.appName;
+    case "buy":
+      return COMMERCE_UI.buyTab;
+    case "orders":
+      return COMMERCE_UI.ordersTab;
     case "services":
       return UI.navServices;
     case "wallet":
