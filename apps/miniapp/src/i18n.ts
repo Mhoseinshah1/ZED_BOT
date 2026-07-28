@@ -132,6 +132,66 @@ export const FAILURE_TEXT: Record<ApiFailureCode, FailureText> = {
     body: "در حال حاضر امکان بررسی دسترسی وجود ندارد. لطفاً دوباره تلاش کنید.",
     retryable: true,
   },
+  // --- support-centre writes -------------------------------------------------
+  //
+  // These reach a user only when the client-side checks were bypassed or the
+  // ticket changed underneath them, so each says what the SERVER decided and
+  // what to do about it - never "invalid input" with no direction.
+  UNSUPPORTED_MEDIA_TYPE: {
+    title: "درخواست نامعتبر",
+    body: "قالب درخواست ارسال‌شده پذیرفته نشد. لطفاً صفحه را دوباره باز کنید.",
+    retryable: false,
+  },
+  INVALID_SUBJECT: {
+    title: "موضوع پذیرفته نشد",
+    body: "موضوع باید بین ۳ تا ۱۰۰ نویسه باشد. لطفاً آن را کوتاه‌تر یا کامل‌تر بنویسید.",
+    retryable: false,
+  },
+  INVALID_MESSAGE: {
+    title: "متن پیام پذیرفته نشد",
+    body: "متن پیام باید بین ۱ تا ۳۰۰۰ نویسه باشد. لطفاً آن را اصلاح کنید.",
+    retryable: false,
+  },
+  INVALID_CATEGORY: {
+    title: "دسته‌بندی نامعتبر",
+    body: "دستهٔ انتخاب‌شده معتبر نیست. لطفاً یکی از دسته‌های فهرست را انتخاب کنید.",
+    retryable: false,
+  },
+  INVALID_SERVICE: {
+    title: "سرویس نامعتبر",
+    body: "سرویس انتخاب‌شده پیدا نشد. تیکت را بدون سرویس ثبت کنید یا سرویس دیگری انتخاب کنید.",
+    retryable: false,
+  },
+  INVALID_REQUEST_ID: {
+    title: "درخواست نامعتبر",
+    body: "شناسهٔ این درخواست معتبر نبود. لطفاً صفحه را دوباره باز کنید و از نو تلاش کنید.",
+    retryable: false,
+  },
+  INVALID_TICKET_ID: {
+    title: "تیکت یافت نشد",
+    body: "این تیکت وجود ندارد یا دیگر در دسترس شما نیست.",
+    retryable: false,
+  },
+  TICKET_NOT_FOUND: {
+    title: "تیکت یافت نشد",
+    body: "این تیکت وجود ندارد یا دیگر در دسترس شما نیست.",
+    retryable: false,
+  },
+  // A closed conversation is not an error the user caused, and retrying it can
+  // never succeed - so no retry is offered and the screen says what to do
+  // instead.
+  TICKET_CLOSED: {
+    title: "این تیکت بسته شده است",
+    body: "امکان ارسال پاسخ روی تیکت بسته وجود ندارد. برای پیگیری، یک تیکت جدید باز کنید.",
+    retryable: false,
+  },
+  // The key is known but was first used for different content: replaying it
+  // would answer a question nobody asked, so the user starts a new draft.
+  IDEMPOTENCY_CONFLICT: {
+    title: "این درخواست قبلاً ثبت شده است",
+    body: "درخواست دیگری با همین شناسه پیش‌تر ثبت شده بود. لطفاً از نو شروع کنید.",
+    retryable: false,
+  },
 };
 
 /** Service lifecycle states, in the same words the bot uses. */
@@ -168,6 +228,60 @@ export const USER_GROUP_TEXT: Record<string, string> = {
 export const SERVICE_SOURCE_TEXT: Record<string, string> = {
   PAID: "خریداری‌شده",
   FREE_TRIAL: "تست رایگان",
+};
+
+// --- support tickets ---------------------------------------------------------
+//
+// `apps/miniapp` deliberately depends on NOTHING from the workspace: it is a
+// browser bundle, and pulling in `@zedbot/shared` would drag a package built
+// for Node (and everything it imports) into a Vite build for the sake of five
+// strings. So the codes and their labels are written out here and MIRROR
+// `SUPPORT_TICKET_CATEGORIES` / `SUPPORT_CATEGORY_LABEL_FA` in
+// `packages/shared/src/support-tickets-v2.ts` exactly - same codes, same
+// Persian words. Behaviour is driven by the CODE either way; the server
+// re-validates whatever this app sends, so a drifted label is a wording bug
+// and a drifted code is refused with INVALID_CATEGORY rather than accepted.
+
+/** Mirrors `SUPPORT_TICKET_CATEGORIES` (`@zedbot/shared`), order included. */
+export const SUPPORT_CATEGORIES = [
+  "CONNECTION",
+  "PAYMENT",
+  "SERVICE_MANAGEMENT",
+  "ACCOUNT",
+  "OTHER",
+] as const;
+
+export type SupportCategoryCode = (typeof SUPPORT_CATEGORIES)[number];
+
+/** Mirrors `SUPPORT_CATEGORY_LABEL_FA` (`@zedbot/shared`), word for word. */
+export const SUPPORT_CATEGORY_TEXT: Record<string, string> = {
+  CONNECTION: "اتصال",
+  PAYMENT: "پرداخت و سفارش",
+  SERVICE_MANAGEMENT: "مدیریت سرویس",
+  ACCOUNT: "حساب کاربری",
+  OTHER: "سایر",
+};
+
+/**
+ * Ticket lifecycle states.
+ *
+ * `ANSWERED` is a legacy value the enum still carries; it means the same thing
+ * to a user as `WAITING_USER`, so it reads the same rather than leaking the
+ * word "ANSWERED" onto a screen.
+ */
+export const TICKET_STATUS_TEXT: Record<string, string> = {
+  OPEN: "باز",
+  WAITING_ADMIN: "در انتظار پشتیبانی",
+  WAITING_USER: "در انتظار پاسخ شما",
+  ANSWERED: "در انتظار پاسخ شما",
+  CLOSED: "بسته‌شده",
+};
+
+/** Who wrote a message. `SYSTEM` is the bot's own automated note. */
+export const TICKET_SENDER_TEXT: Record<string, string> = {
+  USER: "شما",
+  ADMIN: "پشتیبانی",
+  SYSTEM: "سیستم",
 };
 
 /** Falls back to the raw code so an unmapped value is visible, not blank. */
@@ -241,4 +355,71 @@ export const UI = {
   remainingDays: "روزهای باقی‌مانده",
   activeServices: "سرویس‌های فعال",
   totalServices: "کل سرویس‌ها",
+
+  // --- support centre --------------------------------------------------------
+  navSupport: "پشتیبانی",
+  supportTitle: "مرکز پشتیبانی",
+  supportTicketsTotal: "همهٔ تیکت‌ها",
+  supportTicketsOpen: "تیکت‌های باز",
+  supportTicketsWaitingUser: "در انتظار پاسخ شما",
+  supportTicketsClosed: "بسته‌شده",
+  supportOpenList: "مشاهدهٔ تیکت‌ها",
+  supportNewTicket: "ثبت تیکت جدید",
+  supportListTitle: "تیکت‌های من",
+  supportEmpty: "هنوز تیکتی ثبت نکرده‌اید.",
+  supportTicketId: "شناسهٔ تیکت",
+  supportNoSubject: "بدون موضوع",
+  supportCategory: "دسته‌بندی",
+  supportStatus: "وضعیت",
+  supportOpenedAt: "تاریخ ثبت",
+  supportUpdatedAt: "آخرین تغییر",
+  supportClosedAt: "تاریخ بسته شدن",
+  supportRelatedService: "سرویس مرتبط",
+  supportThread: "گفت‌وگو",
+  supportLoadOlder: "نمایش پیام‌های قدیمی‌تر",
+  supportNoMessages: "پیامی در این تیکت ثبت نشده است.",
+  supportMessageHasAttachment: "این پیام فایل پیوست دارد",
+  // Attachments exist in the data and are shown in the BOT, never here: this
+  // app has no upload control and no download route to point one at.
+  supportAttachmentsTitle: "این تیکت فایل پیوست دارد",
+  supportAttachmentsBody:
+    "مشاهدهٔ فایل‌های پیوست فقط در ربات ممکن است. برای دیدن آن‌ها گفت‌وگو را در ربات ادامه دهید.",
+  supportAttachmentsAction: "مشاهدهٔ پیوست‌ها در ربات 📎",
+  supportReplyTitle: "ارسال پاسخ",
+  supportReplyPlaceholder: "پاسخ خود را بنویسید…",
+  supportReplySend: "ارسال پاسخ",
+  supportReplySending: "در حال ارسال…",
+  supportReplySent: "پاسخ شما ثبت شد.",
+  supportReplyRetry: "ارسال دوباره",
+  supportClosedNotice:
+    "این تیکت بسته شده است و امکان ارسال پاسخ ندارد. برای پیگیری، تیکت جدیدی باز کنید.",
+
+  // The wizard. One decision per step, then a review of exactly what will be
+  // sent, then one explicit confirmation - nothing is submitted before it.
+  supportWizardTitle: "ثبت تیکت جدید",
+  supportStepCategory: "گام ۱ از ۴ — دسته‌بندی مشکل",
+  supportStepSubject: "گام ۲ از ۴ — موضوع",
+  supportStepMessage: "گام ۳ از ۴ — شرح مشکل",
+  supportStepReview: "گام ۴ از ۴ — بازبینی و تأیید",
+  supportSubjectLabel: "موضوع تیکت",
+  supportSubjectPlaceholder: "موضوع را کوتاه بنویسید",
+  supportMessageLabel: "شرح مشکل",
+  supportMessagePlaceholder: "مشکل را با جزئیات بنویسید…",
+  supportNext: "ادامه",
+  supportPrevious: "بازگشت به گام قبل",
+  supportReviewLead: "این دقیقاً همان چیزی است که ارسال می‌شود:",
+  supportConfirmSend: "تأیید و ارسال تیکت",
+  supportSending: "در حال ارسال…",
+  supportRetrySend: "ارسال دوباره",
+  supportCancel: "انصراف",
+  supportCreated: "تیکت شما ثبت شد.",
+  supportSubjectTooShort: "موضوع باید دست‌کم ۳ نویسه باشد.",
+  supportSubjectTooLong: "موضوع نباید بیش از ۱۰۰ نویسه باشد.",
+  supportMessageTooShort: "متن پیام نمی‌تواند خالی باشد.",
+  supportMessageTooLong: "متن پیام نباید بیش از ۳۰۰۰ نویسه باشد.",
+  supportCharacterCount: "نویسه",
+  // The wizard writes; the rest of the app does not. Saying so where the user
+  // is about to write keeps the read-only notice on other screens honest.
+  supportWriteNotice:
+    "ثبت تیکت و پاسخ در همین‌جا انجام می‌شود؛ خرید، پرداخت و تغییر سرویس‌ها همچنان در ربات است.",
 } as const;

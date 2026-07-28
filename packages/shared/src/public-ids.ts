@@ -48,3 +48,66 @@ export const SERVICE_PUBLIC_ID_PATTERN = /^[0-9a-f]{8}$/i;
 export function isServicePublicId(value: unknown): value is string {
   return typeof value === "string" && SERVICE_PUBLIC_ID_PATTERN.test(value);
 }
+
+/**
+ * The ONE canonical form of a public id, or null when it is not one.
+ *
+ * Hex is case-insensitive, so `AB12CD34` and `ab12cd34` name the same row —
+ * and anything that treats them as different strings will eventually treat one
+ * request as two. That bit us: an idempotency fingerprint built from the raw
+ * transport value made a retry that changed case look like a different
+ * mutation, so a user who resubmitted from a client that upper-cased the id
+ * would have been told their retry conflicted.
+ *
+ * So there is exactly one place that decides what a public id "is", and both
+ * the lookup and the fingerprint use its output. Never the raw value.
+ */
+export function canonicalPublicId(value: unknown, pattern: RegExp): string | null {
+  return typeof value === "string" && pattern.test(value) ? value.toLowerCase() : null;
+}
+
+/** Canonical lowercase service public id, or null. */
+export function canonicalServicePublicId(value: unknown): string | null {
+  return canonicalPublicId(value, SERVICE_PUBLIC_ID_PATTERN);
+}
+
+// --- support tickets ---------------------------------------------------------
+//
+// The same reasoning, for the same reason. A SupportTicket's primary key is a
+// uuid that appears in operator logs and admin screens; a ticket's public
+// identifier is what the user reads in the bot and in the Mini App, and the two
+// must be one value. The bot has always addressed tickets by a uuid PREFIX in
+// its callback data — this names that format instead of leaving each caller to
+// slice the string itself.
+//
+// Resolution is deliberately NOT here: it needs a database and an owner, and
+// every caller must scope its own query by the authenticated user.
+
+/** Characters of the uuid taken. 8 hex chars = 32 bits, as for services. */
+export const TICKET_SHORT_ID_LENGTH = 8;
+
+/** The public identifier for a support ticket. */
+export function ticketShortId(ticket: { id: string }): string {
+  return ticket.id.slice(0, TICKET_SHORT_ID_LENGTH);
+}
+
+/**
+ * Exactly the shape `ticketShortId` produces.
+ *
+ * The bot's own callback data may carry a looser prefix because the bot
+ * generated it and a stale button is harmless. An HTTP surface accepts this and
+ * nothing else: a shorter prefix would turn the detail route into a
+ * prefix-enumeration oracle over the caller's own tickets, and a longer one
+ * would let a caller keep a full uuid in circulation.
+ */
+export const TICKET_PUBLIC_ID_PATTERN = /^[0-9a-f]{8}$/i;
+
+/** True when `value` could be a public ticket id (format only, no lookup). */
+export function isTicketPublicId(value: unknown): value is string {
+  return typeof value === "string" && TICKET_PUBLIC_ID_PATTERN.test(value);
+}
+
+/** Canonical lowercase ticket public id, or null. Same discipline as services. */
+export function canonicalTicketPublicId(value: unknown): string | null {
+  return canonicalPublicId(value, TICKET_PUBLIC_ID_PATTERN);
+}

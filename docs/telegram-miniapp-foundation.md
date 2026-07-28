@@ -1,15 +1,21 @@
-# Telegram Mini App: foundation and read-only dashboard
+# Telegram Mini App: foundation, read-only dashboard and Support Centre
 
 A Persian, right-to-left web panel that opens inside Telegram and shows a user
-their wallet balance, their services and their transaction history. It is
-**read-only**. Nothing in it buys, renews, pays, opens a ticket or changes a
-service; those flows stay in the bot, where the existing business logic,
+their wallet balance, their services and their transaction history. Those
+surfaces are **read-only**: nothing in them buys, renews, pays or changes a
+service, and those flows stay in the bot, where the existing business logic,
 notifications and audit trail already live.
 
-Read-only does not mean a dead end. Every screen that raises an action — buying,
+There is exactly **one** write surface, added deliberately and bounded on
+purpose: the **Support Centre** (§4.8), where a user opens a ticket and posts a
+reply. Text only — no upload, no attachment download — and every write carries a
+client-minted idempotency key so a retry cannot open a second ticket. Everything
+else about a ticket (assignment, closing, files, admin notifications) still
+happens in the bot.
+
+Read-only is not a dead end either. Every screen that raises an action — buying,
 charging the wallet, renewing or managing a service, contacting support — offers
 it as a button that **opens the configured bot and does nothing else** (§4.7).
-None of them call a write-capable Mini App endpoint, because there is none.
 
 ---
 
@@ -209,7 +215,7 @@ with no row gets `403 NOT_REGISTERED` and a link to `/start`.
 
 ---
 
-## 4. The read-only API
+## 4. The API
 
 All routes are under `/api/miniapp`. Every response carries `Cache-Control:
 no-store`, `X-Content-Type-Options: nosniff` and `Vary: Cookie`, and **no**
@@ -224,6 +230,12 @@ no-store`, `X-Content-Type-Options: nosniff` and `Vary: Cookie`, and **no**
 | GET | `/services` | Keyset page of the caller's services. |
 | GET | `/services/:publicId` | One service the caller owns, addressed by its 8-character public id (§4.5). |
 | GET | `/wallet/transactions` | Keyset page of the caller's ledger. |
+| GET | `/support/summary` | `{ total, open, waitingUser, closed }` for the caller's tickets (§4.8). |
+| GET | `/support/tickets` | Keyset page of the caller's tickets, newest-updated first. |
+| GET | `/support/tickets/:publicId` | One ticket the caller owns, plus `canReply`, `hasAttachments`, `closedAt`, `serviceId`. |
+| GET | `/support/tickets/:publicId/messages` | Keyset page of a thread. Oldest-first **within** a page; the cursor walks **backwards** to older messages. |
+| POST | `/support/tickets` | **Write.** Opens a ticket; `201` with the ticket. |
+| POST | `/support/tickets/:publicId/replies` | **Write.** Appends a user reply; `201` with the updated ticket. |
 
 ### 4.1 What never crosses the boundary
 
@@ -447,20 +459,135 @@ and failure states carry none of these: the shared failure screen owns its own
 bot handoff for gates that can only be cleared in the bot, and stapling a second
 set of actions onto it would offer two different ways out of one problem.
 
+### 4.8 The Support Centre — the one write surface
+
+Contacting support is the one flow where "go back to the bot" was the worst
+answer available. Everything else the bot owns has real business logic behind it
+— pricing, stock, settlement — and duplicating any of it would create a second
+source of truth. A ticket does not: it is a subject, a category and some text.
+So this is the one place the Mini App writes, and the bounds are drawn tightly.
+
+**Where the rules live.** Not here. `packages/support-tickets` owns validation,
+ownership, status transitions and idempotency, and the bot imports the same
+package — so a subject the bot accepts is a subject the Mini App accepts. The
+route file (`apps/api/src/miniapp/support-routes.ts`) does three things only:
+read the request, choose a status code, shape the response.
+
+| Bound | Value | Where it is decided |
+| --- | --- | --- |
+| subject | 3–100 characters, trimmed first | `packages/support-tickets/src/contract.ts` |
+| message | 1–3000 characters, trimmed first | same |
+| category | one of `CONNECTION`, `PAYMENT`, `SERVICE_MANAGEMENT`, `ACCOUNT`, `OTHER` | `packages/shared/src/support-tickets-v2.ts` |
+| `clientRequestId` | `/^[A-Za-z0-9_-]{16,64}$/` | `packages/support-tickets/src/contract.ts` |
+| request body | 8 KiB | `SUPPORT_BODY_LIMIT_BYTES` |
+| `origin` | forced to `MINIAPP`, never read from the body | the route |
+
+`origin` is forced rather than accepted because it is the only column that says
+where support requests actually come from; letting a client claim otherwise
+would corrupt the one field the answer depends on.
+
+**The frontend mirrors those bounds, it does not own them.** A 4000-character
+message is refused before the round trip so the user is not made to wait for a
+verdict already knowable — but the server's answer always wins, and every
+rejection is a CODE the frontend renders in its own Persian.
+
+#### Idempotency: one key per submission, replayed on every retry
+
+A failed write has three outcomes a client cannot tell apart: it never arrived,
+it arrived and was refused, or **it arrived, was applied, and the response was
+lost**. Only the third is dangerous, and only replaying the same key protects
+against it.
+
+So the `clientRequestId` for a given wizard submission — or a given reply draft
+— is minted **once**, from `crypto.getRandomValues`, and reused **verbatim** on
+every retry of that submission. A retry that minted a fresh key would describe a
+different mutation, the server's record would not recognise it, and the user
+would get a second ticket: the exact failure the key exists to prevent. A fresh
+key is minted only for a genuinely new ticket or a new reply draft.
+
+The key lives in React state for the life of the draft and **nowhere else** —
+not `localStorage`, not a cookie, not IndexedDB.
+
+Server-side, the key is stored with the operation, the target ticket and a
+**fingerprint of the normalised mutation**. All three must match for a replay to
+be answered with the original outcome; a key reused for different content is
+`409 IDEMPOTENCY_CONFLICT` rather than a wrong answer to the right question.
+
+#### Text only, and it stays that way
+
+There is no upload route, no attachment download and no file metadata in any
+response. Tickets raised from Telegram can carry files; the Mini App is told
+only that one **exists** (`hasAttachments`, a boolean) and hands off to the bot
+to look at it.
+
+That is a security decision, not a scope cut. A download here would mean
+re-deciding, in a second place, who may read a given file — and the second
+answer eventually differs from the first. Since no file id, name, size or type
+ever crosses the boundary, there is nothing in the browser that a download could
+even be built from.
+
+#### What each failure means to a person
+
+The server sends codes; the frontend chooses the Persian. Two of them carry
+meaning a generic error would destroy:
+
+| Code | HTTP | What the screen does |
+| --- | --- | --- |
+| `TICKET_CLOSED` | 409 | Says this conversation is over and **removes the reply box**, then refetches the ticket. Never a retry button: the same request will fail identically. |
+| `IDEMPOTENCY_CONFLICT` | 409 | Says the key was already used for different content and starts a fresh draft. |
+| `INVALID_SUBJECT` / `INVALID_MESSAGE` / `INVALID_CATEGORY` / `INVALID_SERVICE` / `INVALID_REQUEST_ID` | 400 | Names the field that was refused. |
+| `TICKET_NOT_FOUND` / `INVALID_TICKET_ID` | 404 | One identical answer. Unknown, malformed, ambiguous and somebody else's collapse on purpose — distinguishing them would confirm which ticket ids exist. |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | The mutation gate refused the content type. |
+| `RATE_LIMITED` | 429 | Wait and retry. |
+
+**The mutation gate.** Both writes pass `checkSupportMutation` before any domain
+work: secure transport, `Origin` against the allowlist, `Content-Type`, and a
+per-user rate limit. It is the same shape as the auth limiter (§4.3) and for the
+same reason — a write anyone with a cookie can reach is a write worth bounding.
+
+**The API still holds no bot token.** Creating a ticket writes a *notification
+intent* in the same transaction as the message; the bot's sweep turns that into
+a message to the administrators. That is why the intent exists at all, and it is
+why `apps/api` needs no grammY to make support work.
+
+**Ticket ids are public short ids**, resolved owner-scoped exactly as services
+are (§4.5). No uuid crosses this boundary, and a message carries a display key
+derived the same way rather than its primary key.
+
 ---
 
 ## 5. The frontend
 
 `apps/miniapp` — React 19 + Vite 7 + TypeScript, Persian, RTL.
 
-Nine screens: splash, outside-Telegram, signed-out, dashboard, service list,
-service detail, wallet history, profile, and the failure screen every error path
-lands on.
+Thirteen screens: splash, outside-Telegram, signed-out, dashboard, service list,
+service detail, wallet history, profile, the failure screen every error path
+lands on, and the Support Centre's four — landing, ticket list, ticket thread
+and the new-ticket wizard.
+
+Five tabs: خانه, سرویس‌ها, کیف پول, پشتیبانی, حساب من. Navigation is component
+state in `App.tsx`, not a router: a URL-driven router inside a Telegram WebView
+adds history semantics nobody asked for, and there is less code in the state
+machine than there would be in the routing library.
+
+**The read/write split is a file boundary.** `src/screens.tsx` reads and only
+reads; `src/support.tsx` is the single module that posts. Keeping them apart is
+not tidiness — a reader who opens `screens.tsx` should be able to trust that the
+read-only guarantees still hold on every screen in it.
 
 - **No token anywhere, and nowhere to put one.** The session is an HttpOnly
   cookie the script cannot read; requests carry it with `credentials:
   "same-origin"`. Nothing is written to `localStorage` or `sessionStorage`, so
   an XSS that would otherwise exfiltrate a stored token has nothing to take.
+- **No browser persistence at all**, and that now includes ticket drafts and
+  idempotency keys. A draft in `localStorage` is a copy of a user's support text
+  sitting where any script on the page can read it, and a stored idempotency key
+  would outlive the submission it belongs to. Both are React state and die with
+  the component.
+- **The new-ticket wizard reviews before it sends.** Category → subject →
+  message → a review step showing exactly what will be transmitted → one
+  explicit confirmation. Advancing through the wizard issues no request at all;
+  the confirmation is the only thing that writes.
 - **Errors are codes.** The server sends no prose, so nothing server-authored is
   ever rendered; the Persian text is chosen locally from a closed set, and an
   unknown code collapses to a generic internal failure.
@@ -586,7 +713,9 @@ object-src 'none'
   CSP does not restrict. A test asserts the built `index.html` carries no inline
   `<style>` and no `style=` attribute.
 - `base-uri 'none'` and `form-action 'none'`: the app has no `<base>` and no
-  form, so both are locked rather than merely narrowed.
+  `<form>` element, so both stay locked. The Support Centre's inputs are
+  controlled React fields submitted with `fetch`, never a form navigation, so
+  `form-action 'none'` costs nothing and still forbids the one thing it names.
 
 **One authoritative CSP.** Nginx sends it; Fastify does not, and the document
 ships no `<meta http-equiv>` policy — a second policy would *intersect* with the
@@ -678,6 +807,13 @@ rate limiter stores a salted hash of the address rather than the address.
 Auth failures log a reason **code** and nothing else. Read failures log the
 error message with no request payload and no user identity.
 
+**Support writes log no ticket text.** A failed write logs the operation and an
+error message; it never logs the request body, which is the subject and message
+a user just typed. The idempotency record stores a **hash** of the normalised
+mutation rather than the mutation, because the point is comparison, not recall —
+the text already exists once in the database, and a second copy would double the
+blast radius of a leak in exchange for nothing.
+
 ---
 
 ## 9. Tests
@@ -702,6 +838,9 @@ error message with no request payload and no user identity.
 | Frontend formatting & client | `apps/miniapp/tests/` | F01–F20 |
 | Theme & logout lifecycle (jsdom) | `apps/miniapp/tests/lifecycle.test.tsx` | L01–L12 |
 | Bot-return actions & profile counts (jsdom) | `apps/miniapp/tests/bot-actions.test.tsx` | E4-1–E4-12 |
+| Support Centre screens, idempotency, closed tickets (jsdom) | `apps/miniapp/tests/support.test.tsx` | S01–S20 |
+| Support client, key generation, failure vocabulary | `apps/miniapp/tests/support-client.test.ts` | S21–S31 |
+| Documentation contract (this file) | `apps/api/tests/miniapp-doc-contract.test.ts` | F1-1–F1-10 |
 
 The API suite needs a migrated PostgreSQL (`DATABASE_URL`); without it it skips
 itself. The Nginx suite runs a real `nginx -t` when the binary is present and

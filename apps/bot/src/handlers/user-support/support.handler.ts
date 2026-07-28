@@ -3,6 +3,7 @@ import {
   SUPPORT_CAPTION_MAX,
   supportCategoryFromCallback,
   supportCategoryPrefersService,
+  ticketShortId,
   validateDiagnosticSnapshot,
 } from "@zedbot/shared";
 import { Composer, InlineKeyboard } from "grammy";
@@ -167,7 +168,7 @@ async function renderList(ctx: BotContext, page: number): Promise<void> {
       ticket.status === "CLOSED" ? "بسته" : ticket.updatedAt.toISOString().slice(5, 10);
     kb.text(
       `${TICKET_STATUS_ICON[ticket.status]} ${short} | ${tail}`,
-      SUP_CB.view(ticket.id.slice(0, 8)),
+      SUP_CB.view(ticketShortId(ticket)),
     ).row();
   }
   if (pageData.pages > 1) {
@@ -192,7 +193,7 @@ export function buildUserTicketDetailText(
   ticket: TicketWithMessages,
   missingServiceText: string,
 ): string {
-  const header = [`تیکت 🎫 <code>${ticket.id.slice(0, 8)}</code>`, ""];
+  const header = [`تیکت 🎫 <code>${ticketShortId(ticket)}</code>`, ""];
   header.push(`موضوع: ${escapeHtml(ticket.subject ?? "-")}`);
   const category = supportCategoryLabel(ticket.category);
   if (category !== null) {
@@ -227,7 +228,7 @@ export async function buildTicketDetailKeyboard(
   ticket: TicketWithMessages,
   listPage: number,
 ): Promise<InlineKeyboard> {
-  const sid = ticket.id.slice(0, 8);
+  const sid = ticketShortId(ticket);
   const [replyLabel, refreshLabel, myTickets, backSupport] = await Promise.all([
     getButtonText("reply_ticket"),
     getButtonText("refresh"),
@@ -542,7 +543,7 @@ supportHandler.callbackQuery(/^user:sup:reply:([0-9a-f-]+)$/, async (ctx) => {
       max: TICKET_MESSAGE_MAX,
       caption: SUPPORT_CAPTION_MAX,
     }),
-    new InlineKeyboard().text("انصراف", SUP_CB.view(ticket.id.slice(0, 8))),
+    new InlineKeyboard().text("انصراف", SUP_CB.view(ticketShortId(ticket))),
   );
 });
 
@@ -775,7 +776,7 @@ async function handleMessageInput(
     await notifyAdminsAboutNewTicket(ctx.api, outcome.ticket.id);
   }
   await safeReply(ctx, await getMessageTemplate("support_ticket_created_text"));
-  const ticket = await getUserTicketDetail(userId, outcome.ticket.id.slice(0, 8));
+  const ticket = await getUserTicketDetail(userId, ticketShortId(outcome.ticket));
   if (ticket !== null) {
     await renderDetail(ctx, ticket);
   }
@@ -828,7 +829,7 @@ async function handleReplyInput(
     await notifyAdminsAboutUserReply(ctx.api, ticketId);
   }
   await safeReply(ctx, "پاسخ شما ثبت شد ✅");
-  const ticket = await getUserTicketDetail(userId, ticketId.slice(0, 8));
+  const ticket = await getUserTicketDetail(userId, ticketShortId({ id: ticketId }));
   if (ticket !== null) {
     await renderDetail(ctx, ticket);
   }

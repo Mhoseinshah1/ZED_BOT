@@ -38,8 +38,19 @@ import {
 // query is scoped by the session's user id regardless of what the cursor says.
 // =============================================================================
 
-/** The collections a cursor can belong to. Also the AEAD's additional data. */
-export type CursorResource = "services" | "wallet-transactions";
+/**
+ * The collections a cursor can belong to. Also the AEAD's additional data.
+ *
+ * Support tickets and their messages are separate resources even though one
+ * contains the other: a cursor into a ticket list must not decode against a
+ * message list, and binding each collection separately is what makes that
+ * true by construction rather than by review.
+ */
+export type CursorResource =
+  | "services"
+  | "wallet-transactions"
+  | "support-tickets"
+  | "support-messages";
 
 const CURSOR_VERSION = "c2";
 const KEY_CONTEXT = "zedbot.miniapp.cursor.key.v2";
@@ -48,7 +59,14 @@ const IV_BYTES = 12;
 const TAG_BYTES = 16;
 
 export interface KeysetCursor {
-  /** Unix milliseconds of the last row's `createdAt`. */
+  /**
+   * Unix milliseconds of the last row's SORT timestamp.
+   *
+   * That is `createdAt` for every append-only collection. Support tickets sort
+   * by `updatedAt` instead — a reply moves a ticket to the top of the list —
+   * so for that resource this carries `updatedAt`. The field is the position
+   * in the ordering, whichever column defines it.
+   */
   createdAtMs: number;
   /** Tie-breaker for rows sharing a millisecond — never leaves this module. */
   id: string;

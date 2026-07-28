@@ -133,6 +133,11 @@ body {
   margin-bottom: var(--gap);
 }
 
+/* Four counts read better two-up than squeezed into the three-column grid. */
+.stats--pair {
+  grid-template-columns: repeat(2, 1fr);
+}
+
 .stat {
   background: var(--tg-secondary-bg);
   border-radius: var(--radius);
@@ -353,7 +358,7 @@ body {
   inset-inline: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   background: var(--tg-secondary-bg);
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
@@ -409,4 +414,150 @@ body {
 
 .txn__amount--debit {
   color: var(--danger);
+}
+
+/* --- support: forms ------------------------------------------------------- */
+/*
+   The only inputs in the app. Everything is a logical property, so the
+   direction comes from `dir="rtl"` on the document and nothing here has to be
+   mirrored: `text-align: start`, `border-inline-start`, `margin-inline`.
+   Colours come from the same --tg-* custom properties the host theme writes
+   into, so a light/dark switch mid-session repaints these too. */
+
+.form__label {
+  display: block;
+  font-size: 13px;
+  color: var(--tg-hint);
+  margin: 0 0 6px;
+}
+
+.form__lead {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--tg-hint);
+}
+
+.form__input,
+.form__textarea {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--tg-bg);
+  border-radius: var(--radius);
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  font: inherit;
+  text-align: start;
+}
+
+.form__textarea {
+  resize: vertical;
+  min-height: 96px;
+  line-height: 1.8;
+}
+
+.form__input:focus,
+.form__textarea:focus {
+  outline: 2px solid var(--tg-button);
+  outline-offset: 1px;
+}
+
+.form__input:disabled,
+.form__textarea:disabled {
+  opacity: 0.6;
+}
+
+.form__counter {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--tg-hint);
+  text-align: end;
+}
+
+.form__hint {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--warning);
+}
+
+.form__error {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: var(--gap) 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border-inline-start: 3px solid var(--danger);
+  background: var(--tg-secondary-bg);
+  font-size: 13px;
+}
+
+.form__error-title {
+  color: var(--danger);
+}
+
+/* The review step's copy of the message. `pre-wrap` keeps the user's own line
+   breaks, and `anywhere` stops a long unbroken token widening the page. */
+.form__review-message {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--tg-bg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* --- support: thread ------------------------------------------------------ */
+
+.thread {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.message {
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: var(--tg-bg);
+  /* Logical, so the user's own messages hug the start edge in RTL and LTR
+     alike without a single left/right rule. */
+  margin-inline-end: 12px;
+}
+
+.message--mine {
+  margin-inline-end: 0;
+  margin-inline-start: 12px;
+  border-inline-start: 3px solid var(--tg-button);
+}
+
+.message--theirs {
+  border-inline-start: 3px solid var(--tg-hint);
+}
+
+.message__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--tg-hint);
+}
+
+.message__text {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Presence of a file, never a link to one: there is no download route, so
+   this is text and stays text. */
+.message__attachment {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--tg-hint);
+}
+
+.support__attachment-body {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--tg-hint);
 }

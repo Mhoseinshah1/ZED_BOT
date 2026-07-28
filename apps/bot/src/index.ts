@@ -4,9 +4,14 @@ import { errorMessage } from "@zedbot/shared";
 import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
+import { runShutdownSequence } from "./core/shutdown.js";
 import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
 import { startReferralExecuteConsumer } from "./services/referral-execute-consumer.js";
 import { startStarsSubscriptionConsumer } from "./services/stars-subscription-consumer.js";
+import {
+  startSupportNotificationLoop,
+  type SupportNotificationLoopController,
+} from "./services/support-notification.service.js";
 import { runningGitSha } from "./services/backup-health.service.js";
 import { startCheckoutInputRetentionLoop } from "./services/checkout-customer-input.service.js";
 import { startFreeTrialLoop } from "./services/free-trial.service.js";
@@ -57,31 +62,51 @@ async function run(botToken: string): Promise<void> {
   // unconfigured; the whole feature is disabled-by-default regardless.
   const referralExecuteConsumer = startReferralExecuteConsumer();
 
+  // Assigned after startup below; declared here so the shutdown closure can
+  // stop it. Null only in the window before startup reaches the start call.
+  let supportNotificationLoop: SupportNotificationLoopController | null = null;
+
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`received ${signal}, stopping bot`);
-    try {
-      // Ops log BEFORE the database disconnects; writeSystemLog never throws.
-      await writeSystemLog({
-        level: "INFO",
-        eventType: OPS_EVENTS.BOT_STOPPED,
-        message: "bot service stopping",
-        metadata: { signal },
-        topicKey: "SYSTEM",
-      });
-      await bot.stop();
-      if (autoRenewalConsumer !== null) {
-        await autoRenewalConsumer.stop();
-      }
-      if (starsSubscriptionConsumer !== null) {
-        await starsSubscriptionConsumer.stop();
-      }
-      if (referralExecuteConsumer !== null) {
-        await referralExecuteConsumer.stop();
-      }
-      await disconnectDatabase();
-    } catch (err) {
-      logger.warn("error during shutdown", { error: errorMessage(err) });
-    }
+    // The order — and the fact that each step FINISHES before the next starts
+    // — is the contract, so it lives in runShutdownSequence where a test can
+    // execute it rather than read it. Stopping the notification loop is not
+    // enough on its own: a sweep already running holds claims in SENDING, and
+    // disconnecting underneath it strands them until the next process's stale
+    // sweep. So ticks are stopped, then drained, and only then does anything
+    // else tear down.
+    await runShutdownSequence(
+      {
+        stopSupportNotificationTicks: () => supportNotificationLoop?.stop(),
+        drainSupportNotifications: async () => {
+          await supportNotificationLoop?.drain();
+        },
+        writeStoppingLog: () =>
+          writeSystemLog({
+            level: "INFO",
+            eventType: OPS_EVENTS.BOT_STOPPED,
+            message: "bot service stopping",
+            metadata: { signal },
+            topicKey: "SYSTEM",
+          }),
+        stopBot: () => bot.stop(),
+        stopConsumers: async () => {
+          if (autoRenewalConsumer !== null) {
+            await autoRenewalConsumer.stop();
+          }
+          if (starsSubscriptionConsumer !== null) {
+            await starsSubscriptionConsumer.stop();
+          }
+          if (referralExecuteConsumer !== null) {
+            await referralExecuteConsumer.stop();
+          }
+        },
+        disconnectDatabase: () => disconnectDatabase(),
+      },
+      (step, err) => {
+        logger.warn("error during shutdown", { step, error: errorMessage(err) });
+      },
+    );
     process.exit(0);
   };
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
@@ -130,6 +155,22 @@ async function run(botToken: string): Promise<void> {
 
   // Hourly redaction of dead-end pre-settlement customer-input rows (same never-throws loop contract).
   startCheckoutInputRetentionLoop();
+
+  // Durable support-notification delivery. This is the ONLY thing that can turn
+  // an intent written by the API — which has no bot token and never talks to
+  // Telegram — into a message an administrator actually receives, and it is
+  // what recovers a backlog left by a process that died mid-fan-out.
+  //
+  // Started HERE, after the Api exists, after the database connection has been
+  // attempted and after the shutdown handlers are registered, so a SIGTERM
+  // arriving during the first tick is handled rather than racing an unarmed
+  // handler. It runs one bounded tick immediately — a backlog from the previous
+  // process is exactly what a restart should clear, not something to leave
+  // sitting for a full interval — then sweeps periodically. The function
+  // latches, so a second call anywhere is a no-op; its timer is unref'd so it
+  // never holds the process open; and a failed tick is swallowed so it cannot
+  // stop the ones after it.
+  supportNotificationLoop = startSupportNotificationLoop(bot.api);
 
   await bot.start({
     onStart: (botInfo) => {

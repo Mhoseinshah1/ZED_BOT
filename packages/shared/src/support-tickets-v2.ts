@@ -36,6 +36,11 @@ export const SUPPORT_TICKET_ORIGINS = [
   "SERVICE_DETAIL",
   "CONNECTION_GUIDE",
   "SERVICE_DIAGNOSTICS",
+  // The Telegram Mini App support centre. Additive: `origin` is a nullable
+  // String column validated against this list, so no migration is needed and
+  // every existing ticket keeps the origin it was opened with. Recorded for
+  // admin visibility only — no behaviour branches on it.
+  "MINIAPP",
 ] as const;
 export type SupportTicketOrigin = (typeof SUPPORT_TICKET_ORIGINS)[number];
 
@@ -68,6 +73,7 @@ export const SUPPORT_ORIGIN_LABEL_FA: Readonly<Record<SupportTicketOrigin, strin
   SERVICE_DETAIL: "صفحه سرویس",
   CONNECTION_GUIDE: "آموزش اتصال",
   SERVICE_DIAGNOSTICS: "عیب‌یابی خودکار",
+  MINIAPP: "وب‌اپ",
 };
 
 /** Stable Persian label for a (possibly null/invalid) category code, or null. */

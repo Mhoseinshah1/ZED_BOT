@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -436,46 +436,110 @@ describe("deploy scripts (Phase 36)", () => {
 
 describe("Dockerfile workspace coverage", () => {
   const dockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
-  const packageDirs = readdirSync(path.join(repoRoot, "packages"), {
-    withFileTypes: true,
-  })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .filter((name) => {
-      try {
-        readFileSync(path.join(repoRoot, "packages", name, "package.json"), "utf8");
-        return true;
-      } catch {
-        return false;
-      }
-    });
 
-  it("copies every workspace package manifest into both install stages", () => {
-    expect(packageDirs.length).toBeGreaterThan(0);
-    for (const name of packageDirs) {
-      const line = `COPY packages/${name}/package.json packages/${name}/`;
-      // Twice: the build stage and the --prod runtime-deps stage. A package
-      // missing from either one breaks a different half of the image.
+  /**
+   * Every workspace member, discovered the way pnpm discovers them.
+   *
+   * The globs are read from pnpm-workspace.yaml rather than hard-coded, because
+   * a hard-coded ["apps", "packages"] is the same class of bug one level up: it
+   * would silently stop covering a third root the day someone adds one.
+   */
+  const workspaceRoots = (() => {
+    const yaml = readFileSync(path.join(repoRoot, "pnpm-workspace.yaml"), "utf8");
+    const roots: string[] = [];
+    for (const line of yaml.split("\n")) {
+      // Only the simple `- "dir/*"` form this repo uses. A nested or negated
+      // glob would need a real parser, and reaching that point should be a
+      // deliberate change to this test rather than a silent miss.
+      const match = /^\s*-\s*"?([A-Za-z0-9_-]+)\/\*"?\s*$/.exec(line);
+      if (match !== null) {
+        roots.push(match[1]);
+      }
+    }
+    return roots;
+  })();
+
+  interface Member {
+    /** Path relative to the repo root, e.g. "packages/support-tickets". */
+    dir: string;
+    manifest: { scripts?: Record<string, string> };
+  }
+
+  const members: Member[] = workspaceRoots.flatMap((root) =>
+    readdirSync(path.join(repoRoot, root), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .flatMap((entry) => {
+        const dir = `${root}/${entry.name}`;
+        try {
+          const manifest = JSON.parse(
+            readFileSync(path.join(repoRoot, dir, "package.json"), "utf8"),
+          ) as Member["manifest"];
+          return [{ dir, manifest }];
+        } catch {
+          // A directory with no manifest is not a workspace member.
+          return [];
+        }
+      }),
+  );
+
+  it("discovers the workspace from pnpm-workspace.yaml, not from a hard-coded list", () => {
+    // A guard on the guard: if the discovery silently found nothing, every
+    // assertion below would vacuously pass and the whole file would be theatre.
+    expect(workspaceRoots).toContain("apps");
+    expect(workspaceRoots).toContain("packages");
+    expect(members.length).toBeGreaterThanOrEqual(8);
+    expect(members.map((m) => m.dir)).toContain("packages/support-tickets");
+  });
+
+  it("copies every workspace manifest into BOTH dependency-install stages", () => {
+    for (const member of members) {
+      const line = `COPY ${member.dir}/package.json ${member.dir}/`;
+      // Twice: the build stage and the --prod runtime-deps stage. A member
+      // missing from either one breaks a different half of the image — the
+      // build stage fails the lockfile check, the prod stage silently ships an
+      // image whose runtime dependencies were resolved without it.
       const occurrences = dockerfile.split(line).length - 1;
       expect(occurrences, `${line} (expected in both install stages)`).toBe(2);
     }
   });
 
-  it("copies the built output of every package the runtime actually needs", () => {
-    // A package with no build script emits no dist and must not be asserted on;
-    // everything that does build has to reach the runtime image, or the app
-    // starts and then throws ERR_MODULE_NOT_FOUND on first use.
-    for (const name of packageDirs) {
-      const manifest = JSON.parse(
-        readFileSync(path.join(repoRoot, "packages", name, "package.json"), "utf8"),
-      ) as { scripts?: Record<string, string> };
-      if (manifest.scripts?.build === undefined) {
+  it("every COPY source in the Dockerfile exists in the repository", () => {
+    // The image build resolves these paths; a typo produces a build that fails
+    // only in CI, minutes in. Sources coming from an earlier stage
+    // (--from=build) are produced by that stage rather than by the repo, so
+    // only the paths under the build context are checkable here — but those are
+    // exactly the manifest lines this file is about.
+    const missing: string[] = [];
+    for (const line of dockerfile.split("\n")) {
+      const match = /^COPY\s+(?!--from)(?:--chown=\S+\s+)?(.+)$/.exec(line.trim());
+      if (match === null) {
         continue;
       }
+      const parts = match[1].split(/\s+/);
+      // The last token is the destination.
+      for (const src of parts.slice(0, -1)) {
+        if (src.includes("*") || src === "." || src.startsWith("$")) {
+          continue;
+        }
+        if (!existsSync(path.join(repoRoot, src))) {
+          missing.push(src);
+        }
+      }
+    }
+    expect(missing, "Dockerfile COPY sources that do not exist").toEqual([]);
+  });
+
+  it("copies the built output of every member that produces one into Runtime", () => {
+    // A member with no build script emits no dist and must not be asserted on;
+    // everything that does build has to reach the runtime image, or the app
+    // starts and then throws ERR_MODULE_NOT_FOUND on first use.
+    const built = members.filter((m) => m.manifest.scripts?.build !== undefined);
+    expect(built.length, "some member must build, or this asserts nothing").toBeGreaterThan(0);
+    for (const member of built) {
       expect(
         dockerfile,
-        `packages/${name}/dist must be copied into the runtime image`,
-      ).toContain(`COPY --from=build /repo/packages/${name}/dist packages/${name}/dist`);
+        `${member.dir}/dist must be copied into the runtime image`,
+      ).toContain(`COPY --from=build /repo/${member.dir}/dist ${member.dir}/dist`);
     }
   });
 });

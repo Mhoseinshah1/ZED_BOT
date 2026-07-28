@@ -14,6 +14,12 @@ import {
   WalletScreen,
 } from "./screens";
 import {
+  SupportNewTicketScreen,
+  SupportScreen,
+  SupportTicketScreen,
+  SupportTicketsScreen,
+} from "./support";
+import {
   closeMiniApp,
   isTelegramEnvironment,
   rawInitData,
@@ -22,17 +28,22 @@ import {
 } from "./telegram";
 
 // =============================================================================
-// The shell: authentication, then a four-tab read-only app.
+// The shell: authentication, then a five-tab app.
 //
 // Sign-in happens ONCE, on mount. The raw `initData` is posted to the server,
 // which verifies Telegram's HMAC and answers with an HttpOnly cookie; from then
 // on the cookie is the credential and `initData` is not touched again. It is
 // never stored, never put in a header, never logged.
 //
-// Navigation is component state, not a router. There are four tabs and one
-// detail view - a routing library would be more code than the thing it routes,
-// and a URL-driven router inside a Telegram WebView adds history semantics
-// nobody asked for.
+// Navigation is component state, not a router. There are five tabs, a service
+// detail view and the Support Centre's own three views - a routing library
+// would be more code than the thing it routes, and a URL-driven router inside a
+// Telegram WebView adds history semantics nobody asked for.
+//
+// FOUR TABS READ; ONE WRITES. Everything under dashboard, services, wallet and
+// profile is a read. The Support Centre is the single write surface: it opens
+// tickets and posts replies, and it is the only place in this app that does.
+// That is why it lives in its own module rather than in `screens.tsx`.
 //
 // SIGNING OUT STAYS SIGNED OUT. The shell must never re-authenticate on its
 // own after a logout: `initData` is still sitting in the WebView, so calling
@@ -43,7 +54,21 @@ import {
 // authenticates again.
 // =============================================================================
 
-type Tab = "dashboard" | "services" | "wallet" | "profile";
+type Tab = "dashboard" | "services" | "wallet" | "support" | "profile";
+
+/**
+ * Where the Support tab currently is.
+ *
+ * Held here rather than inside the tab so leaving the tab genuinely leaves:
+ * switching away and back returns to the landing view, and a half-finished
+ * draft is discarded rather than silently resurrected. Nothing about it
+ * survives a reload either - there is no storage in this app.
+ */
+type SupportView =
+  | { kind: "home" }
+  | { kind: "list" }
+  | { kind: "ticket"; ticketId: string }
+  | { kind: "new" };
 
 type Session =
   | { phase: "starting" }
@@ -57,6 +82,7 @@ export function App(): ReactNode {
   const [session, setSession] = useState<Session>({ phase: "starting" });
   const [tab, setTab] = useState<Tab>("dashboard");
   const [openServiceId, setOpenServiceId] = useState<string | null>(null);
+  const [supportView, setSupportView] = useState<SupportView>({ kind: "home" });
 
   const signIn = useCallback(async () => {
     setSession({ phase: "starting" });
@@ -99,15 +125,30 @@ export function App(): ReactNode {
   }
 
   const showingDetail = openServiceId !== null;
+  // The Support tab's inner views get the same back affordance the service
+  // detail has, for the same reason: a screen you can reach must be a screen
+  // you can leave without hunting for the tab you came from.
+  const showingSupportInner = !showingDetail && tab === "support" && supportView.kind !== "home";
+  const goSupportHome = (): void => setSupportView({ kind: "home" });
   return (
     <div className="app">
       <header className="header">
-        {showingDetail ? (
-          <button type="button" className="header__back" onClick={() => setOpenServiceId(null)}>
+        {showingDetail || showingSupportInner ? (
+          <button
+            type="button"
+            className="header__back"
+            onClick={showingDetail ? () => setOpenServiceId(null) : goSupportHome}
+          >
             {`‹ ${UI.back}`}
           </button>
         ) : null}
-        <h1 className="header__title">{showingDetail ? UI.navServices : titleFor(tab)}</h1>
+        <h1 className="header__title">
+          {showingDetail
+            ? UI.navServices
+            : showingSupportInner
+              ? supportTitleFor(supportView)
+              : titleFor(tab)}
+        </h1>
       </header>
 
       <main className="app__content">
@@ -119,11 +160,33 @@ export function App(): ReactNode {
           <ServicesScreen onOpenService={setOpenServiceId} />
         ) : tab === "wallet" ? (
           <WalletScreen />
+        ) : tab === "support" ? (
+          supportView.kind === "home" ? (
+            <SupportScreen
+              onOpenTickets={() => setSupportView({ kind: "list" })}
+              onNewTicket={() => setSupportView({ kind: "new" })}
+            />
+          ) : supportView.kind === "list" ? (
+            <SupportTicketsScreen
+              onOpenTicket={(ticketId) => setSupportView({ kind: "ticket", ticketId })}
+              onNewTicket={() => setSupportView({ kind: "new" })}
+            />
+          ) : supportView.kind === "ticket" ? (
+            <SupportTicketScreen ticketId={supportView.ticketId} />
+          ) : (
+            <SupportNewTicketScreen
+              // A created ticket lands on its own thread, so the user sees the
+              // thing they just wrote rather than a list they have to search.
+              onCreated={(ticketId) => setSupportView({ kind: "ticket", ticketId })}
+              onCancel={goSupportHome}
+            />
+          )
         ) : (
           <ProfileScreen
             user={session.user}
             onSignedOut={() => {
               setOpenServiceId(null);
+              setSupportView({ kind: "home" });
               setTab("dashboard");
               // Close if the host allows it; otherwise park on the signed-out
               // screen. Never `signIn()` - `initData` is still available and
@@ -142,6 +205,7 @@ export function App(): ReactNode {
             ["dashboard", UI.navDashboard],
             ["services", UI.navServices],
             ["wallet", UI.navWallet],
+            ["support", UI.navSupport],
             ["profile", UI.navProfile],
           ] as Array<[Tab, string]>
         ).map(([key, label]) => (
@@ -152,6 +216,10 @@ export function App(): ReactNode {
             aria-current={tab === key && !showingDetail ? "page" : undefined}
             onClick={() => {
               setOpenServiceId(null);
+              // Leaving the Support tab resets it: a tap on «پشتیبانی» should
+              // land on the Support Centre, not halfway through someone's
+              // abandoned draft.
+              setSupportView({ kind: "home" });
               setTab(key);
             }}
           >
@@ -171,7 +239,22 @@ function titleFor(tab: Tab): string {
       return UI.navServices;
     case "wallet":
       return UI.navWallet;
+    case "support":
+      return UI.supportTitle;
     case "profile":
       return UI.navProfile;
+  }
+}
+
+function supportTitleFor(view: SupportView): string {
+  switch (view.kind) {
+    case "home":
+      return UI.supportTitle;
+    case "list":
+      return UI.supportListTitle;
+    case "ticket":
+      return UI.supportTitle;
+    case "new":
+      return UI.supportWizardTitle;
   }
 }

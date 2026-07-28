@@ -9,7 +9,6 @@ import {
   type User,
 } from "@zedbot/database";
 import {
-  errorMessage,
   isSupportAttachmentType,
   isSupportTicketCategory,
   isSupportTicketOrigin,
@@ -19,10 +18,26 @@ import {
   supportCategoryLabelFa,
   type SupportTicketCategory,
   type SupportTicketOrigin,
+  ticketShortId,
 } from "@zedbot/shared";
+import {
+  normalizeMessage,
+  normalizeSubject,
+  recordIntent,
+  TICKET_MESSAGE_MAX,
+  TICKET_MESSAGE_MIN,
+  TICKET_STATUS_AFTER_ADMIN_REPLY,
+  TICKET_STATUS_AFTER_CREATE,
+  TICKET_STATUS_AFTER_USER_REPLY,
+  TICKET_SUBJECT_MAX,
+  TICKET_SUBJECT_MIN,
+  type SupportNotificationKind,
+  userMayReply,
+} from "@zedbot/support-tickets";
 import { InlineKeyboard } from "grammy";
 
 import { logger } from "../core/logger.js";
+import { supportNotificationErrorCode } from "./support-notification-errors.js";
 import type { DeliverySendApi } from "./other-product-delivery.service.js";
 
 // =============================================================================
@@ -39,10 +54,18 @@ import type { DeliverySendApi } from "./other-product-delivery.service.js";
 // No payment/order/service/financial row is touched anywhere here.
 // =============================================================================
 
-export const TICKET_SUBJECT_MIN = 3;
-export const TICKET_SUBJECT_MAX = 100;
-export const TICKET_MESSAGE_MIN = 1;
-export const TICKET_MESSAGE_MAX = 3000;
+// The bounds are NOT declared here any more. They live in
+// @zedbot/support-tickets and are re-exported so every existing importer of
+// this module keeps working unchanged. Two copies of "how long may a subject
+// be" is exactly how the bot and the Mini App would come to disagree about what
+// input is acceptable, and the user who hits the difference is the one who
+// typed a valid message into the wrong surface.
+export {
+  TICKET_SUBJECT_MIN,
+  TICKET_SUBJECT_MAX,
+  TICKET_MESSAGE_MIN,
+  TICKET_MESSAGE_MAX,
+} from "@zedbot/support-tickets";
 export const TICKETS_PAGE_SIZE = 10;
 export const TICKET_MESSAGES_PREVIEW_LIMIT = 10;
 
@@ -110,26 +133,28 @@ export interface SupportMessageContent {
   sourceMessageId?: number;
 }
 
-function validSubject(subject: string): boolean {
-  return subject.length >= TICKET_SUBJECT_MIN && subject.length <= TICKET_SUBJECT_MAX;
-}
-
-function validMessage(text: string): boolean {
-  return text.length >= TICKET_MESSAGE_MIN && text.length <= TICKET_MESSAGE_MAX;
-}
+// Normalization is DELEGATED to @zedbot/support-tickets, and the normalizer's
+// output is what gets stored. Importing the bounds but keeping a local
+// comparison against them would leave a second place deciding whether input is
+// acceptable; keeping a local trim would leave a second place deciding what the
+// value IS. Both drift silently — one surface storing "موضوع   " where the
+// other stores "موضوع" is invisible until someone matches on the text.
 
 /** A valid message needs non-empty text (1..3000) OR a validated attachment.
  * When an attachment is present the text is an OPTIONAL caption (0..1000). */
 function validateContent(
   content: SupportMessageContent,
 ): { ok: true; text: string | null } | { ok: false; safeMessage: string } {
-  const trimmed = typeof content.text === "string" ? content.text.trim() : "";
   if (content.attachment === undefined) {
-    if (!validMessage(trimmed)) {
+    const message = normalizeMessage(content.text);
+    if (!message.ok) {
       return { ok: false, safeMessage: INVALID_TICKET_MESSAGE_TEXT };
     }
-    return { ok: true, text: trimmed };
+    return { ok: true, text: message.value };
   }
+  // A caption is not a message: it is optional and has its own, shorter bound,
+  // so it is trimmed here rather than run through the message normalizer.
+  const trimmed = typeof content.text === "string" ? content.text.trim() : "";
   if (trimmed.length > SUPPORT_CAPTION_MAX) {
     return { ok: false, safeMessage: INVALID_TICKET_CAPTION_TEXT };
   }
@@ -232,10 +257,11 @@ export interface CreateSupportTicketInput {
 export async function createSupportTicket(
   input: CreateSupportTicketInput,
 ): Promise<TicketMutationOutcome> {
-  const cleanSubject = input.subject.trim();
-  if (!validSubject(cleanSubject)) {
+  const subject = normalizeSubject(input.subject);
+  if (!subject.ok) {
     return { ok: false, safeMessage: INVALID_TICKET_SUBJECT_TEXT };
   }
+  const cleanSubject = subject.value;
   const content = validateContent(input.content);
   if (!content.ok) {
     return content;
@@ -254,16 +280,20 @@ export async function createSupportTicket(
         data: {
           userId: input.userId,
           subject: cleanSubject,
-          status: "WAITING_ADMIN",
+          status: TICKET_STATUS_AFTER_CREATE,
           category,
           origin,
           serviceId,
           ...(snapshot === undefined ? {} : { diagnosticSnapshot: snapshot }),
         },
       });
-      await tx.supportMessage.create({
+      const message = await tx.supportMessage.create({
         data: { ticketId: created.id, senderType: "USER", senderUserId: input.userId, ...fields },
       });
+      // Same transaction as the message. The bot could send immediately and
+      // usually does — but a crash between this commit and that send used to
+      // lose the notification with nothing left to retry from.
+      await recordIntent(tx, created.id, message.id, "support.ticket_created");
       return created;
     });
     logger.info("support ticket created", {
@@ -338,7 +368,7 @@ export async function addUserTicketReply(
   if (ticket === null) {
     return { ok: false, safeMessage: TICKET_NOT_FOUND_TEXT };
   }
-  if (ticket.status === "CLOSED") {
+  if (!userMayReply(ticket.status)) {
     return { ok: false, safeMessage: TICKET_CLOSED_TEXT };
   }
   const fields = messageWriteFields(input.content, content.text);
@@ -349,14 +379,15 @@ export async function addUserTicketReply(
       // update rolls back the whole tx — including the status flip.
       const flipped = await tx.supportTicket.updateMany({
         where: { id: input.ticketId, userId, status: { not: "CLOSED" } },
-        data: { status: "WAITING_ADMIN" },
+        data: { status: TICKET_STATUS_AFTER_USER_REPLY },
       });
       if (flipped.count !== 1) {
         return null;
       }
-      await tx.supportMessage.create({
+      const message = await tx.supportMessage.create({
         data: { ticketId: input.ticketId, senderType: "USER", senderUserId: userId, ...fields },
       });
+      await recordIntent(tx, input.ticketId, message.id, "support.user_replied");
       return tx.supportTicket.findUniqueOrThrow({ where: { id: input.ticketId } });
     });
     if (updated === null) {
@@ -465,7 +496,7 @@ export async function addAdminTicketReply(
     const updated = await prisma.$transaction(async (tx) => {
       const flipped = await tx.supportTicket.updateMany({
         where: { id: input.ticketId, status: { not: "CLOSED" } },
-        data: { status: "WAITING_USER" },
+        data: { status: TICKET_STATUS_AFTER_ADMIN_REPLY },
       });
       if (flipped.count !== 1) {
         return null;
@@ -674,69 +705,85 @@ function ticketAttachmentLine(
   return null;
 }
 
-/** Sends one text to every ACTIVE admin; returns how many were reached. */
-async function notifyActiveAdmins(
-  api: DeliverySendApi,
-  ticketId: string,
-  title: string,
-): Promise<number> {
-  let reached = 0;
-  try {
-    const ticket = await loadTicketForNotify(ticketId);
-    if (ticket === null) {
-      return 0;
-    }
-    const sid = ticket.id.slice(0, 8);
-    const text = [
-      title,
-      "",
-      `تیکت: ${sid}`,
-      ticketUserLine(ticket.user),
-      `موضوع: ${ticket.subject ?? "-"}`,
-      ticketCategoryLine(ticket.category),
-      ticketServiceLine(ticket.service),
-      ticketAttachmentLine(ticket.messages),
-    ]
-      .filter((line): line is string => line !== null)
-      .join("\n");
-    const keyboard = new InlineKeyboard().text("مشاهده تیکت 🎫", `admin:sup:view:${sid}`);
-    const admins = await prisma.admin.findMany({
-      where: { isActive: true },
-      select: { telegramId: true },
-    });
-    for (const admin of admins) {
-      try {
-        await api.sendMessage(admin.telegramId.toString(), text, { reply_markup: keyboard });
-        reached += 1;
-      } catch (err) {
-        logger.warn("support ticket admin notification failed", {
-          ticketId,
-          adminTelegramId: admin.telegramId.toString(),
-          error: errorMessage(err),
-        });
-      }
-    }
-  } catch (err) {
-    logger.warn("support ticket admin notification failed", {
-      ticketId,
-      error: errorMessage(err),
-    });
-  }
-  return reached;
+/** The Persian title for each notification KIND. Presentation only — the stored
+ * value is the stable code, so re-wording these never touches a database row. */
+const NOTIFICATION_TITLE_FA: Record<SupportNotificationKind, string> = {
+  "support.ticket_created": "🎫 تیکت جدید",
+  "support.user_replied": "💬 پاسخ جدید کاربر در تیکت",
+};
+
+/** One rendered admin notification: what to say, and who to say it to. */
+export interface RenderedAdminNotification {
+  text: string;
+  keyboard: InlineKeyboard;
+  adminChatIds: string[];
 }
 
+/**
+ * Render an admin notification from the CURRENT state of the ticket.
+ *
+ * Read at delivery time rather than snapshotted into the intent, so a retry a
+ * minute later describes the ticket as it is rather than as it was. Null when
+ * the ticket no longer exists — there is nothing to say, and no retry will
+ * change that.
+ *
+ * Never includes a fileId, a caption, a config, a subscription URL or any
+ * Service field beyond the public username: this text lands in admin chats and
+ * in screenshots.
+ */
+export async function renderAdminTicketNotification(
+  ticketId: string,
+  kind: SupportNotificationKind,
+): Promise<RenderedAdminNotification | null> {
+  const ticket = await loadTicketForNotify(ticketId);
+  if (ticket === null) {
+    return null;
+  }
+  const sid = ticketShortId(ticket);
+  const text = [
+    NOTIFICATION_TITLE_FA[kind],
+    "",
+    `تیکت: ${sid}`,
+    ticketUserLine(ticket.user),
+    `موضوع: ${ticket.subject ?? "-"}`,
+    ticketCategoryLine(ticket.category),
+    ticketServiceLine(ticket.service),
+    ticketAttachmentLine(ticket.messages),
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+  const admins = await prisma.admin.findMany({
+    where: { isActive: true },
+    select: { telegramId: true },
+  });
+  return {
+    text,
+    keyboard: new InlineKeyboard().text("مشاهده تیکت 🎫", `admin:sup:view:${sid}`),
+    adminChatIds: admins.map((admin) => admin.telegramId.toString()),
+  };
+}
+
+/**
+ * The single immediate-delivery entry point, kept as a thin re-export.
+ *
+ * The claim/fan-out/settle cycle lives in support-notification.service, which
+ * imports THIS module for rendering — so the dependency runs one way and these
+ * two wrappers exist only to keep every existing call site unchanged.
+ */
 export async function notifyAdminsAboutNewTicket(
   api: DeliverySendApi,
   ticketId: string,
 ): Promise<number> {
-  return notifyActiveAdmins(api, ticketId, "🎫 تیکت جدید");
+  const { deliverTicketNotificationNow } = await import("./support-notification.service.js");
+  return deliverTicketNotificationNow(api, ticketId, "support.ticket_created");
 }
 
 export async function notifyAdminsAboutUserReply(
   api: DeliverySendApi,
   ticketId: string,
 ): Promise<number> {
-  return notifyActiveAdmins(api, ticketId, "💬 پاسخ جدید کاربر در تیکت");
+  const { deliverTicketNotificationNow } = await import("./support-notification.service.js");
+  return deliverTicketNotificationNow(api, ticketId, "support.user_replied");
 }
 
 /** Sends one text + view button to the ticket's owner; returns success. */
@@ -766,9 +813,12 @@ async function notifyTicketUser(
     });
     return true;
   } catch (err) {
+    // Classified code only. The ticket uuid identifies the user's own ticket
+    // and the raw error can echo their chat id or the message text; neither
+    // belongs in an operational log, and no path-based redaction can find an
+    // arbitrary substring inside an arbitrary error string.
     logger.warn("support ticket user notification failed", {
-      ticketId,
-      error: errorMessage(err),
+      code: supportNotificationErrorCode(err),
     });
     return false;
   }

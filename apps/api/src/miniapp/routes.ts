@@ -31,6 +31,7 @@ import {
   toMiniAppTransaction,
   toMiniAppUser,
 } from "./serializers.js";
+import { registerSupportRoutes } from "./support-routes.js";
 import { isSecureRequest } from "./transport.js";
 
 const logger = createLogger("api");
@@ -478,6 +479,16 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
         }
       },
     );
+
+    // The Support Center. Registered INSIDE the secured plugin so it inherits
+    // the same session hook every other authenticated route uses — a support
+    // route that had to remember to authenticate itself would eventually
+    // forget. It brings its own mutation gate, because it is the only part of
+    // this API that writes something a user owns.
+    registerSupportRoutes(secured, {
+      allowedOrigins,
+      production: process.env.NODE_ENV === "production",
+    });
   });
 }
 
