@@ -642,6 +642,7 @@ model User {
   // is written atomically together with the row here.
   termsAcceptances            TermsAcceptance[]
   miniAppIdempotency          MiniAppRequestIdempotency[]
+  miniAppReceiptUploads       MiniAppReceiptUpload[]
 
   @@index([status])
   @@index([group])
@@ -1006,6 +1007,9 @@ model CheckoutSession {
   discountCodeId                  String?
   discountCode                    DiscountCode?   @relation(fields: [discountCodeId], references: [id])
   status                          CheckoutStatus  @default(PENDING)
+  /// Which transport created this checkout ("MINIAPP"; null = bot). Recorded
+  /// for §18 origin bookkeeping only — the financial meaning is identical.
+  origin                          String?
   // P0 settlement phase: THE atomic cross-provider settlement claim. The
   // one Payment allowed to create the Order / credit the wallet for this
   // checkout - written by a compare-and-set (settledByPaymentId IS NULL),
@@ -1290,23 +1294,58 @@ model FinancialReconciliationCase {
 }
 
 model ManualReceipt {
-  id                String        @id @default(uuid())
+  id                String                @id @default(uuid())
   paymentId         String
-  payment           Payment       @relation(fields: [paymentId], references: [id])
+  payment           Payment               @relation(fields: [paymentId], references: [id])
   userId            String
-  user              User          @relation(fields: [userId], references: [id])
+  user              User                  @relation(fields: [userId], references: [id])
   fileId            String?
   text              String?
-  status            PaymentStatus @default(PENDING_REVIEW)
+  /// Browser-uploaded receipt (Mini App card-to-card). Exactly one of
+  /// fileId / text / uploadId carries the evidence; admin review re-sends
+  /// uploaded bytes from MiniAppReceiptUpload instead of a Telegram file_id.
+  uploadId          String?               @unique
+  upload            MiniAppReceiptUpload? @relation(fields: [uploadId], references: [id])
+  status            PaymentStatus         @default(PENDING_REVIEW)
   reviewedByAdminId String?
   reviewedAt        DateTime?
   rejectReason      String?
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
 
   @@index([paymentId])
   @@index([userId])
   @@index([status])
+}
+
+// Browser receipt uploads (miniapp-commerce-parity §13). The Mini App cannot
+// hand Telegram file_ids to the existing receipt flow, so the API stores the
+// verified bytes here (bounded size, signature-checked MIME, randomized uuid
+// identity, no filesystem path, no public URL) and submitReceipt links the row
+// into the SAME Payment/ManualReceipt review pipeline the bot uses. Unconsumed
+// rows expire and are deleted by a retention sweep; consumed rows are deleted
+// after the linked payment reaches a terminal state + retention window.
+model MiniAppReceiptUpload {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Verified content bytes. Never written to disk, never logged.
+  bytes      Bytes
+  /// Sniffed (not client-claimed) media type: image/jpeg | image/png | application/pdf.
+  mimeType   String
+  sizeBytes  Int
+  /// SHA-256 hex of the bytes — integrity + duplicate diagnostics, never identity.
+  sha256     String
+  /// Set when submitReceipt consumed this upload into a ManualReceipt.
+  consumedAt DateTime?
+  /// Unconsumed uploads past this instant are swept (abandoned-upload cleanup).
+  expiresAt  DateTime
+  createdAt  DateTime  @default(now())
+
+  manualReceipt ManualReceipt?
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
 }
 
 model UserHiddenPaymentGateway {
@@ -2156,21 +2195,27 @@ model SupportMessage {
 // mutation always has its idempotency record and a rolled-back one has neither.
 // =============================================================================
 model MiniAppRequestIdempotency {
-  id              String   @id @default(uuid())
-  userId          String
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                      String   @id @default(uuid())
+  userId                  String
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   /// Client-supplied, unguessable, unique PER USER.
-  clientRequestId String
+  clientRequestId         String
   /// Stable operation code (MINIAPP_IDEMPOTENT_OPERATIONS in @zedbot/support-tickets).
-  operation       String
+  operation               String
   /// The ticket a reply targeted. Null for creation.
-  targetTicketId  String?
+  targetTicketId          String?
   /// SHA-256 over the canonical normalized payload. Never the payload itself.
-  fingerprint     String
+  fingerprint             String
   /// What the original attempt produced, so a retry can return it verbatim.
-  resultTicketId  String
-  resultMessageId String
-  createdAt       DateTime @default(now())
+  /// Support operations fill the ticket/message pair; commerce operations
+  /// (miniapp-commerce-parity) fill the checkout/payment refs instead and
+  /// store the support pair as "" (the columns predate commerce and are
+  /// non-null). Soft references by design — rows outlive their targets.
+  resultTicketId          String
+  resultMessageId         String
+  resultCheckoutSessionId String?
+  resultPaymentId         String?
+  createdAt               DateTime @default(now())
 
   @@unique([userId, clientRequestId])
   @@index([createdAt])

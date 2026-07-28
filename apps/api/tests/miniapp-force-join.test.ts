@@ -459,30 +459,38 @@ describe("api dependency isolation", () => {
     return dirs;
   }
 
-  it("FJ13 has no path from @zedbot/api to grammy, directly or through a workspace package", async () => {
+  it("FJ13 grammy stays out of the API's own manifest closure (the one sanctioned edge is @zedbot/bot)", async () => {
     const dirs = await workspaceDirs();
-    // The transitive closure of @zedbot/api's declared dependencies, following
-    // workspace edges. A `grammy` entry anywhere in it is the failure.
+    // miniapp-commerce-parity: @zedbot/api now declares @zedbot/bot ON PURPOSE
+    // — the two transports share one commerce authority (§4), and the bot's
+    // service layer is that authority. The manifest closure therefore contains
+    // grammy THROUGH @zedbot/bot, and manifests stop being a usable proxy for
+    // "grammY entered the API". The load-bearing guarantee moved to
+    // miniapp-import-graph.test.ts, which walks the RUNTIME import graph of
+    // apps/api/src (through the bot's sources) and fails on any grammy value
+    // import, bot handler, keyboard or *-views module. What this test still
+    // pins: the api itself and every OTHER workspace package it uses must not
+    // declare grammy — only the sanctioned @zedbot/bot edge may carry it.
     const seen = new Set<string>();
     const queue = ["@zedbot/api"];
-    const external: string[] = [];
     while (queue.length > 0) {
       const name = queue.shift() as string;
       if (seen.has(name)) continue;
       seen.add(name);
       const dir = dirs.get(name);
       if (dir === undefined) {
-        external.push(name);
         continue;
       }
-      for (const dep of Object.keys((await manifest(dir)).dependencies ?? {})) {
-        queue.push(dep);
+      if (name !== "@zedbot/bot") {
+        const deps = Object.keys((await manifest(dir)).dependencies ?? {});
+        expect(deps.filter((d) => d.includes("grammy")), name).toEqual([]);
+        for (const dep of deps) {
+          queue.push(dep);
+        }
       }
     }
     expect(seen.has("@zedbot/force-join")).toBe(true); // the extraction is real
-    expect(seen.has("@zedbot/bot")).toBe(false);
-    expect(external).not.toContain("grammy");
-    expect(external.filter((n) => n.includes("grammy"))).toEqual([]);
+    expect(seen.has("@zedbot/bot")).toBe(true); // the shared authority is real
   });
 
   it("FJ13b has no grammy import anywhere in the API or the shared force-join package", async () => {

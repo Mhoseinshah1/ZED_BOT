@@ -16,7 +16,7 @@
     "build:packages": "pnpm --filter \"./packages/*\" run build",
     "lint": "eslint .",
     "test": "pnpm -r --if-present run test",
-    "typecheck": "pnpm run build:packages && pnpm -r run typecheck",
+    "typecheck": "pnpm run build:packages && pnpm --filter @zedbot/bot run build && pnpm -r run typecheck",
     "db:generate": "pnpm --filter @zedbot/database run db:generate",
     "db:migrate": "pnpm --filter @zedbot/database run db:migrate",
     "db:deploy": "pnpm --filter @zedbot/database run db:deploy",

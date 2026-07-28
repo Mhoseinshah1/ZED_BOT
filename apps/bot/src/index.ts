@@ -16,7 +16,9 @@ import { runningGitSha } from "./services/backup-health.service.js";
 import { startCheckoutInputRetentionLoop } from "./services/checkout-customer-input.service.js";
 import { startFreeTrialLoop } from "./services/free-trial.service.js";
 import { startFreeTrialCampaignLoop } from "./services/free-trial-campaign.service.js";
-import { startGatewaySettlementLoop } from "./services/gateway-payment.service.js";
+import {
+  startGatewaySettlementLoop,
+} from "./services/gateway-settlement-runner.service.js";
 import {
   RECOVERY_RECHECK_DELAY_MS,
   runStartupRecovery,

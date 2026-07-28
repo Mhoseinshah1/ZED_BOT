@@ -236,6 +236,12 @@ no-store`, `X-Content-Type-Options: nosniff` and `Vary: Cookie`, and **no**
 | GET | `/support/tickets/:publicId/messages` | Keyset page of a thread. Oldest-first **within** a page; the cursor walks **backwards** to older messages. |
 | POST | `/support/tickets` | **Write.** Opens a ticket; `201` with the ticket. |
 | POST | `/support/tickets/:publicId/replies` | **Write.** Appends a user reply; `201` with the updated ticket. |
+| GET | `/commerce/flags` | The nine `miniapp_*` rollout switches as booleans, read fresh; an unreadable switch reports `false` (§4.9). |
+| GET | `/commerce/catalog` | The caller's retail catalog (panels → categories → products, plus other-product categories when their switch is on), visibility-filtered by the bot's own predicate (§4.9). |
+| POST | `/commerce/username` | **Write.** Reserves a service username (custom or random) as a durable HELD reservation; returns the server-minted `draftNonce` (§4.9). |
+| POST | `/commerce/quote` | The authoritative pre-invoice for a draft — pricing, representative pricing and discount decided server-side — plus a sealed `draftToken`. No writes (§4.9). |
+| POST | `/commerce/checkout` | **Write.** Confirms a draft token into the ONE durable `CheckoutSession` (frozen snapshot, in-transaction reservation claim); `201` with the checkout (§4.9). |
+| GET | `/commerce/checkouts/:publicId` | One checkout the caller owns, by 8-character public id. |
 
 ### 4.1 What never crosses the boundary
 
@@ -574,6 +580,58 @@ broken, missing or expired, so refusing a ticket until they name one would lock
 out exactly the wrong people. The picker is fed by the existing authenticated
 `/services` route, so only public service ids ever reach the browser, and the
 server resolves whatever is sent inside the transaction that writes the ticket.
+
+### 4.9 Commerce, part A — one authority, two transports
+
+The commerce surface exists under a rule the Support Centre never needed:
+**every financial decision is made by the bot's own domain services**, imported
+by the API as `@zedbot/bot/services/*`. Catalog visibility is
+`isProductVisible`, pricing is `resolveEffectiveProductPrice` (representative
+pricing included), discount validity is `validateDiscountCode` +
+`claimDiscountUsage`, and the durable checkout is `createCheckoutSession` —
+the same function the bot's «تایید خرید» runs, with the same in-transaction
+username-reservation claim. The API computes no amount itself, and the
+frontend renders amounts without ever deriving one.
+
+What keeps this from dragging Telegram into the API: the one module where
+settlement was fused to fulfilment (`gateway-payment.service`) was split — the
+grammY-facing settlement runner stayed bot-only — and
+`apps/api/tests/miniapp-import-graph.test.ts` walks the API's **runtime**
+import graph (through the bot's sources) and fails on any grammy value import,
+handler, keyboard or `*-views` module. The old manifest-closure assertion in
+FJ13 now pins the narrower fact that only the sanctioned `@zedbot/bot` edge
+may carry grammy in its manifest.
+
+**Rollout.** Nine OWNER switches (`miniapp_commerce_enabled` first among
+them), all seeded `false`, toggled from the bot's admin settings, and re-read
+**fresh and fail-closed** at every commerce boundary — a database error blocks
+exactly like a disabled switch, and a switch flipped off between quote and
+confirm rejects the stale confirm with `FEATURE_DISABLED`. Provider-level
+gating stays authoritative and composes with these by AND.
+
+**The draft.** The bot keeps its pre-invoice draft in the grammY session; a
+browser gets no such trust. `/commerce/quote` computes the authoritative
+pre-invoice and returns a sealed capsule (AES-256-GCM, same key discipline as
+cursors) carrying the draft's IDENTITY — product, reservation, note, discount
+code, server-minted nonce — and deliberately **not its amounts**.
+`/commerce/checkout` reopens the capsule, re-validates visibility and the
+discount, re-prices from live rows (`SETTLE` mode, so an OWNER
+emergency-disable of representative checkout bites at the money boundary) and
+only then creates the `CheckoutSession`, recording `origin: "MINIAPP"` for
+bookkeeping. A price changed after the quote settles on the fresh price, never
+the browser's remembered one.
+
+**Idempotency.** Commerce mutations reuse `MiniAppRequestIdempotency` with the
+support rules verbatim: same key + same payload replays the original result;
+same key + different payload is a `409` conflict; a concurrent duplicate
+converges on the unique-row winner. Underneath, the money keeps its own
+guarantees (`Payment.idempotencyKey`, the settlement CAS, one order per
+checkout), so the request-level layer is a convenience, never the safety.
+
+**Identifiers.** Commerce rows are addressed by the same 8-hex uuid-prefix
+public ids as services and tickets (`commerceShortId`), resolved owner-scoped
+with `take: 2` ambiguity → 404. Internal uuids travel only inside sealed
+capsules, exactly as they do inside cursors.
 
 ---
 

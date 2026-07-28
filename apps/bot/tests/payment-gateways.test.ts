@@ -36,9 +36,11 @@ import {
   clearGatewayManagerCache,
   getOrCreateGatewayPayment,
   recordProviderSuccessFromBot,
-  runGatewaySettlementSweep,
   settleGatewayPayment,
 } from "../src/services/gateway-payment.service.js";
+import {
+  runGatewaySettlementSweep,
+} from "../src/services/gateway-settlement-runner.service.js";
 import {
   getAvailablePaymentMethods,
   submitReceipt,

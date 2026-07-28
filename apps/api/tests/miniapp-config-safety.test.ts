@@ -202,12 +202,14 @@ describe("mini app configuration safety", () => {
     expect(errors).toHaveLength(0);
     expect(warns).toHaveLength(0);
     // One line per setting, every time: auth rate limit, support mutation rate
-    // limit, initData window, session TTL. The count is asserted rather than
-    // just "at least one" so a knob added without a startup line is caught —
-    // an unreported setting is one an operator cannot verify is in force.
-    expect(infos).toHaveLength(4);
+    // limit, commerce mutation rate limit, initData window, session TTL. The
+    // count is asserted rather than just "at least one" so a knob added
+    // without a startup line is caught — an unreported setting is one an
+    // operator cannot verify is in force.
+    expect(infos).toHaveLength(5);
     expect(infos.some((l) => l.includes("MINIAPP_AUTH_RATE_LIMIT"))).toBe(true);
     expect(infos.some((l) => l.includes("MINIAPP_SUPPORT_RATE_LIMIT"))).toBe(true);
+    expect(infos.some((l) => l.includes("MINIAPP_COMMERCE_RATE_LIMIT"))).toBe(true);
   });
 
   // D4-7 -----------------------------------------------------------------
