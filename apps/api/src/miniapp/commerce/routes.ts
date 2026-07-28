@@ -58,13 +58,18 @@ import {
   type SupportMutationLimiters,
 } from "../support-guards.js";
 import { allMiniAppSwitchesEnabled, readMiniAppSwitchFresh } from "../feature-switches.js";
-import { buildValidatedDraft } from "./draft-build.js";
+import { buildAddonDraft, buildValidatedDraft } from "./draft-build.js";
+import { createRenewalCheckoutSession } from "@zedbot/bot/services/renewal-checkout.service";
+import { createExtraVolumeCheckout } from "@zedbot/bot/services/extra-volume.service";
+import { createExtraTimeCheckout } from "@zedbot/bot/services/extra-time.service";
 import {
   openDraft,
   sealDraft,
   type CheckoutDraftCapsule,
 } from "./draft-token.js";
 import { registerCommercePaymentRoutes } from "./payment-routes.js";
+import { registerCommerceServiceRoutes } from "./service-routes.js";
+import { registerCommerceHistoryRoutes } from "./history-routes.js";
 import {
   commerceFingerprint,
   isValidClientRequestId,
@@ -136,6 +141,8 @@ export function registerCommerceRoutes(
   options: CommerceRouteOptions,
 ): void {
   registerCommercePaymentRoutes(app, options);
+  registerCommerceServiceRoutes(app, options);
+  registerCommerceHistoryRoutes(app, options);
 
   const gate = (request: FastifyRequest, reply: FastifyReply, userId: string) => {
     const rejection = checkSupportMutation(request, {
@@ -476,6 +483,50 @@ export function registerCommerceRoutes(
             fingerprint: commerceFingerprint([String(body.draftToken)]),
           },
           async () => {
+            if (
+              capsule.kind === "RENEWAL" ||
+              capsule.kind === "EXTRA_VOLUME" ||
+              capsule.kind === "EXTRA_TIME"
+            ) {
+              const builtAddon = await buildAddonDraft(userId, capsule.kind, capsule);
+              if (builtAddon.rejected !== undefined) {
+                throw new ConfirmRejected(
+                  builtAddon.rejected === "SERVICE_NOT_ELIGIBLE"
+                    ? "PRODUCT_UNAVAILABLE"
+                    : builtAddon.rejected,
+                  builtAddon.status,
+                );
+              }
+              const addonCheckout =
+                capsule.kind === "RENEWAL"
+                  ? await createRenewalCheckoutSession(
+                      builtAddon.user,
+                      builtAddon.service,
+                      builtAddon.product,
+                      builtAddon.draft,
+                    )
+                  : capsule.kind === "EXTRA_VOLUME"
+                    ? await createExtraVolumeCheckout(
+                        builtAddon.user,
+                        builtAddon.service,
+                        builtAddon.product,
+                        builtAddon.draft,
+                      )
+                    : await createExtraTimeCheckout(
+                        builtAddon.user,
+                        builtAddon.service,
+                        builtAddon.product,
+                        builtAddon.draft,
+                      );
+              await prisma.checkoutSession.update({
+                where: { id: addonCheckout.id },
+                data: { origin: "MINIAPP" },
+              });
+              return {
+                resultCheckoutSessionId: addonCheckout.id,
+                resultPaymentId: null,
+              };
+            }
             const built = await buildValidatedDraft(userId, capsule, "SETTLE");
             if (built.rejected !== undefined) {
               throw new ConfirmRejected(built.rejected, built.status);

@@ -249,6 +249,16 @@ no-store`, `X-Content-Type-Options: nosniff` and `Vary: Cookie`, and **no**
 | POST | `/commerce/checkouts/:publicId/receipt` | **Write.** Browser receipt upload (sniffed MIME, bounded size/dimensions, uuid identity) or text — into the SAME `Payment`/`ManualReceipt` review pipeline the bot admins work; `201` `PENDING_REVIEW`. |
 | POST | `/commerce/checkouts/:publicId/pay/gateway` | **Write.** Initiates an online-gateway payment; returns a safe redirect URL (or a Stars invoice link minted server-side). |
 | GET | `/commerce/payments/:publicId` | Owner-scoped payment status — the poll target after a gateway return. Runs the same idempotent settle attempt as the bot's «بررسی وضعیت» button; the browser's word is never evidence. |
+| GET | `/commerce/services/:publicId/delivery` | Owner-safe delivery: username, status, subscription URL, config links (≤10). Gated by `miniapp_service_delivery_enabled`. |
+| GET | `/commerce/services/:publicId/qr` | Server-rendered PNG QR (`target=sub` or `target=config&index=n`) via the bot's own generator. |
+| GET | `/commerce/services/:publicId/addons` | Renewal plans + extra-volume/time packages: per-add-on switches AND the bot's real eligibility (renewableWhere / lifecycle / group). |
+| POST | `/commerce/services/:publicId/addon-quote` | Authoritative add-on pre-invoice (+ sealed draft token); discount purpose RENEWAL for renewals, PURCHASE for extras — the bot's rule. |
+| GET | `/commerce/history` | Unified orders + order-less payments, the bot's own 10/page merge. |
+| GET | `/commerce/payments?page=n` | Payment history list. |
+| GET | `/commerce/orders/:publicId` | Order detail linking payment / service / checkout public ids + reconciliation flag. |
+| GET | `/commerce/other-orders/:publicId` | Other-product order detail — the ONE surface where delivered stock content / manual delivery text is revealed, owner-only. |
+| GET | `/commerce/checkouts/:publicId/input` | Customer-input form: field definitions + masked summary. Raw values never round-trip. |
+| POST | `/commerce/checkouts/:publicId/input` | **Write.** Full-form submit, validated by the bot's schema authority; a wallet retry then settles the SAME materialized checkout. |
 
 ### 4.1 What never crosses the boundary
 

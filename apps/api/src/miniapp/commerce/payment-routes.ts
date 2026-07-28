@@ -42,7 +42,10 @@ import {
   submitReceipt,
 } from "@zedbot/bot/services/payment-method.service";
 import {
+  payExtraTimeDraftWithWallet,
+  payExtraVolumeDraftWithWallet,
   payPurchaseDraftWithWallet,
+  payRenewalDraftWithWallet,
   walletPaymentErrorCode,
 } from "@zedbot/bot/services/wallet-payment.service";
 import {
@@ -55,7 +58,7 @@ import { supportFailureLog } from "../support-errors.js";
 import { checkSupportMutation, sendMutationRejection } from "../support-guards.js";
 import { readMiniAppSwitchFresh } from "../feature-switches.js";
 import { openDraft } from "./draft-token.js";
-import { buildValidatedDraft } from "./draft-build.js";
+import { buildAddonDraft, buildValidatedDraft } from "./draft-build.js";
 import {
   commerceFingerprint,
   isValidClientRequestId,
@@ -295,6 +298,47 @@ export function registerCommercePaymentRoutes(
             fingerprint: commerceFingerprint([String(body.draftToken)]),
           },
           async () => {
+            if (
+              capsule.kind === "RENEWAL" ||
+              capsule.kind === "EXTRA_VOLUME" ||
+              capsule.kind === "EXTRA_TIME"
+            ) {
+              const builtAddon = await buildAddonDraft(userId, capsule.kind, capsule);
+              if (builtAddon.rejected !== undefined) {
+                throw new PayRejected(
+                  builtAddon.rejected === "SERVICE_NOT_ELIGIBLE"
+                    ? "PRODUCT_UNAVAILABLE"
+                    : builtAddon.rejected,
+                  builtAddon.status,
+                );
+              }
+              const paid =
+                capsule.kind === "RENEWAL"
+                  ? await payRenewalDraftWithWallet(builtAddon.user, builtAddon.draft)
+                  : capsule.kind === "EXTRA_VOLUME"
+                    ? await payExtraVolumeDraftWithWallet(builtAddon.user, builtAddon.draft)
+                    : await payExtraTimeDraftWithWallet(builtAddon.user, builtAddon.draft);
+              if (!paid.result.ok) {
+                const code = walletPaymentErrorCode(paid.result.error);
+                throw new PayRejected(
+                  code === "INTERNAL" ? "INTERNAL" : code,
+                  code === "INSUFFICIENT_BALANCE" ? 402 : code === "INTERNAL" ? 503 : 409,
+                );
+              }
+              await prisma.checkoutSession.updateMany({
+                where: { id: paid.result.checkout.id, origin: null },
+                data: { origin: "MINIAPP" },
+              });
+              await enqueueCommerceFollowUp({
+                name: MINIAPP_COMMERCE_JOB_NAMES.FULFILL_ORDER,
+                orderId: paid.result.order.id,
+              });
+              return {
+                resultCheckoutSessionId: paid.result.checkout.id,
+                resultPaymentId: paid.result.payment.id,
+                needsCustomerInput: false,
+              };
+            }
             const built = await buildValidatedDraft(userId, capsule, "SETTLE");
             if (built.rejected !== undefined) {
               throw new PayRejected(built.rejected, built.status);

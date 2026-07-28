@@ -26,10 +26,19 @@ const TAG_BYTES = 16;
  * ephemeral pre-invoice horizon; the durable checkout gets its own expiresAt. */
 export const DRAFT_TOKEN_TTL_MS = 15 * 60_000;
 
+export type CheckoutDraftKind =
+  | "SERVICE"
+  | "OTHER"
+  | "RENEWAL"
+  | "EXTRA_VOLUME"
+  | "EXTRA_TIME";
+
 export interface CheckoutDraftCapsule {
   /** Session user the quote was computed for — confirm rejects anyone else. */
   userId: string;
-  kind: "SERVICE" | "OTHER";
+  kind: CheckoutDraftKind;
+  /** RENEWAL / EXTRA_* only: the target service (sealed internal uuid). */
+  serviceId?: string;
   /** Internal uuid of the quoted product (sealed, never client-visible). */
   productId: string;
   /** Wallet-idempotency seed + reservation linkage; minted server-side. */
@@ -108,7 +117,7 @@ export function openDraft(token: unknown, nowMs: number): CheckoutDraftCapsule |
     const capsule = parsed as CheckoutDraftCapsule;
     if (
       typeof capsule.userId !== "string" ||
-      (capsule.kind !== "SERVICE" && capsule.kind !== "OTHER") ||
+      !["SERVICE", "OTHER", "RENEWAL", "EXTRA_VOLUME", "EXTRA_TIME"].includes(capsule.kind) ||
       typeof capsule.productId !== "string" ||
       typeof capsule.draftNonce !== "string" ||
       typeof capsule.mintedAtMs !== "number"
