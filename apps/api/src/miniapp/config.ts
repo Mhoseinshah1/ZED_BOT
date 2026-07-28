@@ -172,6 +172,53 @@ export function miniAppAuthRateLimit(): number {
   return resolveMiniAppAuthRateLimit().value;
 }
 
+// --- support mutation ceiling -------------------------------------------------
+
+/**
+ * Production default: ten Support Center writes a minute, per user.
+ *
+ * Someone with a real problem writes one ticket and a few replies. Ten a
+ * minute is far past that and far below anything a flaky connection retrying
+ * with the same idempotency key would hit.
+ */
+export const MINIAPP_SUPPORT_RATE_LIMIT_DEFAULT = 10;
+/** Floor of one: zero would lock every user out of asking for help. */
+export const MINIAPP_SUPPORT_RATE_LIMIT_MIN = 1;
+export const MINIAPP_SUPPORT_RATE_LIMIT_MAX = 10_000;
+
+export function resolveMiniAppSupportRateLimit(): ResolvedIntSetting {
+  return resolveClampedInt(
+    "MINIAPP_SUPPORT_RATE_LIMIT",
+    MINIAPP_SUPPORT_RATE_LIMIT_DEFAULT,
+    MINIAPP_SUPPORT_RATE_LIMIT_MIN,
+    MINIAPP_SUPPORT_RATE_LIMIT_MAX,
+  );
+}
+
+/**
+ * The per-minute Support Center mutation ceiling, per user.
+ *
+ * Read inside the limiter on every mutation, so like every other knob here it
+ * clamps rather than throwing: a typo must not take down the one part of the
+ * product a stuck user reaches for.
+ */
+export function miniAppSupportRateLimit(): number {
+  return resolveMiniAppSupportRateLimit().value;
+}
+
+/**
+ * The per-client ceiling, derived rather than separately configurable.
+ *
+ * One address is often many people — a household, an office, a carrier NAT —
+ * so it must be looser than the per-user limit, but it has to move WITH it or
+ * an operator who raises one would be silently capped by the other.
+ */
+export const SUPPORT_CLIENT_LIMIT_MULTIPLIER = 3;
+
+export function miniAppSupportClientRateLimit(): number {
+  return miniAppSupportRateLimit() * SUPPORT_CLIENT_LIMIT_MULTIPLIER;
+}
+
 // --- startup report -----------------------------------------------------------
 
 /**
@@ -190,6 +237,11 @@ export function logMiniAppConfig(): void {
       name: "MINIAPP_AUTH_RATE_LIMIT",
       unit: "per minute",
       resolved: resolveMiniAppAuthRateLimit(),
+    },
+    {
+      name: "MINIAPP_SUPPORT_RATE_LIMIT",
+      unit: "per minute per user",
+      resolved: resolveMiniAppSupportRateLimit(),
     },
     {
       name: "MINIAPP_INITDATA_MAX_AGE_SECONDS",

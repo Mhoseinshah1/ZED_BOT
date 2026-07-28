@@ -4,6 +4,7 @@ import {
   type Service,
   type SupportMessage,
   type SupportTicket,
+  type SupportTicketStatus,
 } from "@zedbot/database";
 import { canonicalServicePublicId, canonicalTicketPublicId } from "@zedbot/shared";
 
@@ -452,4 +453,99 @@ export async function listOwnedTicketMessages(
     hasMore,
     older: hasMore && oldest !== null ? { createdAt: oldest.createdAt, id: oldest.id } : null,
   };
+}
+
+// --- ticket listing ----------------------------------------------------------
+
+export interface TicketPage {
+  /** Newest first — a support inbox opens on what just happened. */
+  tickets: SupportTicket[];
+  /** True only when a further row actually exists. */
+  hasMore: boolean;
+  /** Keyset position of the last row returned, or null when there is no more. */
+  next: { updatedAt: Date; id: string } | null;
+}
+
+/**
+ * The caller's own tickets, newest activity first, keyset-paged.
+ *
+ * OWNERSHIP IS IN THE QUERY. `userId` is a WHERE clause, not a filter applied
+ * to a result — there is no shape of cursor, page size or concurrent write
+ * that can make this return somebody else's ticket.
+ *
+ * ORDERED BY `updatedAt`, NOT `createdAt`. A support list is about what needs
+ * attention, and a reply on an old ticket moves it to the top. `id` breaks
+ * ties, so two tickets touched in the same millisecond still have exactly one
+ * ordering and a cursor can never skip or repeat one.
+ *
+ * `limit + 1` rows are fetched so "is there another page?" is answered by a row
+ * that exists rather than inferred from `rows.length === limit`, which hands
+ * out a cursor to an empty page whenever the total is a multiple of the page
+ * size.
+ */
+export async function listOwnedTickets(
+  userId: string,
+  limit: number,
+  after: { updatedAt: Date; id: string } | null,
+): Promise<TicketPage> {
+  const rows = await prisma.supportTicket.findMany({
+    where:
+      after === null
+        ? { userId }
+        : {
+            userId,
+            OR: [
+              { updatedAt: { lt: after.updatedAt } },
+              { updatedAt: after.updatedAt, id: { lt: after.id } },
+            ],
+          },
+    orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+    take: limit + 1,
+  });
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page.length === 0 ? null : page[page.length - 1];
+  return {
+    tickets: page,
+    hasMore,
+    next: hasMore && last !== null ? { updatedAt: last.updatedAt, id: last.id } : null,
+  };
+}
+
+/** Counts for the Support Center landing. Owner-scoped, no ticket text read. */
+export interface TicketSummary {
+  total: number;
+  open: number;
+  waitingUser: number;
+  closed: number;
+}
+
+export async function summarizeOwnedTickets(userId: string): Promise<TicketSummary> {
+  const grouped = await prisma.supportTicket.groupBy({
+    by: ["status"],
+    where: { userId },
+    _count: { _all: true },
+  });
+  const by = (status: SupportTicketStatus): number =>
+    grouped.find((row) => row.status === status)?._count._all ?? 0;
+  const closed = by("CLOSED");
+  const waitingUser = by("WAITING_USER");
+  const total = grouped.reduce((sum, row) => sum + row._count._all, 0);
+  return {
+    total,
+    // "Open" is everything not closed — the user's question is "does anything
+    // still need me or the team?", not which internal state it is in.
+    open: total - closed,
+    waitingUser,
+    closed,
+  };
+}
+
+/** Does this ticket have at least one attachment? No file id is returned. */
+export async function ticketHasAttachments(ticketId: string): Promise<boolean> {
+  const found = await prisma.supportMessage.findFirst({
+    where: { ticketId, fileId: { not: null } },
+    select: { id: true },
+  });
+  return found !== null;
 }

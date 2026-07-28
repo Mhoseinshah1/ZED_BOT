@@ -325,3 +325,64 @@ Each step is awaited before the next begins and each is individually contained,
 so a step that throws is logged and the sequence still reaches the disconnect.
 The order is asserted by executing the sequence with a sweep that has not
 resolved, not by reading the entrypoint as text.
+
+## The Mini App Support Center HTTP surface
+
+Six routes under `/api/miniapp`, all inside the authenticated plugin, all
+owner-scoped in the query rather than filtered afterwards:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/support/summary` | counts for the landing page |
+| GET | `/support/tickets` | the caller's tickets, newest activity first |
+| GET | `/support/tickets/:ticketId` | one ticket, by public short id |
+| GET | `/support/tickets/:ticketId/messages` | the thread, paged backwards |
+| POST | `/support/tickets` | create a text-only ticket |
+| POST | `/support/tickets/:ticketId/replies` | append a text-only reply |
+
+**Identifiers.** No database uuid crosses this boundary. Tickets are addressed
+by an 8-hex-character public id resolved through the domain's owner-scoped
+resolver; a malformed, unknown, ambiguous or foreign id is the same 404, so the
+response shape never confirms which ticket ids exist.
+
+**Paging.** Sealed AES-GCM cursors bound to their collection —
+`support-tickets` and `support-messages` are separate resources, so a cursor
+from one cannot decode against the other, and neither can decode against
+services or wallet transactions. A cursor says *where* to continue; the
+session's user id says *whether* there is anything to continue.
+
+**Text only.** There is no upload route, no attachment download and no file
+metadata in any response — a message reports `hasAttachment: true` and nothing
+more. Tickets raised from Telegram can carry files; the Mini App says one
+exists and hands off to the bot. Adding a download here would mean deciding, in
+a second place, who may read a file.
+
+**The mutation gate**, in order, cheapest and most categorical first:
+
+1. secure transport (plaintext refused in production);
+2. same origin (checked before the rate limiter, so a cross-site flood cannot
+   consume the victim's own quota);
+3. `application/json` or 415 — a form post would otherwise parse as an empty
+   body and reach the handler looking well-formed;
+4. rate, per user **and** per client, both consumed on every attempt.
+
+Body size is enforced by Fastify per route (8 KiB) before any of it runs.
+
+`MINIAPP_SUPPORT_RATE_LIMIT` sets the per-user per-minute ceiling (default 10,
+clamped, never throwing); the per-client ceiling is three times it, so raising
+one cannot be silently capped by the other.
+
+**Errors** are codes, never prose: the domain's own `SupportDomainError` maps
+to a status in the domain package (`supportDomainErrorStatus`), so `400`
+(malformed), `404` (no such ticket for this owner) and `409` (`TICKET_CLOSED`,
+`IDEMPOTENCY_CONFLICT`) mean the same thing on every transport. A closed ticket
+is deliberately distinguishable from a missing one: the Mini App has to tell
+"this conversation is over" apart from "no such ticket".
+
+**Idempotency.** Every mutation carries a `clientRequestId`; replaying it
+returns the original ticket, and reusing it with a different payload is a
+409 rather than a silent second write.
+
+**The API still cannot reach Telegram.** Creating a ticket writes a
+notification intent in the same transaction as the message; the bot's sweep
+turns that into a message to the administrators. This is why the intent exists.

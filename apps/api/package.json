@@ -18,6 +18,7 @@
     "@zedbot/force-join": "workspace:*",
     "@zedbot/payments": "workspace:*",
     "@zedbot/shared": "workspace:*",
+    "@zedbot/support-tickets": "workspace:*",
     "fastify": "^5.2.0",
     "ioredis": "^5.4.2"
   },

@@ -1,5 +1,5 @@
 import type { ServiceStatus, UserGroup, UserStatus } from "@zedbot/database";
-import { serviceShortId } from "@zedbot/shared";
+import { serviceShortId, ticketShortId } from "@zedbot/shared";
 
 // =============================================================================
 // Response shaping — an ALLOWLIST, never a redaction pass.
@@ -253,4 +253,106 @@ export function toMiniAppTransaction(row: MiniAppTransactionSource): MiniAppTran
     balanceAfterToman: row.balanceAfterToman,
     createdAt: row.createdAt.toISOString(),
   };
+}
+
+// --- support tickets ---------------------------------------------------------
+//
+// The owner is reading their OWN conversation, so subject and message text go
+// back verbatim — they wrote them. What does not go back is any database uuid:
+// tickets are addressed by their public short id everywhere, and a message
+// carries a display key derived the same way rather than its primary key.
+
+export interface MiniAppTicketSource {
+  id: string;
+  subject: string | null;
+  status: string;
+  category: string | null;
+  origin: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  closedAt: Date | null;
+}
+
+export interface MiniAppTicketSummaryDto {
+  /** Public short id — the only ticket identifier a browser ever sees. */
+  id: string;
+  subject: string | null;
+  status: string;
+  category: string | null;
+  origin: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function toMiniAppTicketSummary(ticket: MiniAppTicketSource): MiniAppTicketSummaryDto {
+  return {
+    id: ticketShortId(ticket),
+    subject: ticket.subject,
+    status: ticket.status,
+    category: ticket.category,
+    origin: ticket.origin,
+    createdAt: ticket.createdAt.toISOString(),
+    updatedAt: ticket.updatedAt.toISOString(),
+  };
+}
+
+export interface MiniAppTicketDetailDto extends MiniAppTicketSummaryDto {
+  closedAt: string | null;
+  /** Whether the Mini App may offer a reply box at all. */
+  canReply: boolean;
+  /**
+   * True when at least one message carries a file. The Mini App shows an
+   * indicator and a hand-off to the bot; it never receives a file id, and
+   * there is no download route to receive one from.
+   */
+  hasAttachments: boolean;
+  /** Public id of the linked service, when the ticket is about one. */
+  serviceId: string | null;
+}
+
+export function toMiniAppTicketDetail(
+  ticket: MiniAppTicketSource & { serviceId: string | null },
+  extras: { canReply: boolean; hasAttachments: boolean },
+): MiniAppTicketDetailDto {
+  return {
+    ...toMiniAppTicketSummary(ticket),
+    closedAt: ticket.closedAt === null ? null : ticket.closedAt.toISOString(),
+    canReply: extras.canReply,
+    hasAttachments: extras.hasAttachments,
+    serviceId: ticket.serviceId === null ? null : serviceShortId({ id: ticket.serviceId }),
+  };
+}
+
+export interface MiniAppMessageSource {
+  id: string;
+  senderType: string;
+  text: string | null;
+  fileId: string | null;
+  createdAt: Date;
+}
+
+export interface MiniAppMessageDto {
+  /** Display key only. Derived like every other public id: never the uuid. */
+  key: string;
+  senderType: string;
+  text: string | null;
+  hasAttachment: boolean;
+  createdAt: string;
+}
+
+export function toMiniAppMessage(message: MiniAppMessageSource): MiniAppMessageDto {
+  return {
+    key: messageDisplayKey(message.id),
+    senderType: message.senderType,
+    text: message.text,
+    // The presence of a file, never its id, name, size or type. A Mini App
+    // that cannot download an attachment has no use for its metadata, and
+    // metadata is the part that leaks what a file is.
+    hasAttachment: message.fileId !== null,
+    createdAt: message.createdAt.toISOString(),
+  };
+}
+
+function messageDisplayKey(id: string): string {
+  return id.replace(/-/g, "").slice(0, 12);
 }
