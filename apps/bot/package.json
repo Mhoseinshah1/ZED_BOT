@@ -17,6 +17,7 @@
     "@zedbot/force-join": "workspace:*",
     "@zedbot/panel-adapters": "workspace:*",
     "@zedbot/payments": "workspace:*",
+    "@zedbot/service-renewal": "workspace:*",
     "@zedbot/shared": "workspace:*",
     "@zedbot/support-tickets": "workspace:*",
     "bullmq": "^5.34.0",

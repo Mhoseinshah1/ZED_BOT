@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@zedbot/database": "workspace:*",
+    "@zedbot/panel-adapters": "workspace:*",
     "@zedbot/shared": "workspace:*"
   },
   "devDependencies": {

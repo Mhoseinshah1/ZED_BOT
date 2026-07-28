@@ -9,6 +9,17 @@ import {
 } from "@zedbot/panel-adapters";
 import { errorMessage } from "@zedbot/shared";
 
+import {
+  classifyXuiRemoteModel,
+  panelCapabilities,
+  panelHasCredentials,
+  panelOperationAvailable,
+  panelSupportsOperation,
+  panelTypesSupporting,
+  serviceSupportsGlobalLifecycle,
+  type XuiRemoteModel,
+} from "@zedbot/service-renewal";
+
 import { logger } from "../core/logger.js";
 import {
   buildAdapterForPanel,
@@ -97,30 +108,6 @@ const ALL_CAPABILITIES: readonly PanelCapability[] = [
 ];
 
 /** Static capability set for a panel row (per type/variant, no network). */
-export function panelCapabilities(panel: Panel): readonly PanelCapability[] {
-  if (panel.type === "MARZBAN") {
-    return MARZBAN_CAPABILITIES;
-  }
-  return SUPPORTED_XUI_VARIANTS.has(resolveXuiVariant(panel)) ? XUI_CAPABILITIES : [];
-}
-
-/** Prisma PanelType values whose adapters implement the capability. */
-export function panelTypesSupporting(capability: PanelCapability): Panel["type"][] {
-  const types: Panel["type"][] = [];
-  if (MARZBAN_CAPABILITIES.includes(capability)) {
-    types.push("MARZBAN");
-  }
-  if (XUI_CAPABILITIES.includes(capability)) {
-    types.push("XUI");
-  }
-  return types;
-}
-
-/** true when the panel's adapter implements (and this repo tested) the operation. */
-export function panelSupportsOperation(panel: Panel, capability: PanelCapability): boolean {
-  return panelCapabilities(panel).includes(capability);
-}
-
 /** Persian capability statuses for the admin panel detail (specified texts). */
 export const CAPABILITY_STATUS_TEXT = {
   supported: "پشتیبانی می‌شود ✅",
@@ -188,54 +175,6 @@ export function parsePanelInboundIds(raw: unknown): number[] {
  * global-client migration) stay readable but are never mutated through the
  * global-client endpoints and are never silently migrated.
  */
-export type XuiRemoteModel = "GLOBAL_CLIENT" | "LEGACY_PER_INBOUND" | "UNKNOWN";
-
-/**
- * Classifies an XUI service's remote model from its stored identifiers.
- * GLOBAL_CLIENT: the remote metadata names ONE client whose email is the
- * service username exactly. LEGACY_PER_INBOUND: per-inbound client labels
- * (`username-<inboundId>`). Anything unprovable is UNKNOWN and treated like
- * legacy (mutations blocked) - never guessed.
- */
-export function classifyXuiRemoteModel(
-  service: Pick<Service, "panelType" | "username" | "remoteMetadata">,
-): XuiRemoteModel {
-  if (service.panelType !== "XUI") {
-    return "GLOBAL_CLIENT";
-  }
-  const metadata = service.remoteMetadata;
-  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return "UNKNOWN";
-  }
-  const record = metadata as { email?: unknown; clients?: unknown };
-  if (typeof record.email === "string") {
-    return record.email === service.username ? "GLOBAL_CLIENT" : "UNKNOWN";
-  }
-  if (Array.isArray(record.clients) && record.clients.length > 0) {
-    const emails = record.clients
-      .map((c) => (typeof c === "object" && c !== null ? (c as { email?: unknown }).email : undefined))
-      .filter((e): e is string => typeof e === "string");
-    if (emails.length === 0) {
-      return "UNKNOWN";
-    }
-    if (emails.every((e) => e === service.username)) {
-      return "GLOBAL_CLIENT";
-    }
-    if (emails.some((e) => e.startsWith(`${service.username}-`))) {
-      return "LEGACY_PER_INBOUND";
-    }
-    return "UNKNOWN";
-  }
-  return "UNKNOWN";
-}
-
-/** true when lifecycle mutations may target this service's remote model. */
-export function serviceSupportsGlobalLifecycle(
-  service: Pick<Service, "panelType" | "username" | "remoteMetadata">,
-): boolean {
-  return service.panelType !== "XUI" || classifyXuiRemoteModel(service) === "GLOBAL_CLIENT";
-}
-
 /** Result of resolving a product's effective XUI inbound selection. */
 export type ProductInboundResolution =
   | { ok: true; inboundIds: number[]; inherited: boolean }
@@ -324,28 +263,6 @@ export function assessPanelConfig(panel: Panel): PanelConfigAssessment {
     return { ok: false, reason: "no-inbound-ids", adminText: PANEL_XUI_INBOUND_TEXT };
   }
   return { ok: true };
-}
-
-function panelHasCredentials(panel: Panel): boolean {
-  if (panel.type === "XUI" && resolveXuiAuthMode(panel) === "API_TOKEN") {
-    return panel.tokenEncrypted !== null && panel.tokenEncrypted !== "";
-  }
-  return panel.username !== null && panel.passwordEncrypted !== null;
-}
-
-/**
- * Pre-payment gate for operations on EXISTING services (renewal, extras,
- * toggle, regenerate, sync): the panel type/variant must implement the
- * operation and the login credentials must be present. Unlike sellability
- * this does NOT require provisioning config (template/inbounds) - mutating
- * an existing account never provisions a new one.
- */
-export function panelOperationAvailable(panel: Panel, capability: PanelCapability): boolean {
-  return (
-    panel.status === PanelStatus.ACTIVE &&
-    panelSupportsOperation(panel, capability) &&
-    panelHasCredentials(panel)
-  );
 }
 
 /**
@@ -553,3 +470,18 @@ export const READINESS_RELEVANT_COLUMNS: ReadonlySet<string> = new Set([
 export function readinessResetData(): Prisma.PanelUpdateInput {
   return { provisioningReady: null, capabilitySnapshot: Prisma.DbNull };
 }
+
+// The capability predicates now live in @zedbot/service-renewal so the Mini App
+// API can ask the same questions the bot asks. Re-exported here so every
+// existing import of this module keeps working and there is still exactly one
+// implementation.
+export {
+  classifyXuiRemoteModel,
+  panelCapabilities,
+  panelHasCredentials,
+  panelOperationAvailable,
+  panelSupportsOperation,
+  panelTypesSupporting,
+  serviceSupportsGlobalLifecycle,
+  type XuiRemoteModel,
+};

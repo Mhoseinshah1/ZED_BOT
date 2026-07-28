@@ -30,3 +30,18 @@ export {
   isMiniAppWalletRenewalEnabled,
   setMiniAppWalletRenewalEnabled,
 } from "./rollout.js";
+
+export {
+  classifyXuiRemoteModel,
+  panelCapabilities,
+  panelHasCredentials,
+  panelOperationAvailable,
+  panelSupportsOperation,
+  panelTypesSupporting,
+  resolveXuiAuthMode,
+  resolveXuiVariant,
+  serviceSupportsGlobalLifecycle,
+  SUPPORTED_XUI_AUTH_MODES,
+  SUPPORTED_XUI_VARIANTS,
+  type XuiRemoteModel,
+} from "./panel-capability.js";
