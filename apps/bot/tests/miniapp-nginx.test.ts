@@ -329,44 +329,43 @@ describe("mini app Nginx configuration", () => {
     );
     expect(openssl.status, openssl.stderr).toBe(0);
 
-    // Two substitutions, both about the ENVIRONMENT rather than the policy
-    // under test. Every location, header and CSP stays byte-identical to what
-    // the installer writes.
+    // NO DIRECTIVE IS EVER SUBSTITUTED OUT. This test previously deleted
+    // `http2 on;` when the local nginx was older than 1.25.1 — and that
+    // exemption is precisely how a config that cannot start on the deployed
+    // server passed CI. The generated file now requests HTTP/2 on the listen
+    // line, which every nginx since 1.9.5 accepts, so there is nothing left to
+    // excuse and the exemption is gone. See N11.
     //
-    //  1. certificate paths - nginx -t genuinely loads the files, and
+    // The three remaining substitutions are about the ENVIRONMENT, not the
+    // configuration. Every location, header, CSP and protocol directive stays
+    // byte-identical to what the installer writes.
+    //
+    //  1. certificate paths — `nginx -t` genuinely loads the files, and
     //     Let's Encrypt has not run inside a test container.
-    //  2. `http2 on;` - that spelling arrived in nginx 1.25.1. On an older
-    //     binary the directive is unknown and the whole file fails to parse,
-    //     which would say nothing about the Mini App location. Dropped only
-    //     when the local nginx predates it.
     let server = https
       .replace(/ssl_certificate\s+\S+;/, `ssl_certificate ${cert};`)
       .replace(/ssl_certificate_key\s+\S+;/, `ssl_certificate_key ${key};`)
       .replace(/^\s*include \/etc\/letsencrypt\/options-ssl-nginx\.conf;\s*$/m, "");
-    const version = spawnSync("nginx", ["-v"], { encoding: "utf8" });
-    const parsed = /nginx\/(\d+)\.(\d+)\.(\d+)/.exec(`${version.stdout}${version.stderr}`);
-    const supportsHttp2Directive =
-      parsed !== null &&
-      (Number(parsed[1]) > 1 ||
-        (Number(parsed[1]) === 1 &&
-          (Number(parsed[2]) > 25 || (Number(parsed[2]) === 25 && Number(parsed[3]) >= 1))));
-    if (!supportsHttp2Directive) {
-      server = server.replace(/^\s*http2 on;\s*$/m, "");
-    }
-    // 3. IPv6 listeners - `nginx -t` OPENS the listening sockets, so a host
-    //    without IPv6 fails on `[::]` with an errno that says nothing about
-    //    the configuration.
+    //  2. IPv6 listeners — `nginx -t` OPENS the listening sockets, so a host
+    //     without IPv6 fails on `[::]` with an errno that says nothing about
+    //     the configuration.
     if (!existsSync("/proc/net/if_inet6")) {
       server = server.replace(/^\s*listen \[::\][^\n]*\n/gm, "");
     }
-    // 4. Privileged ports - same reason, one step further. `nginx -t` binds 80
-    //    and 443, which an unprivileged CI runner cannot do, and it reports
-    //    that as a failed config test even after printing "syntax is ok". The
-    //    port number is not the thing under test; every location, header and
-    //    CSP is untouched.
+    //  3. Privileged ports — same reason, one step further. `nginx -t` binds 80
+    //     and 443, which an unprivileged CI runner cannot do, and it reports
+    //     that as a failed config test even after printing "syntax is ok". Only
+    //     the port number changes; `ssl http2` and everything after it is kept,
+    //     so the protocol directives really are the ones being validated.
     server = server
       .replace(/\blisten (\[::\]:)?80;/g, (_m, v6) => `listen ${v6 ?? ""}18080;`)
-      .replace(/\blisten (\[::\]:)?443 ssl;/g, (_m, v6) => `listen ${v6 ?? ""}18443 ssl;`);
+      .replace(
+        /\blisten (\[::\]:)?443 (ssl[^\n;]*);/g,
+        (_m, v6, rest) => `listen ${v6 ?? ""}18443 ${rest};`,
+      );
+    // The rewrite must not have quietly dropped the protocol request — if it
+    // had, nginx -t would pass for the wrong reason.
+    expect(server, server).toContain("18443 ssl http2;");
     mkdirSync(path.join(dir, "logs"), { recursive: true });
     const confPath = path.join(dir, "nginx.conf");
     writeFileSync(
@@ -412,6 +411,92 @@ describe("mini app Nginx configuration", () => {
       return;
     }
     expect(output, output).toContain("test is successful");
+  });
+
+  it("N10b HTTP/2 is requested on the listen line, in exactly one style", () => {
+    // THE DEPLOYED SERVER IS THE AUTHORITY. `http2 on;` is a separate directive
+    // that only exists from nginx 1.25.1. The Ubuntu LTS this project installs
+    // on ships 1.24, where it is an unknown directive: `nginx -t` fails, the
+    // reverse proxy never starts, and the whole panel is unreachable. It shipped
+    // once because N10 deleted the directive before validating on an older
+    // binary — the config under test was not the config being deployed.
+    //
+    // `listen ... http2` has been accepted since 1.9.5 and is only deprecated
+    // (a warning) on newer builds, so it is the one spelling correct everywhere
+    // this repository is installed.
+    expect(https).toContain("listen 443 ssl http2;");
+    expect(https).toContain("listen [::]:443 ssl http2;");
+
+    // NEVER BOTH. nginx refuses a server block that requests HTTP/2 twice, so a
+    // "belt and braces" edit that left the old directive in place would break
+    // exactly the servers it was meant to support.
+    expect(https, "the 1.25-only directive must be gone").not.toMatch(/^\s*http2\s+on;/m);
+    // And the plain form must not survive anywhere either — a stray
+    // `listen 443 ssl;` would silently serve HTTP/1.1 only.
+    expect(https).not.toMatch(/^\s*listen (\[::\]:)?443 ssl;\s*$/m);
+  });
+
+  it("N10c the local nginx accepts the exact listen line the installer writes", () => {
+    // A direct, minimal check of the one directive the deployed server rejected.
+    // N10 validates the whole file; this one isolates the line so a failure says
+    // "this spelling is not supported here" rather than "something in the config
+    // is wrong".
+    const nginxBinary = spawnSync("sh", ["-c", "command -v nginx"], { encoding: "utf8" });
+    if (nginxBinary.status !== 0 || nginxBinary.stdout.trim() === "") {
+      console.warn("N10c skipped: no nginx binary on PATH");
+      return;
+    }
+    const dir = mkdtempSync(path.join(tmpdir(), "zedbot-nginx-listen-"));
+    const cert = path.join(dir, "cert.pem");
+    const key = path.join(dir, "key.pem");
+    const openssl = spawnSync(
+      "openssl",
+      [
+        "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", key, "-out", cert, "-days", "1",
+        "-subj", "/CN=bot.example.com",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(openssl.status, openssl.stderr).toBe(0);
+    mkdirSync(path.join(dir, "logs"), { recursive: true });
+
+    const listen = existsSync("/proc/net/if_inet6")
+      ? "        listen 18443 ssl http2;\n        listen [::]:18443 ssl http2;"
+      : "        listen 18443 ssl http2;";
+    const confPath = path.join(dir, "nginx.conf");
+    writeFileSync(
+      confPath,
+      [
+        "worker_processes 1;",
+        `pid ${path.join(dir, "nginx.pid")};`,
+        `error_log ${path.join(dir, "logs", "error.log")};`,
+        "events { worker_connections 64; }",
+        "http {",
+        "    access_log off;",
+        `    client_body_temp_path ${path.join(dir, "client_body")};`,
+        `    proxy_temp_path ${path.join(dir, "proxy")};`,
+        `    fastcgi_temp_path ${path.join(dir, "fastcgi")};`,
+        `    uwsgi_temp_path ${path.join(dir, "uwsgi")};`,
+        `    scgi_temp_path ${path.join(dir, "scgi")};`,
+        "    server {",
+        listen,
+        "        server_name bot.example.com;",
+        `        ssl_certificate ${cert};`,
+        `        ssl_certificate_key ${key};`,
+        "        location / { return 204; }",
+        "    }",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = spawnSync("nginx", ["-t", "-c", confPath, "-p", dir], { encoding: "utf8" });
+    const output = `${result.stdout}${result.stderr}`;
+    expect(output, output).toContain("syntax is ok");
+    // The specific failure this guards against, named so a regression is
+    // obvious from the assertion alone.
+    expect(output).not.toContain('unknown directive "http2"');
   });
 });
 
