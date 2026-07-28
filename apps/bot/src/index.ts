@@ -7,7 +7,10 @@ import { logger } from "./core/logger.js";
 import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
 import { startReferralExecuteConsumer } from "./services/referral-execute-consumer.js";
 import { startStarsSubscriptionConsumer } from "./services/stars-subscription-consumer.js";
-import { startSupportNotificationLoop } from "./services/support-notification.service.js";
+import {
+  startSupportNotificationLoop,
+  type SupportNotificationLoopController,
+} from "./services/support-notification.service.js";
 import { runningGitSha } from "./services/backup-health.service.js";
 import { startCheckoutInputRetentionLoop } from "./services/checkout-customer-input.service.js";
 import { startFreeTrialLoop } from "./services/free-trial.service.js";
@@ -58,9 +61,18 @@ async function run(botToken: string): Promise<void> {
   // unconfigured; the whole feature is disabled-by-default regardless.
   const referralExecuteConsumer = startReferralExecuteConsumer();
 
+  // Assigned after startup below; declared here so the shutdown closure can
+  // stop it. Null only in the window before startup reaches the start call.
+  let supportNotificationLoop: SupportNotificationLoopController | null = null;
+
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`received ${signal}, stopping bot`);
     try {
+      // FIRST: no new notification sweep may begin. A tick that starts while
+      // the database is disconnecting fails for a reason that reads as an
+      // outage, and its claims sit in SENDING until the stale sweep of the
+      // NEXT process rescues them. A tick already in flight finishes safely.
+      supportNotificationLoop?.stop();
       // Ops log BEFORE the database disconnects; writeSystemLog never throws.
       await writeSystemLog({
         level: "INFO",
@@ -146,7 +158,7 @@ async function run(botToken: string): Promise<void> {
   // latches, so a second call anywhere is a no-op; its timer is unref'd so it
   // never holds the process open; and a failed tick is swallowed so it cannot
   // stop the ones after it.
-  startSupportNotificationLoop(bot.api);
+  supportNotificationLoop = startSupportNotificationLoop(bot.api);
 
   await bot.start({
     onStart: (botInfo) => {

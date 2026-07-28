@@ -1,0 +1,21 @@
+-- Freeze the recipient set exactly once.
+--
+-- The documented contract is that an administrator added AFTER an event was
+-- first picked up never receives the old event. The implementation broke it:
+-- expansion re-queried the live administrator table on every retry, so a
+-- promotion between attempt 1 and attempt 2 quietly widened the set.
+--
+-- recipientsExpandedAt is the durable expansion boundary. It is stamped in the
+-- SAME transaction that inserts the recipient rows (a CAS on NULL under the
+-- intent's row lock), so:
+--   - a crash mid-expansion rolls back the stamp AND the partial rows;
+--   - two replicas expanding concurrently serialize on the row lock and
+--     converge on exactly one set — the loser's CAS matches zero rows;
+--   - once stamped, expansion is a permanent no-op and retries never read the
+--     administrator table again.
+--
+-- Additive and forward-only. Existing intents keep NULL and freeze on their
+-- next claim, so an in-flight deploy loses nothing.
+
+-- AlterTable
+ALTER TABLE "SupportNotificationIntent" ADD COLUMN "recipientsExpandedAt" TIMESTAMP(3);

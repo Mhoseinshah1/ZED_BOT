@@ -2250,6 +2250,16 @@ model SupportNotificationIntent {
   claimedAt     DateTime?
   sentAt        DateTime?
 
+  /// When the recipient set was FROZEN. Null = not yet expanded. This is the
+  /// one durable signal that expansion happened: it is stamped in the SAME
+  /// transaction that inserts the recipient rows, so a crash mid-expansion
+  /// rolls both back and the next attempt freezes one coherent set. "There is
+  /// at least one recipient row" is deliberately NOT the signal — a crash after
+  /// a partial insert would make that lie. Once set, retries never re-read the
+  /// administrator table, so an administrator promoted after this moment can
+  /// never receive the old event.
+  recipientsExpandedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

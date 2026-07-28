@@ -223,22 +223,44 @@ export async function runSupportNotificationSweep(api: DeliverySendApi): Promise
 // --- the production loop -----------------------------------------------------
 
 /**
+ * The handle a caller uses to wind the loop down.
+ *
+ * Shutdown needs this: a tick that starts after the database begins
+ * disconnecting fails for a reason that looks like an outage, and a test that
+ * cannot stop the timer leaks it into every suite that runs afterwards.
+ */
+export interface SupportNotificationLoopController {
+  /**
+   * Idempotently stop the loop. The interval is cleared and no NEW tick will
+   * ever begin; a tick already in flight is not interrupted — its sweep holds
+   * database claims that settle normally, and killing it mid-send is how
+   * duplicates happen.
+   */
+  stop(): void;
+}
+
+/**
  * At most one loop per process.
  *
  * Startup is not the only place that could reach for this — a test harness, a
  * future admin "retry now" button, a second call added during a refactor — and
  * two loops would double every sweep's claim contention for no benefit.
  */
-let loopStarted = false;
+let activeLoop: SupportNotificationLoopController | null = null;
 
-/** Exposed for tests: a module-level latch is otherwise unresettable. */
+/** Exposed for tests: stops any live timer so it cannot leak between suites. */
 export function resetSupportNotificationLoopForTests(): void {
-  loopStarted = false;
+  activeLoop?.stop();
 }
 
 export function supportNotificationLoopStarted(): boolean {
-  return loopStarted;
+  return activeLoop !== null;
 }
+
+/** The sweep signature, injectable so fake-timer tests can count ticks. */
+export type SupportSweepRunner = (
+  api: DeliverySendApi,
+) => Promise<{ recovered: number; delivered: number }>;
 
 /**
  * Start durable notification delivery for this process.
@@ -252,15 +274,28 @@ export function supportNotificationLoopStarted(): boolean {
  * failed tick must not prevent the interval from being armed. The interval is
  * unref'd so it never holds the process open, and its callback swallows
  * everything, so one failed tick cannot stop future ticks.
+ *
+ * Calling this while a loop is already running returns the EXISTING controller
+ * and arms nothing — two controllers over one timer would make stop() a
+ * half-measure. After stop(), a fresh start builds a fresh loop, which is what
+ * lets tests reset without process-global leakage.
  */
-export function startSupportNotificationLoop(api: DeliverySendApi): void {
-  if (loopStarted) {
-    return;
+export function startSupportNotificationLoop(
+  api: DeliverySendApi,
+  sweep: SupportSweepRunner = runSupportNotificationSweep,
+): SupportNotificationLoopController {
+  if (activeLoop !== null) {
+    return activeLoop;
   }
-  loopStarted = true;
 
+  let stopped = false;
   const tick = (): void => {
-    void runSupportNotificationSweep(api)
+    if (stopped) {
+      // The interval is cleared in stop(), so this only guards the window
+      // where a tick was already queued on the event loop when stop ran.
+      return;
+    }
+    void sweep(api)
       .then(({ recovered, delivered }) => {
         if (recovered > 0 || delivered > 0) {
           logger.info("support notification sweep", { recovered, delivered });
@@ -276,5 +311,21 @@ export function startSupportNotificationLoop(api: DeliverySendApi): void {
   };
 
   tick();
-  setInterval(tick, SWEEP_INTERVAL_MS).unref();
+  const timer = setInterval(tick, SWEEP_INTERVAL_MS);
+  timer.unref();
+
+  const controller: SupportNotificationLoopController = {
+    stop(): void {
+      if (stopped) {
+        return;
+      }
+      stopped = true;
+      clearInterval(timer);
+      if (activeLoop === controller) {
+        activeLoop = null;
+      }
+    },
+  };
+  activeLoop = controller;
+  return controller;
 }

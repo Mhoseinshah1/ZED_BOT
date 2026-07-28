@@ -189,18 +189,31 @@ mean fabricating a system log for every support ticket and modelling an
 administrator as a topic. Both are lies that would then have to be maintained,
 so the shape is copied and the model is not.
 
-### Documented: no retroactive fan-out
+### The recipient set is frozen exactly once
 
-Obligations are materialized when the intent is **first claimed**, not when the
+Obligations are materialized when the intent is **first worked**, not when the
 ticket is written — a ticket write must not depend on reading the administrator
 table, and the API has no business knowing who the administrators are.
 
-The consequence is deliberate: **an administrator added after an event was first
-picked up gets no obligation for it.** Promoting someone notifies them about
-what happens next, not about the backlog. Expanding against the live
-administrator set on every retry would flood a new administrator with old
-tickets on their first day, and would make "was this event delivered?"
-unanswerable, because the answer would depend on when it was asked.
+The expansion boundary is `recipientsExpandedAt` on the intent, and it is not
+advisory: `freezeRecipientSet` stamps it with a compare-and-set on `NULL` and
+inserts the recipient rows **in the same transaction**. That one decision
+carries the whole contract:
+
+- **Exactly once.** The CAS takes the intent's row lock, so two replicas
+  expanding concurrently serialize on it; the loser's update matches zero rows
+  and inserts nothing. One winner, one set, permanently.
+- **Crash-consistent.** A failure after the stamp — the administrator read
+  throwing, an insert violating a constraint, the process dying — rolls back
+  the stamp *with* the partial rows. "At least one recipient row exists" was
+  rejected as the completion signal precisely because a crash after a partial
+  insert would make it lie.
+- **No retroactive fan-out.** Once stamped, expansion is a permanent no-op:
+  retries — including an operator re-driving a parked `FAILED` intent — never
+  read the administrator table again. **An administrator added after the
+  freeze receives no old event.** Promoting someone notifies them about what
+  happens next, not about the backlog, and the delivered-set of an event stops
+  depending on when the question is asked.
 
 ### No chat id is stored
 

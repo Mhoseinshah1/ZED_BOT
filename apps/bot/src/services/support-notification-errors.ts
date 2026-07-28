@@ -15,11 +15,15 @@ import { errorMessage } from "@zedbot/shared";
  */
 export function supportNotificationErrorCode(err: unknown): string {
   const text = errorMessage(err).toLowerCase();
-  if (text.includes("429") || text.includes("too many requests")) return "rate-limited";
-  if (text.includes("403") || text.includes("blocked") || text.includes("forbidden")) {
+  // Phrases first, then HTTP status codes matched only as standalone numbers:
+  // a bare `includes("429")` would fire on those digits INSIDE a numeric chat
+  // id echoed by the error, classifying "chat not found: chat_id=1429..." as
+  // rate-limited.
+  if (text.includes("chat not found")) return "chat-missing";
+  if (text.includes("too many requests") || /\b429\b/.test(text)) return "rate-limited";
+  if (text.includes("blocked") || text.includes("forbidden") || /\b403\b/.test(text)) {
     return "blocked-by-admin";
   }
-  if (text.includes("chat not found")) return "chat-missing";
   if (text.includes("timeout") || text.includes("etimedout")) return "timeout";
   return "send-failed";
 }

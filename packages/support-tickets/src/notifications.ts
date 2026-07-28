@@ -1,4 +1,4 @@
-import { prisma, type SupportNotificationIntent } from "@zedbot/database";
+import { type Prisma, prisma, type SupportNotificationIntent } from "@zedbot/database";
 
 import {
   NOTIFICATION_MAX_ATTEMPTS,
@@ -138,37 +138,90 @@ export async function claimIntentForTicket(
 // --- fan-out -----------------------------------------------------------------
 
 /**
- * Materialize one obligation per currently-active administrator.
+ * Freeze one intent's recipient set inside the caller's transaction.
+ *
+ * The expansion boundary is `recipientsExpandedAt`, stamped by a CAS on NULL
+ * and committed in the SAME transaction as the recipient rows. That single
+ * decision carries every guarantee this function makes:
+ *
+ *   EXACTLY ONCE. The CAS takes the intent's row lock, so two replicas
+ *   expanding concurrently serialize here: the loser's update matches zero
+ *   rows, and it inserts nothing. The winner's set is the set, permanently.
+ *
+ *   CRASH-CONSISTENT. A failure anywhere after the stamp — the administrator
+ *   read throwing, the insert violating a constraint, the process dying —
+ *   rolls back the stamp WITH the partial rows. There is no state in which
+ *   the intent claims to be expanded but holds half a fan-out, which is
+ *   exactly why "at least one recipient row exists" was rejected as the
+ *   completion signal.
+ *
+ * `loadAdminIds` runs AFTER the CAS, under the same lock, so the set is read
+ * once, by one winner, at one moment. It is a parameter rather than an inline
+ * query so a test can inject a failing or poisoned loader and prove the
+ * rollback through this exact code path instead of a re-implementation.
+ */
+export async function freezeRecipientSet(
+  tx: Prisma.TransactionClient,
+  intentId: string,
+  loadAdminIds: () => Promise<string[]>,
+  now: Date = new Date(),
+): Promise<number> {
+  const won = await tx.supportNotificationIntent.updateMany({
+    where: { id: intentId, recipientsExpandedAt: null },
+    data: { recipientsExpandedAt: now },
+  });
+  if (won.count === 0) {
+    // Already frozen — by this worker's earlier attempt or by another replica.
+    // Either way the set exists and must not be widened.
+    return 0;
+  }
+  const adminIds = await loadAdminIds();
+  if (adminIds.length === 0) {
+    // Frozen as EMPTY. That is a real, durable outcome: nobody was eligible
+    // when the event was first worked, and an administrator hired tomorrow is
+    // not owed yesterday's tickets.
+    return 0;
+  }
+  const created = await tx.supportNotificationRecipient.createMany({
+    data: adminIds.map((adminId) => ({ intentId, adminId })),
+    // The unique (intentId, adminId) constraint decides duplicates. With the
+    // CAS above this is belt-and-braces, but it keeps a manual repair that
+    // pre-created a row from failing the whole freeze.
+    skipDuplicates: true,
+  });
+  return created.count;
+}
+
+/**
+ * Materialize one obligation per administrator active at FREEZE time.
  *
  * Called when a worker holds the intent claim, NOT when the ticket is written:
  * a ticket write must not depend on reading the administrator table, and the
  * API — which has no business knowing who the administrators are — writes
  * tickets too.
  *
- * DELIBERATE CONSEQUENCE, DOCUMENTED: an administrator added AFTER an event was
- * first picked up gets no obligation for it. Promoting someone notifies them
- * about what happens next, not about the backlog. The alternative — expanding
- * against the live administrator set on every retry — would mean a new
- * administrator receives a burst of old tickets on their first day, and would
- * make "was this event delivered?" unanswerable, because the answer would
- * depend on when it was asked.
- *
- * Idempotent: re-running on a retry creates nothing new (the unique constraint
- * decides) and leaves already-terminal obligations untouched.
+ * DELIBERATE CONSEQUENCE, DOCUMENTED AND NOW ENFORCED: an administrator added
+ * after the freeze gets no obligation for this event, on the first attempt or
+ * any retry. Promoting someone notifies them about what happens next, not
+ * about the backlog — and re-reading the live set on retry would also make
+ * "was this event delivered?" unanswerable, because the answer would change
+ * depending on when it was asked.
  */
-export async function expandRecipients(intentId: string): Promise<number> {
-  const admins = await prisma.admin.findMany({
-    where: { isActive: true },
-    select: { id: true },
-  });
-  if (admins.length === 0) {
-    return 0;
-  }
-  const created = await prisma.supportNotificationRecipient.createMany({
-    data: admins.map((admin) => ({ intentId, adminId: admin.id })),
-    skipDuplicates: true,
-  });
-  return created.count;
+export async function expandRecipients(intentId: string, now: Date = new Date()): Promise<number> {
+  return prisma.$transaction((tx) =>
+    freezeRecipientSet(
+      tx,
+      intentId,
+      async () => {
+        const admins = await tx.admin.findMany({
+          where: { isActive: true },
+          select: { id: true },
+        });
+        return admins.map((admin) => admin.id);
+      },
+      now,
+    ),
+  );
 }
 
 /**
