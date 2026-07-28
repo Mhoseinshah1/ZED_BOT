@@ -25,7 +25,10 @@ actually been built, tested and pushed.
 | --- | --- | --- |
 | `packages/service-renewal` scaffold + contract | `fafaacf` | builds clean; closed result-code set, option public-id convention, quote TTL, confirm body limit, idempotency-key shape |
 | Rollout gate `miniapp_wallet_renewal_enabled`, default **false** | `fafaacf` | uncached read, fails closed on missing row / malformed value / unreadable DB; not `isPublic` |
-| Parity matrix + this ledger | this commit | 34 real capabilities inventoried; 2 placeholders excluded with evidence |
+| Parity matrix + this ledger | `0bb2ae5` | 34 real capabilities inventoried; 2 placeholders excluded with evidence |
+| Docker workspace coverage repair | `d344b94` | `service-renewal` added to both install stages + runtime; deploy-scripts 2 failed → 32 passed |
+| Panel capability predicates extracted | `b197b87` | moved to `@zedbot/service-renewal`, bot re-exports; one implementation |
+| Unused-import cleanup after extraction | `e1e575a` | CI Lint caught what tsc did not |
 
 ### Not yet landed in layer 1
 
@@ -40,7 +43,16 @@ actually been built, tested and pushed.
 - The entire DB-backed test matrix, concurrency tests and mutation tests.
 - The full validation battery for the layer.
 
-### Blocking dependency — analysed, with the extraction path
+### Blocking dependency — RESOLVED in `b197b87`
+
+The predicates now live in `packages/service-renewal/src/panel-capability.ts`
+and `panel-readiness.service.ts` re-exports them, so bot call sites are
+unchanged. Owner-scoped renewable resolution is now unblocked.
+
+The analysis that led there is kept below because it records why the obvious
+home was the wrong one.
+
+### Original analysis — extraction path
 
 Owner-scoped renewable resolution cannot move out of the bot until three
 predicates move with it: `panelTypesSupporting`, `serviceSupportsGlobalLifecycle`
@@ -69,9 +81,28 @@ can proceed first.
 
 ## Validation runs
 
-| Layer | Battery | Result |
+| Layer | Gate | Result |
 | --- | --- | --- |
-| 1 | full repository battery | **not yet run for this layer** |
+| 1 | API suite | 205 passed, 1 skipped (206) |
+| 1 | Bot suite | 2896 passed, 62 skipped (2958) |
+| 1 | Mini App suite | 109 passed (109) |
+| 1 | typecheck | clean, 11 packages |
+| 1 | lint | clean |
+| 1 | workspace build | clean, 11 packages |
+| 1 | fresh migrate deploy + seed | applied; 26/26 settings, 131 templates, 156 button texts |
+| 1 | CI `e1e575a` | **all 3 jobs success** — typecheck/lint/build/validate, legacy production upgrade, Docker backup smoke (real image build) |
+
+Local Docker build is not possible in this sandbox: the egress policy returns
+403 for `production.cloudfront.docker.com` (the BuildKit frontend blob) and for
+`dl-cdn.alpinelinux.org` plus seven Alpine mirrors. CI performs the real image
+build and is the authoritative result; it passes.
+
+### CI defect history for this layer
+
+`7766143` failed **all three** jobs — the missing Docker workspace coverage
+broke the image build, the legacy upgrade and the validate job together.
+`d344b94` fixed the Dockerfile. `b197b87` still failed Lint alone (unused
+imports the extraction orphaned; tsc does not flag those). `e1e575a` is green.
 
 No layer may be reported complete until its CI is green. Nothing here has been
 deployed and every rollout switch remains disabled.
