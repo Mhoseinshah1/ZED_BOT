@@ -45,7 +45,6 @@ const STOCK_CONTENT = `SECRET-STOCK-${runTag}`;
 
 let app: FastifyInstance;
 let ownerId = "";
-let otherId = "";
 let panelId = "";
 let servicePublicId = "";
 let renewProductPublicId = "";
@@ -139,10 +138,9 @@ beforeAll(async () => {
     data: { telegramId: OWNER_TELEGRAM_ID, firstName: "Owner", balanceToman: START_BALANCE },
   });
   ownerId = owner.id;
-  const other = await prisma.user.create({
+  await prisma.user.create({
     data: { telegramId: OTHER_TELEGRAM_ID, firstName: "Other", balanceToman: 100_000 },
   });
-  otherId = other.id;
 
   const panel = await prisma.panel.create({
     data: {
