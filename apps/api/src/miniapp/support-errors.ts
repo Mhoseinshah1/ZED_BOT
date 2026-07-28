@@ -30,6 +30,12 @@
 // on a route that already tells the client nothing; it is answerable from the
 // database's own logs, which live inside the trust boundary the ticket text
 // does.
+//
+// USED BY THE WHOLE MINI APP SURFACE, not only the ticket routes. The Support
+// Center's Service picker is served by `/services` in routes.ts, so a ticket
+// flow that stops leaking ticket text but leaks the service metadata one screen
+// earlier has not stopped leaking; the auth, profile, dashboard and wallet
+// handlers next to it carry values of the same kinds.
 // =============================================================================
 
 /**

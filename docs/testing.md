@@ -27,13 +27,22 @@ DISPOSABLE** PostgreSQL database. The suite creates users/panels/products/
 orders in it; never point it at a real database.
 
 ```bash
-# one-time: create + migrate a throwaway DB (any PostgreSQL 16 works)
+# one-time: create + migrate + seed a throwaway DB (any PostgreSQL 16 works)
 createdb zedbot_test
 DATABASE_URL="postgresql://postgres@127.0.0.1:5432/zedbot_test" pnpm db:deploy
+DATABASE_URL="postgresql://postgres@127.0.0.1:5432/zedbot_test" pnpm db:seed
 
 # run the tests
 DATABASE_URL="postgresql://postgres@127.0.0.1:5432/zedbot_test" pnpm test
 ```
+
+**`db:seed` is not optional.** The migrations create empty tables; the message
+templates and button labels live in rows, and the seed is what writes them. The
+menu, pricing and free-trial suites edit those rows to prove that behaviour
+binds to a key rather than to Persian text — `messageTemplate.update({ where:
+{ key: "pricing_page_intro" } })` on an unseeded database raises "No record was
+found for an update", and six suite files fail for a reason that has nothing to
+do with the code under test. Seeding is idempotent, so re-running it is safe.
 
 **Without `DATABASE_URL` set, the DB suites skip themselves** and `pnpm
 test` still exits 0 (a placeholder test states "wallet payment integration
@@ -92,10 +101,14 @@ in ~34s. The failures are an artifact of a stale throwaway database, not of the
 code under test — so drop and recreate before running the battery, and do not
 "fix" them by raising a timeout.
 
+Recreating drops the seeded rows with everything else, so seed again — skipping
+that step trades the ~15 low-balance failures for six text-registry ones.
+
 ```bash
 psql "$ADMIN_URL" -c 'DROP DATABASE IF EXISTS zedbot_test WITH (FORCE);' \
                   -c 'CREATE DATABASE zedbot_test;'
 DATABASE_URL="postgresql://postgres@127.0.0.1:5432/zedbot_test" pnpm db:deploy
+DATABASE_URL="postgresql://postgres@127.0.0.1:5432/zedbot_test" pnpm db:seed
 ```
 
 ## Redis-backed suites

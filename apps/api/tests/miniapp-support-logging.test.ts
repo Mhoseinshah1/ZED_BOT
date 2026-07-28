@@ -30,6 +30,82 @@ import {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
+/**
+ * Every `logger.*(...)` call in a source file, argument list included.
+ *
+ * Counts parentheses rather than matching up to the first `)`, because a
+ * regex that stops early would read `logger.error("x", { id: f() })` as
+ * `logger.error("x", { id: f()` and could miss what follows.
+ */
+function extractLogCalls(source: string): string[] {
+  const calls: string[] = [];
+  const opener = /logger\.(?:error|warn|info|debug)\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = opener.exec(source)) !== null) {
+    let depth = 0;
+    let quote = "";
+    let i = match.index + match[0].length - 1;
+    for (; i < source.length; i += 1) {
+      const c = source[i];
+      // Brackets inside a string are text, not structure: a message reading
+      // "rejected (expired)" would otherwise close the call early.
+      if (quote) {
+        if (c === "\\") i += 1;
+        else if (c === quote) quote = "";
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") quote = c;
+      else if (c === "(") depth += 1;
+      else if (c === ")") {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    calls.push(source.slice(match.index, i + 1));
+  }
+  return calls;
+}
+
+/**
+ * The arguments after the message literal, or "" when the call has none.
+ *
+ * The message literal is excluded on purpose: it is a constant the author
+ * wrote, so words inside it ("mini app initData rejected") say nothing about
+ * what is logged. Only the arguments carry values.
+ */
+function payloadOf(call: string): string {
+  const open = call.indexOf("(");
+  let depth = 0;
+  let quote = "";
+  for (let i = open; i < call.length; i += 1) {
+    const c = call[i];
+    // A comma inside the message ("rejected, retrying") is not the argument
+    // separator, so strings are skipped here for the same reason as above.
+    if (quote) {
+      if (c === "\\") i += 1;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if (c === "(" || c === "{" || c === "[") depth += 1;
+    else if (c === ")" || c === "}" || c === "]") depth -= 1;
+    else if (c === "," && depth === 1) {
+      // String literals inside the payload are constants the author wrote —
+      // `supportFailureLog("service-list", err)` names an operation, it does
+      // not log a service. Only identifiers can carry a value.
+      return call.slice(i + 1, -1).replace(/"[^"]*"|'[^']*'/g, '""');
+    }
+  }
+  return "";
+}
+
+/**
+ * Bindings that hold a person's data on these routes. A log payload naming one
+ * of them is logging the thing the whole feature exists to contain, whether or
+ * not an error is involved.
+ */
+const SENSITIVE_BINDINGS = /\b(body|subject|text|ticket|service|payload|initData|telegramId)\b/;
+
 /** Realistic secrets, of the four kinds that must never appear in a log. */
 const TICKET_SUBJECT = "قطع شدن اتصال از دیشب";
 const TICKET_BODY = "کاربر عزیز رمز من 1234 است و ایمیلم user@example.com";
@@ -163,19 +239,38 @@ describe("mini app support failure logging", () => {
   });
 
   // SL-6 ----------------------------------------------------------------------
-  it("SL-6: the route file logs through the classifier and nothing else", () => {
+  it.each([
+    "apps/api/src/miniapp/support-routes.ts",
+    // routes.ts is on this list because the Support Center's Service picker is
+    // fed by its `/services` route. A ticket flow that stops leaking ticket
+    // text but still leaks the service metadata one screen earlier has not
+    // stopped leaking; the auth, profile, dashboard and wallet handlers in the
+    // same file carry the same kinds of value.
+    "apps/api/src/miniapp/routes.ts",
+  ])("SL-6: %s logs through the classifier and nothing else", (relative) => {
     // The payload can be perfect and still be bypassed by one `logger.error`
     // that formats its own object. This is the assertion that keeps the whole
     // surface honest, so it is made against the source rather than a mock.
-    const source = readFileSync(
-      path.join(repoRoot, "apps/api/src/miniapp/support-routes.ts"),
-      "utf8",
-    );
-    const logCalls = source.match(/logger\.(error|warn|info|debug)\([^)]*\)/g) ?? [];
+    const source = readFileSync(path.join(repoRoot, relative), "utf8");
+    const logCalls = extractLogCalls(source);
     expect(logCalls.length, "the routes must still log failures at all").toBeGreaterThan(0);
+
+    let classified = 0;
     for (const call of logCalls) {
-      expect(call, `raw payload in: ${call}`).toContain("supportFailureLog(");
+      // The rule is about the caught error, because the error is the value
+      // that renders arbitrary row content. A call that names `err` at all
+      // must hand it to the classifier rather than to the log.
+      if (/\berr\b/.test(call)) {
+        expect(call, `unclassified error in: ${call}`).toContain("supportFailureLog(");
+        classified += 1;
+      }
+      // Separately: nothing on this surface may log a person's data directly,
+      // error or not. `{ reason: validated.reason }` survives because `reason`
+      // is a closed union of 13 constants, not because it is in a log call.
+      expect(payloadOf(call), `sensitive binding in: ${call}`).not.toMatch(SENSITIVE_BINDINGS);
     }
+    expect(classified, "these routes must log at least one classified failure").toBeGreaterThan(0);
+
     // `errorMessage` is the specific function that produced the leak. Its
     // absence from this file is the regression guard.
     expect(source).not.toContain("errorMessage");
