@@ -137,90 +137,227 @@ export async function claimIntentForTicket(
 
 // --- fan-out -----------------------------------------------------------------
 
+// --- THE RECIPIENT-SET LINEARIZATION POINT -----------------------------------
+//
+// One sentence, because everything below is a consequence of it:
+//
+//   THE RECIPIENT SET IS THE SET OF ADMINISTRATORS ELIGIBLE AT THE INSTANT THE
+//   FREEZE TRANSACTION TAKES ITS SNAPSHOT, WHICH IS THE ELIGIBILITY QUERY —
+//   THE FIRST STATEMENT OF A REPEATABLE READ TRANSACTION.
+//
+// PostgreSQL fixes a REPEATABLE READ transaction's snapshot at its first
+// statement, not at BEGIN, and every later statement in that transaction reads
+// from that same snapshot. Ordering the eligibility query first therefore
+// makes the linearization point both early and nameable: an administrator
+// whose activation commits after it is invisible to this transaction — to the
+// CAS, to the inserts, to everything — and can never appear in the set.
+//
+// WHY THE ORDER CHANGED. The previous version stamped first and read the
+// administrator table afterwards, then claimed the stamp had frozen the set.
+// Under READ COMMITTED that claim was false: each statement takes a FRESH
+// snapshot, so an administrator committed between the stamp and the read was
+// visible to the read and got an obligation for an event that was, by the
+// code's own account, already frozen. The bug was in the reasoning, not in the
+// SQL, which is why it survived tests that only checked the stamp.
+//
+// WHY REPEATABLE READ AS WELL as the ordering. Reading first is enough while
+// eligibility is one statement. Repeatable Read is what keeps it true if it
+// ever becomes two — a join, a settings lookup, a role filter — because then
+// "one coherent snapshot" is enforced by the database rather than by whoever
+// edits the query next. It costs one retry path, below, and buys a guarantee
+// that does not decay.
+//
+// WHAT THE CAS STILL DECIDES. Not when the set is read — whether this read is
+// the authoritative one. Exactly one transaction can move
+// `recipientsExpandedAt` off NULL; the winner's snapshot becomes the set, and
+// a loser discards its own snapshot without writing a single row.
+
 /**
- * Freeze one intent's recipient set inside the caller's transaction.
+ * How many times a freeze is retried after a serialization failure.
  *
- * The expansion boundary is `recipientsExpandedAt`, stamped by a CAS on NULL
- * and committed in the SAME transaction as the recipient rows. That single
- * decision carries every guarantee this function makes:
- *
- *   EXACTLY ONCE. The CAS takes the intent's row lock, so two replicas
- *   expanding concurrently serialize here: the loser's update matches zero
- *   rows, and it inserts nothing. The winner's set is the set, permanently.
- *
- *   CRASH-CONSISTENT. A failure anywhere after the stamp — the administrator
- *   read throwing, the insert violating a constraint, the process dying —
- *   rolls back the stamp WITH the partial rows. There is no state in which
- *   the intent claims to be expanded but holds half a fan-out, which is
- *   exactly why "at least one recipient row exists" was rejected as the
- *   completion signal.
- *
- * `loadAdminIds` runs AFTER the CAS, under the same lock, so the set is read
- * once, by one winner, at one moment. It is a parameter rather than an inline
- * query so a test can inject a failing or poisoned loader and prove the
- * rollback through this exact code path instead of a re-implementation.
+ * Bounded on purpose. Every retry re-reads a fresh snapshot, and a retry only
+ * writes anything if the intent is STILL unfrozen — so retrying cannot widen a
+ * set, but retrying forever could pin a worker on a contended row. Two
+ * replicas need one retry between them; five is slack, not a strategy.
  */
-export async function freezeRecipientSet(
+const FREEZE_MAX_ATTEMPTS = 5;
+
+/** What one freeze attempt did. */
+export interface FreezeOutcome {
+  /**
+   * True when THIS call was the one that froze the set. False means somebody
+   * else already did — the correct, expected outcome of every retry.
+   */
+  frozen: boolean;
+  /**
+   * Obligations written by this call. Zero with `frozen: true` is a real and
+   * valid result: an empty eligible set is a set, frozen as such.
+   */
+  created: number;
+}
+
+/**
+ * A serialization failure PostgreSQL raises when two Repeatable Read
+ * transactions touch the same row — Prisma surfaces it as P2034, and the raw
+ * SQLSTATEs (40001 serialization_failure, 40P01 deadlock_detected) can reach
+ * us through raw paths. Anything else is a real error and must not be retried:
+ * retrying a foreign-key violation just fails five times more slowly.
+ */
+function isSerializationFailure(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === "P2034" || code === "40001" || code === "40P01") {
+    return true;
+  }
+  const text = err instanceof Error ? err.message.toLowerCase() : "";
+  return text.includes("could not serialize") || text.includes("deadlock detected");
+}
+
+/** The eligibility query. ONE statement, and the linearization point. */
+async function eligibleAdminIds(tx: Prisma.TransactionClient): Promise<string[]> {
+  const admins = await tx.admin.findMany({
+    where: { isActive: true },
+    select: { id: true },
+    orderBy: { id: "asc" },
+  });
+  return admins.map((admin) => admin.id);
+}
+
+/** The transactional body. Private: the isolation level is not optional. */
+async function freezeInTransaction(
   tx: Prisma.TransactionClient,
   intentId: string,
-  loadAdminIds: () => Promise<string[]>,
-  now: Date = new Date(),
-): Promise<number> {
+  loadEligibleAdminIds: (tx: Prisma.TransactionClient) => Promise<string[]>,
+  now: Date,
+): Promise<FreezeOutcome> {
+  // (1) THE SNAPSHOT. First statement, so this is where the transaction's view
+  // of the database — including who is an administrator — is fixed.
+  const adminIds = await loadEligibleAdminIds(tx);
+
+  // (2) THE CAS. Does this snapshot get to be the authoritative one?
   const won = await tx.supportNotificationIntent.updateMany({
     where: { id: intentId, recipientsExpandedAt: null },
     data: { recipientsExpandedAt: now },
   });
   if (won.count === 0) {
-    // Already frozen — by this worker's earlier attempt or by another replica.
-    // Either way the set exists and must not be widened.
-    return 0;
+    // Already frozen, by an earlier attempt or another replica. The set exists
+    // and must not be widened, so this snapshot is discarded unused.
+    return { frozen: false, created: 0 };
   }
-  const adminIds = await loadAdminIds();
+
+  // (3) THE OBLIGATIONS, in the same transaction as the stamp. A failure
+  // anywhere here — the insert violating a constraint, the process dying —
+  // rolls back the stamp WITH the partial rows, so no state can commit in
+  // which the intent claims to be expanded while holding half a fan-out. That
+  // is exactly why "at least one recipient row exists" was rejected as the
+  // completion signal: a partial insert would make it lie.
   if (adminIds.length === 0) {
-    // Frozen as EMPTY. That is a real, durable outcome: nobody was eligible
-    // when the event was first worked, and an administrator hired tomorrow is
-    // not owed yesterday's tickets.
-    return 0;
+    // Frozen EMPTY. Nobody was eligible at the snapshot, and an administrator
+    // hired tomorrow is not owed yesterday's tickets.
+    return { frozen: true, created: 0 };
   }
   const created = await tx.supportNotificationRecipient.createMany({
     data: adminIds.map((adminId) => ({ intentId, adminId })),
     // The unique (intentId, adminId) constraint decides duplicates. With the
-    // CAS above this is belt-and-braces, but it keeps a manual repair that
+    // CAS this is belt-and-braces, but it keeps a manual repair that
     // pre-created a row from failing the whole freeze.
     skipDuplicates: true,
   });
-  return created.count;
+  return { frozen: true, created: created.count };
 }
 
 /**
- * Materialize one obligation per administrator active at FREEZE time.
+ * Freeze one intent's recipient set, exactly once, from one coherent snapshot.
+ *
+ * `loadEligibleAdminIds` is a parameter rather than an inline query for two
+ * reasons: a test can inject a failing or poisoned loader and prove the
+ * rollback through this exact code path instead of a re-implementation, and a
+ * test can pin the interleaving by waiting inside it — after the snapshot is
+ * fixed, before anything is written — which is the only way to demonstrate the
+ * linearization point rather than assert it in a comment.
+ *
+ * RETRY. A Repeatable Read transaction that loses a write race raises a
+ * serialization failure instead of blocking. That is the concurrent-expander
+ * case, and it is retried up to FREEZE_MAX_ATTEMPTS times with a fresh
+ * snapshot each time. A retry whose CAS finds the intent already frozen
+ * returns `frozen: false` and writes nothing, so retries converge on the first
+ * winner's set and can never widen it. Non-serialization errors propagate on
+ * the first attempt.
+ */
+export async function runRecipientFreeze(
+  intentId: string,
+  loadEligibleAdminIds: (tx: Prisma.TransactionClient) => Promise<string[]>,
+  now: Date = new Date(),
+): Promise<FreezeOutcome> {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= FREEZE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await prisma.$transaction(
+        (tx) => freezeInTransaction(tx, intentId, loadEligibleAdminIds, now),
+        { isolationLevel: "RepeatableRead" },
+      );
+    } catch (err) {
+      if (!isSerializationFailure(err)) {
+        throw err;
+      }
+      lastError = err;
+    }
+  }
+  throw lastError;
+}
+
+/** Options for {@link expandRecipients}. */
+export interface ExpandOptions {
+  now?: Date;
+  /**
+   * Awaited AFTER the authoritative snapshot is fixed and BEFORE the CAS.
+   *
+   * A test seam, and a deliberate one: the guarantee under test is about an
+   * instant in time inside a transaction, and no assertion made from outside
+   * that transaction can pin it. A test that activates an administrator here
+   * proves — through the production function, not a copy of it — that the
+   * administrator is excluded.
+   *
+   * It receives the transaction client so a test can also assert what is true
+   * AT that instant. The load-bearing one: the intent is not yet stamped. That
+   * is what separates this implementation from the one it replaced, where the
+   * stamp went first and the eligibility read followed it — leaving a window
+   * in which the code had already declared the set frozen but had not yet read
+   * it, so an administrator committing inside the window was included in a set
+   * the code called sealed.
+   */
+  afterSnapshot?: (tx: Prisma.TransactionClient) => Promise<void>;
+}
+
+/**
+ * Materialize one obligation per administrator eligible at the snapshot.
  *
  * Called when a worker holds the intent claim, NOT when the ticket is written:
  * a ticket write must not depend on reading the administrator table, and the
  * API — which has no business knowing who the administrators are — writes
  * tickets too.
  *
- * DELIBERATE CONSEQUENCE, DOCUMENTED AND NOW ENFORCED: an administrator added
- * after the freeze gets no obligation for this event, on the first attempt or
- * any retry. Promoting someone notifies them about what happens next, not
- * about the backlog — and re-reading the live set on retry would also make
- * "was this event delivered?" unanswerable, because the answer would change
- * depending on when it was asked.
+ * DELIBERATE CONSEQUENCE, DOCUMENTED AND ENFORCED: an administrator whose
+ * activation commits after the snapshot gets no obligation for this event, on
+ * the first attempt or any retry. Promoting someone notifies them about what
+ * happens next, not about the backlog — and re-reading the live set on retry
+ * would also make "was this event delivered?" unanswerable, because the answer
+ * would change depending on when it was asked.
  */
-export async function expandRecipients(intentId: string, now: Date = new Date()): Promise<number> {
-  return prisma.$transaction((tx) =>
-    freezeRecipientSet(
-      tx,
-      intentId,
-      async () => {
-        const admins = await tx.admin.findMany({
-          where: { isActive: true },
-          select: { id: true },
-        });
-        return admins.map((admin) => admin.id);
-      },
-      now,
-    ),
+export async function expandRecipients(
+  intentId: string,
+  options: ExpandOptions = {},
+): Promise<FreezeOutcome> {
+  const { now = new Date(), afterSnapshot } = options;
+  return runRecipientFreeze(
+    intentId,
+    async (tx) => {
+      const ids = await eligibleAdminIds(tx);
+      if (afterSnapshot !== undefined) {
+        await afterSnapshot(tx);
+      }
+      return ids;
+    },
+    now,
   );
 }
 

@@ -225,18 +225,34 @@ export async function runSupportNotificationSweep(api: DeliverySendApi): Promise
 /**
  * The handle a caller uses to wind the loop down.
  *
- * Shutdown needs this: a tick that starts after the database begins
- * disconnecting fails for a reason that looks like an outage, and a test that
- * cannot stop the timer leaks it into every suite that runs afterwards.
+ * Shutdown needs BOTH halves of this. Stopping alone was not enough: it
+ * cleared the interval and returned immediately, leaving a sweep that was
+ * already running to finish against a database the next shutdown step was
+ * about to disconnect. That sweep holds claims — rows sitting in SENDING — and
+ * killing its connection mid-settle strands every one of them until the next
+ * process's stale sweep rescues them, which is the outage this mechanism
+ * exists to prevent.
+ *
+ * So stopping and draining are separate, and shutdown does both.
  */
 export interface SupportNotificationLoopController {
   /**
-   * Idempotently stop the loop. The interval is cleared and no NEW tick will
-   * ever begin; a tick already in flight is not interrupted — its sweep holds
-   * database claims that settle normally, and killing it mid-send is how
-   * duplicates happen.
+   * Idempotently prevent any NEW tick. The interval is cleared and a callback
+   * already queued on the event loop becomes a no-op. A tick already in flight
+   * is NOT interrupted — killing it mid-send is how duplicates happen.
    */
   stop(): void;
+  /**
+   * Resolve once no tick is running.
+   *
+   * Never rejects: a tick's own failure is already contained, and a shutdown
+   * step that throws would skip the steps after it. Safe to call before stop()
+   * — it then waits out whatever is running plus anything the interval starts
+   * while it waits — but shutdown calls stop() first so it terminates.
+   */
+  drain(): Promise<void>;
+  /** stop() then drain(), in that order. What shutdown actually wants. */
+  stopAndDrain(): Promise<void>;
 }
 
 /**
@@ -248,9 +264,12 @@ export interface SupportNotificationLoopController {
  */
 let activeLoop: SupportNotificationLoopController | null = null;
 
-/** Exposed for tests: stops any live timer so it cannot leak between suites. */
-export function resetSupportNotificationLoopForTests(): void {
-  activeLoop?.stop();
+/**
+ * Exposed for tests: stops any live timer AND waits for its tick, so neither a
+ * timer nor an in-flight database query leaks into the next suite.
+ */
+export async function resetSupportNotificationLoopForTests(): Promise<void> {
+  await activeLoop?.stopAndDrain();
 }
 
 export function supportNotificationLoopStarted(): boolean {
@@ -272,8 +291,14 @@ export type SupportSweepRunner = (
  *
  * The first tick is fire-and-forget: startup must not block on Telegram, and a
  * failed tick must not prevent the interval from being armed. The interval is
- * unref'd so it never holds the process open, and its callback swallows
- * everything, so one failed tick cannot stop future ticks.
+ * unref'd so it never holds the process open, and every tick's failure is
+ * contained, so one failed tick cannot stop future ticks.
+ *
+ * NO OVERLAP. A tick that is still running when the interval fires suppresses
+ * that firing rather than starting a second sweep beside it. Two sweeps in one
+ * process would contend for the same claims and, after a stale recovery,
+ * could work the same recovered rows — all to do work the next tick will find
+ * waiting anyway.
  *
  * Calling this while a loop is already running returns the EXISTING controller
  * and arms nothing — two controllers over one timer would make stop() a
@@ -289,25 +314,52 @@ export function startSupportNotificationLoop(
   }
 
   let stopped = false;
+  /**
+   * The ticks that have started and not yet finished — what drain() awaits.
+   * A Set rather than a single promise because "is anything running?" is the
+   * question both the overlap guard and shutdown need answered.
+   */
+  const inFlight = new Set<Promise<void>>();
+
   const tick = (): void => {
     if (stopped) {
       // The interval is cleared in stop(), so this only guards the window
       // where a tick was already queued on the event loop when stop ran.
       return;
     }
-    void sweep(api)
+    if (inFlight.size > 0) {
+      // Still working. The backlog does not evaporate; the next tick gets it.
+      return;
+    }
+    let started: Promise<{ recovered: number; delivered: number }>;
+    try {
+      started = sweep(api);
+    } catch (err) {
+      // A sweep that throws synchronously never produced a promise, so there
+      // is nothing to track and nothing to drain.
+      logger.error("support notification sweep rejected", {
+        code: supportNotificationErrorCode(err),
+      });
+      return;
+    }
+    const run: Promise<void> = started
       .then(({ recovered, delivered }) => {
         if (recovered > 0 || delivered > 0) {
           logger.info("support notification sweep", { recovered, delivered });
         }
       })
       .catch((err: unknown) => {
-        // Swallowed on purpose: the next tick is already scheduled, and a
-        // rejected promise here would otherwise take the process down.
+        // Contained on purpose: the next tick is already scheduled, and a
+        // rejected promise here would otherwise take the process down. It also
+        // keeps drain() a promise that never rejects.
         logger.error("support notification sweep rejected", {
           code: supportNotificationErrorCode(err),
         });
+      })
+      .finally(() => {
+        inFlight.delete(run);
       });
+    inFlight.add(run);
   };
 
   tick();
@@ -324,6 +376,19 @@ export function startSupportNotificationLoop(
       if (activeLoop === controller) {
         activeLoop = null;
       }
+    },
+    async drain(): Promise<void> {
+      // Loops rather than awaiting once: called without stop() first, the
+      // interval can start another tick while this awaits, and a drain that
+      // returned with a sweep running would be exactly the lie this exists to
+      // remove. After stop() the second pass finds an empty set immediately.
+      while (inFlight.size > 0) {
+        await Promise.allSettled([...inFlight]);
+      }
+    },
+    async stopAndDrain(): Promise<void> {
+      controller.stop();
+      await controller.drain();
     },
   };
   activeLoop = controller;

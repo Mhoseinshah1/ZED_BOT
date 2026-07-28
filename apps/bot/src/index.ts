@@ -4,6 +4,7 @@ import { errorMessage } from "@zedbot/shared";
 import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
+import { runShutdownSequence } from "./core/shutdown.js";
 import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
 import { startReferralExecuteConsumer } from "./services/referral-execute-consumer.js";
 import { startStarsSubscriptionConsumer } from "./services/stars-subscription-consumer.js";
@@ -67,34 +68,45 @@ async function run(botToken: string): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`received ${signal}, stopping bot`);
-    try {
-      // FIRST: no new notification sweep may begin. A tick that starts while
-      // the database is disconnecting fails for a reason that reads as an
-      // outage, and its claims sit in SENDING until the stale sweep of the
-      // NEXT process rescues them. A tick already in flight finishes safely.
-      supportNotificationLoop?.stop();
-      // Ops log BEFORE the database disconnects; writeSystemLog never throws.
-      await writeSystemLog({
-        level: "INFO",
-        eventType: OPS_EVENTS.BOT_STOPPED,
-        message: "bot service stopping",
-        metadata: { signal },
-        topicKey: "SYSTEM",
-      });
-      await bot.stop();
-      if (autoRenewalConsumer !== null) {
-        await autoRenewalConsumer.stop();
-      }
-      if (starsSubscriptionConsumer !== null) {
-        await starsSubscriptionConsumer.stop();
-      }
-      if (referralExecuteConsumer !== null) {
-        await referralExecuteConsumer.stop();
-      }
-      await disconnectDatabase();
-    } catch (err) {
-      logger.warn("error during shutdown", { error: errorMessage(err) });
-    }
+    // The order — and the fact that each step FINISHES before the next starts
+    // — is the contract, so it lives in runShutdownSequence where a test can
+    // execute it rather than read it. Stopping the notification loop is not
+    // enough on its own: a sweep already running holds claims in SENDING, and
+    // disconnecting underneath it strands them until the next process's stale
+    // sweep. So ticks are stopped, then drained, and only then does anything
+    // else tear down.
+    await runShutdownSequence(
+      {
+        stopSupportNotificationTicks: () => supportNotificationLoop?.stop(),
+        drainSupportNotifications: async () => {
+          await supportNotificationLoop?.drain();
+        },
+        writeStoppingLog: () =>
+          writeSystemLog({
+            level: "INFO",
+            eventType: OPS_EVENTS.BOT_STOPPED,
+            message: "bot service stopping",
+            metadata: { signal },
+            topicKey: "SYSTEM",
+          }),
+        stopBot: () => bot.stop(),
+        stopConsumers: async () => {
+          if (autoRenewalConsumer !== null) {
+            await autoRenewalConsumer.stop();
+          }
+          if (starsSubscriptionConsumer !== null) {
+            await starsSubscriptionConsumer.stop();
+          }
+          if (referralExecuteConsumer !== null) {
+            await referralExecuteConsumer.stop();
+          }
+        },
+        disconnectDatabase: () => disconnectDatabase(),
+      },
+      (step, err) => {
+        logger.warn("error during shutdown", { step, error: errorMessage(err) });
+      },
+    );
     process.exit(0);
   };
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

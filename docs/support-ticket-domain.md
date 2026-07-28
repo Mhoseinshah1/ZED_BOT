@@ -258,3 +258,70 @@ administrator at all.
 - No user-side ticket closing, departments, SLAs or assignment.
 - No realtime transport.
 - Subjects and bodies are never logged.
+
+## The recipient-set linearization point
+
+The recipient set for a notification intent is **the set of administrators
+eligible at the instant the freeze transaction takes its snapshot, which is the
+eligibility query — the first statement of a REPEATABLE READ transaction.**
+
+That sentence is the whole contract, and everything else follows from it:
+
+- **One coherent snapshot.** PostgreSQL fixes a Repeatable Read transaction's
+  snapshot at its first statement, and every later statement in that
+  transaction reads from it. The eligibility query runs first, so the set is
+  read once, at one instant, from one view of the database.
+- **Committed after the snapshot means excluded.** An administrator created or
+  activated after that instant is invisible to the whole transaction — to the
+  compare-and-set, to the inserts, to everything.
+- **Retries never widen.** A retry's compare-and-set finds
+  `recipientsExpandedAt` already set and writes nothing, so the first winner's
+  set is permanent. The administrator table is never re-read for a frozen
+  intent.
+- **Two expanders converge.** Exactly one transaction can move
+  `recipientsExpandedAt` off NULL. A Repeatable Read loser raises a
+  serialization failure instead of blocking; the freeze retries with a fresh
+  snapshot up to five times, finds the intent frozen, and returns
+  `{ frozen: false, created: 0 }`.
+- **A failure leaves nothing behind.** The stamp and the obligations commit in
+  the same transaction, so a throw anywhere rolls back both:
+  `recipientsExpandedAt` stays NULL and zero recipient rows exist. "At least
+  one recipient row" is deliberately *not* the completion signal — a partial
+  insert would make it lie.
+- **An empty set is a set.** No eligible administrator means the intent is
+  frozen with zero obligations and completes, rather than looping forever.
+- **No Telegram id is stored.** The obligation points at the `Admin` row; the
+  chat id is read at send time and never written to the recipient table.
+
+### Why the order changed
+
+The previous implementation stamped `recipientsExpandedAt` first and read the
+administrator table afterwards, then documented the stamp as the moment the set
+froze. Under READ COMMITTED that was false: each statement takes a fresh
+snapshot, so an administrator committing between the stamp and the read was
+visible to the read and received an obligation for an event the code had
+already declared sealed. The SQL was fine; the reasoning was wrong, which is
+why tests that only checked the stamp kept passing.
+
+The regression test now asserts the ordering from inside the transaction: at
+the moment the eligibility snapshot is taken, `recipientsExpandedAt` must still
+be NULL.
+
+## Shutdown drains notification work
+
+Stopping the sweep loop and disconnecting the database are two steps, and
+between them there is a third: waiting. A sweep already running holds claims —
+rows sitting in `SENDING` — and disconnecting underneath it strands every one
+of them until the next process's stale recovery. So the controller exposes
+`stop()` (idempotent, prevents new ticks) and `drain()` (resolves when no tick
+is running), and shutdown runs, in order:
+
+1. stop new support-notification ticks;
+2. await the running sweep;
+3. write the ops log, stop the bot and the queue consumers;
+4. disconnect PostgreSQL.
+
+Each step is awaited before the next begins and each is individually contained,
+so a step that throws is logged and the sequence still reaches the disconnect.
+The order is asserted by executing the sequence with a sweep that has not
+resolved, not by reading the entrypoint as text.
