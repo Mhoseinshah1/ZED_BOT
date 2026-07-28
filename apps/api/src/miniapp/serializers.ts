@@ -1,5 +1,6 @@
-import type { ServiceStatus, UserGroup, UserStatus } from "@zedbot/database";
+import type { ServiceStatus, SupportTicketStatus, UserGroup, UserStatus } from "@zedbot/database";
 import { serviceShortId, ticketShortId } from "@zedbot/shared";
+import { ticketWaitingParty } from "@zedbot/support-tickets";
 
 // =============================================================================
 // Response shaping — an ALLOWLIST, never a redaction pass.
@@ -258,9 +259,18 @@ export function toMiniAppTransaction(row: MiniAppTransactionSource): MiniAppTran
 // --- support tickets ---------------------------------------------------------
 //
 // The owner is reading their OWN conversation, so subject and message text go
-// back verbatim — they wrote them. What does not go back is any database uuid:
-// tickets are addressed by their public short id everywhere, and a message
-// carries a display key derived the same way rather than its primary key.
+// back verbatim — they wrote them. What does not go back is any database uuid,
+// or anything derived from one.
+//
+// MESSAGES CARRY NO IDENTIFIER AT ALL. An earlier version returned a "display
+// key" that was the first twelve hex characters of the message's uuid. It was
+// never used as an address — only as a React key — but it was still a piece of
+// a primary key on the wire: it leaks the id space, it is stable enough to
+// correlate across responses, and a prefix that short invites exactly the
+// startsWith lookup the ticket resolver uses. There is no ticket-style public
+// id for messages either, because inventing one would put the same information
+// back through a different door. The Mini App mints its own keys in memory as
+// it ingests a page; nothing about a message needs to survive a reload.
 
 export interface MiniAppTicketSource {
   id: string;
@@ -273,30 +283,59 @@ export interface MiniAppTicketSource {
   closedAt: Date | null;
 }
 
+/**
+ * The linked Service, as much of it as a support list may show.
+ *
+ * A public id to navigate by and a username to recognise it by. No panel, no
+ * location, no traffic, no expiry — a ticket row is not a service card, and
+ * everything else about the service is a route away behind the same
+ * owner-scoped check.
+ */
+export interface MiniAppTicketServiceDto {
+  id: string;
+  label: string;
+}
+
 export interface MiniAppTicketSummaryDto {
   /** Public short id — the only ticket identifier a browser ever sees. */
   id: string;
   subject: string | null;
   status: string;
   category: string | null;
-  origin: string | null;
+  /**
+   * Who the conversation is waiting on, decided in the domain from the stored
+   * status — including the legacy values old rows still carry. The Mini App
+   * renders this rather than re-deriving it from `status`, so one mapping
+   * exists rather than two that can disagree.
+   */
+  waitingParty: "USER" | "SUPPORT" | null;
+  service: MiniAppTicketServiceDto | null;
   createdAt: string;
   updatedAt: string;
 }
 
-export function toMiniAppTicketSummary(ticket: MiniAppTicketSource): MiniAppTicketSummaryDto {
+export function toMiniAppTicketSummary(
+  ticket: MiniAppTicketSource & { service?: { id: string; username: string } | null },
+): MiniAppTicketSummaryDto {
+  const service = ticket.service ?? null;
   return {
     id: ticketShortId(ticket),
     subject: ticket.subject,
     status: ticket.status,
     category: ticket.category,
-    origin: ticket.origin,
+    waitingParty: ticketWaitingParty(ticket.status as SupportTicketStatus),
+    service:
+      service === null
+        ? null
+        : { id: serviceShortId({ id: service.id }), label: service.username },
     createdAt: ticket.createdAt.toISOString(),
     updatedAt: ticket.updatedAt.toISOString(),
   };
 }
 
 export interface MiniAppTicketDetailDto extends MiniAppTicketSummaryDto {
+  /** Where the ticket was raised. Detail only — a list row does not need it. */
+  origin: string | null;
   closedAt: string | null;
   /** Whether the Mini App may offer a reply box at all. */
   canReply: boolean;
@@ -306,20 +345,18 @@ export interface MiniAppTicketDetailDto extends MiniAppTicketSummaryDto {
    * there is no download route to receive one from.
    */
   hasAttachments: boolean;
-  /** Public id of the linked service, when the ticket is about one. */
-  serviceId: string | null;
 }
 
 export function toMiniAppTicketDetail(
-  ticket: MiniAppTicketSource & { serviceId: string | null },
+  ticket: MiniAppTicketSource & { service?: { id: string; username: string } | null },
   extras: { canReply: boolean; hasAttachments: boolean },
 ): MiniAppTicketDetailDto {
   return {
     ...toMiniAppTicketSummary(ticket),
+    origin: ticket.origin,
     closedAt: ticket.closedAt === null ? null : ticket.closedAt.toISOString(),
     canReply: extras.canReply,
     hasAttachments: extras.hasAttachments,
-    serviceId: ticket.serviceId === null ? null : serviceShortId({ id: ticket.serviceId }),
   };
 }
 
@@ -332,8 +369,6 @@ export interface MiniAppMessageSource {
 }
 
 export interface MiniAppMessageDto {
-  /** Display key only. Derived like every other public id: never the uuid. */
-  key: string;
   senderType: string;
   text: string | null;
   hasAttachment: boolean;
@@ -342,7 +377,6 @@ export interface MiniAppMessageDto {
 
 export function toMiniAppMessage(message: MiniAppMessageSource): MiniAppMessageDto {
   return {
-    key: messageDisplayKey(message.id),
     senderType: message.senderType,
     text: message.text,
     // The presence of a file, never its id, name, size or type. A Mini App
@@ -351,8 +385,4 @@ export function toMiniAppMessage(message: MiniAppMessageSource): MiniAppMessageD
     hasAttachment: message.fileId !== null,
     createdAt: message.createdAt.toISOString(),
   };
-}
-
-function messageDisplayKey(id: string): string {
-  return id.replace(/-/g, "").slice(0, 12);
 }
