@@ -28,6 +28,7 @@ import {
   type WorkerRedisConnection,
 } from "./queues.js";
 import { rawRedisClient } from "./redis.js";
+import { startReceiptUploadCleanupLoop } from "./receipts/upload-cleanup.js";
 import { startReservationCleanupLoop } from "./reservations/cleanup.js";
 import { startScheduleReconciler } from "./scheduler.js";
 import { createBackupProcessor } from "./workers.js";
@@ -89,6 +90,12 @@ async function run(options: RedisConnectionOptions): Promise<void> {
   // an unconditional bounded sweep that reclaims abandoned username holds. Runs on
   // its own fixed cadence, independent of any feature master switch.
   const stopReservationCleanup = startReservationCleanupLoop();
+
+  // Mini App browser receipt-upload retention (miniapp-commerce-parity §13):
+  // deletes abandoned uploads past their TTL and consumed evidence whose
+  // payment has been terminal past the retention window. Bytes only — the
+  // ManualReceipt financial record is never touched.
+  const stopReceiptUploadCleanup = startReceiptUploadCleanupLoop();
 
   // Delivery of operational alerts is owed by the DATABASE row, not by the
   // queue: writers that hold no BullMQ connection (the API's force-join outbox)
@@ -182,6 +189,7 @@ async function run(options: RedisConnectionOptions): Promise<void> {
     stopHeartbeat();
     stopReconciler();
     stopReservationCleanup();
+      stopReceiptUploadCleanup();
     stopLogDeliverySweep();
     try {
       await notificationEngine.stop();

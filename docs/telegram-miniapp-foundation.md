@@ -242,6 +242,13 @@ no-store`, `X-Content-Type-Options: nosniff` and `Vary: Cookie`, and **no**
 | POST | `/commerce/quote` | The authoritative pre-invoice for a draft — pricing, representative pricing and discount decided server-side — plus a sealed `draftToken`. No writes (§4.9). |
 | POST | `/commerce/checkout` | **Write.** Confirms a draft token into the ONE durable `CheckoutSession` (frozen snapshot, in-transaction reservation claim); `201` with the checkout (§4.9). |
 | GET | `/commerce/checkouts/:publicId` | One checkout the caller owns, by 8-character public id. |
+| GET | `/commerce/checkouts/:publicId/methods` | Payment methods for that checkout: the bot's provider gating AND the Mini App method switches, composed (§4.9). |
+| POST | `/commerce/pay/wallet` | **Write.** Pays a quoted draft from the wallet — the bot's atomic CAS deduction, ledger row, payment and order in ONE transaction; `201` with the paid checkout (§4.9). |
+| POST | `/commerce/topup` | **Write.** Creates a wallet top-up checkout under the bot's min/max rules; the wallet itself is never offered to pay it. |
+| POST | `/commerce/checkouts/:publicId/pay/card` | Card-to-card transfer details (rotated card account) for a payable checkout. |
+| POST | `/commerce/checkouts/:publicId/receipt` | **Write.** Browser receipt upload (sniffed MIME, bounded size/dimensions, uuid identity) or text — into the SAME `Payment`/`ManualReceipt` review pipeline the bot admins work; `201` `PENDING_REVIEW`. |
+| POST | `/commerce/checkouts/:publicId/pay/gateway` | **Write.** Initiates an online-gateway payment; returns a safe redirect URL (or a Stars invoice link minted server-side). |
+| GET | `/commerce/payments/:publicId` | Owner-scoped payment status — the poll target after a gateway return. Runs the same idempotent settle attempt as the bot's «بررسی وضعیت» button; the browser's word is never evidence. |
 
 ### 4.1 What never crosses the boundary
 
@@ -632,6 +639,23 @@ checkout), so the request-level layer is a convenience, never the safety.
 public ids as services and tickets (`commerceShortId`), resolved owner-scoped
 with `take: 2` ambiguity → 404. Internal uuids travel only inside sealed
 capsules, exactly as they do inside cursors.
+
+**Payments (part B).** The wallet endpoint replays the bot's pre-invoice
+wallet button: the sealed draft is re-validated and re-priced, then
+`payPurchaseDraftWithWallet` runs the ONE transaction — conditional
+`balanceToman ≥ amount` deduction, ledger row with exact before/after,
+`Payment(APPROVED)`, `Order(PAID)`, in-transaction reservation claim and
+discount consumption. Card-to-card feeds the browser upload (magic-byte
+sniffing, 5 MiB cap, bounded image dimensions, uuid identity, bytes in the
+database — no filesystem path, no public URL, sweeper-enforced retention)
+into the SAME review pipeline; an approval from the bot settles the same
+rows the Mini App polls. Online gateways are initiated server-side and
+settled only by verified provider evidence; the status endpoint's
+settle-on-poll is the same CAS `settleGatewayPayment` the bot's check button
+runs. Telegram-facing follow-up (fulfilment, notices, admin receipt fan-out)
+executes in the BOT process via the durable `miniapp-commerce-followup`
+queue — the auto-renewal producer/consumer split — with the settlement sweep
+as the recovery path, which now also backstops wallet-paid orders.
 
 ---
 

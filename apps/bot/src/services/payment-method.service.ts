@@ -166,6 +166,10 @@ export async function getPendingReviewPayment(checkoutSessionId: string): Promis
 export interface ReceiptInput {
   fileId?: string;
   text?: string;
+  /** Browser-uploaded evidence (Mini App): MiniAppReceiptUpload row id. The
+   * SAME review pipeline consumes it — admins re-send the stored bytes
+   * instead of a Telegram file_id. */
+  uploadId?: string;
 }
 
 export type ReceiptSubmission =
@@ -215,6 +219,7 @@ export async function submitReceipt(
         userId: user.id,
         fileId: receipt.fileId ?? null,
         text: receipt.text ?? null,
+        uploadId: receipt.uploadId ?? null,
         status: PaymentStatus.PENDING_REVIEW,
       },
     });

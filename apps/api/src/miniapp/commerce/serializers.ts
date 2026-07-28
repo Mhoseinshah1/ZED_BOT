@@ -87,6 +87,9 @@ export interface MiniAppQuote {
   /** OTHER products: a structured customer-input form must be completed
    * before this checkout can settle. */
   needsCustomerInputBeforePayment: boolean;
+  /** The bot-level wallet_payment_enabled switch (display hint only — the
+   * wallet endpoint re-checks it inside the settlement authority). */
+  walletPayEnabled: boolean;
   draftToken: string;
 }
 

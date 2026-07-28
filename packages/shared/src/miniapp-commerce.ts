@@ -90,3 +90,27 @@ export function resolveMiniAppSwitchState(
   if (!read.ok) return { ok: false };
   return { ok: true, enabled: isMiniAppSwitchValueTruthy(read.value) };
 }
+
+// --- follow-up queue (Mini-App-initiated settlements) --------------------------
+//
+// Money settles wherever the mutation ran, but FULFILMENT and user/admin
+// Telegram notices always execute in the BOT process (it owns the grammY Api,
+// the panel adapters and the service locks). A Mini-App-initiated settlement
+// therefore enqueues one durable follow-up job the bot consumes — the same
+// producer/consumer split the wallet auto-renewal engine established. Every
+// job is idempotent downstream (CAS-claimed fulfilment executors, exactly-once
+// admin notices), and the bot's settlement sweep remains the fallback: a lost
+// queue message can delay follow-up, never lose it.
+export const MINIAPP_COMMERCE_QUEUE_NAME = "miniapp-commerce-followup";
+
+export const MINIAPP_COMMERCE_JOB_NAMES = {
+  /** A wallet-paid order: run the unified post-payment fulfilment dispatcher. */
+  FULFILL_ORDER: "fulfill-paid-order",
+  /** A settled gateway payment: run post-settlement fulfilment/notices. */
+  GATEWAY_FULFILL: "fulfill-settled-gateway-payment",
+  /** A submitted card-to-card receipt: notify the active admins. */
+  NOTIFY_RECEIPT: "notify-receipt-submitted",
+} as const;
+
+export type MiniAppCommerceJobName =
+  (typeof MINIAPP_COMMERCE_JOB_NAMES)[keyof typeof MINIAPP_COMMERCE_JOB_NAMES];

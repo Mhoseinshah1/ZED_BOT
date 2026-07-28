@@ -167,9 +167,15 @@ export async function runGatewaySettlementSweep(api: DeliverySendApi): Promise<v
     const blockedCheckoutIds = await blockedServiceUnboundCheckoutIds();
     const unfulfilled = await prisma.payment.findMany({
       where: {
-        provider: { in: ONLINE_PROVIDER_TYPES },
+        // miniapp-commerce-parity: wallet payments (provider null, purpose
+        // PAY_WITH_WALLET) are included so a Mini-App-initiated wallet order
+        // whose follow-up job was lost still gets fulfilled here. The bot's
+        // own wallet flow dispatches inline, so for it this is pure backstop.
+        OR: [
+          { provider: { in: ONLINE_PROVIDER_TYPES }, purpose: PaymentPurpose.ORDER_PAYMENT },
+          { provider: null, purpose: PaymentPurpose.PAY_WITH_WALLET },
+        ],
         status: PaymentStatus.APPROVED,
-        purpose: PaymentPurpose.ORDER_PAYMENT,
         order: {
           is: {
             status: OrderStatus.PAID,

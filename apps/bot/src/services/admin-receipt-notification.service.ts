@@ -5,7 +5,7 @@ import {
   type User,
 } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
-import { InlineKeyboard } from "grammy";
+import { InlineKeyboard, InputFile } from "grammy";
 
 import { CB } from "../core/callbacks.js";
 import { logger } from "../core/logger.js";
@@ -28,12 +28,12 @@ export type ReceiptKind = "PHOTO" | "DOCUMENT" | "TEXT";
 export interface ReceiptNotifyApi {
   sendPhoto(
     chatId: string,
-    photo: string,
+    photo: string | InputFile,
     other?: Record<string, unknown>,
   ): Promise<unknown>;
   sendDocument(
     chatId: string,
-    document: string,
+    document: string | InputFile,
     other?: Record<string, unknown>,
   ): Promise<unknown>;
   sendMessage(chatId: string, text: string, other?: Record<string, unknown>): Promise<unknown>;
@@ -49,6 +49,9 @@ export interface ReceiptNotifyArgs {
   /** Raw card number the user paid to (masked before sending; never logged). */
   cardNumber?: string;
   cardAccountId?: string;
+  /** Browser-uploaded receipt (Mini App): MiniAppReceiptUpload row id. Sent
+   * as bytes via InputFile — there is no Telegram file_id to re-send. */
+  uploadId?: string;
 }
 
 const ORDER_TYPE_LABELS: Record<string, string> = {
@@ -152,10 +155,45 @@ export async function notifyAdminsAboutReceipt(
 
     const text = buildReceiptNotificationText(args, ownerName);
     const keyboard = receiptNotificationKeyboard(args.payment.id.slice(0, 8));
+    // Browser-uploaded evidence: fetched once, sent to every admin as bytes.
+    // The bytes never touch a log and never gain a public URL.
+    let uploadFile: { file: InputFile; asPhoto: boolean } | null = null;
+    if (args.uploadId !== undefined) {
+      const upload = await prisma.miniAppReceiptUpload.findUnique({
+        where: { id: args.uploadId },
+        select: { bytes: true, mimeType: true },
+      });
+      if (upload !== null) {
+        const name =
+          upload.mimeType === "image/png"
+            ? "receipt.png"
+            : upload.mimeType === "image/jpeg"
+              ? "receipt.jpg"
+              : "receipt.pdf";
+        uploadFile = {
+          file: new InputFile(Buffer.from(upload.bytes), name),
+          asPhoto: upload.mimeType !== "application/pdf",
+        };
+      }
+    }
     for (const admin of admins) {
       const chatId = admin.telegramId.toString();
       try {
-        if (args.receiptKind === "PHOTO" && args.receiptFileId !== undefined) {
+        if (uploadFile !== null) {
+          if (uploadFile.asPhoto) {
+            await api.sendPhoto(chatId, uploadFile.file, {
+              caption: text,
+              parse_mode: "HTML",
+              reply_markup: keyboard,
+            });
+          } else {
+            await api.sendDocument(chatId, uploadFile.file, {
+              caption: text,
+              parse_mode: "HTML",
+              reply_markup: keyboard,
+            });
+          }
+        } else if (args.receiptKind === "PHOTO" && args.receiptFileId !== undefined) {
           await api.sendPhoto(chatId, args.receiptFileId, {
             caption: text,
             parse_mode: "HTML",

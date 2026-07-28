@@ -124,6 +124,40 @@ export type PurchaseWalletResult =
   | WalletPaymentResult
   | { ok: false; needsCustomerInfo: true; checkoutId: string };
 
+/**
+ * Stable machine codes for the wallet-payment failure texts (miniapp-commerce-
+ * parity): the HTTP surface must answer with codes, never Persian prose, and
+ * matching on the exported strings from outside this module would silently
+ * break the day a text is reworded. The mapping lives HERE, beside the texts,
+ * so they can only change together.
+ */
+export function walletPaymentErrorCode(
+  error: string,
+):
+  | "INSUFFICIENT_BALANCE"
+  | "DISCOUNT_INVALID"
+  | "PRODUCT_UNAVAILABLE"
+  | "RESERVATION_NOT_CLAIMABLE"
+  | "WALLET_PAYMENT_DISABLED"
+  | "INTERNAL" {
+  switch (error) {
+    case INSUFFICIENT_BALANCE_TEXT:
+      return "INSUFFICIENT_BALANCE";
+    case DISCOUNT_CHANGED_TEXT:
+      return "DISCOUNT_INVALID";
+    case DRAFT_STALE_TEXT:
+    case REP_PRICE_STALE_TEXT:
+    case REP_CHECKOUT_UNAVAILABLE_TEXT:
+      return "PRODUCT_UNAVAILABLE";
+    case RESERVATION_STALE_TEXT:
+      return "RESERVATION_NOT_CLAIMABLE";
+    case WALLET_PAYMENT_DISABLED_TEXT:
+      return "WALLET_PAYMENT_DISABLED";
+    default:
+      return "INTERNAL";
+  }
+}
+
 /** Thrown inside the transaction to abort with a safe user error. */
 class WalletPaymentAbort extends Error {
   constructor(readonly userError: string) {

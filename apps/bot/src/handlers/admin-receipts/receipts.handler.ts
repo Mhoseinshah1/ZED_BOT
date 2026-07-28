@@ -1,6 +1,6 @@
-import { OrderType, PaymentStatus, type User } from "@zedbot/database";
+import { prisma, OrderType, PaymentStatus, type User } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
-import { Composer, InlineKeyboard } from "grammy";
+import { InputFile, Composer, InlineKeyboard } from "grammy";
 
 import { CB } from "../../core/callbacks.js";
 import type { BotContext } from "../../core/context.js";
@@ -392,6 +392,38 @@ export async function sendReceiptMedia(
     return { kind: "none" };
   }
   if (receipt.fileId === null || receipt.fileId === "") {
+    // Browser-uploaded evidence (Mini App): re-send the stored bytes. The
+    // uuid identity and the bytes stay server-side; only Telegram sees them.
+    if (receipt.uploadId !== null) {
+      const upload = await prisma.miniAppReceiptUpload.findUnique({
+        where: { id: receipt.uploadId },
+        select: { bytes: true, mimeType: true },
+      });
+      if (upload !== null) {
+        const caption = `رسید ${paymentShortId(payment)} 🧾 | ${userLabel(payment)} | ${formatToman(payment.amountToman)}`;
+        const name =
+          upload.mimeType === "image/png"
+            ? "receipt.png"
+            : upload.mimeType === "image/jpeg"
+              ? "receipt.jpg"
+              : "receipt.pdf";
+        const file = new InputFile(Buffer.from(upload.bytes), name);
+        try {
+          if (upload.mimeType === "application/pdf") {
+            await api.sendDocument(chatId, file, { caption });
+            return { kind: "document" };
+          }
+          await api.sendPhoto(chatId, file, { caption });
+          return { kind: "photo" };
+        } catch (err) {
+          logger.warn("receipt media send failed", {
+            paymentId: payment.id,
+            error: errorMessage(err),
+          });
+          return { kind: "failed" };
+        }
+      }
+    }
     if (receipt.text !== null && receipt.text !== "") {
       return { kind: "text", text: receipt.text };
     }

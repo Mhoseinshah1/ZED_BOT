@@ -38,6 +38,7 @@ import {
   createCheckoutSession,
 } from "@zedbot/bot/services/checkout.service";
 import { validateDiscountCode } from "@zedbot/bot/services/discount.service";
+import { isWalletPaymentEnabled } from "@zedbot/bot/services/payment-settings.service";
 import { resolveEffectiveProfile } from "@zedbot/bot/services/other-product-profile.service";
 import { getProductByShortId } from "@zedbot/bot/services/product.service";
 import { resolveEffectiveProductPrice } from "@zedbot/bot/services/representative-pricing.service";
@@ -58,11 +59,13 @@ import {
   type SupportMutationLimiters,
 } from "../support-guards.js";
 import { allMiniAppSwitchesEnabled, readMiniAppSwitchFresh } from "../feature-switches.js";
+import { buildValidatedDraft } from "./draft-build.js";
 import {
   openDraft,
   sealDraft,
   type CheckoutDraftCapsule,
 } from "./draft-token.js";
+import { registerCommercePaymentRoutes } from "./payment-routes.js";
 import {
   commerceFingerprint,
   isValidClientRequestId,
@@ -133,6 +136,8 @@ export function registerCommerceRoutes(
   app: FastifyInstance,
   options: CommerceRouteOptions,
 ): void {
+  registerCommercePaymentRoutes(app, options);
+
   const gate = (request: FastifyRequest, reply: FastifyReply, userId: string) => {
     const rejection = checkSupportMutation(request, {
       allowedOrigins: options.allowedOrigins,
@@ -407,6 +412,7 @@ export function registerCommerceRoutes(
             ? resolveEffectiveProfile(product).requireInfoBeforeSettlement
             : false;
 
+        const walletSwitch = await isWalletPaymentEnabled();
         const quote: MiniAppQuote = {
           kind,
           productPublicId,
@@ -421,6 +427,7 @@ export function registerCommerceRoutes(
           discountStackingRejected:
             pricing.pricingMode === "REPRESENTATIVE" && pricing.discountStackingRejected,
           needsCustomerInputBeforePayment: needsCustomerInput,
+          walletPayEnabled: walletSwitch,
           draftToken: sealDraft(capsule),
         };
         return reply.send({ ok: true, quote });
@@ -470,84 +477,11 @@ export function registerCommerceRoutes(
             fingerprint: commerceFingerprint([String(body.draftToken)]),
           },
           async () => {
-            const user = await prisma.user.findUnique({ where: { id: userId } });
-            if (user === null) {
-              throw new ConfirmRejected("NOT_FOUND", 404);
+            const built = await buildValidatedDraft(userId, capsule, "SETTLE");
+            if (built.rejected !== undefined) {
+              throw new ConfirmRejected(built.rejected, built.status);
             }
-            const product = await prisma.product.findUnique({
-              where: { id: capsule.productId },
-              include: { category: true, panel: true },
-            });
-            if (product === null || !isProductVisible(product, user.group)) {
-              throw new ConfirmRejected("PRODUCT_UNAVAILABLE", 409);
-            }
-
-            // Re-validate + RE-PRICE everything fresh; the capsule carried
-            // identity only. SETTLE mode reads the rep switch uncached.
-            let discountRow = null;
-            if (capsule.discountCode !== undefined) {
-              const validation = await validateDiscountCode(
-                capsule.discountCode,
-                user,
-                product.priceToman,
-                "PURCHASE",
-              );
-              if (!validation.ok) {
-                throw new ConfirmRejected("DISCOUNT_INVALID", 409);
-              }
-              discountRow = validation.discountCode;
-            }
-            const pricing = await resolveEffectiveProductPrice({
-              user,
-              product,
-              checkoutPurpose: "PURCHASE",
-              discountCode: discountRow,
-              mode: "SETTLE",
-            });
-
-            const draft: CheckoutDraft = {
-              productId: product.id,
-              categoryId: product.categoryId,
-              ...(product.panelId !== null ? { panelId: product.panelId } : {}),
-              flowType: product.type,
-              ...(pricing.discountCodeId !== null && capsule.discountCode !== undefined
-                ? { discountCode: capsule.discountCode, discountCodeId: pricing.discountCodeId }
-                : {}),
-              originalPriceToman: pricing.basePriceToman,
-              discountAmountToman: pricing.discountAmountToman,
-              finalPriceToman: pricing.finalPriceToman,
-              draftNonce: capsule.draftNonce,
-              ...(pricing.pricingMode === "REPRESENTATIVE"
-                ? {
-                    representative: {
-                      representativeId: pricing.representativeId,
-                      tierId: pricing.tierId,
-                      tierSlug: pricing.tierSlug,
-                      priceMode: pricing.priceMode,
-                      retailPriceToman: pricing.retailPriceToman,
-                      basePriceToman: pricing.basePriceToman,
-                      tierFingerprint: pricing.tierFingerprint,
-                      priceFingerprint: pricing.priceFingerprint,
-                    },
-                  }
-                : {}),
-              ...(capsule.reservationId !== undefined &&
-              capsule.normalizedUsername !== undefined &&
-              capsule.usernameMode !== undefined
-                ? {
-                    serviceCustomization: {
-                      usernameMode: capsule.usernameMode as ServiceUsernameMode,
-                      normalizedUsername: capsule.normalizedUsername,
-                      reservationId: capsule.reservationId,
-                      note: capsule.note ?? null,
-                      usernameConfirmedAt:
-                        capsule.usernameConfirmedAt ?? new Date().toISOString(),
-                      completed: true,
-                    },
-                  }
-                : {}),
-            };
-
+            const { user, product, draft } = built;
             let checkout;
             try {
               checkout = await createCheckoutSession(user, product, draft);
