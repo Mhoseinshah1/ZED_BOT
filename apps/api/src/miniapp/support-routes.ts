@@ -7,6 +7,7 @@ import {
   replyToTicket,
   resolveOwnedTicket,
   summarizeOwnedTickets,
+  SUPPORT_MUTATION_BODY_LIMIT_BYTES,
   supportDomainErrorStatus,
   ticketHasAttachments,
   userMayReply,
@@ -59,12 +60,26 @@ const logger = createLogger("api");
 const DEFAULT_MESSAGE_PAGE = 20;
 
 /**
- * Bounds a ticket body. The domain caps a message at 3000 characters and a
- * subject at 100; 8 KiB of JSON holds both several times over in the worst
- * case (every character a 6-byte escape) and still refuses anything that is
- * trying to be a file.
+ * How many recent tickets the landing screen carries.
+ *
+ * Small on purpose: this is a preview beside the counts, not the list. The
+ * full list has its own paged route, and returning more here would make the
+ * first screen slower for a row nobody scrolls to.
  */
-export const SUPPORT_BODY_LIMIT_BYTES = 8 * 1024;
+const SUMMARY_RECENT_TICKETS = 5;
+
+/**
+ * Bounds a ticket body — the ONE authoritative limit, derived in the domain
+ * package from the same constants the validator uses.
+ *
+ * It is imported rather than restated because the previous 8 KiB was chosen by
+ * eye and was wrong: the domain bounds a message in UTF-16 code units and HTTP
+ * bounds a body in bytes, so 3000 valid Persian characters (6000 bytes) or
+ * 3000 CJK characters (9000 bytes) — and any client whose JSON serializer
+ * escapes non-ASCII as `\uXXXX`, six bytes per code unit — could be refused
+ * transport-side for a message the domain would have accepted.
+ */
+export const SUPPORT_BODY_LIMIT_BYTES = SUPPORT_MUTATION_BODY_LIMIT_BYTES;
 
 type SupportErrorCode =
   | "NOT_AUTHENTICATED"
@@ -123,8 +138,18 @@ export function registerSupportRoutes(secured: FastifyInstance, options: Support
     const user = requireUser(request, reply);
     if (user === null) return reply;
     try {
-      const summary = await summarizeOwnedTickets(user.id);
-      return reply.send({ ok: true, summary });
+      // The counts AND the newest few tickets in one round trip: the landing
+      // screen shows both, and two requests to paint one screen is two chances
+      // to show a half-loaded page.
+      const [summary, recent] = await Promise.all([
+        summarizeOwnedTickets(user.id),
+        listOwnedTickets(user.id, SUMMARY_RECENT_TICKETS, null),
+      ]);
+      return reply.send({
+        ok: true,
+        summary,
+        recentTickets: recent.tickets.map(toMiniAppTicketSummary),
+      });
     } catch (err) {
       logger.error("mini app support summary failed", { error: errorMessage(err) });
       return fail(reply, 503, "INTERNAL");
