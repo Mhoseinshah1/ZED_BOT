@@ -38,6 +38,9 @@ importers:
       '@zedbot/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@zedbot/support-tickets':
+        specifier: workspace:*
+        version: link:../../packages/support-tickets
       fastify:
         specifier: ^5.2.0
         version: 5.10.0
