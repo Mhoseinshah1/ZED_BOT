@@ -361,7 +361,6 @@ function PurchaseWizard(props: {
     if (!needsUsername && quote === null && !busy && failure === null) {
       void runQuote(null, appliedDiscount);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needsUsername]);
 
   if (failure !== null && quote === null) {
@@ -396,6 +395,16 @@ function PurchaseWizard(props: {
       {quote !== null ? (
         <>
           <Card title={C.discountLabel}>
+            {!props.other ? (
+              <input
+                className="form__input"
+                dir="auto"
+                value={note}
+                placeholder={C.noteLabel}
+                onChange={(event) => setNote(event.target.value)}
+                onBlur={() => void runQuote(draftNonce, appliedDiscount)}
+              />
+            ) : null}
             <input
               className="form__input"
               dir="ltr"
@@ -636,7 +645,6 @@ function PaymentStatusScreen(props: { paymentPublicId: string; onBack: () => voi
   const [tick, setTick] = useState(0);
   const load = useCallback(
     () => fetchPaymentStatus(props.paymentPublicId),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [props.paymentPublicId, tick],
   );
   const { state, reload } = useResource(load);
