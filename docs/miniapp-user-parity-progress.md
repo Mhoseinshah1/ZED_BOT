@@ -40,14 +40,32 @@ actually been built, tested and pushed.
 - The entire DB-backed test matrix, concurrency tests and mutation tests.
 - The full validation battery for the layer.
 
-### Blocking dependency discovered
+### Blocking dependency — analysed, with the extraction path
 
-`panelTypesSupporting`, `serviceSupportsGlobalLifecycle` and
-`panelOperationAvailable` are pure capability predicates but live in
-`apps/bot/src/services/panel-readiness.service.ts`, which imports the bot logger
-and the panel adapter factory. They must be lifted into a package (either
-`@zedbot/service-renewal` or `@zedbot/panel-adapters`) with the bot re-exporting,
-before owner-scoped renewable resolution can move out of the bot.
+Owner-scoped renewable resolution cannot move out of the bot until three
+predicates move with it: `panelTypesSupporting`, `serviceSupportsGlobalLifecycle`
+and `panelOperationAvailable`. All three live in
+`apps/bot/src/services/panel-readiness.service.ts`, which is not portable — it
+imports the bot logger.
+
+The predicates themselves are portable. Their transitive needs are:
+
+| Predicate | Depends on | Portable? |
+| --- | --- | --- |
+| `panelTypesSupporting` | `MARZBAN_CAPABILITIES`, `XUI_CAPABILITIES` | yes — already `@zedbot/panel-adapters` |
+| `panelSupportsOperation` → `panelCapabilities` | + `SUPPORTED_XUI_VARIANTS`, `resolveXuiVariant` | yes — `panel-adapter-factory.ts` imports only `@zedbot/database`, `@zedbot/panel-adapters`, `@zedbot/shared` |
+| `panelOperationAvailable` | + `panelHasCredentials` | yes — local and pure |
+| `serviceSupportsGlobalLifecycle` | `classifyXuiRemoteModel` | yes — local and pure |
+
+**Recommended path:** move the pure capability layer into
+`@zedbot/panel-adapters`, beside the capability tables it already owns, and have
+both `apps/bot` (re-export from `panel-readiness.service.ts`, so no call site
+changes) and `@zedbot/service-renewal` import from there. Duplicating them into
+the renewal package is explicitly ruled out by the no-second-implementation
+guardrail.
+
+This is the first task of the next session; nothing downstream of it in layer 1
+can proceed first.
 
 ## Validation runs
 
