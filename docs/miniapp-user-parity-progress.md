@@ -32,61 +32,54 @@ actually been built, tested and pushed.
 | **§A owner-scoped Service resolution** | `8ea8ecb` | `resolveOwnedService` in the domain package; 14 DB-backed tests; mutation (drop `userId` from WHERE) fails exactly RS-5 + RS-13; CI green |
 | **§B renewal / extra-volume / extra-time option authority** | `b2fd7a3` | one `OPERATION_RULES` table replaces three near-identical modules; bot re-exports; 28 DB-backed tests; 4 mutations each caught; CI #361 green |
 | **§C checkout draft, discount, frozen snapshot, quote** | `cf04acc` | `CheckoutSession` reused (no second table); AES-256-GCM sealed quote; 16 API tests + `SNAP-1` bot parity; 3 mutations each caught |
+| **OWNER rollout page** | `ded9590` | `admin:mini_app_settings` graduated out of the placeholder list; all five switches visible, CAS-toggled, with scopes; 6 tests |
+| **§D shared wallet settlement** | `ded9590` | `settleWalletOrder` in the domain package, bot delegates; payload-bound idempotency; low-balance observer moved; 19 DB tests with real concurrency; 6 mutations each caught |
+| **Username reservation + adapter factory + catalog reads** | `0e59046` | reservation engine, panel-adapter factory and catalog reads moved; panel probe injectable so bot mocks still intercept; `createPurchaseCheckout`; 12 tests |
 
 ### Next unresolved invariant (start here)
 
-**§D — the shared wallet settlement seam.** The authority to reuse is
-`apps/bot/src/services/wallet-payment.service.ts`: `executeWalletOrderPayment`
-is the one atomic transaction that creates the PAID checkout, the APPROVED
-Payment, the PAID Order, the conditional balance deduction and the SPEND
-WalletTransaction, and claims the discount usage. It must move into
-`packages/service-renewal` so `apps/api` calls it rather than growing a second
-one.
+**§E — the shared Panel execution and reconciliation boundary.** Everything up
+to and including "the money moved and a PAID Order exists" is now shared. What
+is NOT shared is what happens next: turning a PAID Order into a remote account,
+a renewal, added volume or added time.
 
-Its dependencies, and what each needs before the move:
+The authorities to reuse, all in `apps/bot/src/services/`:
 
-| Dependency | Status |
+| Executor | Entry point |
 | --- | --- |
-| `claimDiscountUsage` | **done** — already in the package (`cf04acc`) |
-| `checkoutExpiryMinutes` | **done** — already in the package (`cf04acc`) |
-| `isWalletPaymentEnabled` | portable; reads one Setting row via the bot's cached settings service |
-| `onWalletBalanceChanged` → `observeWalletBalance` | portable — `low-balance.service.ts` imports only `@zedbot/database`, `@zedbot/shared` and the bot settings reader. **Must move**, or a Mini App settlement would skip the low-balance state machine that an identical Bot settlement runs |
-| `claimReservationForCheckout` / `attachReservationToOrder` | needed only by NEW_PURCHASE; inert for the three service operations |
-| `isCheckoutInputSatisfied` | needed only by OTHER_PRODUCT; inert here |
-| `logger` | inject, or drop to the package's own no-op |
+| new subscription | `provisioning.service.ts` → `provisionPaidOrder(orderId)` |
+| renewal | `service-renewal.service.ts` |
+| extra volume | `extra-volume.service.ts` → `executeExtraVolumeOrder(orderId)` |
+| extra time | `extra-time.service.ts` → `executeExtraTimeOrder(orderId)` |
+| recovery | `startup-recovery.service.ts` → `recoverStaleProvisioningOrders`, `classifyMutationState` |
 
-The invariant §D must establish: one confirmed intent produces **exactly one**
-WalletTransaction, one Payment and one Order under real concurrency, a failed
-precondition writes nothing at all, and a replay is resolved **before** any
-mutable precondition is re-read — otherwise a retry after the price changed
-turns a settled purchase into a failure.
+They are NOT queue-driven today: the bot calls them inline after payment and
+`runStartupRecovery` sweeps what was left PROVISIONING. So the API cannot reach
+them by enqueuing; they have to move into `packages/service-renewal` the way the
+settlement did, or gain a queue both transports can post to.
 
-Mutation C1 from §C ("trust a browser-supplied amount") belongs to this section:
-there is no settlement path to mutate until §D exists.
+Their remaining unportable dependencies are the bot logger, the service lock
+(`service-lock.service.ts`, Redis-backed) and the trial-conversion hook. The
+panel adapter factory they need is already in the package (`0e59046`).
+
+The invariant §E must establish: a timeout after the panel may have accepted an
+operation NEVER triggers a blind second grant. One financial effect, one
+operation intent, durable reconciliation state, and a refund only on a DEFINITE
+failure — never on an uncertain one, because the remote mutation may already
+have succeeded.
 
 ### Not yet landed in layer 1
 
-- **§D** wallet settlement seam callable from both transports (see above).
-- **§E** provisioning / add-on execution / reconciliation boundary.
+- **§E** provisioning / add-on execution / reconciliation (see above).
 - **§F** the authenticated Mini App commerce API endpoints and their transport
-  security.
+  security. The domain they would call is now complete for catalog, options,
+  drafts, discounts, quotes and settlement; what is missing is the HTTP surface,
+  its gates and its DTO allowlists.
 - **§G** every Mini App commerce screen.
 - **§H** the full-branch review, security review and validation battery.
-- **NEW_PURCHASE checkout.** §C covers RENEWAL, EXTRA_VOLUME and EXTRA_TIME —
-  the three operations that target a Service the buyer already owns. A new
-  subscription additionally needs the **username-reservation** engine
-  (`service-username-selection.service.ts`, 759 lines): the bot's
-  `createCheckoutSession` throws `CheckoutReservationError` without a claimed
-  `ServiceUsernameReservation`, and `payPurchaseDraftWithWallet` fails closed.
-  That engine also reaches a panel (the read-only `getServiceAccount`
-  availability probe) so `panel-adapter-factory.ts` moves with it — the same
-  extraction §E needs for provisioning. Doing both at once is the intended
-  order; a Mini App purchase without the reservation would either bypass
-  username uniqueness or duplicate it.
 - **OTHER_PRODUCT purchase** (matrix #16) stays out of layer 1: its checkout
-  requires `buildFulfillmentSnapshot` and, for personalized products, the
-  customer-input form the matrix puts at **L3** (#17). Shipping the purchase
-  without the form would take money for something that cannot be fulfilled.
+  needs the customer-input form the matrix assigns to **L3** (#17). Selling one
+  without it would take money for something that cannot be fulfilled.
 
 ### Blocking dependency — RESOLVED in `b197b87`
 
@@ -152,6 +145,12 @@ package must not learn about Prisma.
 | 1 | §C snapshot parity (bot suite) | 1 passed (1) |
 | 1 | API suite after §C | 263 passed, 1 skipped (264) |
 | 1 | CI `b2fd7a3` (§B) | **all 3 jobs success** — run #361 |
+| 1 | CI `d3fc36f` (§C + docs) | **all 3 jobs success** — run #363 |
+| 1 | OWNER rollout suite | 6 passed (6) |
+| 1 | §D settlement suite | 19 passed (19) |
+| 1 | purchase/catalog suite | 12 passed (12) |
+| 1 | API suite after the extractions | 294 passed, 1 skipped (295) |
+| 1 | Bot suite after §D | 2583 passed, 375 skipped, 7 pre-existing env failures (2965) |
 
 ### Mutation evidence
 
@@ -165,6 +164,19 @@ package must not learn about Prisma.
 | C | Drop the quote's user binding | `CO-16` (1 failed, 15 passed) | yes — 16/16 |
 | C | Skip stale revalidation (constant fingerprint) | `CO-13`, `CO-14`, `CO-15` (3 failed, 13 passed) | yes — 16/16 |
 | C | Quote from the live Product price, not the frozen draft | `CO-14` (1 failed, 15 passed) | yes — 16/16 |
+| D | Remove idempotency (fast path AND P2002 recovery) | `WS-6`, `WS-7`, `WS-8`, `WS-10`, `WS-14`, `WS-16` (6 failed, 13 passed) | yes — 19/19 |
+| D | Make the wallet debit non-atomic (read-then-write) | `WS-11`, `WS-12` (2 failed, 17 passed) | yes — 19/19 |
+| D | Resolve the replay AFTER mutable preconditions | `WS-7` (1 failed, 18 passed) | yes — 19/19 |
+| D | Permit two Payments for one CheckoutSession | `WS-13`, `WS-14` (2 failed, 17 passed) | yes — 19/19 |
+| D | Omit the low-balance observation | `WS-18` (1 failed, 18 passed) | yes — 19/19 |
+| D | Claim the discount outside the financial transaction | `WS-17` (1 failed, 18 passed) | yes — 19/19 |
+
+The §D idempotency mutation ALSO survived its first attempt, for a third
+distinct reason worth recording: removing the pre-transaction replay lookup
+alone changed nothing, because the unique `idempotencyKey` index still raised
+P2002 and the catch resolved the replay from there. Idempotency here has two
+layers, and a mutation that removes one is not a mutation. Only disabling both —
+and the unique key itself — exposed the six cases above.
 
 The §B panel-compatibility mutation **survived** its first run (28/28 still
 passed) and that is why `OPT-25` and `OPT-26` exist. The listing query already
