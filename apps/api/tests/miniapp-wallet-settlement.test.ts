@@ -13,6 +13,11 @@ import {
   WALLET_ORDER_PAYMENT_REASON,
   type WalletSettlementArgs,
 } from "@zedbot/service-renewal";
+import {
+  LOW_BALANCE_ENABLED_KEY,
+  LOW_BALANCE_REARM_MARGIN_KEY,
+  LOW_BALANCE_THRESHOLD_KEY,
+} from "@zedbot/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 // =============================================================================
@@ -568,10 +573,17 @@ describe.skipIf(!hasDb)("shared wallet settlement", () => {
   // WS-18 ---------------------------------------------------------------------
   it("WS-18: settlement runs the low-balance state machine, as every wallet path does", async () => {
     // Turn the feature on with a threshold the settlement will cross.
+    //
+    // The keys come from the shared constants, never from string literals. An
+    // earlier version of this case spelled them by hand, got them wrong, and
+    // still PASSED locally — because the bot's own low-balance suite had left
+    // the real rows enabled in the shared test database. CI, with a fresh
+    // database, is what caught it. A test that depends on another suite's
+    // leftovers is not testing what it says it tests.
     for (const [key, value] of [
-      ["low_balance_enabled", "true"],
-      ["low_balance_threshold_toman", "50000"],
-      ["low_balance_rearm_margin_toman", "10000"],
+      [LOW_BALANCE_ENABLED_KEY, "true"],
+      [LOW_BALANCE_THRESHOLD_KEY, "50000"],
+      [LOW_BALANCE_REARM_MARGIN_KEY, "10000"],
     ] as const) {
       await prisma.setting.upsert({
         where: { key },
@@ -594,9 +606,9 @@ describe.skipIf(!hasDb)("shared wallet settlement", () => {
         where: {
           key: {
             in: [
-              "low_balance_enabled",
-              "low_balance_threshold_toman",
-              "low_balance_rearm_margin_toman",
+              LOW_BALANCE_ENABLED_KEY,
+              LOW_BALANCE_THRESHOLD_KEY,
+              LOW_BALANCE_REARM_MARGIN_KEY,
             ],
           },
         },
