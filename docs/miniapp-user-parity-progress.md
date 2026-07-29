@@ -29,6 +29,25 @@ actually been built, tested and pushed.
 | Docker workspace coverage repair | `d344b94` | `service-renewal` added to both install stages + runtime; deploy-scripts 2 failed → 32 passed |
 | Panel capability predicates extracted | `b197b87` | moved to `@zedbot/service-renewal`, bot re-exports; one implementation |
 | Unused-import cleanup after extraction | `e1e575a` | CI Lint caught what tsc did not |
+| **§A owner-scoped Service resolution** | `8ea8ecb` | `resolveOwnedService` in the domain package; 14 DB-backed tests; mutation (drop `userId` from WHERE) fails exactly RS-5 + RS-13; CI green |
+
+### Next unresolved invariant (start here)
+
+**§B — renewal and add-on option resolution.** The authority to reuse is
+`apps/bot/src/services/renewal-checkout.service.ts`:
+`renewalPlansForPanel(group, panelId)` and `isRenewalPlanValid(product, service,
+group)`, plus `extra-volume.service.ts` / `extra-time.service.ts` for the add-on
+choices. Move them into `packages/service-renewal`, have the bot re-export (the
+pattern `panel-readiness.service.ts` already uses), and expose options by the
+8-hex Product prefix — `renewalOptionPublicId` already exists in `contract.ts`
+and is unused so far.
+
+The invariant §B must establish: a Product uuid never reaches the browser, and
+an option that is no longer eligible is indistinguishable from one that never
+existed — the same one-answer rule §A holds for services.
+
+`resolveOwnedService(db, userId, publicId, capability)` is the gate to call
+first from every §B/§C/§D entry point; it is done and tested.
 
 ### Not yet landed in layer 1
 
@@ -99,6 +118,14 @@ package must not learn about Prisma.
 | 1 | workspace build | clean, 11 packages |
 | 1 | fresh migrate deploy + seed | applied; 26/26 settings, 131 templates, 156 button texts |
 | 1 | CI `e1e575a` | **all 3 jobs success** — typecheck/lint/build/validate, legacy production upgrade, Docker backup smoke (real image build) |
+| 1 | §A resolution suite | 14 passed (14) |
+| 1 | CI `8ea8ecb` | **all 3 jobs success** |
+
+### Mutation evidence
+
+| Mutation | Tests that failed | Restored |
+| --- | --- | --- |
+| Remove `userId` from the resolver's WHERE clause | `RS-5`, `RS-13` (2 failed, 12 passed) | yes — back to 14/14 |
 
 Local Docker build is not possible in this sandbox: the egress policy returns
 403 for `production.cloudfront.docker.com` (the BuildKit frontend blob) and for
