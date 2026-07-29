@@ -39,8 +39,16 @@ type Db = PrismaClient | Prisma.TransactionClient;
  * Matched exactly rather than by truthiness: `"false"` is a non-empty string
  * and would be true under a naive check, which is the classic way a disabled
  * flag turns itself on.
+ *
+ * THIS SET IS THE BOT'S SET. `apps/bot/src/services/settings.service.ts`
+ * documents `isTruthySettingValue` as "THE boolean interpretation for
+ * settings", and it accepts exactly `true`, `1` and `yes`. An earlier version
+ * of this file also accepted `on`, which meant an operator who typed `on`
+ * into the settings table would see the switch reading DISABLED on the admin
+ * page while this gate read it as ENABLED — the two would disagree about
+ * whether a payment surface was open. One interpretation, or none.
  */
-const TRUE_VALUES = new Set(["true", "1", "on", "yes"]);
+const TRUE_VALUES = new Set(["true", "1", "yes"]);
 
 /**
  * Every layer-1 commerce switch defaults to the same value, and it is false.

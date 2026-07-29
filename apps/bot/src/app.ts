@@ -116,6 +116,7 @@ import {
   lowBalanceAdminHandler,
   lowBalanceAdminTextHandler,
 } from "./handlers/admin-settings/low-balance-admin.handler.js";
+import { miniAppCommerceAdminHandler } from "./handlers/admin-settings/miniapp-commerce-admin.handler.js";
 import {
   termsAdminHandler,
   termsAdminTextHandler,
@@ -310,6 +311,7 @@ export function createBot(token: string): Bot<BotContext> {
   // page (admin:lowbal:*) — master switch, boundaries, template preview and the
   // explicitly-confirmed backfill. Aggregate counts only; never names a user.
   adminArea.use(lowBalanceAdminHandler);
+  adminArea.use(miniAppCommerceAdminHandler);
   adminArea.use(adminRepresentativeHandler);
   adminArea.use(deviceGuidesHandler);
   adminArea.use(diagnosticsAdminHandler);

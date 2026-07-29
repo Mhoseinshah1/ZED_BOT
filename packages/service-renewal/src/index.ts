@@ -150,3 +150,24 @@ export {
   type QuoteOpenResult,
   type QuotePayload,
 } from "./quote.js";
+
+export {
+  evaluateEligibility,
+  observeWalletBalance,
+  onWalletBalanceChanged,
+  readLowBalanceConfigRows,
+  type LowBalanceEligibility,
+  type ObserveArgs,
+  type ObserveOutcome,
+  type Toman,
+} from "./low-balance.js";
+
+export {
+  settleWalletOrder,
+  settlementPayloadFingerprint,
+  WALLET_ORDER_PAYMENT_REASON,
+  type WalletSettlementArgs,
+  type WalletSettlementFailure,
+  type WalletSettlementResult,
+  type WalletSettlementSuccess,
+} from "./settlement.js";
