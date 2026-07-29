@@ -9,6 +9,15 @@ import {
 } from "@zedbot/database";
 
 import { resolveProductInboundIds, type ProductWithRelations } from "./catalog.js";
+import { ServiceUsernameMode } from "@zedbot/database";
+
+import { catalogPublicId, resolvePurchasableProduct } from "./catalog-read.js";
+import {
+  claimReservationForCheckout,
+  reserveRandomServiceUsername,
+  reserveServiceUsername,
+  type PanelAdapterFactory,
+} from "./username-reservation.js";
 import {
   OPERATION_DISCOUNT_PURPOSE,
   OPERATION_ORDER_TYPE,
@@ -344,6 +353,8 @@ async function priceOperation(
     operation: ServiceOperation;
     product: ProductWithRelations;
     discountCode?: string;
+    /** Forces the discount purpose, for the NEW_PURCHASE path. */
+    purposeOverride?: "PURCHASE" | "RENEWAL";
   },
 ): Promise<PriceResult> {
   const originalPriceToman = args.product.priceToman;
@@ -363,7 +374,7 @@ async function priceOperation(
     args.discountCode,
     { id: args.userId, group: args.group },
     originalPriceToman,
-    OPERATION_DISCOUNT_PURPOSE[args.operation],
+    args.purposeOverride ?? OPERATION_DISCOUNT_PURPOSE[args.operation],
     db,
   );
   if (!validation.ok) {
@@ -608,3 +619,264 @@ function operationOfOrderType(orderType: string | null): ServiceOperation | null
   return null;
 }
 
+
+// --- new subscription --------------------------------------------------------
+
+/**
+ * The frozen capture for a NEW subscription.
+ *
+ * The shared product block plus the buyer's username selection, in the exact
+ * shape `apps/bot/src/services/checkout.service.ts` writes it — the naming
+ * strategy is captured NOW so a later panel-config edit cannot rename a paid
+ * entitlement, and the reservation id is captured so settlement can claim the
+ * exact hold rather than "a hold for this username".
+ */
+export function buildPurchaseSnapshot(
+  product: ProductWithRelations,
+  pricing: OperationPricing,
+  selection: {
+    normalizedUsername: string;
+    usernameMode: "RANDOM" | "CUSTOM";
+    reservationId: string;
+    note: string | null;
+  },
+): Prisma.InputJsonObject {
+  return {
+    productId: product.id,
+    productType: product.type,
+    productName: product.name,
+    invoiceDescription: product.invoiceDescription ?? "",
+    categoryId: product.categoryId,
+    categoryName: product.category.name,
+    panelId: product.panelId,
+    panelName: product.panel?.name ?? null,
+    panelType: product.panel?.type ?? null,
+    serviceLocation: product.serviceLocation,
+    allLocations: product.allLocations,
+    volumeGb: product.volumeGb,
+    durationDays: product.durationDays,
+    trafficResetCycle: product.trafficResetCycle,
+    requiredUserInfoEnabled: product.requiredUserInfoEnabled,
+    requiredUserInfoPromptText: product.requiredUserInfoPromptText,
+    deliveryType: product.deliveryType,
+    ...(product.panel !== null
+      ? {
+          namingStrategy: product.panel.usernamePatternType,
+          namingCustomText: product.panel.usernameCustomText,
+          namingRandomLength: product.panel.usernameRandomLength,
+          namingRepresentativePrefix: product.panel.representativeUsernamePrefix,
+        }
+      : {}),
+    serviceUsername: selection.normalizedUsername,
+    serviceUsernameMode: selection.usernameMode,
+    serviceUsernameSelectionSource:
+      selection.usernameMode === "RANDOM" ? "USER_RANDOM" : "USER_CUSTOM",
+    serviceUsernameReservationId: selection.reservationId,
+    serviceUserNote: selection.note,
+    originalPriceToman: pricing.originalPriceToman,
+    discountCode: pricing.discountCode,
+    discountAmountToman: pricing.discountAmountToman,
+    finalPriceToman: pricing.finalPriceToman,
+    inboundIds: resolveSoldInboundIds(product),
+  };
+}
+
+export type PurchaseCheckoutResult =
+  | { ok: true; checkout: CheckoutSession; draft: PurchaseDraftDto }
+  | {
+      ok: false;
+      code: Extract<
+        CommerceResultCode,
+        "PRODUCT_UNAVAILABLE" | "OPTION_UNAVAILABLE" | "CHECKOUT_UNAVAILABLE"
+      >;
+      /** Why the username could not be held, when that is the reason. */
+      usernameOutcome?: string;
+      discountRejection?: DiscountRejection;
+    };
+
+export interface PurchaseDraftDto {
+  checkoutId: string;
+  productId: string;
+  productLabel: string;
+  locationLabel: string | null;
+  username: string;
+  usernameMode: "RANDOM" | "CUSTOM";
+  durationDays: number | null;
+  trafficGb: number | null;
+  originalPriceToman: number;
+  discountCode: string | null;
+  discountAmountToman: number;
+  finalPriceToman: number;
+  currency: "IRT";
+  expiresAt: string;
+}
+
+export interface PurchaseCheckoutArgs {
+  userId: string;
+  group: UserGroup;
+  publicProductId: string;
+  /** RANDOM asks the server to mint one; CUSTOM validates the buyer's choice. */
+  usernameMode: "RANDOM" | "CUSTOM";
+  requestedUsername?: string;
+  /** Ties the username hold to this draft, exactly as the bot's nonce does. */
+  draftNonce: string;
+  note?: string | null;
+  discountCode?: string;
+  /** The panel probe, injectable so a caller can supply a mocked boundary. */
+  buildAdapter?: PanelAdapterFactory;
+}
+
+/**
+ * Creates a PENDING draft for a NEW subscription, with its username reserved.
+ *
+ * WHY THE RESERVATION HAPPENS HERE AND NOT AT PAYMENT. The username is what the
+ * remote account will be called, and it is unique across the whole installation.
+ * Holding it at draft time is what stops two buyers who are both looking at the
+ * checkout screen from being sold the same name; claiming it to this checkout in
+ * the same breath is what stops a hold from outliving the draft that owns it.
+ *
+ * A failed claim leaves NOTHING behind: the create and the claim share one
+ * transaction, so a payable draft can never exist without its exact active hold.
+ */
+export async function createPurchaseCheckout(
+  db: Db,
+  args: PurchaseCheckoutArgs,
+): Promise<PurchaseCheckoutResult> {
+  const resolved = await resolvePurchasableProduct(db, args.group, args.publicProductId);
+  if (!resolved.ok) {
+    return { ok: false, code: "PRODUCT_UNAVAILABLE" };
+  }
+  const product = resolved.product;
+  if (product.panelId === null || product.panel === null) {
+    // A panel-less legacy SERVICE product cannot be provisioned by this path,
+    // and it carries no reservation to claim.
+    return { ok: false, code: "PRODUCT_UNAVAILABLE" };
+  }
+
+  const pricing = await priceOperation(db, {
+    userId: args.userId,
+    group: args.group,
+    // A new purchase validates discount codes under PURCHASE semantics.
+    operation: "RENEWAL",
+    product,
+    ...(args.discountCode !== undefined ? { discountCode: args.discountCode } : {}),
+    purposeOverride: "PURCHASE",
+  });
+  if (!pricing.ok) {
+    return { ok: false, code: "PRODUCT_UNAVAILABLE", discountRejection: pricing.reason };
+  }
+
+  const held =
+    args.usernameMode === "RANDOM"
+      ? await reserveRandomServiceUsername({
+          userId: args.userId,
+          panelId: product.panelId,
+          draftNonce: args.draftNonce,
+          ...(args.buildAdapter !== undefined ? { buildAdapter: args.buildAdapter } : {}),
+        })
+      : await reserveServiceUsername({
+          userId: args.userId,
+          panelId: product.panelId,
+          mode: ServiceUsernameMode.CUSTOM,
+          normalizedUsername: (args.requestedUsername ?? "").trim().toLowerCase(),
+          draftNonce: args.draftNonce,
+          ...(args.buildAdapter !== undefined ? { buildAdapter: args.buildAdapter } : {}),
+        });
+  if (held.outcome !== "AVAILABLE") {
+    // The reason IS returned here, unlike a service or option refusal: the buyer
+    // typed this name and has to be told whether to pick another one. It names
+    // no other user and no other row.
+    return { ok: false, code: "OPTION_UNAVAILABLE", usernameOutcome: held.outcome };
+  }
+
+  const minutes = await checkoutExpiryMinutes(db);
+  const expiresAt = new Date(Date.now() + minutes * 60_000);
+  const snapshot = buildPurchaseSnapshot(product, pricing.pricing, {
+    normalizedUsername: held.normalizedUsername,
+    usernameMode: args.usernameMode,
+    reservationId: held.reservationId,
+    note: args.note ?? null,
+  });
+
+  try {
+    const checkout = await prisma.$transaction(async (tx) => {
+      // Repeated taps must not pile up parallel payable drafts for one product.
+      await tx.checkoutSession.updateMany({
+        where: {
+          userId: args.userId,
+          productId: product.id,
+          status: CheckoutStatus.PENDING,
+        },
+        data: { status: CheckoutStatus.CANCELLED },
+      });
+      const created = await tx.checkoutSession.create({
+        data: {
+          userId: args.userId,
+          purpose: "ORDER_PAYMENT",
+          productId: product.id,
+          orderType: OPERATION_ORDER_TYPE.NEW_PURCHASE,
+          productSnapshot: snapshot,
+          originalPriceToman: pricing.pricing.originalPriceToman,
+          discountAmountToman: pricing.pricing.discountAmountToman,
+          finalPriceToman: pricing.pricing.finalPriceToman,
+          discountCodeId: pricing.pricing.discountCodeId,
+          status: CheckoutStatus.PENDING,
+          expiresAt,
+        },
+      });
+      // The ONE authoritative claim: one atomic UPDATE verifying owner, nonce,
+      // username, mode, CURRENT panel, HELD, unexpired and unlinked. Throwing
+      // rolls the checkout back with it.
+      const claim = await claimReservationForCheckout(
+        tx,
+        {
+          reservationId: held.reservationId,
+          userId: args.userId,
+          draftNonce: args.draftNonce,
+          normalizedUsername: held.normalizedUsername,
+          mode: held.mode,
+          panelId: product.panelId as string,
+        },
+        created.id,
+      );
+      if (!claim.ok) {
+        throw new PurchaseClaimFailed();
+      }
+      return created;
+    });
+
+    return {
+      ok: true,
+      checkout,
+      draft: {
+        checkoutId: checkoutPublicId(checkout),
+        productId: catalogPublicId(product),
+        productLabel: product.name,
+        locationLabel: product.panel?.name ?? null,
+        username: held.normalizedUsername,
+        usernameMode: args.usernameMode,
+        durationDays: product.durationDays ?? null,
+        trafficGb: product.volumeGb ?? null,
+        originalPriceToman: pricing.pricing.originalPriceToman,
+        discountCode: pricing.pricing.discountCode,
+        discountAmountToman: pricing.pricing.discountAmountToman,
+        finalPriceToman: pricing.pricing.finalPriceToman,
+        currency: "IRT",
+        expiresAt: checkout.expiresAt.toISOString(),
+      },
+    };
+  } catch (err) {
+    if (err instanceof PurchaseClaimFailed) {
+      return { ok: false, code: "CHECKOUT_UNAVAILABLE" };
+    }
+    throw err;
+  }
+}
+
+/** Thrown inside the draft transaction so the claim and the create roll back together. */
+class PurchaseClaimFailed extends Error {
+  constructor() {
+    super("username reservation could not be claimed for this checkout");
+    this.name = "PurchaseClaimFailed";
+  }
+}

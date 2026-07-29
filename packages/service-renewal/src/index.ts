@@ -116,6 +116,8 @@ export {
 
 export {
   buildOperationSnapshot,
+  buildPurchaseSnapshot,
+  createPurchaseCheckout,
   checkoutExpiryMinutes,
   checkoutPublicId,
   createOperationCheckout,
@@ -126,6 +128,9 @@ export {
   type CheckoutCreateResult,
   type CheckoutDraftDto,
   type OperationPricing,
+  type PurchaseCheckoutArgs,
+  type PurchaseCheckoutResult,
+  type PurchaseDraftDto,
   type QuoteDto,
   type QuoteIssueResult,
 } from "./checkout.js";
@@ -171,3 +176,45 @@ export {
   type WalletSettlementResult,
   type WalletSettlementSuccess,
 } from "./settlement.js";
+
+export { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter.js";
+
+export {
+  attachReservationToOrder,
+  bindSettledReservationFromSnapshot,
+  checkServiceUsernameAvailability,
+  claimReservationForCheckout,
+  consumeReservationForOrder,
+  getActiveReservationForDraft,
+  hasForeignActiveReservationForUsername,
+  isReservationClaimable,
+  lockReservationForSettlement,
+  RANDOM_USERNAME_MAX_ATTEMPTS,
+  releaseHeldReservationForDraft,
+  releaseHeldReservationsForDraft,
+  releaseReservation,
+  releaseReservationForFailedOrder,
+  RESERVATION_HELD_TTL_MS,
+  ReservationInvariantError,
+  reserveRandomServiceUsername,
+  reserveServiceUsername,
+  type ClaimReservationResult,
+  type ReservationClaimArgs,
+  type ReservationOrderBindArgs,
+  type ReserveServiceUsernameResult,
+  type SettledReservationBindResult,
+} from "./username-reservation.js";
+
+export {
+  catalogPublicId,
+  CATALOG_PUBLIC_ID_LENGTH,
+  isCatalogPublicId,
+  loadMiniAppCatalog,
+  loadMiniAppCatalogForUser,
+  resolvePurchasableProduct,
+  type CatalogCategoryDto,
+  type CatalogDto,
+  type CatalogLocationDto,
+  type CatalogProductDto,
+  type PurchasableProductResolution,
+} from "./catalog-read.js";
