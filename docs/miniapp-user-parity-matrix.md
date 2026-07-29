@@ -44,6 +44,9 @@ inventing a feature, so both are out of scope for every layer.
 | Is lucky wheel real? | **No — placeholder** | Still in `USER_SECTIONS` |
 | Is there a user "emergency recharge"? | **No** | `emergency` appears only in `admin-service-operation.service.ts`, `admin-service-settings.service.ts` and settings/representative services — an **administrator** capability, excluded by the no-admin-in-Mini-App guardrail |
 | Is there user "account management"? | Partially — profile/notification preferences only | `handlers/user-notifications/notification.handler.ts`; no separate account-management handler exists |
+| Does representative pricing apply to a renewal or an add-on? | **No — always retail** | `resolveRepresentativeBase` returns null for any `checkoutPurpose` other than `PURCHASE`; the bot's own `representative-program.test.ts` asserts "RENEWAL purpose stays retail". Reseller pricing is reached only through «خرید نمایندگی». `OPT-23` locks it in |
+| Can an XUI panel add volume and time? | **Yes** | `XUI_CAPABILITIES` lists `addVolume` and `addTime`, same as `MARZBAN_CAPABILITIES`. An earlier draft of the §B suite asserted the opposite and passed for the wrong reason — its fixtures were failing the *remote-model* gate. What actually blocks an XUI service is a non-`GLOBAL_CLIENT` remote model, or an `apiVariant` with no adapter |
+| Is the option/product public id safe to derive from the uuid? | Yes, with a collision refusal | 8-hex prefix, same convention as services. A shared prefix is dropped from listings *and* refused at resolution (`OPT-16`), so what is offered is exactly what can be chosen |
 
 ## The matrix
 
@@ -58,9 +61,9 @@ Rollout switches all default **false**.
 | 3 | Product detail + pre-invoice | `user:buy` → product | `services/checkout.service.ts` (`buildProductSnapshot`) | CheckoutSession | PENDING checkout | none | ✗ | L1 | `miniapp_commerce_checkout_enabled` | frozen snapshot, expiry | TODO |
 | 4 | Discount code | `checkout:discount` | `services/discount.service.ts` (`validateDiscountCode`, `claimDiscountUsage`) | DiscountCode, usage | usage claim at settlement | none | ✗ | L1 | same as #3 | invalid, expired, exhausted, changed-after-quote | TODO |
 | 5 | New subscription purchase (wallet) | `user:buy` → wallet | `services/wallet-payment.service.ts` `payPurchaseDraftWithWallet` | User.balanceToman, Payment, Order, WalletTransaction, Service | debit + order + provisioning | purchase receipt | ✗ | L1 | `miniapp_wallet_purchase_enabled` | concurrency, exact/insufficient balance, idempotent replay | TODO |
-| 6 | Renewal (wallet) | `user:renew` | `services/renewal-checkout.service.ts` + `payRenewalDraftWithWallet` + `service-renewal.service.ts` | CheckoutSession, Payment, Order, WalletTransaction, Service | debit + in-place renewal | renewal receipt | ✗ (gate only) | L1 | `miniapp_wallet_renewal_enabled` ✅ exists | full §15 matrix | IN PROGRESS |
-| 7 | Extra volume | `user:extra_volume` | `services/extra-volume.service.ts` + `payExtraVolumeDraftWithWallet` | Service, Payment, Order, WalletTransaction | debit + quota grant | receipt | ✗ | L1 | `miniapp_wallet_addons_enabled` | grant once under concurrency | TODO |
-| 8 | Extra time | `user:extra_time` | `services/extra-time.service.ts` + `payExtraTimeDraftWithWallet` | same as #7 | debit + expiry extension | receipt | ✗ | L1 | same as #7 | grant once under concurrency | TODO |
+| 6 | Renewal (wallet) | `user:renew` | `services/renewal-checkout.service.ts` + `payRenewalDraftWithWallet` + `service-renewal.service.ts` | CheckoutSession, Payment, Order, WalletTransaction, Service | debit + in-place renewal | renewal receipt | ✗ (domain done) | L1 | `miniapp_wallet_renewal_enabled` ✅ exists | full §15 matrix | §A–§C DONE; §D–§G pending |
+| 7 | Extra volume | `user:extra_volume` | `services/extra-volume.service.ts` + `payExtraVolumeDraftWithWallet` | Service, Payment, Order, WalletTransaction | debit + quota grant | receipt | ✗ (domain done) | L1 | `miniapp_wallet_addons_enabled` ✅ added, false | grant once under concurrency | §A–§C DONE; §D–§G pending |
+| 8 | Extra time | `user:extra_time` | `services/extra-time.service.ts` + `payExtraTimeDraftWithWallet` | same as #7 | debit + expiry extension | receipt | ✗ (domain done) | L1 | same as #7 | grant once under concurrency | §A–§C DONE; §D–§G pending |
 | 9 | Wallet balance + history | `user:wallet` | `services/wallet*`, existing Mini App wallet read | WalletTransaction | none (read) | none | ✅ read-only | L1 | n/a (already read-only) | owner scope | DONE (#143) |
 | 10 | Wallet top-up amount entry | `user:wallet` → charge | `services/payment-settings.service.ts` (`walletTopupLimits`) | CheckoutSession (WALLET_CHARGE) | PENDING checkout | none | ✗ | L2 | `miniapp_wallet_topup_enabled` | min/max, cannot pay itself from wallet | TODO |
 | 11 | Card-to-card + receipt upload | `payment:receipt` | `services/receipt-review.service.ts` | ManualReceipt, Payment | admin review queue | admin + user | ✗ | L2 | `miniapp_receipt_upload_enabled` | MIME allowlist, signature, size, dimensions, random identity | TODO |
@@ -115,3 +118,37 @@ gated behind `miniapp_stars_enabled` and ships disabled regardless.
 - Every item assigned to a stack layer: **yes**.
 - No placeholder marked implemented: **yes** — both placeholders are in the
   excluded table with evidence.
+
+## Layer-1 rollout settings
+
+Every key below defaults **false**, is **not** `isPublic`, and is **not seeded** —
+a missing row reads as the default, so merging enables nothing and an operator's
+first decision is an explicit one. They do not overlap: each guards a different
+thing a person can do.
+
+| Key | Guards | Default |
+| --- | --- | --- |
+| `miniapp_commerce_browse_enabled` | reading the catalog (no writes, no money) | false |
+| `miniapp_commerce_checkout_enabled` | creating a draft, applying a discount, asking for a quote (writes a draft row; still no money) | false |
+| `miniapp_wallet_purchase_enabled` | settling a NEW subscription from the wallet | false |
+| `miniapp_wallet_renewal_enabled` | settling a renewal from the wallet | false |
+| `miniapp_wallet_addons_enabled` | settling extra volume or extra time from the wallet | false |
+
+The names are the ones this matrix assigned before any of them was built;
+picking different ones would have left these rows pointing at switches that do
+not exist. All follow the repository's existing `<area>_<thing>_enabled`
+convention (`wallet_payment_enabled`, `representative_program_enabled`).
+
+## Layer-1 scope note
+
+Layer 1 as landed covers the three operations that target a Service the buyer
+already owns: **renewal, extra volume, extra time**. Two items remain assigned
+to layer 1 but are not yet built, and both are blocked on the same extraction
+rather than on a decision:
+
+- **New subscription purchase (#5)** needs the username-reservation engine and
+  the panel adapter factory in the shared package — the same move §E needs for
+  provisioning. See `docs/miniapp-user-parity-progress.md`.
+- **Other products (#16)** depend on the customer-input form, which this matrix
+  assigns to **L3** (#17). Selling one without it would take money for something
+  that cannot be fulfilled.
