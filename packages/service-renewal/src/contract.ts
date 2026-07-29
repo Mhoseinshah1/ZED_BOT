@@ -94,6 +94,71 @@ export function isServiceOperation(value: unknown): value is ServiceOperation {
 }
 
 /**
+ * Everything a person can pay for in layer 1.
+ *
+ * A new purchase joins the three service operations here rather than living in
+ * its own vocabulary, because from the checkout's point of view they are the
+ * same transaction with a different target: pick something, freeze a price, pay
+ * from the wallet, make a panel change. The one real difference — a new purchase
+ * has no existing Service — is expressed by `serviceId` being null, which the
+ * type system then forces every caller to handle.
+ */
+export const COMMERCE_OPERATIONS = [
+  "NEW_PURCHASE",
+  "RENEWAL",
+  "EXTRA_VOLUME",
+  "EXTRA_TIME",
+] as const;
+
+export type CommerceOperation = (typeof COMMERCE_OPERATIONS)[number];
+
+/** True when `value` names a commerce operation. */
+export function isCommerceOperation(value: unknown): value is CommerceOperation {
+  return typeof value === "string" && (COMMERCE_OPERATIONS as readonly string[]).includes(value);
+}
+
+/**
+ * The Prisma `OrderType` each operation settles as.
+ *
+ * Stated once. The bot picks these values in four different services; a Mini App
+ * purchase that recorded a different OrderType would be a different row in every
+ * financial report, for the same thing.
+ */
+export const OPERATION_ORDER_TYPE = {
+  NEW_PURCHASE: "SERVICE_PURCHASE",
+  RENEWAL: "SERVICE_RENEWAL",
+  EXTRA_VOLUME: "EXTRA_VOLUME",
+  EXTRA_TIME: "EXTRA_TIME",
+} as const satisfies Record<CommerceOperation, string>;
+
+/**
+ * Which rollout switch must be on to SETTLE each operation.
+ *
+ * Browsing and drafting are gated separately (see the keys above); this table is
+ * only about money moving.
+ */
+export const OPERATION_SETTLE_ROLLOUT_KEY = {
+  NEW_PURCHASE: MINIAPP_WALLET_PURCHASE_ENABLED_KEY,
+  RENEWAL: MINIAPP_WALLET_RENEWAL_ENABLED_KEY,
+  EXTRA_VOLUME: MINIAPP_WALLET_ADDONS_ENABLED_KEY,
+  EXTRA_TIME: MINIAPP_WALLET_ADDONS_ENABLED_KEY,
+} as const satisfies Record<CommerceOperation, MiniAppCommerceRolloutKey>;
+
+/**
+ * The discount purpose each operation validates codes under.
+ *
+ * Taken from the bot, which treats extra volume and extra time as PURCHASE for
+ * discount semantics and only renewal as RENEWAL. A code restricted to renewals
+ * must therefore not apply to an add-on, exactly as today.
+ */
+export const OPERATION_DISCOUNT_PURPOSE = {
+  NEW_PURCHASE: "PURCHASE",
+  RENEWAL: "RENEWAL",
+  EXTRA_VOLUME: "PURCHASE",
+  EXTRA_TIME: "PURCHASE",
+} as const satisfies Record<CommerceOperation, "PURCHASE" | "RENEWAL">;
+
+/**
  * Every outcome a renewal operation can report, for both transports.
  *
  * A CLOSED SET, because these values cross a trust boundary: the browser

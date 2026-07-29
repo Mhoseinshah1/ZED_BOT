@@ -28,8 +28,14 @@ export {
   RENEWAL_OPTION_PUBLIC_ID_PATTERN,
   RENEWAL_ORIGINS,
   RENEWAL_QUOTE_TTL_SECONDS,
+  COMMERCE_OPERATIONS,
+  isCommerceOperation,
+  OPERATION_DISCOUNT_PURPOSE,
+  OPERATION_ORDER_TYPE,
+  OPERATION_SETTLE_ROLLOUT_KEY,
   SERVICE_OPERATIONS,
   renewalOptionPublicId,
+  type CommerceOperation,
   type CommerceResultCode,
   type MiniAppCommerceRolloutKey,
   type RenewalOrigin,
@@ -107,3 +113,40 @@ export {
   servicePublicId,
   type OwnedService,
 } from "./resolve-service.js";
+
+export {
+  buildOperationSnapshot,
+  checkoutExpiryMinutes,
+  checkoutPublicId,
+  createOperationCheckout,
+  isCheckoutPublicId,
+  issueQuoteForCheckout,
+  loadOwnedPendingCheckout,
+  type CheckoutCreateArgs,
+  type CheckoutCreateResult,
+  type CheckoutDraftDto,
+  type OperationPricing,
+  type QuoteDto,
+  type QuoteIssueResult,
+} from "./checkout.js";
+
+export {
+  calculateDiscountAmount,
+  claimDiscountUsage,
+  validateDiscountCode,
+  type DiscountClaimArgs,
+  type DiscountClaimOutcome,
+  type DiscountPurpose,
+  type DiscountRejection,
+  type DiscountValidation,
+} from "./discount.js";
+
+export {
+  openQuote,
+  quoteFingerprint,
+  QuoteConfigError,
+  sealQuote,
+  type QuoteFailure,
+  type QuoteOpenResult,
+  type QuotePayload,
+} from "./quote.js";
