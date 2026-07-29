@@ -17,6 +17,7 @@
     "@zedbot/database": "workspace:*",
     "@zedbot/force-join": "workspace:*",
     "@zedbot/payments": "workspace:*",
+    "@zedbot/service-renewal": "workspace:*",
     "@zedbot/shared": "workspace:*",
     "@zedbot/support-tickets": "workspace:*",
     "fastify": "^5.2.0",

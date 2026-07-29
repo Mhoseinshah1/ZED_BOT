@@ -32,7 +32,6 @@ actually been built, tested and pushed.
 
 ### Not yet landed in layer 1
 
-- Owner-scoped renewable-Service resolution moved into the package.
 - Renewal option listing, plan validity, frozen snapshot, authoritative quote.
 - Wallet settlement seam callable from both transports.
 - Provisioning intent + result classification boundary.
@@ -52,7 +51,19 @@ unchanged. Owner-scoped renewable resolution is now unblocked.
 The analysis that led there is kept below because it records why the obvious
 home was the wrong one.
 
-### Original analysis — extraction path
+### Superseded analysis — kept for its reasoning, NOT for its conclusion
+
+> **Superseded by `b197b87`.** The conclusion below — "move the capability layer
+> into `@zedbot/panel-adapters`" — is **wrong and was not implemented**. The
+> predicates consume Prisma `Panel`/`Service` row types, and
+> `@zedbot/panel-adapters` has zero dependencies and is deliberately
+> storage-independent; hosting them there would have made the adapter layer
+> depend on the schema. They landed in `@zedbot/service-renewal` instead, which
+> imports the capability tables *from* panel-adapters. **Capability extraction
+> is complete. It is not pending and must not be redone.**
+>
+> The dependency analysis in the table below is still accurate and is why the
+> move was possible at all; only the destination changed.
 
 Owner-scoped renewable resolution cannot move out of the bot until three
 predicates move with it: `panelTypesSupporting`, `serviceSupportsGlobalLifecycle`
@@ -69,15 +80,12 @@ The predicates themselves are portable. Their transitive needs are:
 | `panelOperationAvailable` | + `panelHasCredentials` | yes — local and pure |
 | `serviceSupportsGlobalLifecycle` | `classifyXuiRemoteModel` | yes — local and pure |
 
-**Recommended path:** move the pure capability layer into
-`@zedbot/panel-adapters`, beside the capability tables it already owns, and have
-both `apps/bot` (re-export from `panel-readiness.service.ts`, so no call site
-changes) and `@zedbot/service-renewal` import from there. Duplicating them into
-the renewal package is explicitly ruled out by the no-second-implementation
-guardrail.
-
-This is the first task of the next session; nothing downstream of it in layer 1
-can proceed first.
+**What was actually done** (`b197b87`): the pure capability layer moved into
+`packages/service-renewal/src/panel-capability.ts`, and
+`panel-readiness.service.ts` re-exports every symbol so no bot call site
+changed. Duplicating them was ruled out by the no-second-implementation
+guardrail; hosting them in `@zedbot/panel-adapters` was ruled out because that
+package must not learn about Prisma.
 
 ## Validation runs
 

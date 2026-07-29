@@ -45,3 +45,11 @@ export {
   SUPPORTED_XUI_VARIANTS,
   type XuiRemoteModel,
 } from "./panel-capability.js";
+
+export {
+  OPERABLE_SERVICE_STATUSES,
+  resolveOwnedService,
+  resolveOwnedServiceForUser,
+  servicePublicId,
+  type OwnedService,
+} from "./resolve-service.js";
