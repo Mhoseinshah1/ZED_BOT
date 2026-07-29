@@ -7,18 +7,22 @@ import {
   type Prisma,
   type Service,
   type User,
-  type UserGroup,
 } from "@zedbot/database";
 
+import { isRenewalPlanValid, renewalPlansForPanel } from "@zedbot/service-renewal";
+
 import type { RenewalDraft } from "../core/session.js";
-import { groupMatches } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
 import {
-  panelOperationAvailable,
   panelTypesSupporting,
   serviceSupportsGlobalLifecycle,
 } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
+
+// Plan listing and plan validity now live in @zedbot/service-renewal so the Mini
+// App API resolves renewal options through the same authority. Re-exported so
+// every existing bot call site is unchanged and there is one implementation.
+export { isRenewalPlanValid, renewalPlansForPanel };
 
 // =============================================================================
 // Renewal browsing + checkout creation (Phase 12). Strictly read-only until
@@ -101,56 +105,6 @@ export async function getRenewableServiceByShortId(
   // Legacy per-inbound XUI services are never renewable through the
   // global-client endpoints - same null contract as any other ineligibility.
   return match !== null && serviceSupportsGlobalLifecycle(match) ? match : null;
-}
-
-/**
- * Renewal plans for a service: active SERVICE_PRODUCTs of the SAME panel,
- * active category, visible to the user's group. Panel visibility to new
- * buyers (isVisible) is deliberately NOT required - the owner of an existing
- * service may renew it as long as the panel is ACTIVE.
- */
-export async function renewalPlansForPanel(
-  group: UserGroup,
-  panelId: string,
-): Promise<ProductWithRelations[]> {
-  const products = await prisma.product.findMany({
-    where: {
-      type: "SERVICE_PRODUCT",
-      isActive: true,
-      panelId,
-      category: { isActive: true },
-      panel: { status: PanelStatus.ACTIVE },
-    },
-    include: { category: true, panel: true },
-    orderBy: [
-      { category: { displayOrder: "asc" } },
-      { displayOrder: "asc" },
-      { priceToman: "asc" },
-      { createdAt: "asc" },
-    ],
-  });
-  return products.filter((p) => groupMatches(p.displayGroups, group));
-}
-
-/** Re-check that one plan is still valid for renewing this service. */
-export function isRenewalPlanValid(
-  product: ProductWithRelations,
-  service: Service,
-  group: UserGroup,
-): boolean {
-  return (
-    product.type === "SERVICE_PRODUCT" &&
-    product.isActive &&
-    product.category.isActive &&
-    product.panelId === service.panelId &&
-    product.panel !== null &&
-    // Capability gate: a panel whose adapter cannot renew must be blocked
-    // HERE, before payment - never discovered post-payment.
-    panelOperationAvailable(product.panel, "renewService") &&
-    // Remote-model gate: only GLOBAL_CLIENT XUI services may be renewed.
-    serviceSupportsGlobalLifecycle(service) &&
-    groupMatches(product.displayGroups, group)
-  );
 }
 
 /** Renewal checkout snapshot (shared with the Phase 15 wallet payment). */

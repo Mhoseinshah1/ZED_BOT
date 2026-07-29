@@ -6,9 +6,18 @@ import {
   type User,
   type UserGroup,
 } from "@zedbot/database";
+import {
+  groupMatches,
+  isProductStructurallySellable,
+  isProductVisible,
+} from "@zedbot/service-renewal";
 
-import { isPanelSellable, resolveProductInboundIds } from "./panel-readiness.service.js";
 import type { ProductWithRelations } from "./product.service.js";
+
+// The three catalog predicates now live in @zedbot/service-renewal so the Mini
+// App API asks the same questions rather than similar ones. Re-exported here so
+// every existing bot import keeps working and there is one implementation.
+export { groupMatches, isProductStructurallySellable, isProductVisible };
 
 // =============================================================================
 // User-facing catalog: which panels/products a given user may see and buy.
@@ -17,23 +26,6 @@ import type { ProductWithRelations } from "./product.service.js";
 // type" step - real panels configured by the admin drive the selection, and
 // categories/products are always filtered by the selected panel.
 // =============================================================================
-
-/**
- * Group visibility: a product is visible when its displayGroups array
- * contains the user's group (or "ALL"). Missing/empty/invalid displayGroups
- * fall back to the SAFE default: visible to group F only.
- */
-export function groupMatches(displayGroups: unknown, group: UserGroup): boolean {
-  if (Array.isArray(displayGroups)) {
-    const valid = displayGroups.filter(
-      (g): g is string => g === "F" || g === "N" || g === "N2" || g === "ALL",
-    );
-    if (valid.length > 0) {
-      return valid.includes("ALL") || valid.includes(group);
-    }
-  }
-  return group === "F";
-}
 
 /** Panels users may buy from: ACTIVE + visible, in display order. */
 export async function purchasablePanels(): Promise<Panel[]> {
@@ -107,55 +99,6 @@ export function categoriesOf(products: ProductWithRelations[]): ProductCategory[
     }
   }
   return [...seen.values()];
-}
-
-/**
- * Structural sellability of a product, INDEPENDENT of any user group: the
- * product is active, its category is active, and (for a SERVICE_PRODUCT) its
- * panel exists, is visible, is sellable (provisioning-ready), and its XUI
- * inbound selection is valid. This is the group-agnostic core of
- * `isProductVisible` — reused by admin surfaces that need to explain WHY a
- * product cannot currently reach checkout (readiness), where the per-audience
- * group filter is not meaningful. There is exactly ONE copy of these checks.
- */
-export function isProductStructurallySellable(product: ProductWithRelations): boolean {
-  if (!product.isActive || !product.category.isActive) {
-    return false;
-  }
-  if (product.type === "SERVICE_PRODUCT") {
-    // Sellability includes provisioning readiness: a panel with incomplete
-    // provisioning config (or an explicitly failed readiness test) must be
-    // caught HERE - before checkout/payment - never after the money moved.
-    if (
-      product.panel === null ||
-      !product.panel.isVisible ||
-      !isPanelSellable(product.panel)
-    ) {
-      return false;
-    }
-    // XUI: the product's inbound selection must stay inside the panel's
-    // allowlist - a violating product is unsellable BEFORE checkout/payment.
-    if (
-      product.panel.type === "XUI" &&
-      !resolveProductInboundIds(product.panel, product.inboundIds).ok
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/**
- * Re-checks that one specific product is still visible/purchasable for the
- * user (used when resolving callbacks and before checkout creation). This is
- * the SINGLE authoritative catalog predicate: group visibility on top of the
- * structural sellability core above.
- */
-export function isProductVisible(product: ProductWithRelations, group: UserGroup): boolean {
-  if (!groupMatches(product.displayGroups, group)) {
-    return false;
-  }
-  return isProductStructurallySellable(product);
 }
 
 // =============================================================================

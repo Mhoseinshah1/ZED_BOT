@@ -9,18 +9,17 @@ import {
   type Prisma,
   type Service,
   type User,
-  type UserGroup,
 } from "@zedbot/database";
 import { type AddServiceTimeResult } from "@zedbot/panel-adapters";
 import { errorMessage } from "@zedbot/shared";
 
+import { extraTimePackages, isExtraTimePackageValid } from "@zedbot/service-renewal";
+
 import { logger } from "../core/logger.js";
 import type { ExtraTimeDraft } from "../core/session.js";
-import { groupMatches } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import {
-  panelOperationAvailable,
   panelTypesSupporting,
   serviceSupportsGlobalLifecycle,
   XUI_LEGACY_OPERATION_TEXT,
@@ -137,54 +136,10 @@ export async function getExtraTimeServiceByShortId(
   return match !== null && serviceSupportsGlobalLifecycle(match) ? match : null;
 }
 
-/**
- * Extra-time packages: active same-panel SERVICE_PRODUCTs with
- * durationDays > 0 and priceToman > 0 in an active category, visible to the
- * user's group. (No explicit package kind exists yet - Phase 17 treats
- * these as the extra-time packages; a package's volumeGb, if set, is
- * IGNORED by the time calculation. A future `product.intent` migration can
- * refine this.) Ordered by duration, then price/displayOrder.
- */
-export async function extraTimePackages(
-  group: UserGroup,
-  panelId: string,
-): Promise<ProductWithRelations[]> {
-  const products = await prisma.product.findMany({
-    where: {
-      type: "SERVICE_PRODUCT",
-      isActive: true,
-      panelId,
-      durationDays: { gt: 0 },
-      priceToman: { gt: 0 },
-      category: { isActive: true },
-      panel: { status: PanelStatus.ACTIVE },
-    },
-    include: { category: true, panel: true },
-    orderBy: [{ durationDays: "asc" }, { priceToman: "asc" }, { displayOrder: "asc" }],
-  });
-  return products.filter((p) => groupMatches(p.displayGroups, group));
-}
-
-/** Re-check one package against the target service and user group. */
-export function isExtraTimePackageValid(
-  product: ProductWithRelations,
-  service: Service,
-  group: UserGroup,
-): boolean {
-  return (
-    product.type === "SERVICE_PRODUCT" &&
-    product.isActive &&
-    product.category.isActive &&
-    product.panelId === service.panelId &&
-    product.panel !== null &&
-    panelOperationAvailable(product.panel, "addTime") &&
-    // Remote-model gate: only GLOBAL_CLIENT XUI services take extra time.
-    serviceSupportsGlobalLifecycle(service) &&
-    (product.durationDays ?? 0) > 0 &&
-    product.priceToman > 0 &&
-    groupMatches(product.displayGroups, group)
-  );
-}
+// Package listing and package validity now live in @zedbot/service-renewal so
+// the Mini App API resolves extra-time options through the same authority.
+// Re-exported so every existing bot call site is unchanged.
+export { extraTimePackages, isExtraTimePackageValid };
 
 // --- checkout (card-to-card path) ------------------------------------------------------
 

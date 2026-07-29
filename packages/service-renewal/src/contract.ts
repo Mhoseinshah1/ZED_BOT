@@ -34,6 +34,66 @@ export const MINIAPP_WALLET_RENEWAL_ENABLED_KEY = "miniapp_wallet_renewal_enable
 export const MINIAPP_WALLET_RENEWAL_ENABLED_DEFAULT = false;
 
 /**
+ * The rest of the layer-1 rollout switches.
+ *
+ * THE NAMES ARE NOT NEW. `docs/miniapp-user-parity-matrix.md` assigned a
+ * rollout setting to every capability before any of them was built, and these
+ * are those names — picking different ones now would leave the matrix pointing
+ * at switches that do not exist. All follow the repository's existing
+ * `<area>_<thing>_enabled` Setting convention (`wallet_payment_enabled`,
+ * `wallet_topup_enabled`, `representative_program_enabled`).
+ *
+ * THEY DO NOT OVERLAP. Each one guards a different thing a user can do, so an
+ * operator can open the reading surface without opening any spending surface,
+ * and can close one payment surface without closing the others:
+ *
+ *   browse    — reading the catalog. No writes, no money.
+ *   checkout  — creating a draft, applying a discount, asking for a quote.
+ *               Writes a draft row; still no money.
+ *   purchase  — settling a NEW subscription from the wallet.
+ *   renewal   — settling a renewal from the wallet.
+ *   addons    — settling extra volume or extra time from the wallet.
+ *
+ * Every one of them defaults false and none is `isPublic`.
+ */
+export const MINIAPP_COMMERCE_BROWSE_ENABLED_KEY = "miniapp_commerce_browse_enabled";
+export const MINIAPP_COMMERCE_CHECKOUT_ENABLED_KEY = "miniapp_commerce_checkout_enabled";
+export const MINIAPP_WALLET_PURCHASE_ENABLED_KEY = "miniapp_wallet_purchase_enabled";
+export const MINIAPP_WALLET_ADDONS_ENABLED_KEY = "miniapp_wallet_addons_enabled";
+
+/**
+ * Every layer-1 rollout key, so a test can assert the whole set is off and an
+ * operator has one list to read.
+ */
+export const MINIAPP_COMMERCE_ROLLOUT_KEYS = [
+  MINIAPP_COMMERCE_BROWSE_ENABLED_KEY,
+  MINIAPP_COMMERCE_CHECKOUT_ENABLED_KEY,
+  MINIAPP_WALLET_PURCHASE_ENABLED_KEY,
+  MINIAPP_WALLET_RENEWAL_ENABLED_KEY,
+  MINIAPP_WALLET_ADDONS_ENABLED_KEY,
+] as const;
+
+export type MiniAppCommerceRolloutKey = (typeof MINIAPP_COMMERCE_ROLLOUT_KEYS)[number];
+
+/**
+ * The operations a person can perform against a Service they already own.
+ *
+ * One vocabulary for all three because they are the same shape of transaction:
+ * pick an option, freeze a price, pay from the wallet, mutate an existing panel
+ * account. Where they genuinely differ — which panel capability is needed, which
+ * service states qualify, what the option grants — the difference is stated once,
+ * in a table, rather than spread across three near-identical modules.
+ */
+export const SERVICE_OPERATIONS = ["RENEWAL", "EXTRA_VOLUME", "EXTRA_TIME"] as const;
+
+export type ServiceOperation = (typeof SERVICE_OPERATIONS)[number];
+
+/** True when `value` names a service operation. */
+export function isServiceOperation(value: unknown): value is ServiceOperation {
+  return typeof value === "string" && (SERVICE_OPERATIONS as readonly string[]).includes(value);
+}
+
+/**
  * Every outcome a renewal operation can report, for both transports.
  *
  * A CLOSED SET, because these values cross a trust boundary: the browser
@@ -46,15 +106,21 @@ export const MINIAPP_WALLET_RENEWAL_ENABLED_DEFAULT = false;
  * a DELETED service and another user's service alike — a caller who can tell
  * those apart can enumerate other people's services one probe at a time.
  */
-export const RENEWAL_RESULT_CODES = [
-  /** The rollout switch is off right now. */
-  "RENEWAL_DISABLED",
+export const COMMERCE_RESULT_CODES = [
+  /** The rollout switch for this surface is off right now. */
+  "FEATURE_DISABLED",
   /** No service the caller owns matches, for any reason. Deliberately vague. */
   "SERVICE_NOT_FOUND",
-  /** Found and owned, but not in a state or on a panel that can be renewed. */
-  "SERVICE_NOT_RENEWABLE",
-  /** The chosen renewal option is gone, changed, or never applied here. */
-  "RENEWAL_OPTION_UNAVAILABLE",
+  /** Found and owned, but not in a state or on a panel that can do this. */
+  "SERVICE_NOT_ELIGIBLE",
+  /** The chosen option is gone, changed, or never applied here. */
+  "OPTION_UNAVAILABLE",
+  /** The chosen product is hidden, inactive, or not sellable right now. */
+  "PRODUCT_UNAVAILABLE",
+  /** The referenced checkout draft is missing, foreign, settled or expired. */
+  "CHECKOUT_UNAVAILABLE",
+  /** The discount code does not apply. One code for every reason it might not. */
+  "DISCOUNT_INVALID",
   /** The quote outlived its short window. */
   "QUOTE_EXPIRED",
   /** The quote is still young but the world moved: price, discount or state. */
@@ -71,7 +137,7 @@ export const RENEWAL_RESULT_CODES = [
   "INTERNAL",
 ] as const;
 
-export type RenewalResultCode = (typeof RENEWAL_RESULT_CODES)[number];
+export type CommerceResultCode = (typeof COMMERCE_RESULT_CODES)[number];
 
 /**
  * The codes that mean "the money moved". Used to decide whether a response is
@@ -79,14 +145,19 @@ export type RenewalResultCode = (typeof RENEWAL_RESULT_CODES)[number];
  * settling — the two must never be rendered the same way, because one invites
  * a second click and the other must forbid it.
  */
-export const RENEWAL_SETTLED_CODES: readonly RenewalResultCode[] = [
+export const COMMERCE_SETTLED_CODES: readonly CommerceResultCode[] = [
   "PAYMENT_PENDING",
   "RECONCILIATION_REQUIRED",
 ];
 
 /** True when the code means a charge has already happened. */
-export function renewalCodeIsSettled(code: RenewalResultCode): boolean {
-  return RENEWAL_SETTLED_CODES.includes(code);
+export function commerceCodeIsSettled(code: CommerceResultCode): boolean {
+  return COMMERCE_SETTLED_CODES.includes(code);
+}
+
+/** True when `value` is one of the closed set of result codes. */
+export function isCommerceResultCode(value: unknown): value is CommerceResultCode {
+  return typeof value === "string" && (COMMERCE_RESULT_CODES as readonly string[]).includes(value);
 }
 
 /**

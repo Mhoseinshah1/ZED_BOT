@@ -1,20 +1,14 @@
-import {
-  prisma,
-  type Panel,
-  type Prisma,
-  type Product,
-  type ProductCategory,
-  type ProductType,
-} from "@zedbot/database";
+import { prisma, type Prisma, type Product, type ProductType } from "@zedbot/database";
+import type { ProductWithRelations } from "@zedbot/service-renewal";
 
 import { OPS_EVENTS, writeSystemLog } from "./system-log.service.js";
 
 export const PRODUCTS_PAGE_SIZE = 8;
 
-export type ProductWithRelations = Product & {
-  category: ProductCategory;
-  panel: Panel | null;
-};
+// The shape lives in @zedbot/service-renewal because the catalog predicates that
+// consume it do, and the Mini App API needs both. Re-exported under the same
+// name so every existing bot import is unchanged.
+export type { ProductWithRelations };
 
 /** S/O/A by type; V (active) / X (inactive) by status (Fix C). */
 export type ProductListFilter = "S" | "O" | "A" | "V" | "X";
