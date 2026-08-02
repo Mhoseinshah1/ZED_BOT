@@ -800,6 +800,12 @@ export async function createPurchaseCheckout(
 
   try {
     const checkout = await prisma.$transaction(async (tx) => {
+      // Serialize the "cancel old then create new" transition across every API
+      // replica.  There may be no existing checkout row to lock, so a row lock
+      // cannot close the empty-set race; a transaction-scoped PostgreSQL
+      // advisory lock provides a stable lock row derived from the owner and
+      // product and is released automatically on commit/rollback.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`zedbot-purchase-checkout:${args.userId}:${product.id}`}))`;
       // Repeated taps must not pile up parallel payable drafts for one product.
       await tx.checkoutSession.updateMany({
         where: {
