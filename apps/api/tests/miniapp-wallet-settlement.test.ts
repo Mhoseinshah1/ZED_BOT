@@ -94,14 +94,22 @@ function args(
   overrides: Partial<WalletSettlementArgs> = {},
 ): WalletSettlementArgs {
   const finalPriceToman = overrides.finalPriceToman ?? 100_000;
+  const discountAmountToman = overrides.discountAmountToman ?? 0;
+  const originalPriceToman = overrides.originalPriceToman ?? finalPriceToman + discountAmountToman;
   return {
     userId,
     orderType: "SERVICE_RENEWAL",
     productId,
     serviceId: null,
-    snapshot: { productId, productName: "ws-product", originalPriceToman: finalPriceToman },
-    originalPriceToman: finalPriceToman,
-    discountAmountToman: 0,
+    snapshot: {
+      productId,
+      productName: "ws-product",
+      originalPriceToman,
+      discountAmountToman,
+      finalPriceToman,
+    },
+    originalPriceToman,
+    discountAmountToman,
     finalPriceToman,
     discountCodeId: null,
     idempotencyKey: `ws-${runTag}-${(seq += 1)}-${Math.random().toString(36).slice(2, 10)}`,

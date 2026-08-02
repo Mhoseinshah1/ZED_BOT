@@ -268,6 +268,9 @@ async function executeWalletOrderPayment(
  * render as `undefined` on the one day an assumption stops holding.
  */
 const SETTLEMENT_FAILURE_TEXT: Record<WalletSettlementFailure, string> = {
+  // A bot-authored snapshot should always satisfy this. Fail closed with the
+  // same restart instruction used for any other corrupt/stale draft.
+  INVALID_FINANCIAL_INPUT: DRAFT_STALE_TEXT,
   // Unreachable from a bot flow: the admin/user middleware refuses a non-ACTIVE
   // account long before a pre-invoice exists. Mapped to the restart sentence
   // rather than left out, so it can never render as `undefined`.

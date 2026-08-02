@@ -63,6 +63,7 @@ import { onWalletBalanceChanged } from "./low-balance.js";
 
 /** Reason code for a settlement that did not happen. A closed set. */
 export type WalletSettlementFailure =
+  | "INVALID_FINANCIAL_INPUT"
   | "USER_NOT_ACTIVE"
   | "WALLET_DISABLED"
   | "DRAFT_STALE"
@@ -104,6 +105,40 @@ function snapshotString(snapshot: Record<string, unknown>, key: string): string 
 function snapshotInt(snapshot: Record<string, unknown>, key: string): number | null {
   const value = snapshot[key];
   return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+/**
+ * Validate every monetary value at the settlement boundary.
+ *
+ * Callers normally obtain these values from a frozen checkout, but this is the
+ * final authority before durable financial effects.  JavaScript numbers also
+ * permit fractions, infinities and unsafe integers that PostgreSQL's integer
+ * columns cannot represent faithfully, so none of those may reach Prisma.
+ */
+function hasValidFinancialInvariant(args: WalletSettlementArgs): boolean {
+  const snapshot = args.snapshot as Record<string, unknown>;
+  const original = args.originalPriceToman;
+  const discount = args.discountAmountToman;
+  const final = args.finalPriceToman;
+
+  if (
+    !Number.isSafeInteger(original) ||
+    !Number.isSafeInteger(discount) ||
+    !Number.isSafeInteger(final) ||
+    original <= 0 ||
+    discount < 0 ||
+    final <= 0 ||
+    discount > original ||
+    original - discount !== final
+  ) {
+    return false;
+  }
+
+  return (
+    snapshotInt(snapshot, "originalPriceToman") === original &&
+    snapshotInt(snapshot, "discountAmountToman") === discount &&
+    snapshotInt(snapshot, "finalPriceToman") === final
+  );
 }
 
 function snapshotIntArray(snapshot: Record<string, unknown>, key: string): number[] | null {
@@ -257,6 +292,13 @@ function storedFingerprint(payment: Payment): string | null {
 export async function settleWalletOrder(
   args: WalletSettlementArgs,
 ): Promise<WalletSettlementResult> {
+  // Reject malformed or internally inconsistent money before a database read,
+  // feature callback or transaction. The settlement boundary never trusts a
+  // transport merely because it usually supplies a server-authored checkout.
+  if (!hasValidFinancialInvariant(args)) {
+    return { ok: false, code: "INVALID_FINANCIAL_INPUT" };
+  }
+
   const fingerprint = settlementPayloadFingerprint({
     userId: args.userId,
     orderType: args.orderType,
