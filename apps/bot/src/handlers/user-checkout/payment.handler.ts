@@ -20,12 +20,14 @@ import {
   getOwnedCheckout,
 } from "../../services/checkout.service.js";
 import {
-  fulfillSettledGatewayOrder,
   getOrCreateGatewayPayment,
   getUserGatewayPaymentByShortId,
   isOnlineProvider,
   settleGatewayPayment,
 } from "../../services/gateway-payment.service.js";
+import {
+  fulfillSettledGatewayOrder,
+} from "../../services/gateway-settlement-runner.service.js";
 import {
   DUPLICATE_SUCCESS_USER_TEXT,
   notifyDuplicateSuccessCase,

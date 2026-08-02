@@ -192,6 +192,187 @@ export const FAILURE_TEXT: Record<ApiFailureCode, FailureText> = {
     body: "درخواست دیگری با همین شناسه پیش‌تر ثبت شده بود. لطفاً از نو شروع کنید.",
     retryable: false,
   },
+  // --- commerce (miniapp-commerce-parity) ------------------------------------
+  FEATURE_DISABLED: {
+    title: "این بخش فعال نیست",
+    body: "خرید از مینی‌اپ هنوز برای این بخش فعال نشده است. از داخل ربات اقدام کنید.",
+    action: "bot",
+    retryable: false,
+  },
+  FEATURE_UNAVAILABLE: {
+    title: "بخش خرید موقتاً در دسترس نیست",
+    body: "لطفاً کمی بعد دوباره تلاش کنید.",
+    retryable: true,
+  },
+  PRODUCT_UNAVAILABLE: {
+    title: "محصول در دسترس نیست",
+    body: "این محصول دیگر قابل خرید نیست. فهرست را دوباره باز کنید.",
+    retryable: false,
+  },
+  USERNAME_INVALID: {
+    title: "نام کاربری نامعتبر است",
+    body: "نام کاربری باید با قواعد اعلام‌شده مطابقت داشته باشد.",
+    retryable: false,
+  },
+  USERNAME_UNAVAILABLE: {
+    title: "نام کاربری آزاد نیست",
+    body: "این نام قبلاً گرفته شده است؛ نام دیگری انتخاب کنید.",
+    retryable: false,
+  },
+  USERNAME_UNVERIFIABLE: {
+    title: "بررسی نام کاربری ممکن نشد",
+    body: "ارتباط با پنل برقرار نشد. کمی بعد دوباره تلاش کنید.",
+    retryable: true,
+  },
+  NOTE_INVALID: {
+    title: "یادداشت نامعتبر است",
+    body: "متن یادداشت را کوتاه‌تر و ساده‌تر وارد کنید.",
+    retryable: false,
+  },
+  DISCOUNT_INVALID: {
+    title: "کد تخفیف معتبر نیست",
+    body: "کد واردشده معتبر، فعال یا قابل استفاده برای این خرید نیست.",
+    retryable: false,
+  },
+  RESERVATION_NOT_FOUND: {
+    title: "رزرو نام کاربری یافت نشد",
+    body: "رزرو منقضی شده است. نام کاربری را دوباره انتخاب کنید.",
+    retryable: false,
+  },
+  RESERVATION_NOT_CLAIMABLE: {
+    title: "رزرو نام کاربری قابل استفاده نیست",
+    body: "رزرو منقضی یا مصرف شده است. خرید را از ابتدا شروع کنید.",
+    retryable: false,
+  },
+  DRAFT_EXPIRED: {
+    title: "پیش‌فاکتور منقضی شده است",
+    body: "برای ادامه، پیش‌فاکتور را دوباره بسازید.",
+    retryable: false,
+  },
+  CHECKOUT_NOT_PAYABLE: {
+    title: "این پرداخت قابل ادامه نیست",
+    body: "وضعیت سفارش تغییر کرده است. جزئیات سفارش را ببینید.",
+    retryable: false,
+  },
+  CHECKOUT_EXPIRED: {
+    title: "مهلت پرداخت تمام شده است",
+    body: "سفارش منقضی شد. در صورت تمایل دوباره خرید کنید.",
+    retryable: false,
+  },
+  METHOD_UNAVAILABLE: {
+    title: "روش پرداخت در دسترس نیست",
+    body: "این روش الان فعال نیست؛ روش دیگری انتخاب کنید.",
+    retryable: false,
+  },
+  INSUFFICIENT_BALANCE: {
+    title: "موجودی کیف پول کافی نیست",
+    body: "ابتدا کیف پول را شارژ کنید یا روش پرداخت دیگری انتخاب کنید.",
+    retryable: false,
+  },
+  WALLET_PAYMENT_DISABLED: {
+    title: "پرداخت با کیف پول غیرفعال است",
+    body: "روش پرداخت دیگری انتخاب کنید.",
+    retryable: false,
+  },
+  NEEDS_CUSTOMER_INPUT: {
+    title: "تکمیل اطلاعات لازم است",
+    body: "قبل از پرداخت باید فرم اطلاعات این محصول را کامل کنید.",
+    retryable: false,
+  },
+  AMOUNT_OUT_OF_RANGE: {
+    title: "مبلغ خارج از محدوده است",
+    body: "مبلغ باید در محدودهٔ مجاز شارژ کیف پول باشد.",
+    retryable: false,
+  },
+  RECEIPT_ALREADY_SUBMITTED: {
+    title: "رسید قبلاً ثبت شده است",
+    body: "رسید این پرداخت در انتظار بررسی است.",
+    retryable: false,
+  },
+  RECEIPT_FILE_INVALID: {
+    title: "فایل رسید قابل قبول نیست",
+    body: "فقط تصویر JPG/PNG یا PDF تا ۵ مگابایت پذیرفته می‌شود.",
+    retryable: false,
+  },
+  GATEWAY_UNAVAILABLE: {
+    title: "درگاه پرداخت در دسترس نیست",
+    body: "کمی بعد دوباره تلاش کنید یا روش دیگری انتخاب کنید.",
+    retryable: true,
+  },
+  SERVICE_NOT_ELIGIBLE: {
+    title: "این سرویس واجد شرایط نیست",
+    body: "این عملیات برای سرویس انتخابی در دسترس نیست.",
+    retryable: false,
+  },
+  QR_UNAVAILABLE: {
+    title: "کد QR در دسترس نیست",
+    body: "برای این مورد لینکی ثبت نشده است.",
+    retryable: false,
+  },
+  INPUT_CLOSED: {
+    title: "فرم بسته شده است",
+    body: "این فرم دیگر قابل ویرایش نیست.",
+    retryable: false,
+  },
+  INPUT_INVALID: {
+    title: "مقادیر فرم نامعتبر است",
+    body: "مقادیر واردشده را بررسی و دوباره ارسال کنید.",
+    retryable: false,
+  },
+};
+
+/** Checkout lifecycle — the repository's real CheckoutStatus values. */
+export const CHECKOUT_STATUS_TEXT: Record<string, string> = {
+  PENDING: "در انتظار پرداخت",
+  PAID: "پرداخت‌شده",
+  EXPIRED: "منقضی",
+  CANCELLED: "لغوشده",
+  FAILED_REFUNDED: "ناموفق (بازگشت وجه)",
+  COMPLETED: "تکمیل‌شده",
+};
+
+/** Payment lifecycle — the repository's real PaymentStatus values. */
+export const PAYMENT_STATUS_TEXT: Record<string, string> = {
+  PENDING: "در انتظار پرداخت",
+  PENDING_REVIEW: "در انتظار بررسی رسید",
+  PROCESSING: "در حال پردازش",
+  APPROVED: "تایید شده",
+  REJECTED: "رد شده",
+  FAILED: "ناموفق",
+  EXPIRED: "منقضی",
+  CANCELLED: "لغوشده",
+  DELETED: "حذف‌شده",
+};
+
+/** Order lifecycle — the repository's real OrderStatus values. */
+export const ORDER_STATUS_TEXT: Record<string, string> = {
+  PENDING_PAYMENT: "در انتظار پرداخت",
+  WAITING_RECEIPT: "در انتظار رسید",
+  PENDING_REVIEW: "در انتظار بررسی",
+  PAID: "پرداخت‌شده — در صف تحویل",
+  PROVISIONING: "در حال ساخت سرویس",
+  COMPLETED: "تکمیل‌شده",
+  FAILED: "ناموفق (وجه به کیف پول برگشت)",
+  CANCELLED: "لغوشده",
+  REFUNDED: "بازگشت وجه",
+};
+
+/** Other-product user-facing display states (deriveUserOrderStatus codes). */
+export const OTHER_ORDER_STATUS_TEXT: Record<string, string> = {
+  waiting_info: "در انتظار تکمیل اطلاعات",
+  waiting_delivery: "در انتظار تحویل",
+  delivered_manual: "تحویل شد",
+  delivered_stock: "تحویل شد",
+  pending: "در حال پیگیری",
+  closed: "بسته‌شده",
+};
+
+/** Payment method types (PaymentGatewayType subset the Mini App offers). */
+export const METHOD_TYPE_TEXT: Record<string, string> = {
+  CARD_TO_CARD: "کارت به کارت",
+  ZARINPAL: "زرین‌پال",
+  NOWPAYMENTS: "پرداخت کریپتو",
+  TELEGRAM_STARS: "استارز تلگرام",
 };
 
 /** Service lifecycle states, in the same words the bot uses. */
@@ -465,4 +646,91 @@ export const UI = {
   // is about to write keeps the read-only notice on other screens honest.
   supportWriteNotice:
     "ثبت تیکت و پاسخ در همین‌جا انجام می‌شود؛ خرید، پرداخت و تغییر سرویس‌ها همچنان در ربات است.",
+} as const;
+
+export const COMMERCE_UI = {
+  buyTab: "خرید",
+  ordersTab: "سفارش‌ها",
+  buyTitle: "خرید",
+  buySubscription: "خرید اشتراک",
+  otherProducts: "محصولات دیگر",
+  pricing: "تعرفه‌ها",
+  pendingPayments: "پرداخت‌های در انتظار",
+  recentOrders: "سفارش‌های اخیر",
+  choosePanel: "انتخاب لوکیشن / پنل",
+  chooseProduct: "انتخاب محصول",
+  volume: "حجم",
+  duration: "مدت",
+  days: "روز",
+  gb: "گیگابایت",
+  toman: "تومان",
+  usernameStep: "انتخاب نام کاربری سرویس",
+  usernameCustom: "نام دلخواه",
+  usernameRandom: "ساخت نام تصادفی",
+  usernamePlaceholder: "مثلاً my_vpn_01",
+  continueLabel: "ادامه",
+  noteLabel: "یادداشت (اختیاری)",
+  discountLabel: "کد تخفیف",
+  applyDiscount: "اعمال کد",
+  clearDiscount: "حذف کد",
+  preInvoice: "پیش‌فاکتور",
+  originalPrice: "قیمت",
+  discountAmount: "تخفیف",
+  finalPrice: "مبلغ قابل پرداخت",
+  payWithWallet: "پرداخت از کیف پول",
+  goToPayment: "ادامه و انتخاب روش پرداخت",
+  paymentMethods: "روش پرداخت",
+  cardToCardTitle: "کارت به کارت",
+  cardNumber: "شماره کارت",
+  cardOwner: "به نام",
+  transferAmount: "مبلغ واریز",
+  copy: "کپی",
+  copied: "کپی شد ✓",
+  uploadReceipt: "ارسال رسید",
+  receiptHint: "تصویر JPG/PNG یا PDF، حداکثر ۵ مگابایت — یا متن رسید را بنویسید.",
+  receiptTextPlaceholder: "متن رسید / کد پیگیری",
+  submitReceipt: "ثبت رسید",
+  receiptSubmitted: "رسید ثبت شد و در انتظار بررسی است ⏳",
+  openGateway: "رفتن به درگاه پرداخت",
+  openStars: "پرداخت با استارز",
+  checkStatus: "بررسی وضعیت پرداخت",
+  paymentStatusTitle: "وضعیت پرداخت",
+  orderLink: "مشاهده سفارش",
+  serviceLink: "مشاهده سرویس",
+  paid: "پرداخت انجام شد ✅",
+  provisioningNote: "سفارش پرداخت شد؛ تحویل به‌صورت خودکار انجام می‌شود و نتیجه همین‌جا و در ربات اعلام می‌شود.",
+  topupTitle: "شارژ کیف پول",
+  topupAmount: "مبلغ شارژ (تومان)",
+  topupCreate: "ادامه و پرداخت",
+  historyTitle: "سفارش‌ها",
+  orderDetail: "جزئیات سفارش",
+  otherOrderDetail: "جزئیات تحویل",
+  deliveredContent: "محتوای تحویل‌شده",
+  reconciliationPending: "این سفارش در حال بررسی مالی است؛ نتیجه اعلام می‌شود.",
+  inputFormTitle: "تکمیل اطلاعات سفارش",
+  inputRequired: "الزامی",
+  inputOptional: "اختیاری",
+  inputBack: "قبلی",
+  inputNext: "بعدی",
+  inputSkip: "رد کردن",
+  inputReview: "بازبینی و تایید",
+  inputSubmit: "ثبت نهایی",
+  inputSubmitted: "اطلاعات ثبت شد ✓ اکنون می‌توانید پرداخت را ادامه دهید.",
+  deliveryTitle: "اطلاعات اتصال",
+  subscriptionLink: "لینک اشتراک",
+  configs: "کانفیگ‌ها",
+  qrCode: "کد QR",
+  addonsTitle: "تمدید و افزودنی‌ها",
+  renew: "تمدید سرویس",
+  extraVolume: "خرید حجم اضافه",
+  extraTime: "خرید زمان اضافه",
+  notEligible: "در دسترس نیست",
+  choosePlan: "انتخاب پلن",
+  emptyList: "موردی نیست",
+  page: "صفحه",
+  next: "بعدی",
+  prev: "قبلی",
+  back: "بازگشت",
+  loadingMore: "در حال بارگذاری…",
+  pendingReviewNote: "رسید شما در انتظار بررسی است؛ نتیجه از همین‌جا و در ربات اعلام می‌شود.",
 } as const;

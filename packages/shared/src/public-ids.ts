@@ -111,3 +111,29 @@ export function isTicketPublicId(value: unknown): value is string {
 export function canonicalTicketPublicId(value: unknown): string | null {
   return canonicalPublicId(value, TICKET_PUBLIC_ID_PATTERN);
 }
+
+// --- commerce entities (miniapp-commerce-parity, Phase 1) ---------------------
+//
+// The same reasoning, extended to the commerce rows the Mini App must address:
+// checkouts, payments, orders, other-product orders, products, categories and
+// panels. The bot already renders 8-hex uuid prefixes for all of them in its
+// callback data (checkoutShortId, paymentShortId, productShortId, ...); these
+// constants name the one format both transports share. Resolution stays with
+// each caller — owner-scoped for owned rows, visibility-scoped for catalog
+// rows — via `id: { startsWith }` + `take: 2` ambiguity detection.
+
+/** Characters of the uuid taken — one convention for every commerce entity. */
+export const COMMERCE_SHORT_ID_LENGTH = 8;
+
+/** The public identifier for any commerce row addressed by uuid prefix. */
+export function commerceShortId(row: { id: string }): string {
+  return row.id.slice(0, COMMERCE_SHORT_ID_LENGTH);
+}
+
+/** Exactly the shape `commerceShortId` produces — same strictness as services. */
+export const COMMERCE_PUBLIC_ID_PATTERN = /^[0-9a-f]{8}$/i;
+
+/** Canonical lowercase commerce public id, or null. */
+export function canonicalCommercePublicId(value: unknown): string | null {
+  return canonicalPublicId(value, COMMERCE_PUBLIC_ID_PATTERN);
+}

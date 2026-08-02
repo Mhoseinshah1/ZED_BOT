@@ -22,6 +22,7 @@ import {
   OPERATION_DISCOUNT_PURPOSE,
   OPERATION_ORDER_TYPE,
   RENEWAL_QUOTE_TTL_SECONDS,
+  type CommerceOperation,
   type CommerceResultCode,
   type ServiceOperation,
 } from "./contract.js";
@@ -400,7 +401,7 @@ async function priceOperation(
  */
 export interface QuoteDto {
   quote: string;
-  operation: ServiceOperation;
+  operation: CommerceOperation;
   checkoutId: string;
   optionLabel: string;
   serviceLabel: string;
@@ -464,7 +465,7 @@ export async function issueQuoteForCheckout(
       ? (checkout.productSnapshot as Record<string, unknown>)
       : {};
   const productId = typeof snapshot.productId === "string" ? snapshot.productId : null;
-  if (productId === null || checkout.serviceId === null) {
+  if (productId === null || (operation !== "NEW_PURCHASE" && checkout.serviceId === null)) {
     return { ok: false, code: "CHECKOUT_UNAVAILABLE" };
   }
 
@@ -486,10 +487,10 @@ export async function issueQuoteForCheckout(
     discountCodeId: checkout.discountCodeId,
     discountAmountToman: checkout.discountAmountToman,
     finalPriceToman: checkout.finalPriceToman,
-    serviceId: state.service.id,
-    serviceStatus: state.service.status,
-    serviceExpiresAtMs: state.service.expiresAt?.getTime() ?? null,
-    serviceVolumeBytes: state.service.volumeBytes.toString(),
+    serviceId: state.service?.id ?? null,
+    serviceStatus: state.service?.status ?? null,
+    serviceExpiresAtMs: state.service?.expiresAt?.getTime() ?? null,
+    serviceVolumeBytes: state.service?.volumeBytes.toString() ?? null,
   });
 
   const quoteExpiresAtMs = nowMs + RENEWAL_QUOTE_TTL_SECONDS * 1000;
@@ -513,7 +514,9 @@ export async function issueQuoteForCheckout(
       operation,
       checkoutId: checkoutPublicId(checkout),
       optionLabel: typeof snapshot.productName === "string" ? snapshot.productName : "",
-      serviceLabel: state.service.username,
+      serviceLabel:
+        state.service?.username ??
+        (typeof snapshot.serviceUsername === "string" ? snapshot.serviceUsername : ""),
       originalPriceToman: checkout.originalPriceToman,
       discountCode: typeof snapshot.discountCode === "string" ? snapshot.discountCode : null,
       discountAmountToman: checkout.discountAmountToman,
@@ -527,8 +530,11 @@ export async function issueQuoteForCheckout(
       affordable: args.walletBalanceToman >= checkout.finalPriceToman,
       grantedDurationDays,
       grantedTrafficGb,
-      currentExpiresAt: state.service.expiresAt?.toISOString() ?? null,
-      expectedExpiresAt: expectedExpiry(operation, state.service, grantedDurationDays, nowMs),
+      currentExpiresAt: state.service?.expiresAt?.toISOString() ?? null,
+      expectedExpiresAt:
+        state.service === null || operation === "NEW_PURCHASE"
+          ? null
+          : expectedExpiry(operation, state.service, grantedDurationDays, nowMs),
       quoteExpiresAt: new Date(quoteExpiresAtMs).toISOString(),
     },
   };
@@ -564,14 +570,16 @@ async function loadQuoteState(
   db: Db,
   userId: string,
   productId: string,
-  serviceId: string,
-): Promise<{ product: ProductWithRelations; service: Service } | null> {
+  serviceId: string | null,
+): Promise<{ product: ProductWithRelations; service: Service | null } | null> {
   const [product, service] = await Promise.all([
     db.product.findUnique({ where: { id: productId }, include: { category: true, panel: true } }),
     // Owner-scoped in the WHERE, never checked afterwards.
-    db.service.findFirst({ where: { id: serviceId, userId } }),
+    serviceId === null
+      ? Promise.resolve(null)
+      : db.service.findFirst({ where: { id: serviceId, userId } }),
   ]);
-  if (product === null || service === null) {
+  if (product === null || (serviceId !== null && service === null)) {
     return null;
   }
   return { product, service };
@@ -583,7 +591,7 @@ export async function loadOwnedPendingCheckout(
   userId: string,
   publicCheckoutId: string,
   nowMs: number,
-): Promise<{ checkout: CheckoutSession; operation: ServiceOperation } | null> {
+): Promise<{ checkout: CheckoutSession; operation: CommerceOperation } | null> {
   if (!isCheckoutPublicId(publicCheckoutId)) {
     return null;
   }
@@ -612,7 +620,8 @@ export async function loadOwnedPendingCheckout(
 }
 
 /** Reverse of `OPERATION_ORDER_TYPE`, restricted to the service operations. */
-function operationOfOrderType(orderType: string | null): ServiceOperation | null {
+function operationOfOrderType(orderType: string | null): CommerceOperation | null {
+  if (orderType === "SERVICE_PURCHASE") return "NEW_PURCHASE";
   if (orderType === "SERVICE_RENEWAL") return "RENEWAL";
   if (orderType === "EXTRA_VOLUME") return "EXTRA_VOLUME";
   if (orderType === "EXTRA_TIME") return "EXTRA_TIME";

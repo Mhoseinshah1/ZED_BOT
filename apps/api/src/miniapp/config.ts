@@ -219,6 +219,39 @@ export function miniAppSupportClientRateLimit(): number {
   return miniAppSupportRateLimit() * SUPPORT_CLIENT_LIMIT_MULTIPLIER;
 }
 
+// --- commerce mutation ceiling --------------------------------------------------
+
+/**
+ * Production default: thirty commerce calls a minute, per user.
+ *
+ * A real buyer browses, reserves a username, quotes a couple of discount
+ * variations and confirms — a dozen calls. Thirty leaves room for hesitation
+ * and retries without letting a script hammer the pricing endpoints.
+ */
+export const MINIAPP_COMMERCE_RATE_LIMIT_DEFAULT = 30;
+/** Floor of one: zero would lock every user out of buying anything. */
+export const MINIAPP_COMMERCE_RATE_LIMIT_MIN = 1;
+export const MINIAPP_COMMERCE_RATE_LIMIT_MAX = 10_000;
+
+export function resolveMiniAppCommerceRateLimit(): ResolvedIntSetting {
+  return resolveClampedInt(
+    "MINIAPP_COMMERCE_RATE_LIMIT",
+    MINIAPP_COMMERCE_RATE_LIMIT_DEFAULT,
+    MINIAPP_COMMERCE_RATE_LIMIT_MIN,
+    MINIAPP_COMMERCE_RATE_LIMIT_MAX,
+  );
+}
+
+/** The per-minute commerce mutation ceiling, per user. Read per check. */
+export function miniAppCommerceRateLimit(): number {
+  return resolveMiniAppCommerceRateLimit().value;
+}
+
+/** Per-client ceiling, derived with the same multiplier logic as support. */
+export function miniAppCommerceClientRateLimit(): number {
+  return miniAppCommerceRateLimit() * SUPPORT_CLIENT_LIMIT_MULTIPLIER;
+}
+
 // --- startup report -----------------------------------------------------------
 
 /**
@@ -242,6 +275,11 @@ export function logMiniAppConfig(): void {
       name: "MINIAPP_SUPPORT_RATE_LIMIT",
       unit: "per minute per user",
       resolved: resolveMiniAppSupportRateLimit(),
+    },
+    {
+      name: "MINIAPP_COMMERCE_RATE_LIMIT",
+      unit: "per minute per user",
+      resolved: resolveMiniAppCommerceRateLimit(),
     },
     {
       name: "MINIAPP_INITDATA_MAX_AGE_SECONDS",

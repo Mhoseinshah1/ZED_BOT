@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -21,6 +21,7 @@ describe("TypeScript source integrity", () => {
     );
     const contaminated = [...candidates]
       .filter(Boolean)
+      .filter((file) => existsSync(resolve(repositoryRoot, file)))
       .filter((file) => readFileSync(resolve(repositoryRoot, file)).includes(0));
 
     expect(contaminated, `literal NUL byte found in: ${contaminated.join(", ")}`).toEqual([]);

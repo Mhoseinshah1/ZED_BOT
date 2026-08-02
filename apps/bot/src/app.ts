@@ -116,7 +116,6 @@ import {
   lowBalanceAdminHandler,
   lowBalanceAdminTextHandler,
 } from "./handlers/admin-settings/low-balance-admin.handler.js";
-import { miniAppCommerceAdminHandler } from "./handlers/admin-settings/miniapp-commerce-admin.handler.js";
 import {
   termsAdminHandler,
   termsAdminTextHandler,
@@ -130,6 +129,7 @@ import {
   diagnosticsAdminHandler,
   diagnosticsAdminTextHandler,
 } from "./handlers/admin-settings/diagnostics-admin.handler.js";
+import { miniAppCommerceAdminHandler } from "./handlers/admin-settings/miniapp-commerce-admin.handler.js";
 import {
   adminServiceOpsHandler,
   adminServiceOpsTextHandler,
@@ -311,10 +311,13 @@ export function createBot(token: string): Bot<BotContext> {
   // page (admin:lowbal:*) — master switch, boundaries, template preview and the
   // explicitly-confirmed backfill. Aggregate counts only; never names a user.
   adminArea.use(lowBalanceAdminHandler);
-  adminArea.use(miniAppCommerceAdminHandler);
   adminArea.use(adminRepresentativeHandler);
   adminArea.use(deviceGuidesHandler);
   adminArea.use(diagnosticsAdminHandler);
+  // Mini App commerce rollout (miniapp-commerce-parity): the nine OWNER-only
+  // miniapp_* switches (admin:mapp:* + admin:mini_app_settings). All default
+  // FALSE; toggles are atomic CAS; disabling never touches settled work.
+  adminArea.use(miniAppCommerceAdminHandler);
   // Admin Service Operations (feat/admin-service-operations): the per-Service
   // admin console (admin:svc:*). Read-only detail + refresh for any admin;
   // lifecycle mutations + the master switch OWNER-only and re-validated inside

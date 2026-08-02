@@ -80,12 +80,18 @@ describe.skipIf(!built)("mini app build output", () => {
       .join("\n");
     // A build-time leak is permanent: the bundle is one artifact served to
     // every visitor.
+    // "ZARINPAL"/"NOWPAYMENTS" alone are no longer forbidden: they are the
+    // PaymentGatewayType wire codes the commerce screens legitimately render
+    // through i18n. What must never appear are the credential-bearing env
+    // names and connection strings.
     for (const forbidden of [
       "APP_SECRET",
       "TELEGRAM_BOT_TOKEN",
       "DATABASE_URL",
-      "ZARINPAL",
-      "NOWPAYMENTS",
+      "ZARINPAL_MERCHANT_ID",
+      "ZARINPAL_CALLBACK_URL",
+      "NOWPAYMENTS_API_KEY",
+      "NOWPAYMENTS_IPN_SECRET",
       "postgresql://",
       "redis://",
     ]) {

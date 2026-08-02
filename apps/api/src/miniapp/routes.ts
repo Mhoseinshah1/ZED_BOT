@@ -15,7 +15,12 @@ import {
 import type { FastifyInstance, FastifyReply } from "fastify";
 
 import { evaluateMiniAppAccess, type MiniAppAccessUser } from "./access-policy.js";
-import { miniAppInitDataMaxAgeSeconds, miniAppSessionTtlSeconds } from "./config.js";
+import {
+  miniAppCommerceClientRateLimit,
+  miniAppCommerceRateLimit,
+  miniAppInitDataMaxAgeSeconds,
+  miniAppSessionTtlSeconds,
+} from "./config.js";
 import { clampPageSize, decodeCursor, encodeCursor, type CursorResource } from "./cursor.js";
 import {
   checkRequestOrigin,
@@ -32,18 +37,21 @@ import {
 } from "./serializers.js";
 import { supportFailureLog } from "./support-errors.js";
 import { registerSupportRoutes } from "./support-routes.js";
+import { registerCommerceRoutes } from "./commerce/routes.js";
 import { isSecureRequest } from "./transport.js";
 
 const logger = createLogger("api");
 
 // =============================================================================
-// Mini App HTTP surface — READ ONLY.
+// Mini App HTTP surface.
 //
-// Every route here answers a question. None of them changes anything a user
-// owns: no balance moves, no service is touched, no order is placed. The two
-// POSTs exist because minting and destroying a session are state changes on the
-// SESSION, not on the account, and both must be POSTs so they cannot be
-// triggered by a link or an <img> tag.
+// The routes in THIS module answer questions and mint/destroy sessions; they
+// change nothing a user owns. Mutations live in the modules registered inside
+// the secured plugin below — the Support Center (support-routes) and, behind
+// nine OWNER rollout switches that all default to off, the commerce surface
+// (commerce/routes). Every mutating module brings its own gate: TLS-in-prod,
+// same-origin, JSON content-type, dual rate limits and payload-bound
+// idempotency, calling the same domain authorities the bot calls.
 //
 // This module knows nothing about grammY, `BotContext`, message rendering or
 // keyboards, and nothing about panels. It reads rows the bot already wrote and
@@ -488,6 +496,19 @@ export async function miniAppRoutes(app: FastifyInstance): Promise<void> {
     registerSupportRoutes(secured, {
       allowedOrigins,
       production: process.env.NODE_ENV === "production",
+    });
+
+    // Commerce (miniapp-commerce-parity, Phase 1). Same session hook, its own
+    // dual rate-limit pair (a separate budget from support, so a buyer cannot
+    // starve their own ability to file a ticket), fresh fail-closed rollout
+    // switches inside every handler.
+    registerCommerceRoutes(secured, {
+      allowedOrigins,
+      production: process.env.NODE_ENV === "production",
+      limiters: {
+        perUser: new FixedWindowRateLimiter(miniAppCommerceRateLimit, 60_000),
+        perClient: new FixedWindowRateLimiter(miniAppCommerceClientRateLimit, 60_000),
+      },
     });
   });
 }
