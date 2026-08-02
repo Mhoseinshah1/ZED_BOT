@@ -11,7 +11,7 @@ describe("TypeScript source integrity", () => {
       execFileSync("git", args, { cwd: repositoryRoot, encoding: "utf8" });
     const candidates = new Set(
       [
-        git("diff", "--name-only", "9b9b4d9", "HEAD", "--", "*.ts", "*.tsx"),
+        git("ls-files", "--", "*.ts", "*.tsx"),
         git("diff", "--name-only", "--", "*.ts", "*.tsx"),
         git("ls-files", "--others", "--exclude-standard", "--", "*.ts", "*.tsx"),
       ]
