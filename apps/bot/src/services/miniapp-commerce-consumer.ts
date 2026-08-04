@@ -7,7 +7,10 @@ import {
   MINIAPP_COMMERCE_QUEUE_NAME,
 } from "@zedbot/shared";
 import { Worker, type Job } from "bullmq";
-import { executePaidCommerceOrder } from "@zedbot/service-renewal";
+import {
+  executePaidCommerceOrder,
+  reconcileCommerceOrder,
+} from "@zedbot/service-renewal";
 
 import type { DeliverySendApi } from "./other-product-delivery.service.js";
 
@@ -18,11 +21,15 @@ export interface MiniAppCommerceConsumer { stop: () => Promise<void> }
 async function fulfillOrder(_api: DeliverySendApi, orderId: string): Promise<string> {
   const order = await prisma.order.findUnique({ where: { id: orderId }, include: { user: true } });
   if (order === null) return "order-missing";
-  if (order.status !== OrderStatus.PAID) return "already-converged";
-  const result = await executePaidCommerceOrder(order.id);
-  if (!result.ok && result.classification === "UNCERTAIN_RECONCILIATION_REQUIRED") {
-    throw new Error(result.code);
+  if (order.status !== OrderStatus.PAID && order.status !== OrderStatus.PROVISIONING) {
+    return "already-converged";
   }
+  const result = order.status === OrderStatus.PROVISIONING
+    ? await reconcileCommerceOrder(order.id)
+    : await executePaidCommerceOrder(order.id);
+  // Uncertain and contended work is deliberately left PROVISIONING/PAID for
+  // the source-of-truth reconciliation sweep. Throwing here would ask BullMQ
+  // to repeat a possibly-applied panel mutation.
   return result.classification.toLowerCase();
 }
 

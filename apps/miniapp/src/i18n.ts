@@ -209,24 +209,9 @@ export const FAILURE_TEXT: Record<ApiFailureCode, FailureText> = {
     body: "این محصول دیگر قابل خرید نیست. فهرست را دوباره باز کنید.",
     retryable: false,
   },
-  USERNAME_INVALID: {
-    title: "نام کاربری نامعتبر است",
-    body: "نام کاربری باید با قواعد اعلام‌شده مطابقت داشته باشد.",
-    retryable: false,
-  },
-  USERNAME_UNAVAILABLE: {
-    title: "نام کاربری آزاد نیست",
-    body: "این نام قبلاً گرفته شده است؛ نام دیگری انتخاب کنید.",
-    retryable: false,
-  },
-  USERNAME_UNVERIFIABLE: {
-    title: "بررسی نام کاربری ممکن نشد",
-    body: "ارتباط با پنل برقرار نشد. کمی بعد دوباره تلاش کنید.",
-    retryable: true,
-  },
-  NOTE_INVALID: {
-    title: "یادداشت نامعتبر است",
-    body: "متن یادداشت را کوتاه‌تر و ساده‌تر وارد کنید.",
+  OPTION_UNAVAILABLE: {
+    title: "گزینه در دسترس نیست",
+    body: "این گزینه دیگر قابل انتخاب نیست. فهرست را تازه کنید.",
     retryable: false,
   },
   DISCOUNT_INVALID: {
@@ -234,89 +219,34 @@ export const FAILURE_TEXT: Record<ApiFailureCode, FailureText> = {
     body: "کد واردشده معتبر، فعال یا قابل استفاده برای این خرید نیست.",
     retryable: false,
   },
-  RESERVATION_NOT_FOUND: {
-    title: "رزرو نام کاربری یافت نشد",
-    body: "رزرو منقضی شده است. نام کاربری را دوباره انتخاب کنید.",
-    retryable: false,
-  },
-  RESERVATION_NOT_CLAIMABLE: {
-    title: "رزرو نام کاربری قابل استفاده نیست",
-    body: "رزرو منقضی یا مصرف شده است. خرید را از ابتدا شروع کنید.",
-    retryable: false,
-  },
-  DRAFT_EXPIRED: {
+  QUOTE_EXPIRED: {
     title: "پیش‌فاکتور منقضی شده است",
     body: "برای ادامه، پیش‌فاکتور را دوباره بسازید.",
     retryable: false,
   },
-  CHECKOUT_NOT_PAYABLE: {
+  QUOTE_STALE: {
+    title: "پیش‌فاکتور تغییر کرده است",
+    body: "مبلغ یا شرایط خرید تغییر کرده؛ پیش‌فاکتور تازه‌ای بسازید.",
+    retryable: false,
+  },
+  CHECKOUT_UNAVAILABLE: {
     title: "این پرداخت قابل ادامه نیست",
     body: "وضعیت سفارش تغییر کرده است. جزئیات سفارش را ببینید.",
     retryable: false,
   },
-  CHECKOUT_EXPIRED: {
-    title: "مهلت پرداخت تمام شده است",
-    body: "سفارش منقضی شد. در صورت تمایل دوباره خرید کنید.",
-    retryable: false,
-  },
-  METHOD_UNAVAILABLE: {
-    title: "روش پرداخت در دسترس نیست",
-    body: "این روش الان فعال نیست؛ روش دیگری انتخاب کنید.",
-    retryable: false,
-  },
   INSUFFICIENT_BALANCE: {
     title: "موجودی کیف پول کافی نیست",
-    body: "ابتدا کیف پول را شارژ کنید یا روش پرداخت دیگری انتخاب کنید.",
+    body: "برای ادامه، موجودی کیف پول کافی نیست.",
     retryable: false,
   },
-  WALLET_PAYMENT_DISABLED: {
+  WALLET_DISABLED: {
     title: "پرداخت با کیف پول غیرفعال است",
-    body: "روش پرداخت دیگری انتخاب کنید.",
+    body: "این روش اکنون فعال نیست.",
     retryable: false,
-  },
-  NEEDS_CUSTOMER_INPUT: {
-    title: "تکمیل اطلاعات لازم است",
-    body: "قبل از پرداخت باید فرم اطلاعات این محصول را کامل کنید.",
-    retryable: false,
-  },
-  AMOUNT_OUT_OF_RANGE: {
-    title: "مبلغ خارج از محدوده است",
-    body: "مبلغ باید در محدودهٔ مجاز شارژ کیف پول باشد.",
-    retryable: false,
-  },
-  RECEIPT_ALREADY_SUBMITTED: {
-    title: "رسید قبلاً ثبت شده است",
-    body: "رسید این پرداخت در انتظار بررسی است.",
-    retryable: false,
-  },
-  RECEIPT_FILE_INVALID: {
-    title: "فایل رسید قابل قبول نیست",
-    body: "فقط تصویر JPG/PNG یا PDF تا ۵ مگابایت پذیرفته می‌شود.",
-    retryable: false,
-  },
-  GATEWAY_UNAVAILABLE: {
-    title: "درگاه پرداخت در دسترس نیست",
-    body: "کمی بعد دوباره تلاش کنید یا روش دیگری انتخاب کنید.",
-    retryable: true,
   },
   SERVICE_NOT_ELIGIBLE: {
     title: "این سرویس واجد شرایط نیست",
     body: "این عملیات برای سرویس انتخابی در دسترس نیست.",
-    retryable: false,
-  },
-  QR_UNAVAILABLE: {
-    title: "کد QR در دسترس نیست",
-    body: "برای این مورد لینکی ثبت نشده است.",
-    retryable: false,
-  },
-  INPUT_CLOSED: {
-    title: "فرم بسته شده است",
-    body: "این فرم دیگر قابل ویرایش نیست.",
-    retryable: false,
-  },
-  INPUT_INVALID: {
-    title: "مقادیر فرم نامعتبر است",
-    body: "مقادیر واردشده را بررسی و دوباره ارسال کنید.",
     retryable: false,
   },
 };

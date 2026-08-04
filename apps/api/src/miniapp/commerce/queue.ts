@@ -57,8 +57,10 @@ export async function enqueueCommerceFollowUp(job: CommerceFollowUp): Promise<vo
     }
     const { name, ...data } = job;
     await target.add(name as MiniAppCommerceJobName, data, {
-      attempts: 5,
-      backoff: { type: "exponential", delay: 2_000 },
+      // A panel timeout may mean the remote mutation landed. Never let BullMQ
+      // blindly execute that mutation again; the reconciliation sweep reads
+      // panel truth and is the only safe follow-up for uncertain outcomes.
+      attempts: 1,
       removeOnComplete: 1000,
       removeOnFail: 5000,
     });
