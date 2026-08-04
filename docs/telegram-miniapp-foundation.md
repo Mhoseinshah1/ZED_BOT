@@ -236,6 +236,20 @@ no-store`, `X-Content-Type-Options: nosniff` and `Vary: Cookie`, and **no**
 | GET | `/support/tickets/:publicId/messages` | Keyset page of a thread. Oldest-first **within** a page; the cursor walks **backwards** to older messages. |
 | POST | `/support/tickets` | **Write.** Opens a ticket; `201` with the ticket. |
 | POST | `/support/tickets/:publicId/replies` | **Write.** Appends a user reply; `201` with the updated ticket. |
+| GET | `/commerce/flags` | The five wallet-commerce rollout switches as booleans, read fresh; missing rows are disabled (§4.9). |
+| GET | `/commerce/catalog` | The caller's service catalog (panels → categories → products), visibility-filtered by the shared domain predicate (§4.9). |
+| POST | `/commerce/quote` | **Write.** Atomically reserves the chosen username, creates the one durable pending checkout, and returns its authoritative sealed wallet quote (§4.9). |
+| POST | `/commerce/checkout` | Re-opens a sealed quote and returns its owner-scoped checkout. |
+| GET | `/commerce/checkouts/:publicId` | One checkout the caller owns, by 8-character public id. |
+| POST | `/commerce/pay/wallet` | **Write.** Pays a quoted draft from the wallet — the bot's atomic CAS deduction, ledger row, payment and order in ONE transaction; `201` with the paid checkout (§4.9). |
+| GET | `/commerce/payments/:publicId` | Owner-scoped status for the wallet payment and linked order/service. |
+| GET | `/commerce/services/:publicId/delivery` | Owner-safe delivery: username, status, subscription URL, config links (≤10). Gated by `miniapp_service_delivery_enabled`. |
+| GET | `/commerce/services/:publicId/qr` | Server-rendered PNG QR (`target=sub` or `target=config&index=n`) via the bot's own generator. |
+| GET | `/commerce/services/:publicId/addons` | Renewal plans + extra-volume/time packages: per-add-on switches AND the bot's real eligibility (renewableWhere / lifecycle / group). |
+| POST | `/commerce/services/:publicId/addon-quote` | Authoritative add-on pre-invoice (+ sealed draft token); discount purpose RENEWAL for renewals, PURCHASE for extras — the bot's rule. |
+| GET | `/commerce/history` | Unified orders + order-less payments, the bot's own 10/page merge. |
+| GET | `/commerce/payments?page=n` | Payment history list. |
+| GET | `/commerce/orders/:publicId` | Order detail linking payment / service / checkout public ids + reconciliation flag. |
 
 ### 4.1 What never crosses the boundary
 
@@ -574,6 +588,68 @@ broken, missing or expired, so refusing a ticket until they name one would lock
 out exactly the wrong people. The picker is fed by the existing authenticated
 `/services` route, so only public service ids ever reach the browser, and the
 server resolves whatever is sent inside the transaction that writes the ticket.
+
+### 4.9 Commerce, part A — one authority, two transports
+
+The commerce surface exists under a rule the Support Centre never needed:
+**every financial decision is made by the bot's own domain services**, imported
+by the API as `@zedbot/bot/services/*`. Catalog visibility is
+`isProductVisible`, pricing is `resolveEffectiveProductPrice` (representative
+pricing included), discount validity is `validateDiscountCode` +
+`claimDiscountUsage`, and the durable checkout is `createCheckoutSession` —
+the same function the bot's «تایید خرید» runs, with the same in-transaction
+username-reservation claim. The API computes no amount itself, and the
+frontend renders amounts without ever deriving one.
+
+What keeps this from dragging Telegram into the API: the one module where
+settlement was fused to fulfilment (`gateway-payment.service`) was split — the
+grammY-facing settlement runner stayed bot-only — and
+`apps/api/tests/miniapp-import-graph.test.ts` walks the API's **runtime**
+import graph (through the bot's sources) and fails on any grammy value import,
+handler, keyboard or `*-views` module. The old manifest-closure assertion in
+FJ13 now pins the narrower fact that only the sanctioned `@zedbot/bot` edge
+may carry grammy in its manifest.
+
+**Rollout.** Nine OWNER switches (`miniapp_commerce_enabled` first among
+them), all seeded `false`, toggled from the bot's admin settings, and re-read
+**fresh and fail-closed** at every commerce boundary — a database error blocks
+exactly like a disabled switch, and a switch flipped off between quote and
+confirm rejects the stale confirm with `FEATURE_DISABLED`. Provider-level
+gating stays authoritative and composes with these by AND.
+
+**The draft.** The bot keeps its pre-invoice draft in the grammY session; a
+browser gets no such trust. `/commerce/quote` computes the authoritative
+pre-invoice and returns a sealed capsule (AES-256-GCM, same key discipline as
+cursors) carrying the draft's IDENTITY — product, reservation, note, discount
+code, server-minted nonce — and deliberately **not its amounts**.
+`/commerce/checkout` reopens the capsule, re-validates visibility and the
+discount, re-prices from live rows (`SETTLE` mode, so an OWNER
+emergency-disable of representative checkout bites at the money boundary) and
+only then creates the `CheckoutSession`, recording `origin: "MINIAPP"` for
+bookkeeping. A price changed after the quote settles on the fresh price, never
+the browser's remembered one.
+
+**Idempotency.** Commerce mutations reuse `MiniAppRequestIdempotency` with the
+support rules verbatim: same key + same payload replays the original result;
+same key + different payload is a `409` conflict; a concurrent duplicate
+converges on the unique-row winner. Underneath, the money keeps its own
+guarantees (`Payment.idempotencyKey`, the settlement CAS, one order per
+checkout), so the request-level layer is a convenience, never the safety.
+
+**Identifiers.** Commerce rows are addressed by the same 8-hex uuid-prefix
+public ids as services and tickets (`commerceShortId`), resolved owner-scoped
+with `take: 2` ambiguity → 404. Internal uuids travel only inside sealed
+capsules, exactly as they do inside cursors.
+
+**Payments.** The wallet endpoint re-validates the sealed quote against live
+domain state and then runs the shared settlement transaction — conditional
+`balanceToman ≥ amount` deduction, ledger row with exact before/after,
+`Payment(APPROVED)`, `Order(PAID)`, in-transaction reservation claim and
+discount consumption. Only wallet payment is exposed by this Mini App scope;
+card, receipt, gateway, top-up, and OTHER_PRODUCT flows are intentionally not
+routes. Durable fulfillment is queued to the Bot process and executed by the
+transport-independent service executor, with reconciliation after uncertain
+panel outcomes.
 
 ---
 

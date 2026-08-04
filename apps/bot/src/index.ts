@@ -6,6 +6,7 @@ import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
 import { runShutdownSequence } from "./core/shutdown.js";
 import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
+import { startMiniAppCommerceConsumer } from "./services/miniapp-commerce-consumer.js";
 import { startReferralExecuteConsumer } from "./services/referral-execute-consumer.js";
 import { startStarsSubscriptionConsumer } from "./services/stars-subscription-consumer.js";
 import {
@@ -16,7 +17,9 @@ import { runningGitSha } from "./services/backup-health.service.js";
 import { startCheckoutInputRetentionLoop } from "./services/checkout-customer-input.service.js";
 import { startFreeTrialLoop } from "./services/free-trial.service.js";
 import { startFreeTrialCampaignLoop } from "./services/free-trial-campaign.service.js";
-import { startGatewaySettlementLoop } from "./services/gateway-payment.service.js";
+import {
+  startGatewaySettlementLoop,
+} from "./services/gateway-settlement-runner.service.js";
 import {
   RECOVERY_RECHECK_DELAY_MS,
   runStartupRecovery,
@@ -56,6 +59,12 @@ async function run(botToken: string): Promise<void> {
   // is unconfigured; the feature is disabled-by-default regardless.
   const starsSubscriptionConsumer = startStarsSubscriptionConsumer(bot.api);
 
+  // Mini App commerce follow-up consumer (miniapp-commerce-parity): runs the
+  // Telegram-facing half of Mini-App-initiated settlements (fulfilment,
+  // notices, admin receipt fan-out). Null when Redis is unconfigured; the
+  // settlement sweep remains the recovery path either way.
+  const miniAppCommerceConsumer = startMiniAppCommerceConsumer(bot.api);
+
   // Referral commission EXECUTE consumer (financial-safety phase): runs the
   // idempotent wallet credit / no-overdraft reversal / debt recovery for jobs the
   // worker (and the live after-commit hook) enqueue. Null when Redis is
@@ -93,6 +102,9 @@ async function run(botToken: string): Promise<void> {
         stopConsumers: async () => {
           if (autoRenewalConsumer !== null) {
             await autoRenewalConsumer.stop();
+          }
+          if (miniAppCommerceConsumer !== null) {
+            await miniAppCommerceConsumer.stop();
           }
           if (starsSubscriptionConsumer !== null) {
             await starsSubscriptionConsumer.stop();

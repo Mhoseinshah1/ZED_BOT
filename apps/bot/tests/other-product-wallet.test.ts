@@ -6,7 +6,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 process.env.APP_SECRET ??= "other-product-wallet-tests-0001";
 
 import type { CheckoutDraft } from "../src/core/session.js";
-import { settleGatewayPayment, fulfillSettledGatewayOrder } from "../src/services/gateway-payment.service.js";
+import {
+  settleGatewayPayment,
+} from "../src/services/gateway-payment.service.js";
+import {
+  fulfillSettledGatewayOrder,
+} from "../src/services/gateway-settlement-runner.service.js";
 import {
   dispatchPaidOrderFulfillment,
   fulfillmentConfirmationLine,

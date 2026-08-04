@@ -206,6 +206,41 @@ export {
 } from "./username-reservation.js";
 
 export {
+  acquireServiceLock,
+  checkAndArmCooldown,
+  clearCooldown,
+  isLockBackendAvailable,
+  RECONCILE_LOCK_WAIT_MS,
+  resetServiceLockClientForTests,
+  SERVICE_LOCK_BUSY_TEXT,
+  SERVICE_LOCK_LOST_TEXT,
+  SERVICE_LOCK_TTL_MS,
+  SERVICE_LOCK_UNAVAILABLE_TEXT,
+  SERVICE_LOCK_WAIT_MS,
+  serviceDiagnosticsCooldownKey,
+  serviceOperationLockKey,
+  serviceProvisioningLockKey,
+  type CooldownGate,
+  type ServiceLock,
+  type ServiceLockAcquisition,
+} from "./service-lock.js";
+
+export {
+  COMMERCE_OPERATION_APPLIED_EVENT,
+  COMMERCE_OPERATION_INTENT_EVENT,
+  executePaidCommerceOrder,
+  executeServiceOperation,
+  provisionPaidOrder,
+  reconcileCommerceOrder,
+  reconcileStaleCommerceOrders,
+  REFUND_PROVISIONING_REASON,
+  TRIAL_CONVERTED_EVENT_TYPE,
+  type CommerceExecutionDependencies,
+  type CommerceExecutionResult,
+  type ExecutionClassification,
+} from "./execution.js";
+
+export {
   catalogPublicId,
   CATALOG_PUBLIC_ID_LENGTH,
   isCatalogPublicId,

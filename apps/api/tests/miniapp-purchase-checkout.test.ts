@@ -418,6 +418,39 @@ describe.skipIf(!hasDb)("mini app catalog and new-subscription checkout", () => 
     expect(older.status).toBe(CheckoutStatus.CANCELLED);
   });
 
+  // PU-11A --------------------------------------------------------------------
+  it("PU-11A: concurrent drafts leave exactly one payable checkout", async () => {
+    const user = await makeUser();
+
+    // Separate nonces force separate reservations and exercise the checkout
+    // transition itself. The database advisory lock, not an in-process mutex,
+    // must serialize these calls even when they use different pool sessions.
+    const results = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        createPurchaseCheckout(prisma, {
+          userId: user.id,
+          group: "F",
+          publicProductId: catalogPublicId({ id: productId }),
+          usernameMode: "RANDOM",
+          draftNonce: `pu-same-buyer-race-${runTag}-${index}`,
+          buildAdapter: freeOnPanel,
+        }),
+      ),
+    );
+
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(
+      await prisma.checkoutSession.count({
+        where: { userId: user.id, productId, status: CheckoutStatus.PENDING },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.checkoutSession.count({
+        where: { userId: user.id, productId, status: CheckoutStatus.CANCELLED },
+      }),
+    ).toBe(5);
+  });
+
   // PU-12 ---------------------------------------------------------------------
   it("PU-12: the draft DTO exposes no uuid", async () => {
     const user = await makeUser();

@@ -2156,21 +2156,27 @@ model SupportMessage {
 // mutation always has its idempotency record and a rolled-back one has neither.
 // =============================================================================
 model MiniAppRequestIdempotency {
-  id              String   @id @default(uuid())
-  userId          String
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                      String   @id @default(uuid())
+  userId                  String
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   /// Client-supplied, unguessable, unique PER USER.
-  clientRequestId String
+  clientRequestId         String
   /// Stable operation code (MINIAPP_IDEMPOTENT_OPERATIONS in @zedbot/support-tickets).
-  operation       String
+  operation               String
   /// The ticket a reply targeted. Null for creation.
-  targetTicketId  String?
+  targetTicketId          String?
   /// SHA-256 over the canonical normalized payload. Never the payload itself.
-  fingerprint     String
+  fingerprint             String
   /// What the original attempt produced, so a retry can return it verbatim.
-  resultTicketId  String
-  resultMessageId String
-  createdAt       DateTime @default(now())
+  /// Support operations fill the ticket/message pair; commerce operations
+  /// (miniapp-commerce-parity) fill the checkout/payment refs instead and
+  /// store the support pair as "" (the columns predate commerce and are
+  /// non-null). Soft references by design — rows outlive their targets.
+  resultTicketId          String
+  resultMessageId         String
+  resultCheckoutSessionId String?
+  resultPaymentId         String?
+  createdAt               DateTime @default(now())
 
   @@unique([userId, clientRequestId])
   @@index([createdAt])

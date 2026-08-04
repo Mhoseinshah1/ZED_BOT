@@ -459,30 +459,29 @@ describe("api dependency isolation", () => {
     return dirs;
   }
 
-  it("FJ13 has no path from @zedbot/api to grammy, directly or through a workspace package", async () => {
+  it("FJ13 grammy and the Bot stay out of the API manifest closure", async () => {
     const dirs = await workspaceDirs();
-    // The transitive closure of @zedbot/api's declared dependencies, following
-    // workspace edges. A `grammy` entry anywhere in it is the failure.
+    // Commerce authority lives in the transport-independent service package;
+    // the API must not depend on the Bot package at all.
     const seen = new Set<string>();
     const queue = ["@zedbot/api"];
-    const external: string[] = [];
     while (queue.length > 0) {
       const name = queue.shift() as string;
       if (seen.has(name)) continue;
       seen.add(name);
       const dir = dirs.get(name);
       if (dir === undefined) {
-        external.push(name);
         continue;
       }
-      for (const dep of Object.keys((await manifest(dir)).dependencies ?? {})) {
+      const deps = Object.keys((await manifest(dir)).dependencies ?? {});
+      expect(deps.filter((d) => d.includes("grammy")), name).toEqual([]);
+      for (const dep of deps) {
         queue.push(dep);
       }
     }
     expect(seen.has("@zedbot/force-join")).toBe(true); // the extraction is real
+    expect(seen.has("@zedbot/service-renewal")).toBe(true);
     expect(seen.has("@zedbot/bot")).toBe(false);
-    expect(external).not.toContain("grammy");
-    expect(external.filter((n) => n.includes("grammy"))).toEqual([]);
   });
 
   it("FJ13b has no grammy import anywhere in the API or the shared force-join package", async () => {
