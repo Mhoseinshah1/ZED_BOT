@@ -57,7 +57,20 @@ export type ApiFailureCode =
   | "INVALID_TICKET_ID"
   | "TICKET_NOT_FOUND"
   | "TICKET_CLOSED"
-  | "IDEMPOTENCY_CONFLICT";
+  | "IDEMPOTENCY_CONFLICT"
+  // commerce (miniapp-commerce-parity). Stable machine codes from the
+  // commerce routes; every one has Persian copy in i18n.FAILURE_TEXT.
+  | "FEATURE_DISABLED"
+  | "FEATURE_UNAVAILABLE"
+  | "PRODUCT_UNAVAILABLE"
+  | "OPTION_UNAVAILABLE"
+  | "DISCOUNT_INVALID"
+  | "QUOTE_EXPIRED"
+  | "QUOTE_STALE"
+  | "CHECKOUT_UNAVAILABLE"
+  | "INSUFFICIENT_BALANCE"
+  | "SERVICE_NOT_ELIGIBLE"
+  | "WALLET_DISABLED";
 
 export interface ApiFailure {
   ok: false;
@@ -109,6 +122,17 @@ export const SERVER_FAILURE_CODES: readonly ApiFailureCode[] = [
   "TICKET_NOT_FOUND",
   "TICKET_CLOSED",
   "IDEMPOTENCY_CONFLICT",
+  "FEATURE_DISABLED",
+  "FEATURE_UNAVAILABLE",
+  "PRODUCT_UNAVAILABLE",
+  "OPTION_UNAVAILABLE",
+  "DISCOUNT_INVALID",
+  "QUOTE_EXPIRED",
+  "QUOTE_STALE",
+  "CHECKOUT_UNAVAILABLE",
+  "INSUFFICIENT_BALANCE",
+  "SERVICE_NOT_ELIGIBLE",
+  "WALLET_DISABLED",
 ];
 
 const KNOWN_CODES = new Set<string>(SERVER_FAILURE_CODES);
@@ -116,6 +140,8 @@ const KNOWN_CODES = new Set<string>(SERVER_FAILURE_CODES);
 function failure(code: ApiFailureCode, status = 0, requiresBot = false): ApiFailure {
   return { ok: false, code, requiresBot, status };
 }
+
+export { request };
 
 async function request<T>(
   path: string,

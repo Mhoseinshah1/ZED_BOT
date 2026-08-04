@@ -1,7 +1,5 @@
-import { PanelStatus, Prisma, prisma, type Panel, type Service } from "@zedbot/database";
+import { Prisma, prisma, type Panel } from "@zedbot/database";
 import {
-  MARZBAN_CAPABILITIES,
-  XUI_CAPABILITIES,
   type PanelCapability,
   type PanelDiagnosticCode,
   type ProvisioningReadinessResult,
@@ -9,13 +7,28 @@ import {
 } from "@zedbot/panel-adapters";
 import { errorMessage } from "@zedbot/shared";
 
+import {
+  classifyXuiRemoteModel,
+  isPanelSellable,
+  panelCapabilities,
+  panelConfigProblem,
+  panelHasCredentials,
+  panelOperationAvailable,
+  panelSupportsOperation,
+  panelTypesSupporting,
+  parsePanelInboundIds,
+  resolveProductInboundIds,
+  serviceSupportsGlobalLifecycle,
+  type PanelConfigProblem,
+  type ProductInboundResolution,
+  type XuiRemoteModel,
+} from "@zedbot/service-renewal";
+
 import { logger } from "../core/logger.js";
 import {
   buildAdapterForPanel,
   normalizeSubscriptionBase,
-  resolveXuiAuthMode,
   resolveXuiVariant,
-  SUPPORTED_XUI_AUTH_MODES,
   SUPPORTED_XUI_VARIANTS,
 } from "./panel-adapter-factory.js";
 
@@ -97,30 +110,6 @@ const ALL_CAPABILITIES: readonly PanelCapability[] = [
 ];
 
 /** Static capability set for a panel row (per type/variant, no network). */
-export function panelCapabilities(panel: Panel): readonly PanelCapability[] {
-  if (panel.type === "MARZBAN") {
-    return MARZBAN_CAPABILITIES;
-  }
-  return SUPPORTED_XUI_VARIANTS.has(resolveXuiVariant(panel)) ? XUI_CAPABILITIES : [];
-}
-
-/** Prisma PanelType values whose adapters implement the capability. */
-export function panelTypesSupporting(capability: PanelCapability): Panel["type"][] {
-  const types: Panel["type"][] = [];
-  if (MARZBAN_CAPABILITIES.includes(capability)) {
-    types.push("MARZBAN");
-  }
-  if (XUI_CAPABILITIES.includes(capability)) {
-    types.push("XUI");
-  }
-  return types;
-}
-
-/** true when the panel's adapter implements (and this repo tested) the operation. */
-export function panelSupportsOperation(panel: Panel, capability: PanelCapability): boolean {
-  return panelCapabilities(panel).includes(capability);
-}
-
 /** Persian capability statuses for the admin panel detail (specified texts). */
 export const CAPABILITY_STATUS_TEXT = {
   supported: "پشتیبانی می‌شود ✅",
@@ -174,195 +163,41 @@ export interface PanelConfigAssessment {
   adminText?: string;
 }
 
-/** Parses the panel's inboundIds JSON into a validated int array. */
-export function parsePanelInboundIds(raw: unknown): number[] {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-  return raw.filter((v): v is number => typeof v === "number" && Number.isInteger(v));
-}
-
 /**
  * Remote model of an XUI service. Lifecycle mutations run ONLY against
  * GLOBAL_CLIENT services; legacy per-inbound services (created before the
  * global-client migration) stay readable but are never mutated through the
  * global-client endpoints and are never silently migrated.
  */
-export type XuiRemoteModel = "GLOBAL_CLIENT" | "LEGACY_PER_INBOUND" | "UNKNOWN";
-
 /**
- * Classifies an XUI service's remote model from its stored identifiers.
- * GLOBAL_CLIENT: the remote metadata names ONE client whose email is the
- * service username exactly. LEGACY_PER_INBOUND: per-inbound client labels
- * (`username-<inboundId>`). Anything unprovable is UNKNOWN and treated like
- * legacy (mutations blocked) - never guessed.
+ * The Persian sentence an admin reads for each machine-level config problem.
+ *
+ * The PROBLEM is decided in @zedbot/service-renewal (the Mini App API needs the
+ * same verdict); only the wording is here, because words are presentation and a
+ * domain package must not carry them. The mapping reproduces exactly what this
+ * function printed before the predicate moved.
  */
-export function classifyXuiRemoteModel(
-  service: Pick<Service, "panelType" | "username" | "remoteMetadata">,
-): XuiRemoteModel {
-  if (service.panelType !== "XUI") {
-    return "GLOBAL_CLIENT";
-  }
-  const metadata = service.remoteMetadata;
-  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return "UNKNOWN";
-  }
-  const record = metadata as { email?: unknown; clients?: unknown };
-  if (typeof record.email === "string") {
-    return record.email === service.username ? "GLOBAL_CLIENT" : "UNKNOWN";
-  }
-  if (Array.isArray(record.clients) && record.clients.length > 0) {
-    const emails = record.clients
-      .map((c) => (typeof c === "object" && c !== null ? (c as { email?: unknown }).email : undefined))
-      .filter((e): e is string => typeof e === "string");
-    if (emails.length === 0) {
-      return "UNKNOWN";
-    }
-    if (emails.every((e) => e === service.username)) {
-      return "GLOBAL_CLIENT";
-    }
-    if (emails.some((e) => e.startsWith(`${service.username}-`))) {
-      return "LEGACY_PER_INBOUND";
-    }
-    return "UNKNOWN";
-  }
-  return "UNKNOWN";
-}
-
-/** true when lifecycle mutations may target this service's remote model. */
-export function serviceSupportsGlobalLifecycle(
-  service: Pick<Service, "panelType" | "username" | "remoteMetadata">,
-): boolean {
-  return service.panelType !== "XUI" || classifyXuiRemoteModel(service) === "GLOBAL_CLIENT";
-}
-
-/** Result of resolving a product's effective XUI inbound selection. */
-export type ProductInboundResolution =
-  | { ok: true; inboundIds: number[]; inherited: boolean }
-  | { ok: false; reason: "panel-allowlist-empty" | "subset-violation"; invalidIds?: number[] };
+const CONFIG_PROBLEM_TEXT: Record<PanelConfigProblem, string> = {
+  "missing-credentials": PANEL_CONFIG_INCOMPLETE_TEXT,
+  "no-template-or-protocol-config": PANEL_CONFIG_INCOMPLETE_TEXT,
+  "unsupported-xui-variant": READINESS_STATUS_TEXT.unsupportedVariant,
+  "unsupported-xui-auth-mode": PANEL_CONFIG_INCOMPLETE_TEXT,
+  "missing-api-token": PANEL_CONFIG_INCOMPLETE_TEXT,
+  "no-inbound-ids": PANEL_XUI_INBOUND_TEXT,
+};
 
 /**
- * Resolves the inbound ids a SERVICE_PRODUCT provisions into on an XUI
- * panel. Configuration hierarchy:
- *   - Panel.inboundIds is the ALLOWLIST of inbound ids ZED_BOT may use;
- *   - Product.inboundIds selects a SUBSET of that allowlist;
- *   - null/empty product selection inherits the panel's full allowlist
- *     (backward compatible - existing products keep working unchanged);
- *   - any selected id outside the allowlist is a configuration error: the
- *     product is unsellable and provisioning fails BEFORE any panel call.
- * Pure and local - panel readiness already validates the allowlist against
- * the live panel, so a valid subset needs no extra network round-trip.
- */
-export function resolveProductInboundIds(
-  panel: Panel,
-  productInboundIds: unknown,
-): ProductInboundResolution {
-  const allowed = parsePanelInboundIds(panel.inboundIds);
-  if (allowed.length === 0) {
-    return { ok: false, reason: "panel-allowlist-empty" };
-  }
-  const selected = parsePanelInboundIds(productInboundIds);
-  if (selected.length === 0) {
-    return { ok: true, inboundIds: allowed, inherited: true };
-  }
-  const allowedSet = new Set(allowed);
-  const invalidIds = [...new Set(selected.filter((id) => !allowedSet.has(id)))];
-  if (invalidIds.length > 0) {
-    return { ok: false, reason: "subset-violation", invalidIds };
-  }
-  return { ok: true, inboundIds: [...new Set(selected)], inherited: false };
-}
-
-/**
- * LOCAL (no network) provisioning-config assessment. Catches configuration
- * dead-ends - missing credentials, no template/protocol config, no inbound
- * ids, unsupported variant - BEFORE the user pays.
+ * LOCAL (no network) provisioning-config assessment, with the admin's Persian
+ * text attached. Catches configuration dead-ends — missing credentials, no
+ * template/protocol config, no inbound ids, unsupported variant — BEFORE the
+ * user pays.
  */
 export function assessPanelConfig(panel: Panel): PanelConfigAssessment {
-  if (panel.type === "MARZBAN") {
-    if (panel.username === null || panel.passwordEncrypted === null) {
-      return { ok: false, reason: "missing-credentials", adminText: PANEL_CONFIG_INCOMPLETE_TEXT };
-    }
-    const hasTemplate = (panel.templateUsername?.trim() ?? "") !== "";
-    const hasExplicit =
-      panel.protocolSettings !== null &&
-      typeof panel.protocolSettings === "object" &&
-      !Array.isArray(panel.protocolSettings) &&
-      Object.keys(panel.protocolSettings as Record<string, unknown>).length > 0;
-    if (!hasTemplate && !hasExplicit) {
-      return {
-        ok: false,
-        reason: "no-template-or-protocol-config",
-        adminText: PANEL_CONFIG_INCOMPLETE_TEXT,
-      };
-    }
+  const problem = panelConfigProblem(panel);
+  if (problem === null) {
     return { ok: true };
   }
-  if (!SUPPORTED_XUI_VARIANTS.has(resolveXuiVariant(panel))) {
-    return {
-      ok: false,
-      reason: "unsupported-xui-variant",
-      adminText: READINESS_STATUS_TEXT.unsupportedVariant,
-    };
-  }
-  const authMode = resolveXuiAuthMode(panel);
-  if (!SUPPORTED_XUI_AUTH_MODES.has(authMode)) {
-    return {
-      ok: false,
-      reason: "unsupported-xui-auth-mode",
-      adminText: PANEL_CONFIG_INCOMPLETE_TEXT,
-    };
-  }
-  if (authMode === "API_TOKEN") {
-    if (panel.tokenEncrypted === null || panel.tokenEncrypted === "") {
-      return { ok: false, reason: "missing-api-token", adminText: PANEL_CONFIG_INCOMPLETE_TEXT };
-    }
-  } else if (panel.username === null || panel.passwordEncrypted === null) {
-    return { ok: false, reason: "missing-credentials", adminText: PANEL_CONFIG_INCOMPLETE_TEXT };
-  }
-  if (parsePanelInboundIds(panel.inboundIds).length === 0) {
-    return { ok: false, reason: "no-inbound-ids", adminText: PANEL_XUI_INBOUND_TEXT };
-  }
-  return { ok: true };
-}
-
-function panelHasCredentials(panel: Panel): boolean {
-  if (panel.type === "XUI" && resolveXuiAuthMode(panel) === "API_TOKEN") {
-    return panel.tokenEncrypted !== null && panel.tokenEncrypted !== "";
-  }
-  return panel.username !== null && panel.passwordEncrypted !== null;
-}
-
-/**
- * Pre-payment gate for operations on EXISTING services (renewal, extras,
- * toggle, regenerate, sync): the panel type/variant must implement the
- * operation and the login credentials must be present. Unlike sellability
- * this does NOT require provisioning config (template/inbounds) - mutating
- * an existing account never provisions a new one.
- */
-export function panelOperationAvailable(panel: Panel, capability: PanelCapability): boolean {
-  return (
-    panel.status === PanelStatus.ACTIVE &&
-    panelSupportsOperation(panel, capability) &&
-    panelHasCredentials(panel)
-  );
-}
-
-/**
- * true when service products on this panel may be sold RIGHT NOW:
- * ACTIVE + createService capability + complete local config + the last
- * persisted authenticated readiness check did not fail. A never-checked
- * panel (provisioningReady null) with complete config stays sellable so
- * existing deployments keep working; an explicit failed check blocks sales
- * until an admin re-tests successfully.
- */
-export function isPanelSellable(panel: Panel): boolean {
-  return (
-    panel.status === PanelStatus.ACTIVE &&
-    panelSupportsOperation(panel, "createService") &&
-    assessPanelConfig(panel).ok &&
-    panel.provisioningReady !== false
-  );
+  return { ok: false, reason: problem, adminText: CONFIG_PROBLEM_TEXT[problem] };
 }
 
 // =============================================================================
@@ -553,3 +388,22 @@ export const READINESS_RELEVANT_COLUMNS: ReadonlySet<string> = new Set([
 export function readinessResetData(): Prisma.PanelUpdateInput {
   return { provisioningReady: null, capabilitySnapshot: Prisma.DbNull };
 }
+
+// The capability predicates now live in @zedbot/service-renewal so the Mini App
+// API can ask the same questions the bot asks. Re-exported here so every
+// existing import of this module keeps working and there is still exactly one
+// implementation.
+export {
+  classifyXuiRemoteModel,
+  isPanelSellable,
+  panelCapabilities,
+  panelHasCredentials,
+  panelOperationAvailable,
+  panelSupportsOperation,
+  panelTypesSupporting,
+  parsePanelInboundIds,
+  resolveProductInboundIds,
+  serviceSupportsGlobalLifecycle,
+  type ProductInboundResolution,
+  type XuiRemoteModel,
+};

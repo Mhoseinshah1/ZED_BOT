@@ -12,11 +12,13 @@ import { Composer } from "grammy";
 import type { BotContext } from "../core/context.js";
 import { logger } from "../core/logger.js";
 import {
-  fulfillSettledGatewayOrder,
   recordProviderSuccessFromBot,
   settleGatewayPayment,
   storedStarsAmount,
 } from "../services/gateway-payment.service.js";
+import {
+  fulfillSettledGatewayOrder,
+} from "../services/gateway-settlement-runner.service.js";
 import {
   DUPLICATE_SUCCESS_USER_TEXT,
   notifyDuplicateSuccessCase,

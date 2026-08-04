@@ -1,0 +1,255 @@
+// =============================================================================
+// @zedbot/service-renewal — the transport-independent renewal domain.
+//
+// Imported by BOTH the Telegram Bot and the Mini App API so there is exactly
+// one renewal authority. Nothing in this package renders, and nothing in it
+// knows which transport called it.
+// =============================================================================
+
+export {
+  COMMERCE_RESULT_CODES,
+  COMMERCE_SETTLED_CODES,
+  commerceCodeIsSettled,
+  isCommerceResultCode,
+  isRenewalIdempotencyKey,
+  isRenewalOptionPublicId,
+  isServiceOperation,
+  MINIAPP_COMMERCE_BROWSE_ENABLED_KEY,
+  MINIAPP_COMMERCE_CHECKOUT_ENABLED_KEY,
+  MINIAPP_COMMERCE_ROLLOUT_KEYS,
+  MINIAPP_WALLET_ADDONS_ENABLED_KEY,
+  MINIAPP_WALLET_PURCHASE_ENABLED_KEY,
+  MINIAPP_WALLET_RENEWAL_ENABLED_DEFAULT,
+  MINIAPP_WALLET_RENEWAL_ENABLED_KEY,
+  RENEWAL_CONFIRM_BODY_LIMIT_BYTES,
+  RENEWAL_IDEMPOTENCY_KEY_MAX_LENGTH,
+  RENEWAL_IDEMPOTENCY_KEY_PATTERN,
+  RENEWAL_OPTION_PUBLIC_ID_LENGTH,
+  RENEWAL_OPTION_PUBLIC_ID_PATTERN,
+  RENEWAL_ORIGINS,
+  RENEWAL_QUOTE_TTL_SECONDS,
+  COMMERCE_OPERATIONS,
+  isCommerceOperation,
+  OPERATION_DISCOUNT_PURPOSE,
+  OPERATION_ORDER_TYPE,
+  OPERATION_SETTLE_ROLLOUT_KEY,
+  SERVICE_OPERATIONS,
+  renewalOptionPublicId,
+  type CommerceOperation,
+  type CommerceResultCode,
+  type MiniAppCommerceRolloutKey,
+  type RenewalOrigin,
+  type ServiceOperation,
+} from "./contract.js";
+
+export {
+  isMiniAppRolloutEnabled,
+  isMiniAppWalletRenewalEnabled,
+  MINIAPP_COMMERCE_ROLLOUT_DEFAULT,
+  readMiniAppRolloutState,
+  setMiniAppRolloutEnabled,
+  setMiniAppWalletRenewalEnabled,
+} from "./rollout.js";
+
+export {
+  groupMatches,
+  isPanelSellable,
+  isProductStructurallySellable,
+  isProductVisible,
+  panelConfigProblem,
+  parsePanelInboundIds,
+  resolveProductInboundIds,
+  type PanelConfigProblem,
+  type ProductInboundResolution,
+  type ProductWithRelations,
+} from "./catalog.js";
+
+export {
+  extraTimePackages,
+  extraVolumePackages,
+  isExtraTimePackageValid,
+  isExtraVolumePackageValid,
+  isOperationOptionValid,
+  isOptionPublicId,
+  isRenewalPlanValid,
+  listServiceOperationOptions,
+  OPTION_PUBLIC_ID_LENGTH,
+  OPTION_PUBLIC_ID_PATTERN,
+  operationCapability,
+  operationProductsForPanel,
+  operationRolloutKey,
+  optionPublicId,
+  renewalPlansForPanel,
+  resolveServiceOperationOption,
+  serviceEligibleForOperation,
+  toOptionDto,
+  type OperationTargetDto,
+  type OptionListArgs,
+  type OptionListResult,
+  type OptionResolution,
+  type OptionResolveArgs,
+  type ServiceOperationOptionDto,
+} from "./options.js";
+
+export {
+  classifyXuiRemoteModel,
+  panelCapabilities,
+  panelHasCredentials,
+  panelOperationAvailable,
+  panelSupportsOperation,
+  panelTypesSupporting,
+  resolveXuiAuthMode,
+  resolveXuiVariant,
+  serviceSupportsGlobalLifecycle,
+  SUPPORTED_XUI_AUTH_MODES,
+  SUPPORTED_XUI_VARIANTS,
+  type XuiRemoteModel,
+} from "./panel-capability.js";
+
+export {
+  OPERABLE_SERVICE_STATUSES,
+  resolveOwnedService,
+  resolveOwnedServiceForUser,
+  servicePublicId,
+  type OwnedService,
+} from "./resolve-service.js";
+
+export {
+  buildOperationSnapshot,
+  buildPurchaseSnapshot,
+  createPurchaseCheckout,
+  checkoutExpiryMinutes,
+  checkoutPublicId,
+  createOperationCheckout,
+  isCheckoutPublicId,
+  issueQuoteForCheckout,
+  loadOwnedPendingCheckout,
+  type CheckoutCreateArgs,
+  type CheckoutCreateResult,
+  type CheckoutDraftDto,
+  type OperationPricing,
+  type PurchaseCheckoutArgs,
+  type PurchaseCheckoutResult,
+  type PurchaseDraftDto,
+  type QuoteDto,
+  type QuoteIssueResult,
+} from "./checkout.js";
+
+export {
+  calculateDiscountAmount,
+  claimDiscountUsage,
+  validateDiscountCode,
+  type DiscountClaimArgs,
+  type DiscountClaimOutcome,
+  type DiscountPurpose,
+  type DiscountRejection,
+  type DiscountValidation,
+} from "./discount.js";
+
+export {
+  openQuote,
+  quoteFingerprint,
+  QuoteConfigError,
+  sealQuote,
+  type QuoteFailure,
+  type QuoteOpenResult,
+  type QuotePayload,
+} from "./quote.js";
+
+export {
+  evaluateEligibility,
+  observeWalletBalance,
+  onWalletBalanceChanged,
+  readLowBalanceConfigRows,
+  type LowBalanceEligibility,
+  type ObserveArgs,
+  type ObserveOutcome,
+  type Toman,
+} from "./low-balance.js";
+
+export {
+  settleWalletOrder,
+  settlementPayloadFingerprint,
+  WALLET_ORDER_PAYMENT_REASON,
+  type WalletSettlementArgs,
+  type WalletSettlementFailure,
+  type WalletSettlementResult,
+  type WalletSettlementSuccess,
+} from "./settlement.js";
+
+export { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter.js";
+
+export {
+  attachReservationToOrder,
+  bindSettledReservationFromSnapshot,
+  checkServiceUsernameAvailability,
+  claimReservationForCheckout,
+  consumeReservationForOrder,
+  getActiveReservationForDraft,
+  hasForeignActiveReservationForUsername,
+  isReservationClaimable,
+  lockReservationForSettlement,
+  RANDOM_USERNAME_MAX_ATTEMPTS,
+  releaseHeldReservationForDraft,
+  releaseHeldReservationsForDraft,
+  releaseReservation,
+  releaseReservationForFailedOrder,
+  RESERVATION_HELD_TTL_MS,
+  ReservationInvariantError,
+  reserveRandomServiceUsername,
+  reserveServiceUsername,
+  type ClaimReservationResult,
+  type ReservationClaimArgs,
+  type ReservationOrderBindArgs,
+  type ReserveServiceUsernameResult,
+  type SettledReservationBindResult,
+} from "./username-reservation.js";
+
+export {
+  acquireServiceLock,
+  checkAndArmCooldown,
+  clearCooldown,
+  isLockBackendAvailable,
+  RECONCILE_LOCK_WAIT_MS,
+  resetServiceLockClientForTests,
+  SERVICE_LOCK_BUSY_TEXT,
+  SERVICE_LOCK_LOST_TEXT,
+  SERVICE_LOCK_TTL_MS,
+  SERVICE_LOCK_UNAVAILABLE_TEXT,
+  SERVICE_LOCK_WAIT_MS,
+  serviceDiagnosticsCooldownKey,
+  serviceOperationLockKey,
+  serviceProvisioningLockKey,
+  type CooldownGate,
+  type ServiceLock,
+  type ServiceLockAcquisition,
+} from "./service-lock.js";
+
+export {
+  COMMERCE_OPERATION_APPLIED_EVENT,
+  COMMERCE_OPERATION_INTENT_EVENT,
+  executePaidCommerceOrder,
+  executeServiceOperation,
+  provisionPaidOrder,
+  reconcileCommerceOrder,
+  reconcileStaleCommerceOrders,
+  REFUND_PROVISIONING_REASON,
+  TRIAL_CONVERTED_EVENT_TYPE,
+  type CommerceExecutionDependencies,
+  type CommerceExecutionResult,
+  type ExecutionClassification,
+} from "./execution.js";
+
+export {
+  catalogPublicId,
+  CATALOG_PUBLIC_ID_LENGTH,
+  isCatalogPublicId,
+  loadMiniAppCatalog,
+  loadMiniAppCatalogForUser,
+  resolvePurchasableProduct,
+  type CatalogCategoryDto,
+  type CatalogDto,
+  type CatalogLocationDto,
+  type CatalogProductDto,
+  type PurchasableProductResolution,
+} from "./catalog-read.js";

@@ -9,18 +9,17 @@ import {
   type Prisma,
   type Service,
   type User,
-  type UserGroup,
 } from "@zedbot/database";
 import { type AddServiceVolumeResult } from "@zedbot/panel-adapters";
 import { errorMessage } from "@zedbot/shared";
 
+import { extraVolumePackages, isExtraVolumePackageValid } from "@zedbot/service-renewal";
+
 import { logger } from "../core/logger.js";
 import type { ExtraVolumeDraft } from "../core/session.js";
-import { groupMatches } from "./catalog.service.js";
 import { buildProductSnapshot, checkoutExpiryMinutes } from "./checkout.service.js";
 import { buildAdapterForPanel, normalizeSubscriptionBase } from "./panel-adapter-factory.js";
 import {
-  panelOperationAvailable,
   panelTypesSupporting,
   serviceSupportsGlobalLifecycle,
   XUI_LEGACY_OPERATION_TEXT,
@@ -130,53 +129,10 @@ export async function getExtraVolumeServiceByShortId(
   return match !== null && serviceSupportsGlobalLifecycle(match) ? match : null;
 }
 
-/**
- * Extra-volume packages: active same-panel SERVICE_PRODUCTs with
- * volumeGb > 0 and priceToman > 0 in an active category, visible to the
- * user's group. (The product model has no explicit package kind yet - Phase
- * 16 treats these as the extra-volume packages; a future `product.intent`
- * migration can refine this.) Ordered by volume, then price/displayOrder.
- */
-export async function extraVolumePackages(
-  group: UserGroup,
-  panelId: string,
-): Promise<ProductWithRelations[]> {
-  const products = await prisma.product.findMany({
-    where: {
-      type: "SERVICE_PRODUCT",
-      isActive: true,
-      panelId,
-      volumeGb: { gt: 0 },
-      priceToman: { gt: 0 },
-      category: { isActive: true },
-      panel: { status: PanelStatus.ACTIVE },
-    },
-    include: { category: true, panel: true },
-    orderBy: [{ volumeGb: "asc" }, { priceToman: "asc" }, { displayOrder: "asc" }],
-  });
-  return products.filter((p) => groupMatches(p.displayGroups, group));
-}
-
-/** Re-check one package against the target service and user group. */
-export function isExtraVolumePackageValid(
-  product: ProductWithRelations,
-  service: Service,
-  group: UserGroup,
-): boolean {
-  return (
-    product.type === "SERVICE_PRODUCT" &&
-    product.isActive &&
-    product.category.isActive &&
-    product.panelId === service.panelId &&
-    product.panel !== null &&
-    panelOperationAvailable(product.panel, "addVolume") &&
-    // Remote-model gate: only GLOBAL_CLIENT XUI services take extra volume.
-    serviceSupportsGlobalLifecycle(service) &&
-    (product.volumeGb ?? 0) > 0 &&
-    product.priceToman > 0 &&
-    groupMatches(product.displayGroups, group)
-  );
-}
+// Package listing and package validity now live in @zedbot/service-renewal so
+// the Mini App API resolves extra-volume options through the same authority.
+// Re-exported so every existing bot call site is unchanged.
+export { extraVolumePackages, isExtraVolumePackageValid };
 
 // --- checkout (card-to-card path) ------------------------------------------------------
 

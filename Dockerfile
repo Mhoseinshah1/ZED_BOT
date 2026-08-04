@@ -24,6 +24,7 @@ COPY packages/force-join/package.json packages/force-join/
 COPY packages/panel-adapters/package.json packages/panel-adapters/
 COPY packages/payments/package.json packages/payments/
 COPY packages/support-tickets/package.json packages/support-tickets/
+COPY packages/service-renewal/package.json packages/service-renewal/
 RUN pnpm install --frozen-lockfile
 COPY tsconfig.base.json ./
 COPY packages ./packages
@@ -50,6 +51,7 @@ COPY packages/force-join/package.json packages/force-join/
 COPY packages/panel-adapters/package.json packages/panel-adapters/
 COPY packages/payments/package.json packages/payments/
 COPY packages/support-tickets/package.json packages/support-tickets/
+COPY packages/service-renewal/package.json packages/service-renewal/
 # --prod skips the Mini App's devDependencies (React, Vite); the bundle it
 # builds is copied in from the build stage as plain static files, so the
 # runtime image never carries a frontend toolchain.
@@ -73,6 +75,7 @@ COPY --from=build /repo/packages/force-join/dist packages/force-join/dist
 COPY --from=build /repo/packages/panel-adapters/dist packages/panel-adapters/dist
 COPY --from=build /repo/packages/payments/dist packages/payments/dist
 COPY --from=build /repo/packages/support-tickets/dist packages/support-tickets/dist
+COPY --from=build /repo/packages/service-renewal/dist packages/service-renewal/dist
 COPY --from=build /repo/apps/api/dist apps/api/dist
 COPY --from=build /repo/apps/bot/dist apps/bot/dist
 COPY --from=build /repo/apps/worker/dist apps/worker/dist

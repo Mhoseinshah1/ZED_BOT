@@ -1,13 +1,9 @@
 import {
   CheckoutStatus,
-  OrderStatus,
   OrderType,
-  PaymentPurpose,
   PaymentStatus,
   Prisma,
   prisma,
-  WalletTransactionSource,
-  WalletTransactionType,
   type CheckoutSession,
   type DiscountCode,
   type Order,
@@ -18,6 +14,11 @@ import {
 } from "@zedbot/database";
 
 import { REPRESENTATIVE_PRICING_MODE, resolveAutoRenewalCharge } from "@zedbot/shared";
+import {
+  settleWalletOrder,
+  WALLET_ORDER_PAYMENT_REASON as SHARED_WALLET_ORDER_PAYMENT_REASON,
+  type WalletSettlementFailure,
+} from "@zedbot/service-renewal";
 
 import { logger } from "../core/logger.js";
 import type { CheckoutDraft, ExtraTimeDraft, ExtraVolumeDraft, RenewalDraft } from "../core/session.js";
@@ -35,7 +36,7 @@ import {
   ReservationInvariantError,
   type ReservationClaimArgs,
 } from "./service-username-selection.service.js";
-import { claimDiscountUsage, validateDiscountCode } from "./discount.service.js";
+import { DISCOUNT_CLAIM_FAILED_TEXT, validateDiscountCode } from "./discount.service.js";
 import { resolveEffectiveProductPrice } from "./representative-pricing.service.js";
 import {
   recordRepresentativePurchase,
@@ -61,7 +62,6 @@ import {
   getRenewableServiceByShortId,
   isRenewalPlanValid,
 } from "./renewal-checkout.service.js";
-import { onWalletBalanceChanged } from "./low-balance/low-balance-hook.js";
 
 // =============================================================================
 // Wallet payment for ORDER checkouts (Phase 15): an immediate payment method
@@ -85,7 +85,10 @@ import { onWalletBalanceChanged } from "./low-balance/low-balance-hook.js";
 // exactly one wins; the other rolls back with INSUFFICIENT_BALANCE_TEXT.
 // =============================================================================
 
-export const WALLET_ORDER_PAYMENT_REASON = "WALLET_ORDER_PAYMENT";
+// The ledger `reason` marker. Defined by the shared settlement and re-exported
+// so the bot's readers (reports, refunds, reconciliation) keep importing it from
+// here and there is one spelling.
+export const WALLET_ORDER_PAYMENT_REASON = SHARED_WALLET_ORDER_PAYMENT_REASON;
 
 export const WALLET_PAYMENT_DONE_TEXT = "پرداخت از کیف پول با موفقیت انجام شد ✅\nسفارش شما ثبت شد.";
 export const INSUFFICIENT_BALANCE_TEXT = "موجودی کیف پول شما کافی نیست.";
@@ -124,33 +127,6 @@ export type PurchaseWalletResult =
   | WalletPaymentResult
   | { ok: false; needsCustomerInfo: true; checkoutId: string };
 
-/** Thrown inside the transaction to abort with a safe user error. */
-class WalletPaymentAbort extends Error {
-  constructor(readonly userError: string) {
-    super("wallet payment aborted");
-  }
-}
-
-function snapshotString(snapshot: Record<string, unknown>, key: string): string | null {
-  const value = snapshot[key];
-  return typeof value === "string" && value !== "" ? value : null;
-}
-
-function snapshotInt(snapshot: Record<string, unknown>, key: string): number | null {
-  const value = snapshot[key];
-  return typeof value === "number" && Number.isInteger(value) ? value : null;
-}
-
-/** Validated int-array snapshot field ([] and non-arrays -> null). */
-function snapshotIntArray(snapshot: Record<string, unknown>, key: string): number[] | null {
-  const value = snapshot[key];
-  if (!Array.isArray(value)) {
-    return null;
-  }
-  const ids = value.filter((v): v is number => typeof v === "number" && Number.isInteger(v));
-  return ids.length > 0 ? ids : null;
-}
-
 interface WalletOrderArgs {
   orderType: OrderType;
   product: ProductWithRelations;
@@ -186,330 +162,126 @@ interface WalletOrderArgs {
   otherProductFulfillmentSnapshot?: Prisma.InputJsonObject;
 }
 
-/** Loads the settled result of a previously-executed idempotency key. */
-async function loadExistingWalletPayment(
-  idempotencyKey: string,
-): Promise<WalletPaymentResult | null> {
-  const payment = await prisma.payment.findUnique({ where: { idempotencyKey } });
-  if (payment === null || payment.orderId === null || payment.checkoutSessionId === null) {
-    return null;
-  }
-  const [order, checkout, walletTransaction] = await Promise.all([
-    prisma.order.findUnique({ where: { id: payment.orderId } }),
-    prisma.checkoutSession.findUnique({ where: { id: payment.checkoutSessionId } }),
-    prisma.walletTransaction.findFirst({
-      where: { relatedPaymentId: payment.id, reason: WALLET_ORDER_PAYMENT_REASON },
-    }),
-  ]);
-  if (order === null || checkout === null || walletTransaction === null) {
-    return null;
-  }
-  return {
-    ok: true,
-    order,
-    payment,
-    checkout,
-    walletTransaction,
-    newBalanceToman: walletTransaction.balanceAfterToman,
-    alreadyPaid: true,
-  };
-}
-
 /**
- * The atomic wallet-payment transaction shared by purchase and renewal.
- * Balance enforcement is a CONDITIONAL update (`updateMany` filtered on
- * `balanceToman >= finalPriceToman`), not a read-then-check: the database
- * re-evaluates the condition against the current committed row under the
- * row lock, so two DIFFERENT drafts racing on one wallet can never both
- * spend a balance that only covers one - the loser matches 0 rows and the
- * whole transaction rolls back. A negative balance is impossible.
+ * The bot's wallet payment: the shared settlement, plus the bot's words.
+ *
+ * The transaction itself lives in `@zedbot/service-renewal` so the Mini App API
+ * settles through the SAME statements in the same order rather than growing a
+ * second money path. What stays here is what is genuinely the bot's: its
+ * username-reservation claim, its customer-information gate, its cached read of
+ * the wallet kill switch, and the Persian sentence for each outcome.
+ *
+ * Every code below maps to the exact text this function returned before the
+ * move, so no handler's user-visible behaviour changed.
  */
 async function executeWalletOrderPayment(
   user: User,
   args: WalletOrderArgs,
 ): Promise<WalletPaymentResult> {
-  const existing = await loadExistingWalletPayment(args.idempotencyKey);
-  if (existing !== null) {
-    return existing;
-  }
-  // Phase 22 operator kill-switch, enforced at the SERVICE level so stale
-  // buttons/old keyboards can never reach the transaction. Checked after
-  // the idempotent replay above: an already-settled payment still returns
-  // its result, but no NEW money moves while disabled.
-  if (!(await isWalletPaymentEnabled())) {
-    return { ok: false, error: WALLET_PAYMENT_DISABLED_TEXT };
-  }
-  // §4 settlement-boundary defense in depth: never settle a resumed personalized
-  // OTHER_PRODUCT checkout whose mandatory customer-info form is not satisfied,
-  // even though payPurchaseDraftWithWallet already gated it upstream. Fail closed
-  // BEFORE the transaction - no deduction, no order.
-  if (
-    args.existingCheckoutId !== undefined &&
-    !(await isCheckoutInputSatisfied(args.existingCheckoutId))
-  ) {
-    return { ok: false, error: DRAFT_STALE_TEXT };
-  }
-  const minutes = await checkoutExpiryMinutes();
-  const now = new Date();
-  const snapshotRecord = args.snapshot as Record<string, unknown>;
-
-  try {
-    const result = await prisma.$transaction(async (tx) => {
-      let checkout: CheckoutSession;
-      if (args.existingCheckoutId !== undefined) {
-        // §4: settle the PENDING checkout the buyer filled the info form against.
-        // CAS under a strict identity + price guard; anything unexpected aborts
-        // the whole payment (fail closed - no deduction, no order).
-        const flipped = await tx.checkoutSession.updateMany({
-          where: {
-            id: args.existingCheckoutId,
-            userId: user.id,
-            purpose: "ORDER_PAYMENT",
-            orderType: args.orderType,
-            productId: args.product.id,
-            finalPriceToman: args.finalPriceToman,
-            status: CheckoutStatus.PENDING,
-            settledByPaymentId: null,
-            // §4 fail closed on a stale materialized checkout: a buyer who left
-            // the form open past expiry can never settle it (parity with the
-            // gateway/card paths, which reject expired checkouts).
-            expiresAt: { gt: now },
+  const settlement = await settleWalletOrder({
+    userId: user.id,
+    orderType: args.orderType,
+    productId: args.product.id,
+    serviceId: args.serviceId,
+    snapshot: args.snapshot,
+    originalPriceToman: args.originalPriceToman,
+    discountAmountToman: args.discountAmountToman,
+    finalPriceToman: args.finalPriceToman,
+    discountCodeId: args.discountCodeId,
+    idempotencyKey: args.idempotencyKey,
+    // The bot reads the kill switch through its 30-second settings cache, as it
+    // always has. The Mini App reads it fresh. Neither surface is forced onto
+    // the other by the shared transaction.
+    isWalletEnabled: isWalletPaymentEnabled,
+    ...(args.existingCheckoutId !== undefined
+      ? {
+          existingCheckoutId: args.existingCheckoutId,
+          isExistingCheckoutSettleable: isCheckoutInputSatisfied,
+        }
+      : {}),
+    ...(args.otherProductFulfillmentSnapshot !== undefined
+      ? { otherProductFulfillmentSnapshot: args.otherProductFulfillmentSnapshot }
+      : {}),
+    ...(args.serviceReservation !== undefined
+      ? {
+          claimReservation: async (tx, checkoutId, orderId, now) => {
+            const reservation = args.serviceReservation as ReservationClaimArgs;
+            const claim = await claimReservationForCheckout(tx, reservation, checkoutId, now);
+            if (!claim.ok) {
+              return false;
+            }
+            try {
+              await attachReservationToOrder(
+                tx,
+                {
+                  reservationId: reservation.reservationId,
+                  userId: reservation.userId,
+                  checkoutSessionId: checkoutId,
+                  panelId: reservation.panelId,
+                  normalizedUsername: reservation.normalizedUsername,
+                  orderId,
+                },
+                now,
+              );
+            } catch (bindErr) {
+              if (bindErr instanceof ReservationInvariantError) {
+                return false;
+              }
+              throw bindErr;
+            }
+            return true;
           },
-          data: { status: CheckoutStatus.PAID, paidAt: now },
-        });
-        if (flipped.count !== 1) {
-          throw new WalletPaymentAbort(DRAFT_STALE_TEXT);
         }
-        checkout = await tx.checkoutSession.findUniqueOrThrow({
-          where: { id: args.existingCheckoutId },
-        });
-      } else {
-        checkout = await tx.checkoutSession.create({
-          data: {
-            userId: user.id,
-            purpose: "ORDER_PAYMENT",
-            productId: args.product.id,
-            serviceId: args.serviceId,
-            orderType: args.orderType,
-            productSnapshot: args.snapshot,
-            ...(args.otherProductFulfillmentSnapshot !== undefined
-              ? { otherProductFulfillmentSnapshot: args.otherProductFulfillmentSnapshot }
-              : {}),
-            originalPriceToman: args.originalPriceToman,
-            discountAmountToman: args.discountAmountToman,
-            finalPriceToman: args.finalPriceToman,
-            discountCodeId: args.discountCodeId,
-            status: CheckoutStatus.PAID,
-            paidAt: now,
-            expiresAt: new Date(now.getTime() + minutes * 60_000),
-          },
-        });
-      }
+      : {}),
+  });
 
-      const payment = await tx.payment.create({
-        data: {
-          userId: user.id,
-          checkoutSessionId: checkout.id,
-          purpose: PaymentPurpose.PAY_WITH_WALLET,
-          status: PaymentStatus.APPROVED,
-          amountToman: args.finalPriceToman,
-          payableAmountToman: args.finalPriceToman,
-          paidAt: now,
-          callbackPayload: { method: "WALLET" },
-          idempotencyKey: args.idempotencyKey,
-          // P0 settlement phase: the wallet payment settles its own
-          // freshly-created checkout in this same transaction.
-          settlementStatus: "SETTLED",
-          settledAt: now,
-        },
-      });
-      // P0 settlement phase: record the settlement OWNER - a later gateway
-      // success against this checkout is a duplicate, never a re-settle.
-      await tx.checkoutSession.update({
-        where: { id: checkout.id },
-        data: { settledByPaymentId: payment.id },
-      });
-
-      const order = await tx.order.create({
-        data: {
-          userId: user.id,
-          checkoutSessionId: checkout.id,
-          type: args.orderType,
-          status: OrderStatus.PAID,
-          productId: args.product.id,
-          serviceId: args.serviceId,
-          paymentId: payment.id,
-          originalPriceToman: args.originalPriceToman,
-          discountAmountToman: args.discountAmountToman,
-          finalPriceToman: args.finalPriceToman,
-          discountCodeId: args.discountCodeId,
-          productNameSnapshot: snapshotString(snapshotRecord, "productName"),
-          productDescriptionSnapshot: snapshotString(snapshotRecord, "invoiceDescription"),
-          productPriceSnapshot: snapshotInt(snapshotRecord, "originalPriceToman"),
-          durationDaysSnapshot: snapshotInt(snapshotRecord, "durationDays"),
-          volumeGbSnapshot: snapshotInt(snapshotRecord, "volumeGb"),
-          ...(snapshotIntArray(snapshotRecord, "inboundIds") !== null
-            ? { inboundIdsSnapshot: snapshotIntArray(snapshotRecord, "inboundIds") as number[] }
-            : {}),
-          panelNameSnapshot: snapshotString(snapshotRecord, "panelName"),
-          locationSnapshot:
-            snapshotRecord.allLocations === true
-              ? "ALL"
-              : snapshotString(snapshotRecord, "serviceLocation"),
-          categorySnapshot: snapshotString(snapshotRecord, "categoryName"),
-          // Service-checkout username selection: the buyer's optional note,
-          // frozen from the checkout snapshot (null when skipped / not a SERVICE).
-          serviceNoteSnapshot: snapshotString(snapshotRecord, "serviceUserNote"),
-          paidAt: now,
-        },
-      });
-      // hotfix §4: CLAIM + BIND the buyer's username reservation INSIDE this
-      // financial transaction. The wallet path creates its checkout + order
-      // together and never pre-bound, so first claim the HELD hold to this
-      // checkout (verifying owner / draft nonce / selected username / mode /
-      // CURRENT panel / unexpired / unlinked), then record this order on it. Any
-      // mismatch throws and rolls the WHOLE payment back — no deduction, no order,
-      // no wallet transaction, no reservation corruption. Placed BEFORE the balance
-      // deduction so a stale hold never costs the buyer money.
-      if (args.serviceReservation !== undefined) {
-        const claim = await claimReservationForCheckout(
-          tx,
-          args.serviceReservation,
-          checkout.id,
-          now,
-        );
-        if (!claim.ok) {
-          throw new WalletPaymentAbort(RESERVATION_STALE_TEXT);
-        }
-        try {
-          await attachReservationToOrder(
-            tx,
-            {
-              reservationId: args.serviceReservation.reservationId,
-              userId: args.serviceReservation.userId,
-              checkoutSessionId: checkout.id,
-              panelId: args.serviceReservation.panelId,
-              normalizedUsername: args.serviceReservation.normalizedUsername,
-              orderId: order.id,
-            },
-            now,
-          );
-        } catch (bindErr) {
-          if (bindErr instanceof ReservationInvariantError) {
-            throw new WalletPaymentAbort(RESERVATION_STALE_TEXT);
-          }
-          throw bindErr;
-        }
-      }
-      const settledPayment = await tx.payment.update({
-        where: { id: payment.id },
-        data: { orderId: order.id },
-      });
-
-      // SECURITY-CRITICAL: atomic check-and-deduct. The WHERE condition is
-      // re-evaluated by PostgreSQL against the committed row while holding
-      // its lock, so a concurrent spend from a DIFFERENT draft can never
-      // sneak past a stale balance read. 0 rows matched = insufficient
-      // funds = the whole transaction (checkout/payment/order above) rolls
-      // back. Deliberately placed AFTER payment.create: a concurrent
-      // SAME-draft duplicate blocks on the unique idempotencyKey first and
-      // resolves via the P2002 path without ever touching the balance.
-      const deducted = await tx.user.updateMany({
-        where: { id: user.id, balanceToman: { gte: args.finalPriceToman } },
-        data: {
-          balanceToman: { decrement: args.finalPriceToman },
-          totalSpentToman: { increment: args.finalPriceToman },
-          ...(args.discountAmountToman > 0
-            ? { totalDiscountToman: { increment: args.discountAmountToman } }
-            : {}),
-          ordersCount: { increment: 1 },
-          paidOrdersCount: { increment: 1 },
-          totalPurchaseAmountToman: { increment: args.finalPriceToman },
-        },
-      });
-      if (deducted.count !== 1) {
-        throw new WalletPaymentAbort(INSUFFICIENT_BALANCE_TEXT);
-      }
-      // Exact ledger values from the row we just updated (still locked by
-      // this transaction, so no other spend can interleave).
-      const updatedUser = await tx.user.findUniqueOrThrow({
-        where: { id: user.id },
-        select: { balanceToman: true },
-      });
-      const balanceAfter = updatedUser.balanceToman;
-      const balanceBefore = balanceAfter + args.finalPriceToman;
-      const walletTransaction = await tx.walletTransaction.create({
-        data: {
-          userId: user.id,
-          amountToman: args.finalPriceToman,
-          type: WalletTransactionType.SPEND,
-          source: WalletTransactionSource.ORDER,
-          reason: WALLET_ORDER_PAYMENT_REASON,
-          relatedOrderId: order.id,
-          relatedPaymentId: payment.id,
-          balanceBeforeToman: balanceBefore,
-        balanceAfterToman: balanceAfter,
-        },
-      });
-
-      // Low-balance state machine: same transaction, committed balance, no I/O.
-      await onWalletBalanceChanged(tx, {
+  if (settlement.ok) {
+    if (!settlement.alreadyPaid) {
+      logger.info("wallet payment settled", {
+        orderId: settlement.order.id,
+        paymentId: settlement.payment.id,
         userId: user.id,
-        balanceBeforeToman: balanceBefore,
-        balanceAfterToman: balanceAfter,
-        source: "ORDER",
+        orderType: args.orderType,
+        amountToman: args.finalPriceToman,
       });
-
-      // SECURITY-CRITICAL discount finalization: claimDiscountUsage locks
-      // the DiscountCode row and re-validates active/window/total/per-user
-      // limits against the committed state - the pre-payment validation
-      // above is UX only and is never trusted here. A failed claim aborts
-      // the WHOLE payment (order, payment, deduction all roll back), so a
-      // discounted price can never settle without its claimed usage.
-      if (args.discountCodeId !== null && args.discountAmountToman > 0) {
-        const claim = await claimDiscountUsage(tx, {
-          discountCodeId: args.discountCodeId,
-          userId: user.id,
-          orderId: order.id,
-          checkoutSessionId: checkout.id,
-          amountToman: args.discountAmountToman,
-        });
-        if (!claim.ok) {
-          throw new WalletPaymentAbort(claim.safeMessage);
-        }
-      }
-
-      return {
-        order,
-        payment: settledPayment,
-        checkout,
-        walletTransaction,
-        newBalanceToman: balanceAfter,
-      };
-    });
-    logger.info("wallet payment settled", {
-      orderId: result.order.id,
-      paymentId: result.payment.id,
-      userId: user.id,
-      orderType: args.orderType,
-      amountToman: args.finalPriceToman,
-    });
-    return { ok: true, ...result, alreadyPaid: false };
-  } catch (err) {
-    if (err instanceof WalletPaymentAbort) {
-      return { ok: false, error: err.userError };
     }
-    // Unique idempotencyKey collision: a concurrent duplicate won - return
-    // its settled result instead of failing.
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      const settled = await loadExistingWalletPayment(args.idempotencyKey);
-      if (settled !== null) {
-        return settled;
-      }
-    }
-    throw err;
+    return {
+      ok: true,
+      order: settlement.order,
+      payment: settlement.payment,
+      checkout: settlement.checkout,
+      walletTransaction: settlement.walletTransaction,
+      newBalanceToman: settlement.newBalanceToman,
+      alreadyPaid: settlement.alreadyPaid,
+    };
   }
+  return { ok: false, error: SETTLEMENT_FAILURE_TEXT[settlement.code] };
 }
+
+/**
+ * The sentence the bot shows for each settlement outcome.
+ *
+ * IDEMPOTENCY_CONFLICT cannot arise on a bot flow — the key is
+ * `wallet:<userId>:<draftNonce>` and the payload is derived from the same draft
+ * the nonce identifies, so the same key always carries the same content. It is
+ * mapped anyway, to the stale-draft sentence, because an unmapped code would
+ * render as `undefined` on the one day an assumption stops holding.
+ */
+const SETTLEMENT_FAILURE_TEXT: Record<WalletSettlementFailure, string> = {
+  // A bot-authored snapshot should always satisfy this. Fail closed with the
+  // same restart instruction used for any other corrupt/stale draft.
+  INVALID_FINANCIAL_INPUT: DRAFT_STALE_TEXT,
+  // Unreachable from a bot flow: the admin/user middleware refuses a non-ACTIVE
+  // account long before a pre-invoice exists. Mapped to the restart sentence
+  // rather than left out, so it can never render as `undefined`.
+  USER_NOT_ACTIVE: DRAFT_STALE_TEXT,
+  WALLET_DISABLED: WALLET_PAYMENT_DISABLED_TEXT,
+  DRAFT_STALE: DRAFT_STALE_TEXT,
+  RESERVATION_STALE: RESERVATION_STALE_TEXT,
+  INSUFFICIENT_BALANCE: INSUFFICIENT_BALANCE_TEXT,
+  DISCOUNT_CHANGED: DISCOUNT_CLAIM_FAILED_TEXT,
+  IDEMPOTENCY_CONFLICT: DRAFT_STALE_TEXT,
+};
 
 /**
  * Wallet payment for a product-purchase pre-invoice draft. Supports BOTH
