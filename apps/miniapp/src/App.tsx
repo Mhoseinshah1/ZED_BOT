@@ -182,6 +182,9 @@ export function App(): ReactNode {
                 ) : null}
                 <AddonsSection
                   servicePublicId={openServiceId}
+                  checkoutEnabled={commerceFlags.checkout}
+                  renewalEnabled={commerceFlags.serviceRenewal}
+                  addonsEnabled={commerceFlags.extraVolume && commerceFlags.extraTime}
                   onPayment={(publicId) => {
                     setOpenServiceId(null);
                     setTab("buy");

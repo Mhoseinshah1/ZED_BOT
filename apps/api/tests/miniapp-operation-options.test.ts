@@ -500,16 +500,23 @@ describe.skipIf(!hasDb)("service operation options", () => {
   // --- ownership -------------------------------------------------------------
 
   // OPT-14 --------------------------------------------------------------------
-  it("OPT-14: another user's service yields SERVICE_NOT_FOUND", async () => {
-    const foreign = await makeService(strangerId, marzbanPanelId, "foreign-svc");
-    const result = await listServiceOperationOptions(prisma, {
-      userId: ownerId,
-      publicServiceId: servicePublicId(foreign),
-      operation: "RENEWAL",
-      group: "F",
-    });
-    expect(result).toEqual({ ok: false, code: "SERVICE_NOT_FOUND" });
-  });
+  it.each(["RENEWAL", "EXTRA_VOLUME", "EXTRA_TIME"] as const)(
+    "OPT-14: %s rejects another user's service with SERVICE_NOT_FOUND",
+    async (operation) => {
+      const foreign = await makeService(
+        strangerId,
+        marzbanPanelId,
+        `foreign-svc-${operation.toLowerCase()}`,
+      );
+      const result = await listServiceOperationOptions(prisma, {
+        userId: ownerId,
+        publicServiceId: servicePublicId(foreign),
+        operation,
+        group: "F",
+      });
+      expect(result).toEqual({ ok: false, code: "SERVICE_NOT_FOUND" });
+    },
+  );
 
   // --- resolution ------------------------------------------------------------
 

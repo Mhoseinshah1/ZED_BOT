@@ -6,6 +6,10 @@ import {
   type User,
   type WalletTransaction,
 } from "@zedbot/database";
+import {
+  MINIAPP_COMMERCE_ROLLOUT_KEYS,
+  settleWalletOrder,
+} from "@zedbot/service-renewal";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 process.env.APP_SECRET ??= "wallet-ledger-secret-wallet-ledger-11";
@@ -294,6 +298,94 @@ describe.runIf(hasDb)("wallet ledger integrity", () => {
     const rows = await ledgerRows(user.id);
     expect(rows.length).toBe(2); // one per DISTINCT draft, never per attempt
     expect(await freshBalance(user.id)).toBe(200_000 - 2 * PRICE);
+  });
+
+  it("3A. Mini App flags neither disable nor redirect bot commerce, and both surfaces write compatible records", async () => {
+    const previous = await prisma.setting.findMany({
+      where: { key: { in: [...MINIAPP_COMMERCE_ROLLOUT_KEYS] } },
+      select: { key: true, value: true },
+    });
+    const previousByKey = new Map(previous.map((row) => [row.key, row.value]));
+
+    try {
+      const botRecords = [];
+      for (const enabled of [false, true]) {
+        await Promise.all(MINIAPP_COMMERCE_ROLLOUT_KEYS.map((key) =>
+          prisma.setting.upsert({
+            where: { key },
+            create: { key, value: String(enabled), type: "BOOLEAN", isPublic: false },
+            update: { value: String(enabled), type: "BOOLEAN", isPublic: false },
+          }),
+        ));
+        const user = await createUser(100_000);
+        const outcome = await payPurchaseDraftWithWallet(user, await armedDraft(user.id));
+        expect(outcome.ok).toBe(true);
+        if (!outcome.ok) continue;
+        botRecords.push({
+          payment: outcome.payment,
+          order: outcome.order,
+          wallet: (await ledgerRows(user.id))[0]!,
+        });
+      }
+
+      expect(botRecords).toHaveLength(2);
+      for (const record of botRecords) {
+        expect(record.payment.status).toBe("APPROVED");
+        expect(record.order.status).toBe("PAID");
+        expect(record.wallet.type).toBe("SPEND");
+        expect(record.wallet.reason).toBe(WALLET_ORDER_PAYMENT_REASON);
+      }
+
+      // This direct shared settlement is the authority invoked by the Mini App
+      // route. Compare persisted financial semantics, not imports or source text.
+      const miniAppUser = await createUser(100_000);
+      const miniApp = await settleWalletOrder({
+        userId: miniAppUser.id,
+        orderType: "SERVICE_PURCHASE",
+        productId,
+        serviceId: null,
+        snapshot: {
+          productId,
+          productName: "miniapp-compatible",
+          originalPriceToman: PRICE,
+          discountAmountToman: 0,
+          finalPriceToman: PRICE,
+        },
+        originalPriceToman: PRICE,
+        discountAmountToman: 0,
+        finalPriceToman: PRICE,
+        discountCodeId: null,
+        idempotencyKey: `miniapp-compatible:${randomUUID()}`,
+        isWalletEnabled: async () => true,
+      });
+      expect(miniApp.ok).toBe(true);
+      if (miniApp.ok) {
+        const miniAppWallet = (await ledgerRows(miniAppUser.id))[0]!;
+        const bot = botRecords[0]!;
+        expect({
+          paymentStatus: miniApp.payment.status,
+          orderStatus: miniApp.order.status,
+          orderType: miniApp.order.type,
+          walletType: miniAppWallet.type,
+          walletReason: miniAppWallet.reason,
+          amount: miniAppWallet.amountToman,
+        }).toEqual({
+          paymentStatus: bot.payment.status,
+          orderStatus: bot.order.status,
+          orderType: bot.order.type,
+          walletType: bot.wallet.type,
+          walletReason: bot.wallet.reason,
+          amount: bot.wallet.amountToman,
+        });
+      }
+    } finally {
+      await Promise.all(MINIAPP_COMMERCE_ROLLOUT_KEYS.map((key) => {
+        const value = previousByKey.get(key);
+        return value === undefined
+          ? prisma.setting.deleteMany({ where: { key } })
+          : prisma.setting.update({ where: { key }, data: { value } });
+      }));
+    }
   });
 
   it("4. refund is idempotent: sequential retries and concurrent calls write one REFUND row", async () => {
