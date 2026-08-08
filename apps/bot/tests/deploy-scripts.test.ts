@@ -55,6 +55,8 @@ describe("deploy scripts (Phase 36)", () => {
       "stop",
       "start",
       "update",
+      "rollback-status",
+      "rollback",
       "backup",
       "health",
       "doctor",

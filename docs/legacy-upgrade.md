@@ -4,7 +4,7 @@ Installations that predate PR #92 (the persistent-backup layout) could run
 `zedbot update` and still end up serving **old code**: old containers, an
 old installed CLI and an old `.env`. This document covers the production
 problem, the self-heal that converges such installations automatically, the
-current 11-step updater, the post-deploy smoke test, the baked deployment
+current 14-step updater, the post-deploy smoke test, the baked deployment
 identity (`GIT_SHA`), the `zedbot deploy-status` report and the CI job that
 proves the whole path end to end.
 
@@ -126,23 +126,26 @@ In order (`legacy_self_heal` in `scripts/migrate.sh`, helpers in
    written into the database Settings via the worker's `record-deploy` CLI
    (best effort — a bookkeeping failure never aborts the deploy).
 
-## The current update flow (11 steps)
+## The current update flow (14 steps)
 
 `scripts/update.sh` (via the refreshed `zedbot update`):
 
 | Step | Action |
 | --- | --- |
-| 1/11 | Safety archive (`.env` + database, `scripts/backup.sh`) |
-| 2/11 | Pre-update database backup **created and verified** (the update gate — any doubt aborts with the running installation untouched; escape hatch `ZEDBOT_SKIP_PREUPDATE_BACKUP=1`) |
-| 3/11 | `git fetch` + `git pull --ff-only` (a non-fast-forwardable checkout warns and continues on the current code) |
-| 4/11 | `migrate_legacy_env` (append-only) + re-load `.env` + `ensure_backup_dir_permissions` |
-| 5/11 | `refresh_cli` — a refresh failure **aborts the update** (a stale installed CLI driving new code is exactly the bug class this updater prevents) |
-| 6/11 | `compose build` with `GIT_SHA="$(repo_head_sha)"` exported (deployment identity) |
-| 7/11 | `scripts/migrate.sh` — Prisma migrations + seed **before** the new app containers run (old code on a newer schema beats new code on an older schema); its legacy self-heal no-ops here because steps 4–5 already converged env + CLI |
-| 8/11 | `compose up -d --force-recreate --remove-orphans` |
-| 9/11 | `record_deployed_sha` (worker `record-deploy` CLI → Settings) |
-| 10/11 | Post-deploy smoke test (below) |
-| 11/11 | `scripts/doctor.sh` health checks |
+| 1/14 | Safety archive (`.env` + database, `scripts/backup.sh`) |
+| 2/14 | Pre-update database backup **created and verified** (the update gate — any doubt aborts with the running installation untouched; escape hatch `ZEDBOT_SKIP_PREUPDATE_BACKUP=1`) |
+| 3/14 | Validate running API/Bot/Worker image/SHA, API health and Worker heartbeat before changing the checkout |
+| 4/14 | `git fetch origin main` + `git merge --ff-only origin/main`; any Git or SHA failure aborts immediately |
+| 5/14 | `migrate_legacy_env` (append-only) + re-load `.env` + `ensure_backup_dir_permissions` |
+| 6/14 | `refresh_cli` — a refresh failure aborts |
+| 7/14 | Retain the verified pre-deploy image and write atomic `prepared` metadata |
+| 8/14 | Revalidate HEAD and build with the exact fetched target SHA |
+| 9/14 | Typed fail-closed migration rollback-compatibility preflight |
+| 10/14 | `scripts/migrate.sh` — Prisma migrations + seed |
+| 11/14 | Revalidate HEAD, then `compose up -d --force-recreate --remove-orphans` |
+| 12/14 | `record_deployed_sha` |
+| 13/14 | Post-deploy smoke test (below) |
+| 14/14 | `scripts/doctor.sh` plus strict application SHA/health validation |
 
 Any failure trips the ERR trap, which prints recovery steps (`zedbot
 logs` / `zedbot doctor`, retry with `zedbot update`, manual restore via
@@ -150,7 +153,7 @@ logs` / `zedbot doctor`, retry with `zedbot update`, manual restore via
 
 ## Post-deploy smoke test
 
-Step 10 runs `apps/worker/dist/cli/deploy-smoke.js` in a **one-off** worker
+Step 13 runs `apps/worker/dist/cli/deploy-smoke.js` in a **one-off** worker
 container while the freshly recreated real worker is running, then adds two
 bot-side checks from the host. The CLI prints one line of secret-free JSON:
 `{ok, failureCategory, filename, operationId, steps}`.

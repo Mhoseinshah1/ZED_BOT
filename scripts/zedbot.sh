@@ -28,6 +28,8 @@ Commands:
   stop                    Stop all services
   update                  Update ZED_BOT to the latest version (creates + verifies a backup first)
   deploy-status           Show repository/image/container version alignment and migration status
+  rollback-status         Validate and show the retained application rollback candidate
+  rollback [--yes]        Restore API/Bot/Worker to the retained image (never restores the database)
   backup [create]         Create a verified database backup (zedbot-db-<stamp>.dump[.enc] + manifest)
   backup list             List all backups (name, size, date, type, verified)
   backup verify <file>    Verify a backup by file name, path or timestamp id
@@ -441,6 +443,12 @@ case "$CMD" in
     ;;
   update)
     exec bash "${SCRIPTS_DIR}/update.sh" "$@"
+    ;;
+  rollback-status)
+    exec bash "${SCRIPTS_DIR}/rollback.sh" status
+    ;;
+  rollback)
+    exec bash "${SCRIPTS_DIR}/rollback.sh" rollback "$@"
     ;;
   deploy-status)
     require_root

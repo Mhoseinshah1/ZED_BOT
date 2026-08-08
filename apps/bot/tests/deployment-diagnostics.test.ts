@@ -573,12 +573,14 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     expect(script).toContain("deploy_status()");
   });
 
-  it("update.sh and migrate.sh bake the repo HEAD as the GIT_SHA build identity", () => {
-    for (const name of ["update.sh", "migrate.sh"]) {
-      const script = readFileSync(path.join(scriptsDir, name), "utf8");
-      expect(script, name).toContain('GIT_SHA="$(repo_head_sha)"');
-      expect(script, name).toContain('export GIT_SHA="${GIT_SHA:-unknown}"');
-    }
+  it("update pins fetched target SHA while legacy self-heal pins repository HEAD", () => {
+    const update = readFileSync(path.join(scriptsDir, "update.sh"), "utf8");
+    expect(update).toContain('target_deploy_sha="$(prepare_exact_origin_main)"');
+    expect(update).toContain('GIT_SHA="$target_deploy_sha"');
+    expect(update).toContain("export GIT_SHA");
+    const migrate = readFileSync(path.join(scriptsDir, "migrate.sh"), "utf8");
+    expect(migrate).toContain('GIT_SHA="$(repo_head_sha)"');
+    expect(migrate).toContain('export GIT_SHA="${GIT_SHA:-unknown}"');
   });
 
   it("no print-like line ever expands a secret variable directly", () => {

@@ -42,6 +42,15 @@ export {
   type MigrationDeploymentEntry,
 } from "./migration-deployment.js";
 export {
+  ROLLBACK_COMPATIBILITY_FORMAT_VERSION,
+  evaluateRollbackCompatibility,
+  evaluateUpdateCompatibility,
+  parseRollbackCompatibilityManifest,
+  type CompatibilityDecision,
+  type MigrationSnapshot,
+  type RollbackCompatibilityManifest,
+} from "./deployment-rollback.js";
+export {
   resolveMigrationsDir,
   checkReferralSchemaPostconditions,
   verifyReferralOrderIdUniqueIndex,

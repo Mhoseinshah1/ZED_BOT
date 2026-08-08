@@ -29,6 +29,9 @@ ZEDBOT_LOGS_DIR="${ZEDBOT_LOGS_DIR:-${ZEDBOT_BASE_DIR}/logs}"
 ZEDBOT_ENV_FILE="${ZEDBOT_ENV_FILE:-${ZEDBOT_APP_DIR}/.env}"
 ZEDBOT_REPO_URL="${ZEDBOT_REPO_URL:-https://github.com/Mhoseinshah1/ZED_BOT.git}"
 ZEDBOT_CLI_PATH="${ZEDBOT_CLI_PATH:-/usr/local/bin/zedbot}"
+ZEDBOT_DEPLOYMENT_DIR="${ZEDBOT_DEPLOYMENT_DIR:-${ZEDBOT_BASE_DIR}/deployments}"
+ZEDBOT_ROLLBACK_METADATA="${ZEDBOT_ROLLBACK_METADATA:-${ZEDBOT_DEPLOYMENT_DIR}/previous.json}"
+ZEDBOT_DEPLOYMENT_LOCK="${ZEDBOT_DEPLOYMENT_LOCK:-${ZEDBOT_DEPLOYMENT_DIR}/deployment.lock}"
 
 # --- Logging -----------------------------------------------------------------
 if [ -t 1 ]; then
@@ -208,6 +211,78 @@ wait_for_service_healthy() {
   return 1
 }
 
+# update and rollback are mutually exclusive. The descriptor remains open for
+# the caller's lifetime; a second process fails immediately instead of waiting.
+acquire_deployment_lock() {
+  mkdir -p "$ZEDBOT_DEPLOYMENT_DIR"
+  chmod 700 "$ZEDBOT_DEPLOYMENT_DIR"
+  exec 9>"$ZEDBOT_DEPLOYMENT_LOCK"
+  chmod 600 "$ZEDBOT_DEPLOYMENT_LOCK"
+  if ! flock -n 9; then
+    log_error "Another update or rollback is already running (${ZEDBOT_DEPLOYMENT_LOCK})."
+    return 1
+  fi
+}
+
+valid_git_sha() { printf '%s' "${1:-}" | grep -Eq '^[a-f0-9]{40}$'; }
+valid_image_id() { printf '%s' "${1:-}" | grep -Eq '^sha256:[a-f0-9]{64}$'; }
+
+application_container_sha() {
+  local service="$1"
+  run_compose exec -T "$service" sh -c 'printf "%s" "${GIT_SHA:-}"' 2>/dev/null | tr -d '[:space:]'
+}
+
+application_container_image_id() {
+  local service="$1" cid
+  cid="$(run_compose ps -q "$service" 2>/dev/null | head -n 1)"
+  [ -n "$cid" ] || return 1
+  docker inspect -f '{{.Image}}' "$cid" 2>/dev/null
+}
+
+# Reads the worker heartbeat through the worker's own Redis configuration. It
+# neither writes Redis nor addresses the redis/postgres Compose services.
+check_fresh_worker_heartbeat() {
+  run_compose exec -T worker node --input-type=module -e '
+    import { RedisConnection } from "bullmq";
+    import { getRedisOptions, WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from "@zedbot/shared";
+    const options = getRedisOptions();
+    if (options === null) process.exit(2);
+    const connection = new RedisConnection({ ...options, maxRetriesPerRequest: 1, connectTimeout: 5000 }, { shared: false, blocking: false, skipVersionCheck: true });
+    try {
+      const redis = await connection.client;
+      const value = await redis.get(WORKER_HEARTBEAT_KEY);
+      const age = value === null ? Infinity : Date.now() - Date.parse(value);
+      if (!Number.isFinite(age) || age < 0 || age > WORKER_HEARTBEAT_TTL_SECONDS * 1000) process.exitCode = 3;
+    } finally { await connection.close(); }
+  ' >/dev/null 2>&1
+}
+
+validate_running_application() {
+  local expected_sha="${1:-}" service sha image common_sha="" common_image=""
+  for service in api bot worker; do
+    compose_service_running "$service" || { log_error "${service} is not running."; return 1; }
+    sha="$(application_container_sha "$service")" || return 1
+    image="$(application_container_image_id "$service")" || return 1
+    valid_git_sha "$sha" && valid_image_id "$image" || { log_error "${service} has invalid deployment identity."; return 1; }
+    [ -z "$common_sha" ] && common_sha="$sha" && common_image="$image"
+    [ "$sha" = "$common_sha" ] && [ "$image" = "$common_image" ] || { log_error "api, bot and worker do not share one SHA/image."; return 1; }
+  done
+  [ -z "$expected_sha" ] || [ "$common_sha" = "$expected_sha" ] || { log_error "Application SHA does not match ${expected_sha}."; return 1; }
+  wait_for_service_healthy api 90 || { log_error "API health check failed."; return 1; }
+  check_fresh_worker_heartbeat || { log_error "Worker heartbeat is missing or stale."; return 1; }
+  printf '%s %s\n' "$common_sha" "$common_image"
+}
+
+atomic_write_metadata() {
+  local source="$1" tmp
+  mkdir -p "$ZEDBOT_DEPLOYMENT_DIR"
+  chmod 700 "$ZEDBOT_DEPLOYMENT_DIR"
+  tmp="${ZEDBOT_ROLLBACK_METADATA}.tmp.$$"
+  install -m 600 "$source" "$tmp"
+  mv -f "$tmp" "$ZEDBOT_ROLLBACK_METADATA"
+  chmod 600 "$ZEDBOT_ROLLBACK_METADATA"
+}
+
 # --- Interaction -------------------------------------------------------------
 # confirm "<question>" [y|n]
 # Returns 0 for yes, 1 for no. The second argument is the default answer,
@@ -291,6 +366,19 @@ repo_head_sha() {
     git config --global --add safe.directory "$ZEDBOT_APP_DIR" >/dev/null 2>&1 || true
   fi
   git -C "$ZEDBOT_APP_DIR" rev-parse HEAD 2>/dev/null || true
+}
+
+# Fetches the one supported deployment source and returns its exact SHA. Any
+# failure is terminal to callers; there is deliberately no warn-and-continue.
+prepare_exact_origin_main() {
+  local target
+  git -C "$ZEDBOT_APP_DIR" config core.fileMode false || return 1
+  git -C "$ZEDBOT_APP_DIR" fetch origin main || return 1
+  target="$(git -C "$ZEDBOT_APP_DIR" rev-parse origin/main 2>/dev/null)"
+  valid_git_sha "$target" || return 1
+  git -C "$ZEDBOT_APP_DIR" merge --ff-only origin/main || return 1
+  [ "$(git -C "$ZEDBOT_APP_DIR" rev-parse HEAD 2>/dev/null)" = "$target" ] || return 1
+  printf '%s\n' "$target"
 }
 
 # True when the installed CLI (ZEDBOT_CLI_PATH) is missing or its content
@@ -390,8 +478,8 @@ migrate_legacy_env() {
 # worker's record-deploy CLI. Best effort: failures are logged but never
 # abort the caller - a deploy must not fail on a bookkeeping write.
 record_deployed_sha() {
-  local sha
-  sha="$(repo_head_sha)"
+  local sha="${1:-}"
+  [ -n "$sha" ] || sha="$(repo_head_sha)"
   if [ -z "$sha" ]; then
     log_warn "Could not determine the repository HEAD SHA - deployed version not recorded."
     return 0

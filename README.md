@@ -78,6 +78,8 @@ All management goes through the `zedbot` CLI (run as root):
 | `zedbot stop`                  | Stop all services                                       |
 | `zedbot update`                | Update to the latest version (creates **and verifies** a backup first) |
 | `zedbot deploy-status`         | Show repository/image/container version alignment and migration status |
+| `zedbot rollback-status`       | Validate/show the retained application rollback candidate |
+| `zedbot rollback [--yes]`      | Restore API/Bot/Worker to the retained image; never restores the database |
 | `zedbot backup`                | Create a verified database backup (`zedbot-db-YYYYMMDD-HHMMSS.dump[.enc]` + manifest) |
 | `zedbot backup list`           | List all backups (name, size, date, type, verified)      |
 | `zedbot backup verify <file>`  | Verify a backup by file name, path or timestamp id       |
@@ -113,6 +115,21 @@ mode-dirty tree its own installer created; the reason and details are in
 ```bash
 git -C /opt/zedbot/app config core.fileMode false && zedbot update
 ```
+
+Updates fail closed if fetching or fast-forwarding `origin/main` fails. Before
+changing the checkout, the updater requires one healthy common API/Bot/Worker
+image and a fresh Worker heartbeat, then retains that immutable image as the
+application-only rollback candidate. Newly pending migrations must be declared
+backward-compatible in `packages/database/prisma/rollback-compatibility.json`.
+
+```bash
+zedbot rollback-status
+zedbot rollback            # interactive confirmation
+zedbot rollback --yes      # explicit non-interactive confirmation
+```
+
+Rollback interrupts and recreates only `api bot worker` with `--no-deps
+--no-build`; it never restarts PostgreSQL/Redis and never restores database data.
 
 ### Status and health
 

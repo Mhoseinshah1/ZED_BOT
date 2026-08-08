@@ -209,6 +209,8 @@ jobs:
         run: |
           bash -n scripts/install.sh
           bash -n scripts/update.sh
+          bash -n scripts/rollback.sh
+          bash -n scripts/tests/application-rollback-test.sh
           bash -n scripts/backup.sh
           bash -n scripts/backup-db.sh
           bash -n scripts/doctor.sh
@@ -229,6 +231,8 @@ jobs:
           shellcheck -x -S warning -e SC1090,SC1091 \
             scripts/install.sh \
             scripts/update.sh \
+            scripts/rollback.sh \
+            scripts/tests/application-rollback-test.sh \
             scripts/backup.sh \
             scripts/backup-db.sh \
             scripts/doctor.sh \
@@ -396,6 +400,15 @@ jobs:
           docker compose down -v --remove-orphans || true
           rm -f .env
           sudo rm -rf "$BACKUP_HOST_DIR" "$DATA_HOST_DIR" || true
+
+  application-rollback-smoke:
+    name: "Disposable application-only rollback"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run isolated rollback proof
+        run: bash scripts/tests/application-rollback-test.sh
 
   # End-to-end proof that installations which predate PR #92 (persistent
   # backups) fully converge on `zedbot update`: the test installs the OLD

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ZED_BOT updater (self-healing):
-#   safety archive -> database backup + verification gate -> pull
+#   safety archive -> database backup + verification gate -> validate running app
+#   -> fail-closed fetch/fast-forward
 #   -> migrate legacy .env -> refresh installed CLI -> build (with identity)
 #   -> migrate DB -> force-recreate -> record deploy -> post-deploy smoke
 #   -> doctor
@@ -20,13 +21,31 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # shellcheck source=lib/common.sh
 . "${SCRIPT_DIR}/lib/common.sh"
 
+DEPLOYMENT_METADATA_ACTIVE=0
+APPLICATION_RECREATED=0
+
+set_rollback_state() {
+  local state="$1" tmp
+  [ "$DEPLOYMENT_METADATA_ACTIVE" -eq 1 ] || return 0
+  tmp="$(mktemp "${ZEDBOT_DEPLOYMENT_DIR}/state.XXXXXX")"
+  jq --arg state "$state" '.state = $state' "$ZEDBOT_ROLLBACK_METADATA" > "$tmp"
+  atomic_write_metadata "$tmp"
+  rm -f "$tmp"
+}
+
 on_update_error() {
+  local rc=$?
+  trap - ERR
+  if [ "$APPLICATION_RECREATED" -eq 1 ]; then
+    set_rollback_state "available-after-failed-deploy" || true
+  fi
   log_error "ZED_BOT update FAILED. Your data and .env were NOT deleted."
   log_error "Recovery steps:"
   log_error "  1. Inspect what went wrong:   zedbot logs        (or: zedbot doctor)"
   log_error "  2. Retry the update:          zedbot update"
   log_error "  3. If the app is broken, restore the pre-update backup MANUALLY:"
   log_error "       zedbot restore-help      (prints the manual restore steps)"
+  exit "$rc"
 }
 trap on_update_error ERR
 
@@ -181,7 +200,7 @@ post_deploy_smoke() {
   log_error "  zedbot repair backups     (fix backup mount ownership/permissions)"
   log_error "  zedbot logs worker        (inspect the worker)"
   log_error "  zedbot update             (retry once fixed)"
-  exit 1
+  return 1
 }
 
 main() {
@@ -189,16 +208,32 @@ main() {
   app_cd
   load_env_if_exists
   detect_compose_command
+  acquire_deployment_lock
 
   log_info "Starting ZED_BOT update ..."
 
-  log_info "[1/11] Creating a safety archive (.env + database) before updating ..."
+  log_info "[1/14] Creating a safety archive (.env + database) before updating ..."
   bash "${SCRIPT_DIR}/backup.sh"
 
-  log_info "[2/11] Creating and verifying a database backup (update gate) ..."
+  log_info "[2/14] Creating and verifying a database backup (update gate) ..."
   pre_update_database_backup
 
-  log_info "[3/11] Pulling the latest code ..."
+  log_info "[3/14] Capturing the healthy running application rollback candidate ..."
+  local identity pre_deploy_sha pre_deploy_image_id baseline_csv migration_json
+  identity="$(validate_running_application)" || {
+    log_error "The current application is not healthy and cannot be retained as known-good."
+    exit 1
+  }
+  read -r pre_deploy_sha pre_deploy_image_id <<< "$identity"
+  migration_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/migration-status.js | tail -n 1)"
+  if [ "$(printf '%s' "$migration_json" | jq -r '.ok == true and .upToDate == true and .failedCount == 0')" != "true" ]; then
+    log_error "Current migration state is not healthy; refusing to retain this application as known-good."
+    exit 1
+  fi
+  baseline_csv="$(run_compose exec -T worker sh -c 'find packages/database/prisma/migrations -mindepth 2 -maxdepth 2 -name migration.sql -printf "%h\n" | sed "s#.*/##" | sort | paste -sd, -')"
+  [ -n "$baseline_csv" ] || { log_error "No complete baseline migrations found."; exit 1; }
+
+  log_info "[4/14] Fetching and fast-forwarding exactly origin/main ..."
   # --add appends duplicates on every run; only add when missing.
   if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ZEDBOT_APP_DIR"; then
     git config --global --add safe.directory "$ZEDBOT_APP_DIR" >/dev/null 2>&1 || true
@@ -209,18 +244,19 @@ main() {
   # pulls (the update then "succeeded" without ever fetching new code).
   # Ignoring mode bits removes that whole failure class.
   git config core.fileMode false
-  git fetch --all --prune
-  if ! git pull --ff-only; then
-    log_warn "Could not fast-forward the repository (local modifications?). Continuing with the current code."
-  fi
+  local target_deploy_sha
+  target_deploy_sha="$(prepare_exact_origin_main)" || {
+    log_error "Fetching, fast-forwarding or verifying origin/main failed; aborting before source preparation."
+    exit 1
+  }
 
-  log_info "[4/11] Migrating the .env to the current layout (append-only) ..."
+  log_info "[5/14] Migrating the .env to the current layout (append-only) ..."
   migrate_legacy_env
   # Re-load so freshly appended keys (ZEDBOT_BACKUP_DIR & co) take effect.
   load_env_if_exists
   ensure_backup_dir_permissions
 
-  log_info "[5/11] Refreshing the installed zedbot CLI ..."
+  log_info "[6/14] Refreshing the installed zedbot CLI ..."
   # Failure to refresh the CLI must fail the update: a stale installed CLI
   # driving new code is exactly the class of bug this updater prevents.
   if ! refresh_cli; then
@@ -229,37 +265,76 @@ main() {
     exit 1
   fi
 
-  log_info "[6/11] Building updated images (with deployment identity) ..."
+  log_info "[7/14] Retaining the verified previous application image and metadata ..."
+  local rollback_tag compatibility_file compatibility_sha compatibility_declarations metadata_tmp
+  rollback_tag="zedbot-app:rollback-${pre_deploy_sha}"
+  compatibility_file="packages/database/prisma/rollback-compatibility.json"
+  jq -e '.formatVersion == 1 and (.backwardCompatibleMigrations | type == "array")' "$compatibility_file" >/dev/null \
+    || { log_error "Rollback compatibility manifest is malformed."; exit 1; }
+  compatibility_sha="$(sha256sum "$compatibility_file" | awk '{print $1}')"
+  compatibility_declarations="$(jq -c '.backwardCompatibleMigrations' "$compatibility_file")"
+  docker image tag "$pre_deploy_image_id" "$rollback_tag"
+  [ "$(docker image inspect -f '{{.Id}}' "$rollback_tag" 2>/dev/null)" = "$pre_deploy_image_id" ] \
+    || { log_error "Retained rollback image tag does not resolve to the verified image ID."; exit 1; }
+  metadata_tmp="$(mktemp "${ZEDBOT_DEPLOYMENT_DIR}/metadata.XXXXXX")"
+  jq -n \
+    --arg preDeploySha "$pre_deploy_sha" --arg preDeployImageId "$pre_deploy_image_id" \
+    --arg targetDeploySha "$target_deploy_sha" --arg retainedImageTag "$rollback_tag" \
+    --arg capturedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg baseline "$baseline_csv" \
+    --arg compatibilityManifestSha256 "$compatibility_sha" \
+    --argjson compatibilityDeclarations "$compatibility_declarations" \
+    '{formatVersion:1,preDeploySha:$preDeploySha,preDeployImageId:$preDeployImageId,targetDeploySha:$targetDeploySha,retainedImageTag:$retainedImageTag,capturedAt:$capturedAt,preDeployMigrations:($baseline|split(",")),compatibilityManifestSha256:$compatibilityManifestSha256,compatibilityDeclarations:$compatibilityDeclarations,state:"prepared"}' > "$metadata_tmp"
+  atomic_write_metadata "$metadata_tmp"
+  rm -f "$metadata_tmp"
+  DEPLOYMENT_METADATA_ACTIVE=1
+
+  log_info "[8/14] Revalidating source and building updated images ..."
   # GIT_SHA travels into the image as its LAST layers (see Dockerfile), so
   # identity-only rebuilds stay cheap.
-  GIT_SHA="$(repo_head_sha)"
-  export GIT_SHA="${GIT_SHA:-unknown}"
+  [ "$(repo_head_sha)" = "$target_deploy_sha" ] || { log_error "HEAD changed before build; aborting."; exit 1; }
+  GIT_SHA="$target_deploy_sha"
+  export GIT_SHA
   run_compose build
 
-  log_info "[7/11] Applying database migrations (before the new app containers run) ..."
+  log_info "[9/14] Validating rollback compatibility of pending migrations ..."
+  local compatibility_json
+  compatibility_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/rollback-compatibility.js update "$baseline_csv")" || {
+    log_error "Migration compatibility check failed: $(printf '%s' "$compatibility_json" | jq -r '.blocker // "unavailable"' 2>/dev/null || echo unavailable)"
+    exit 1
+  }
+  [ "$(printf '%s' "$compatibility_json" | jq -r '.manifestSha256')" = "$compatibility_sha" ] \
+    || { log_error "Compatibility manifest checksum changed during deployment."; exit 1; }
+
+  log_info "[10/14] Applying database migrations (before the new app containers run) ..."
   # `compose run` inside migrate.sh starts postgres/redis itself. The app
   # services still run the OLD code at this point - the safe direction (old
   # code on a newer schema beats new code on an older schema). migrate.sh's
   # legacy self-heal no-ops here: steps 4-5 already converged env + CLI.
   bash "${SCRIPT_DIR}/migrate.sh"
 
-  log_info "[8/11] Recreating all services with the new images ..."
+  log_info "[11/14] Revalidating source and recreating services ..."
   # --force-recreate is THE fix for the stale-container symptom observed in
   # production: a plain `up -d` can leave the previous containers (previous
   # image, previous mounts, previous env) running after a rebuild.
+  [ "$(repo_head_sha)" = "$target_deploy_sha" ] || { log_error "HEAD changed before service recreation; aborting."; exit 1; }
+  APPLICATION_RECREATED=1
+  set_rollback_state "application-recreated"
   run_compose up -d --force-recreate --remove-orphans
 
-  log_info "[9/11] Recording the deployed version ..."
+  log_info "[12/14] Recording the deployed version ..."
   record_deployed_sha
 
-  log_info "[10/11] Running the post-deploy smoke test ..."
+  log_info "[13/14] Running the post-deploy smoke test ..."
   post_deploy_smoke
 
-  log_info "[11/11] Running health checks ..."
+  log_info "[14/14] Running health checks ..."
   if bash "${SCRIPT_DIR}/doctor.sh"; then
+    validate_running_application "$target_deploy_sha" >/dev/null
+    set_rollback_state "available"
     log_success "ZED_BOT update completed successfully."
   else
-    log_warn "Update finished, but the doctor reported problems. Run 'zedbot doctor' for details."
+    log_error "Update health checks failed; deployment was not marked successful."
+    return 1
   fi
 }
 
