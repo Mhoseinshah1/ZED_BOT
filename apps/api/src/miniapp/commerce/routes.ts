@@ -254,7 +254,7 @@ export function registerCommerceRoutes(app: FastifyInstance, options: CommerceRo
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (!isServiceOperation(body.kind) || typeof body.productPublicId !== "string" || !isValidClientRequestId(body.clientRequestId)) return fail(reply, 400, "BAD_REQUEST");
     const operation = body.kind;
-    const denied = await requireRollout(reply, ["miniapp_commerce_checkout_enabled", OPERATION_SETTLE_ROLLOUT_KEY[operation]]);
+    const denied = await requireRollout(reply, ["miniapp_commerce_checkout_enabled"]);
     if (denied !== null) return denied;
     const discountCode = typeof body.discountCode === "string" ? body.discountCode.trim() : "";
     const fingerprint = commerceFingerprint([operation, request.params.serviceId, body.productPublicId, discountCode]);
@@ -289,6 +289,8 @@ export function registerCommerceRoutes(app: FastifyInstance, options: CommerceRo
   app.post<{ Body: unknown }>("/commerce/checkout", { bodyLimit: BODY_LIMIT }, async (request, reply) => {
     const owner = user(request);
     if (!gate(request, reply, owner.id)) return reply;
+    const denied = await requireRollout(reply, ["miniapp_commerce_checkout_enabled"]);
+    if (denied !== null) return denied;
     const token = (request.body as Record<string, unknown> | null)?.draftToken;
     const opened = openQuote(token);
     if (!opened.ok) return fail(reply, 400, opened.reason === "EXPIRED" ? "QUOTE_EXPIRED" : "BAD_REQUEST");
