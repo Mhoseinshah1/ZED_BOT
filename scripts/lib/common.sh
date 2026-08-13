@@ -437,6 +437,40 @@ run_compose() {
       --env-file "$ZEDBOT_CANONICAL_RUNTIME_ENV_FILE" "$@"
 }
 
+# Compose interpolation normally receives no ambient environment at all. A
+# build is the one exception: its immutable deployment identity must reach the
+# Dockerfile as a build argument. Keep that exception narrow and validate it
+# before adding only GIT_SHA to the otherwise-clean environment.
+run_compose_with_deployment_sha() {
+  local sha="$1"
+  shift
+  valid_git_sha "$sha" || { log_error "Deployment image SHA is invalid."; return 1; }
+  detect_compose_command || return 1
+  validate_compose_contract_paths || return 1
+  run_operation_child /usr/bin/env -i PATH="$_ZEDBOT_FIXED_DOCKER_PATH" LC_ALL=C \
+    COMPOSE_DISABLE_ENV_FILE=1 GIT_SHA="$sha" \
+    "${COMPOSE_CMD[@]}" --project-directory "$ZEDBOT_CANONICAL_PROJECT_DIR" \
+      -f "$ZEDBOT_CANONICAL_COMPOSE_FILE" \
+      --project-name "$ZEDBOT_COMPOSE_PROJECT_NAME" \
+      --env-file "$ZEDBOT_CANONICAL_RUNTIME_ENV_FILE" "$@"
+}
+
+# Read-only, fail-closed running-state observation shared by doctor and backup
+# commands. Never accepts an arbitrary Compose service or container identity.
+compose_service_running() {
+  local service="$1" cid inspection
+  case "$service" in api|bot|worker|postgres|redis) ;; *) return 1;; esac
+  cid="$(run_compose ps -q "$service" 2>/dev/null | /usr/bin/head -n 1 || true)"
+  [ -n "$cid" ] || return 1
+  inspection="$(run_clean_docker inspect --type container "$cid" 2>/dev/null)" || return 1
+  printf '%s' "$inspection" | /usr/bin/jq -e --arg service "$service" --arg project "$ZEDBOT_COMPOSE_PROJECT_NAME" '
+    type=="array" and length==1 and
+    .[0].State.Running==true and
+    .[0].Config.Labels["com.docker.compose.project"]==$project and
+    .[0].Config.Labels["com.docker.compose.service"]==$service
+  ' >/dev/null 2>&1
+}
+
 validate_compose_application_images() {
   local rendered service image image_occurrences
   rendered="$(run_compose config --format json)" || { log_error "Canonical Compose configuration could not be rendered."; return 1; }

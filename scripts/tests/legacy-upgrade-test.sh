@@ -434,11 +434,17 @@ assert_converged() {
   # The RUNNING bot image ships the new admin UI strings.
   retry 12 5 "new admin UI strings inside the running bot container" bot_has_new_admin_ui
 
-  # Baked deployment identity on both app containers.
-  local worker_sha=""
+  # Baked deployment identity on every application container.
+  local api_sha="" worker_sha=""
+  api_sha="$(dc exec -T api sh -c 'printf "%s" "${GIT_SHA:-}"' | tr -d '[:space:]' || true)"
   worker_sha="$(dc exec -T worker sh -c 'printf "%s" "${GIT_SHA:-}"' | tr -d '[:space:]' || true)"
+  assert_eq "$api_sha" "$NEW_SHA" "api container GIT_SHA"
   assert_eq "$worker_sha" "$NEW_SHA" "worker container GIT_SHA"
   retry 12 5 "bot container GIT_SHA == ${NEW_SHA}" bot_git_sha_matches
+
+  if grep -qF 'command not found' "${WORK}/update-1.log"; then
+    fail "legacy update or installed doctor reported an unresolved command"
+  fi
 
   echo "all convergence assertions passed."
 }

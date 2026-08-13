@@ -575,12 +575,15 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
 
   it("update pins fetched target SHA while legacy self-heal pins repository HEAD", () => {
     const update = readFileSync(path.join(scriptsDir, "update.sh"), "utf8");
-    expect(update).toContain('target_deploy_sha="$(prepare_exact_origin_main)"');
+    expect(update).toContain('snapshot_result="$(prepare_exact_origin_main)"');
+    expect(update).toContain('read -r target_deploy_sha target_tree SOURCE_SNAPSHOT <<< "$snapshot_result"');
     expect(update).toContain('GIT_SHA="$target_deploy_sha"');
     expect(update).toContain("export GIT_SHA");
     const migrate = readFileSync(path.join(scriptsDir, "migrate.sh"), "utf8");
     expect(migrate).toContain('GIT_SHA="$(repo_head_sha)"');
     expect(migrate).toContain('export GIT_SHA="${GIT_SHA:-unknown}"');
+    expect(migrate).toContain('run_compose_with_deployment_sha "$GIT_SHA" build');
+    expect(migrate).not.toMatch(/^\s*run_compose build\s*$/m);
   });
 
   it("no print-like line ever expands a secret variable directly", () => {
@@ -614,6 +617,10 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     expect(script).toContain('scan_one "POSTGRES_PASSWORD"');
     expect(script).toContain('scan_one "REDIS_PASSWORD"');
     expect(script).toContain('scan_one "TELEGRAM_BOT_TOKEN"');
+    expect(script).toContain("api container GIT_SHA");
+    expect(script).toContain("worker container GIT_SHA");
+    expect(script).toContain("bot container GIT_SHA");
+    expect(script).toContain("command not found");
   });
 });
 

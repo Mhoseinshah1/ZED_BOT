@@ -154,7 +154,11 @@ jobs:
           exit 1
 
       - name: Run tests
-        run: pnpm test
+        # Deployment-state tests intentionally require root-owned mode-0700
+        # fixtures, matching the production contract. GitHub's runner user
+        # cannot create that evidence, so run the application tests as root
+        # instead of weakening ownership validation in production code.
+        run: sudo --preserve-env "$(command -v pnpm)" test
 
       - name: API health smoke test
         run: |

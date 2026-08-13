@@ -58,6 +58,41 @@ describe("deployment shell safety", () => {
   const rollback = readFileSync(path.join(scripts, "rollback.sh"), "utf8");
   const commonShell = readFileSync(path.join(scripts, "lib/common.sh"), "utf8");
 
+  it("forwards only a validated deployment SHA through the clean Compose environment", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-compose-sha-"));
+    const recorder = path.join(dir, "compose-recorder"); const output = path.join(dir, "observed");
+    writeFileSync(recorder, `#!/usr/bin/env bash\nprintf '%s\\n' "\${GIT_SHA:-missing}" > '${output}'\nenv | LC_ALL=C sort >> '${output}'\nprintf '%s\\n' -- "$@" >> '${output}'\n`, { mode: 0o755 });
+    const sha = "a".repeat(40);
+    const command = `. '${path.join(scripts, "lib/common.sh")}'; detect_compose_command(){ :; }; validate_compose_contract_paths(){ :; }; run_operation_child(){ "$@"; }; COMPOSE_CMD=('${recorder}'); run_compose_with_deployment_sha '${sha}' build`;
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8", env: { ...process.env, SHOULD_NOT_SURVIVE: "sensitive-fixture" } });
+    expect(result.status, result.stderr).toBe(0);
+    const observed = readFileSync(output, "utf8");
+    expect(observed.split("\n")[0]).toBe(sha);
+    expect(observed).toContain(`GIT_SHA=${sha}`);
+    expect(observed).not.toContain("SHOULD_NOT_SURVIVE");
+    expect(observed).toContain("build");
+  });
+
+  it("rejects an unvalidated deployment SHA before invoking Compose", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-compose-bad-sha-")); const invoked = path.join(dir, "invoked");
+    const command = `. '${path.join(scripts, "lib/common.sh")}'; detect_compose_command(){ echo yes > '${invoked}'; }; run_compose_with_deployment_sha unknown build`;
+    expect(spawnSync("bash", ["-c", command], { env: process.env }).status).not.toBe(0);
+    expect(existsSync(invoked)).toBe(false);
+  });
+
+  it("binds the validated SHA build argument to exactly api, bot, and worker", () => {
+    const compose = readFileSync(path.join(root, "docker-compose.yml"), "utf8");
+    const services = [...compose.matchAll(/^ {2}(api|bot|worker):\n(?:^(?: {4}.*|\s*)\n)*?^ {8}GIT_SHA: \$\{GIT_SHA:-unknown\}$/gm)].map((match) => match[1]);
+    expect(services).toEqual(["api", "bot", "worker"]);
+  });
+
+  it("observes only allowlisted running Compose services through hardened wrappers", () => {
+    const json = JSON.stringify([{ State: { Running: true }, Config: { Labels: { "com.docker.compose.project": "zedbot", "com.docker.compose.service": "worker" } } }]);
+    const setup = `. '${path.join(scripts, "lib/common.sh")}'; run_compose(){ echo container-id; }; run_clean_docker(){ printf '%s' '${json}'; };`;
+    expect(spawnSync("bash", ["-c", `${setup} compose_service_running worker`], { env: process.env }).status).toBe(0);
+    expect(spawnSync("bash", ["-c", `${setup} compose_service_running attacker`], { env: process.env }).status).not.toBe(0);
+  });
+
   function git(cwd: string, ...args: string[]): string {
     return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
   }

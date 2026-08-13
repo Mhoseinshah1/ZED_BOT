@@ -68,7 +68,7 @@ legacy_self_heal() {
   GIT_SHA="$(repo_head_sha)"
   export GIT_SHA="${GIT_SHA:-unknown}"
   log_info "Rebuilding images with deployment identity (GIT_SHA=${GIT_SHA}) ..."
-  run_compose build
+  run_compose_with_deployment_sha "$GIT_SHA" build
 
   # --force-recreate is the actual fix for the observed production symptom:
   # the legacy updater's plain `up -d` left the OLD containers (old image,

@@ -369,6 +369,13 @@ describe("deploy scripts (Phase 36)", () => {
     const TOKEN = "123456:doctor-check-secret-token";
     const OTHER = "987654:doctor-other-secret-token";
 
+    it("resolves every compose_service_running reference through common.sh", () => {
+      const doctor = readFileSync(doctorScript, "utf8");
+      const common = readFileSync(path.join(scriptsDir, "lib", "common.sh"), "utf8");
+      expect(doctor).toMatch(/\bcompose_service_running\b/);
+      expect(common).toMatch(/^compose_service_running\(\) \{/m);
+    });
+
     function tokenCheck(tg: string, bt: string) {
       const snippet =
         `source '${doctorScript}' >/dev/null 2>&1 || true\n` +
