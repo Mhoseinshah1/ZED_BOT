@@ -886,9 +886,68 @@ secure_deployment_dir() {
   if [ -e "$ZEDBOT_DEPLOYMENT_DIR" ] || [ -L "$ZEDBOT_DEPLOYMENT_DIR" ]; then
     [ ! -L "$ZEDBOT_DEPLOYMENT_DIR" ] && [ -d "$ZEDBOT_DEPLOYMENT_DIR" ] || { log_error "Deployment-state directory must not be a symlink."; return 1; }
   else
-    mkdir -- "$ZEDBOT_DEPLOYMENT_DIR" || return 1
+    mkdir -m 700 -- "$ZEDBOT_DEPLOYMENT_DIR" || return 1
   fi
   [ "$(stat -c %u:%a "$ZEDBOT_DEPLOYMENT_DIR")" = "0:700" ] || { log_error "Deployment-state directory must be root-owned with mode 700."; return 1; }
+}
+
+publish_validated_legacy_self_heal() {
+  local sha="$1" tree="$2" snapshot="$3" generation operation image_id evidence compose_sha tmp baseline migration_json
+  require_deployment_lock || return 1
+  [ "$(classify_installation first-install)" = genuine-first-install ] || return 1
+  require_source_integrity "$sha" "$tree" "$snapshot" || return 1
+  set_update_compose_contract "$snapshot" "$sha" "$tree" || return 1
+  validate_compose_application_images || return 1
+  validate_migration_declaration_pair "$snapshot" || return 1
+  image_id="$(run_clean_docker image inspect -f '{{.Id}}' "$ZEDBOT_EXPECTED_APPLICATION_IMAGE")" || return 1
+  valid_image_id "$image_id" || return 1
+  verify_application_recreation_set "$image_id" || return 1
+  generation="$(date -u +%Y%m%dT%H%M%SZ)-${sha:0:12}"
+  operation="$(< /proc/sys/kernel/random/uuid)"
+  initialize_operation_state install "$generation" || return 1
+  validate_dependencies_healthy || return 1
+  advance_operation_state bootstrap-initialized dependency-ready || return 1
+  require_source_integrity "$sha" "$tree" "$snapshot" || return 1
+  retain_known_good_image "$image_id" "zedbot-app:rollback-${generation}" || return 1
+  retain_known_good_image "$image_id" "zedbot-app:generation-${generation}" || return 1
+  advance_operation_state dependency-ready candidate-image-built || return 1
+  baseline="$(find "$snapshot/packages/database/prisma/migrations" -mindepth 2 -maxdepth 2 -name migration.sql -printf '%h\n' | sed 's#.*/##' | sort | paste -sd, -)"
+  [ -n "$baseline" ] || return 1
+  migration_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/migration-status.js | tail -n 1)" || return 1
+  [ "$(printf '%s' "$migration_json" | /usr/bin/jq -r '.ok == true and .upToDate == true and .failedCount == 0')" = true ] || return 1
+  evidence="$ZEDBOT_DEPLOYMENT_DIR/evidence-${generation}"
+  persist_migration_declaration_evidence "$snapshot" "$evidence" || return 1
+  compose_sha="$(sha256sum "$evidence/docker-compose.yml" | awk '{print $1}')" || return 1
+  advance_operation_state candidate-image-built migrations-confirmed || return 1
+  record_bot_recreation_boundary "$image_id" "$sha" || return 1
+  advance_operation_state migrations-confirmed application-recreated || return 1
+  validate_running_application "$sha" >/dev/null || return 1
+  advance_operation_state application-recreated health-confirmed || return 1
+  tmp="$(operation_mktemp "$ZEDBOT_DEPLOYMENT_DIR/.legacy-current.XXXXXXXX")" || return 1
+  /usr/bin/jq -n --arg generation "$generation" --arg tree "$tree" --arg sha "$sha" --arg image "$image_id" \
+    --arg capturedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg baseline "$baseline" --arg evidence "$evidence" \
+    --arg composeSha "$compose_sha" --arg manifestSha "$MIGRATION_MANIFEST_SHA256" --argjson declarations "$MIGRATION_DECLARATIONS_JSON" \
+    '{formatVersion:2,installationKind:null,lifecycleRole:"current",generation:$generation,sourceTree:$tree,
+      preDeploySha:$sha,preDeployImageId:$image,targetDeploySha:$sha,targetImageId:$image,
+      retainedImageTag:("zedbot-app:rollback-"+$generation),immutableImageTag:("zedbot-app:generation-"+$generation),
+      failedTargetTag:("zedbot-app:failed-"+$generation),capturedAt:$capturedAt,preDeployMigrations:($baseline|split(",")),
+      declarationFormatVersion:2,declarationSourceCategory:"generation-evidence",migrationEvidencePath:$evidence,
+      composeEvidencePath:($evidence+"/docker-compose.yml"),composeEvidenceSha256:$composeSha,composeProjectName:"zedbot",
+      composeApplicationImage:"zedbot-app:latest",compatibilityManifestSha256:$manifestSha,compatibilityDeclarations:$declarations,
+      recreationAttempted:true,healthConfirmed:true,state:"known-good"}' > "$tmp" || return 1
+  atomic_write_metadata "$tmp" "$ZEDBOT_LEGACY_INSTALLATION" || return 1
+  rm -f "$tmp"
+  validate_supported_legacy_installation || return 1
+  tmp="$(operation_mktemp "$ZEDBOT_DEPLOYMENT_DIR/.bootstrap.XXXXXXXX")" || return 1
+  /usr/bin/jq -n --arg generation "$generation" --arg operation "$operation" --arg sourceSha "$sha" --arg sourceTree "$tree" \
+    '{formatVersion:1,kind:"legacy-upgrade",generation:$generation,operation:$operation,phase:"initialized",sourceSha:$sourceSha,sourceTree:$sourceTree}' > "$tmp" || return 1
+  atomic_write_metadata "$tmp" "$ZEDBOT_INSTALLATION_BOOTSTRAP" || return 1
+  rm -f "$tmp"
+  validate_installation_bootstrap || return 1
+  convert_supported_legacy_installation || return 1
+  advance_operation_state health-confirmed promotion-prepared || return 1
+  advance_operation_state promotion-prepared promoted || return 1
+  [ ! -e "$ZEDBOT_ROLLBACK_METADATA" ] && [ "$(classify_installation observe)" = existing-canonical ]
 }
 
 valid_git_sha() { printf '%s' "${1:-}" | grep -Eq '^[a-f0-9]{40}$'; }

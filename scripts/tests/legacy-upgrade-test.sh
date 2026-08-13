@@ -210,6 +210,11 @@ create_legacy_layout() {
   phase "legacy layout: clone at PRE_SHA + pre-PR92 .env"
   mkdir -p "$BASE_DIR"
   git clone "$ORIGIN_DIR" "$APP_DIR"
+  # Production validation must still observe the canonical repository URL.
+  # Redirect only this disposable fixture's transport to the local bare
+  # origin so the smoke test remains network-independent.
+  git -C "$APP_DIR" remote set-url origin https://github.com/Mhoseinshah1/ZED_BOT.git
+  git -C "$APP_DIR" config url."file://${ORIGIN_DIR}".insteadOf https://github.com/Mhoseinshah1/ZED_BOT.git
   git -C "$APP_DIR" checkout -B main "$PRE_SHA"
   git -C "$APP_DIR" branch --set-upstream-to=origin/main main
 
@@ -441,6 +446,14 @@ assert_converged() {
   assert_eq "$api_sha" "$NEW_SHA" "api container GIT_SHA"
   assert_eq "$worker_sha" "$NEW_SHA" "worker container GIT_SHA"
   retry 12 5 "bot container GIT_SHA == ${NEW_SHA}" bot_git_sha_matches
+
+  # Legacy self-heal creates canonical installation state exactly once. The
+  # next updater must classify it as existing-canonical; rollback remains
+  # unavailable until a later real deployment supplies a previous generation.
+  assert_eq "$(stat -c '%u:%g:%a' "${BASE_DIR}/deployments")" "0:0:700" "canonical deployment-state owner/mode"
+  [ -f "${BASE_DIR}/deployments/current.json" ] || fail "legacy self-heal did not publish canonical current evidence"
+  [ ! -e "${BASE_DIR}/deployments/previous.json" ] || fail "legacy self-heal fabricated previous rollback evidence"
+  assert_eq "$(jq -r '.kind+":"+.phase' "${BASE_DIR}/deployments/bootstrap.json")" "legacy-upgrade:promoted" "legacy bootstrap lifecycle"
 
   if grep -qF 'command not found' "${WORK}/update-1.log"; then
     fail "legacy update or installed doctor reported an unresolved command"

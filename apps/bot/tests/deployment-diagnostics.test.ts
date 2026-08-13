@@ -586,6 +586,24 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     expect(migrate).not.toMatch(/^\s*run_compose build\s*$/m);
   });
 
+  it("runs the complete workspace test under sudo with one trusted nested-pnpm PATH and an exact environment allowlist", () => {
+    const workflow = readFileSync(path.join(repoRoot, ".github/workflows/ci.yml"), "utf8");
+    const rootPackage = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: { test: string } };
+    expect(rootPackage.scripts.test).toBe("pnpm -r --if-present run test");
+    expect(workflow).toContain('node_path="$(realpath -e -- "$node_command")"');
+    expect(workflow).toContain('pnpm_path="$(realpath -e -- "$pnpm_command")"');
+    expect(workflow).toContain('test "$node_path" = "$node_bin/node"');
+    expect(workflow).toContain('test "$pnpm_path" = "$tool_root/lib/node_modules/corepack/dist/pnpm.js"');
+    expect(workflow).toContain('test ! -L "$trusted"');
+    expect(workflow).toContain('test "$owner" = 0 || test "$owner" = "$runner_uid"');
+    expect(workflow).toContain('test $((8#$mode & 8#022)) -eq 0');
+    expect(workflow).toContain("sudo --preserve-env=CI,NODE_ENV,APP_NAME,APP_DOMAIN,APP_BASE_URL,API_PORT,LOG_LEVEL,TELEGRAM_BOT_TOKEN,ADMIN_TELEGRAM_IDS,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,DATABASE_URL,REDIS_HOST,REDIS_PORT,REDIS_PASSWORD,REDIS_URL \\");
+    expect(workflow).toContain('PATH="${node_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"');
+    expect(workflow).toContain('"$pnpm_path" test');
+    expect(workflow).not.toMatch(/pnpm_path.*test.*(?:--filter|--exclude|--skip)/);
+    expect(workflow).not.toContain("--preserve-env ");
+  });
+
   it("no print-like line ever expands a secret variable directly", () => {
     // Lines that write to the terminal/logs (echo/printf/loggers) must never
     // interpolate the secret-bearing variables - key NAMES are fine, `$VALUES`

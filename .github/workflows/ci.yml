@@ -158,7 +158,32 @@ jobs:
         # fixtures, matching the production contract. GitHub's runner user
         # cannot create that evidence, so run the application tests as root
         # instead of weakening ownership validation in production code.
-        run: sudo --preserve-env "$(command -v pnpm)" test
+        run: |
+          node_command="$(command -v node)"
+          pnpm_command="$(command -v pnpm)"
+          node_path="$(realpath -e -- "$node_command")"
+          pnpm_path="$(realpath -e -- "$pnpm_command")"
+          node_bin="$(dirname -- "$node_path")"
+          tool_root="$(dirname -- "$node_bin")"
+          case "$tool_root" in
+            /opt/hostedtoolcache/node/*/x64) ;;
+            *) echo "setup-node/Corepack executable identity is unsafe" >&2; exit 1 ;;
+          esac
+          test "$node_path" = "$node_bin/node"
+          test "$pnpm_path" = "$tool_root/lib/node_modules/corepack/dist/pnpm.js"
+          runner_uid="$(id -u)"
+          for trusted in "$tool_root" "$node_bin" "$node_path" "$pnpm_path"; do
+            test -e "$trusted" && test ! -L "$trusted"
+            owner_mode="$(stat -c '%u:%a' "$trusted")"
+            owner="${owner_mode%%:*}"
+            mode="${owner_mode#*:}"
+            test "$owner" = 0 || test "$owner" = "$runner_uid"
+            test $((8#$mode & 8#022)) -eq 0
+          done
+          test -x "$node_path" && test -x "$pnpm_path"
+          sudo --preserve-env=CI,NODE_ENV,APP_NAME,APP_DOMAIN,APP_BASE_URL,API_PORT,LOG_LEVEL,TELEGRAM_BOT_TOKEN,ADMIN_TELEGRAM_IDS,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,DATABASE_URL,REDIS_HOST,REDIS_PORT,REDIS_PASSWORD,REDIS_URL \
+            PATH="${node_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            "$pnpm_path" test
 
       - name: API health smoke test
         run: |

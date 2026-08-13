@@ -15,6 +15,28 @@ function shell(dir: string, body: string) {
 }
 
 describe("area 6 canonical state paths, metadata and locks", () => {
+  it("creates a genuinely absent canonical directory as root-owned mode 0700 regardless of umask", () => {
+    const parent = fixture(); const dir = path.join(parent, "deployments");
+    const result = shell(dir, "umask 0022; secure_deployment_dir; stat -c '%u:%g:%a' \"$ZEDBOT_DEPLOYMENT_DIR\"");
+    expect(result.status, result.stderr).toBe(0); expect(result.stdout.trim()).toBe("0:0:700");
+  });
+
+  it("does not repair an existing wrong-mode deployment directory", () => {
+    const parent = fixture(); const dir = path.join(parent, "deployments"); mkdirSync(dir, { mode: 0o755 }); chmodSync(dir, 0o755);
+    expect(shell(dir, "secure_deployment_dir").status).not.toBe(0); expect(lstatSync(dir).mode & 0o777).toBe(0o755);
+  });
+
+  it("does not repair an existing foreign-owned deployment directory", () => {
+    const parent = fixture(); const dir = path.join(parent, "deployments"); mkdirSync(dir, { mode: 0o700 }); chownSync(dir, 65534, 65534);
+    expect(shell(dir, "secure_deployment_dir").status).not.toBe(0);
+    expect(lstatSync(dir).uid).toBe(65534); expect(lstatSync(dir).mode & 0o777).toBe(0o700);
+  });
+
+  it("rejects a non-directory substituted at the canonical directory path without changing it", () => {
+    const parent = fixture(); const dir = path.join(parent, "deployments"); writeFileSync(dir, "unchanged");
+    expect(shell(dir, "secure_deployment_dir").status).not.toBe(0); expect(readFileSync(dir, "utf8")).toBe("unchanged");
+  });
+
   it("production entry-point reset ignores ambient state-path redirection", () => {
     const dir = fixture(); const result = shell(dir, "ZEDBOT_DEPLOYMENT_DIR=/tmp/attacker; ZEDBOT_ROLLBACK_METADATA=/tmp/attacker.json; reset_deployment_state_fixed_identity; printf '%s\\n' \"$ZEDBOT_DEPLOYMENT_DIR|$ZEDBOT_ROLLBACK_METADATA\"");
     expect(result.status).toBe(0); expect(result.stdout.trim()).toBe("/opt/zedbot/deployments|/opt/zedbot/deployments/previous.json");

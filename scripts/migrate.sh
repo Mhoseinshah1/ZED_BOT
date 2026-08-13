@@ -36,7 +36,7 @@ legacy_self_heal() {
     return 0
   fi
 
-  local cli_refresh_failed=0
+  local cli_refresh_failed=0 snapshot_result snapshot sha tree
 
   log_warn "=================================================================="
   log_warn "Legacy installation detected - finishing the upgrade"
@@ -76,7 +76,15 @@ legacy_self_heal() {
   log_info "Recreating all containers with the new images and .env ..."
   run_compose up -d --force-recreate --remove-orphans
 
-  record_deployed_sha
+  reset_deployment_state_fixed_identity
+  acquire_deployment_lock
+  snapshot_result="$(prepare_exact_origin_main)" || return 1
+  read -r sha tree snapshot <<< "$snapshot_result"
+  register_source_snapshot "$snapshot" "$sha" "$tree" || return 1
+  publish_validated_legacy_self_heal "$sha" "$tree" "$snapshot" || return 1
+  record_deployed_sha "$sha"
+  cleanup_source_snapshot "$snapshot" "$sha" "$tree" || return 1
+  release_deployment_lock || return 1
 
   if [ "$cli_refresh_failed" -ne 0 ]; then
     log_error "Legacy self-heal finished WITH ERRORS (CLI refresh failed). Re-run: zedbot update"
