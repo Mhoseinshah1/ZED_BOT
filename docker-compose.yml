@@ -77,7 +77,7 @@ services:
         # ever a build argument, because build args are visible in image
         # history.
         VITE_BOT_USERNAME: ${VITE_BOT_USERNAME:-}
-    image: zedbot-app
+    image: zedbot-app:latest
     container_name: zedbot-api
     restart: unless-stopped
     command: ["node", "apps/api/dist/index.js"]
@@ -115,7 +115,7 @@ services:
         # ever a build argument, because build args are visible in image
         # history.
         VITE_BOT_USERNAME: ${VITE_BOT_USERNAME:-}
-    image: zedbot-app
+    image: zedbot-app:latest
     container_name: zedbot-bot
     restart: unless-stopped
     command: ["node", "apps/bot/dist/index.js"]
@@ -139,6 +139,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "apps/bot/dist/cli/readiness.js"]
+      interval: 10s
+      timeout: 5s
+      retries: 9
+      start_period: 15s
     networks:
       - zedbot
 
@@ -153,7 +159,7 @@ services:
         # ever a build argument, because build args are visible in image
         # history.
         VITE_BOT_USERNAME: ${VITE_BOT_USERNAME:-}
-    image: zedbot-app
+    image: zedbot-app:latest
     container_name: zedbot-worker
     restart: unless-stopped
     command: ["node", "apps/worker/dist/index.js"]

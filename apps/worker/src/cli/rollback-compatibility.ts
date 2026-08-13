@@ -1,33 +1,14 @@
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
 import {
   connectDatabase,
   disconnectDatabase,
   evaluateMigrationDeploymentState,
   evaluateRollbackCompatibility,
   evaluateUpdateCompatibility,
-  parseRollbackCompatibilityManifest,
+  validateMigrationDeclarationPair,
   type MigrationSnapshot,
 } from "@zedbot/database";
 
 const MIGRATION_NAME = /^\d{14}_[a-z0-9_]+$/;
-
-async function readManifest(): Promise<{ raw: Buffer; value: unknown } | null> {
-  for (const candidate of [
-    path.resolve(process.cwd(), "packages/database/prisma/rollback-compatibility.json"),
-    path.resolve(process.cwd(), "../../packages/database/prisma/rollback-compatibility.json"),
-  ]) {
-    try {
-      const raw = await readFile(candidate);
-      return { raw, value: JSON.parse(raw.toString("utf8")) as unknown };
-    } catch {
-      // Try the next repository/image layout.
-    }
-  }
-  return null;
-}
 
 function parseBaseline(raw: string | undefined): string[] | null {
   if (raw === undefined || raw === "") return null;
@@ -39,17 +20,22 @@ function parseBaseline(raw: string | undefined): string[] | null {
 
 async function main(): Promise<void> {
   const mode = process.argv[2];
+  if (mode === "validate-declarations") {
+    const result = validateMigrationDeclarationPair(process.argv[3] ?? process.cwd());
+    process.stdout.write(`${JSON.stringify(result.ok ? { ok: true, ...result.value } : result)}\n`);
+    process.exit(result.ok ? 0 : 1);
+  }
   const baseline = parseBaseline(process.argv[3]);
   if ((mode !== "update" && mode !== "rollback") || baseline === null) {
     process.stdout.write(`${JSON.stringify({ ok: false, blocker: "invalid-arguments" })}\n`);
     process.exit(1);
   }
-  const loaded = await readManifest();
-  const manifest = loaded === null ? null : parseRollbackCompatibilityManifest(loaded.value);
-  if (loaded === null || manifest === null) {
-    process.stdout.write(`${JSON.stringify({ ok: false, blocker: "invalid-compatibility-manifest" })}\n`);
+  const validated = validateMigrationDeclarationPair(process.cwd());
+  if (!validated.ok) {
+    process.stdout.write(`${JSON.stringify(validated)}\n`);
     process.exit(1);
   }
+  const manifest = validated.value.manifest;
   await connectDatabase();
   try {
     const state = await evaluateMigrationDeploymentState();
@@ -64,8 +50,9 @@ async function main(): Promise<void> {
     const decision = mode === "update"
       ? evaluateUpdateCompatibility(baseline, snapshot, manifest)
       : evaluateRollbackCompatibility(baseline, snapshot, manifest);
-    const manifestSha256 = createHash("sha256").update(loaded.raw).digest("hex");
-    process.stdout.write(`${JSON.stringify({ ...decision, mode, manifestSha256, snapshot })}\n`);
+    process.stdout.write(`${JSON.stringify({ ...decision, mode, manifestSha256: validated.value.manifestSha256,
+      declarations: validated.value.declarations, declarationFormatVersion: manifest.formatVersion,
+      declarationSourceCategory: validated.value.sourceCategory, snapshot })}\n`);
     process.exitCode = decision.ok ? 0 : 1;
   } finally {
     await disconnectDatabase().catch(() => undefined);

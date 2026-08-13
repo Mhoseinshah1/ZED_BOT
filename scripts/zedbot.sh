@@ -445,7 +445,7 @@ case "$CMD" in
     exec bash "${SCRIPTS_DIR}/update.sh" "$@"
     ;;
   rollback-status)
-    exec bash "${SCRIPTS_DIR}/rollback.sh" status
+    exec bash "${SCRIPTS_DIR}/rollback.sh" status "$@"
     ;;
   rollback)
     exec bash "${SCRIPTS_DIR}/rollback.sh" rollback "$@"

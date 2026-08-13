@@ -1,9 +1,12 @@
-export const ROLLBACK_COMPATIBILITY_FORMAT_VERSION = 1;
+import {
+  MIGRATION_DECLARATION_FORMAT_VERSION,
+  parseMigrationDeclarationManifest,
+  type MigrationDeclaration as CompatibleMigrationDeclaration,
+  type MigrationDeclarationManifest as RollbackCompatibilityManifest,
+} from "./migration-declarations.js";
 
-export interface RollbackCompatibilityManifest {
-  formatVersion: 1;
-  backwardCompatibleMigrations: string[];
-}
+export const ROLLBACK_COMPATIBILITY_FORMAT_VERSION = MIGRATION_DECLARATION_FORMAT_VERSION;
+export type { CompatibleMigrationDeclaration, RollbackCompatibilityManifest };
 
 export interface MigrationSnapshot {
   shipped: string[];
@@ -28,14 +31,7 @@ function uniqueSorted(values: readonly string[]): string[] {
 }
 
 export function parseRollbackCompatibilityManifest(value: unknown): RollbackCompatibilityManifest | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const candidate = value as Record<string, unknown>;
-  if (candidate.formatVersion !== ROLLBACK_COMPATIBILITY_FORMAT_VERSION) return null;
-  if (!Array.isArray(candidate.backwardCompatibleMigrations)) return null;
-  if (!candidate.backwardCompatibleMigrations.every((name) => typeof name === "string" && MIGRATION_NAME.test(name))) return null;
-  const names = uniqueSorted(candidate.backwardCompatibleMigrations as string[]);
-  if (names.length !== candidate.backwardCompatibleMigrations.length) return null;
-  return { formatVersion: 1, backwardCompatibleMigrations: names };
+  return parseMigrationDeclarationManifest(value);
 }
 
 export function evaluateUpdateCompatibility(
@@ -50,11 +46,16 @@ export function evaluateUpdateCompatibility(
   if (target.failed.length > 0) return { ok: false, newlyPending: [], unsafe: [], blocker: `failed:${target.failed[0]}` };
   if (target.databaseOnly.length > 0) return { ok: false, newlyPending: [], unsafe: [], blocker: `database-only:${target.databaseOnly[0]}` };
   if (target.incomplete.length > 0) return { ok: false, newlyPending: [], unsafe: [], blocker: `incomplete:${target.incomplete[0]}` };
+  const declared = new Set(manifest.backwardCompatibleMigrations.map(({ name }) => name));
+  const unknown = uniqueSorted([...target.shipped, ...target.applied, ...target.pending]).find((name) => !declared.has(name));
+  if (unknown !== undefined) return { ok: false, newlyPending: [], unsafe: [], blocker: `unknown:${unknown}` };
+  const absent = manifest.backwardCompatibleMigrations.find(({ name }) => !target.shipped.includes(name));
+  if (absent !== undefined) return { ok: false, newlyPending: [], unsafe: [], blocker: `declared-not-shipped:${absent.name}` };
   if (baseline.some((name) => !target.applied.includes(name))) return { ok: false, newlyPending: [], unsafe: [], blocker: "baseline-not-applied" };
   const newlyPending = uniqueSorted(target.pending.filter((name) => !baseline.includes(name)));
   const unexpectedPending = target.pending.filter((name) => baseline.includes(name));
   if (unexpectedPending.length > 0) return { ok: false, newlyPending, unsafe: [], blocker: `baseline-pending:${unexpectedPending[0]}` };
-  const allowed = new Set(manifest.backwardCompatibleMigrations);
+  const allowed = declared;
   const unsafe = newlyPending.filter((name) => !allowed.has(name));
   return { ok: unsafe.length === 0, newlyPending, unsafe, blocker: unsafe.length === 0 ? null : `not-backward-compatible:${unsafe[0]}` };
 }

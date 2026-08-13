@@ -520,15 +520,22 @@ install_cli() {
   log_success "zedbot CLI installed."
 }
 
-start_services() {
+validate_first_install_intent() {
+  local classification
+  classification="$(bash -c ". '${APP_DIR}/scripts/lib/common.sh'; set_deployment_state_paths '${ZEDBOT_BASE_DIR}/deployments'; classify_installation first-install")" || {
+    log_error "Existing, partial, legacy, or ambiguous deployment state forbids first-install mutation. Use zedbot update or the documented legacy reconciliation path."
+    return 1
+  }
+  [ "$classification" = genuine-first-install ] || { log_error "Installer cannot replace installation class ${classification}."; return 1; }
+}
+
+start_dependencies() {
   detect_compose_command
-  # Bake the deployment identity into the images: docker-compose.yml forwards
-  # GIT_SHA as a build arg and the Dockerfile stores it in its last layers.
-  GIT_SHA="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
-  export GIT_SHA
-  log_info "Building and starting services (the first build may take a few minutes) ..."
-  ( cd "$APP_DIR" && "${COMPOSE_CMD[@]}" up -d --build --remove-orphans )
-  log_success "Services started."
+  log_info "Starting first-install dependencies without recreating application services ..."
+  /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C COMPOSE_DISABLE_ENV_FILE=1 \
+    docker --context default compose --project-directory "$APP_DIR" -f "$APP_DIR/docker-compose.yml" \
+    --project-name zedbot --env-file "$ENV_FILE" up -d --no-deps --no-build postgres redis
+  log_success "Dependencies started; canonical readiness validation follows."
 }
 
 # PostgreSQL only reads POSTGRES_PASSWORD when the data directory is first
@@ -692,14 +699,9 @@ main() {
   clone_or_update_repo
   create_env_file
   install_cli
-  start_services
-  sync_postgres_password
-  run_migrations_if_available
-  record_deployed_sha
-  if [ -x "${APP_DIR}/scripts/doctor.sh" ]; then
-    log_info "Running post-install health checks ..."
-    bash "${APP_DIR}/scripts/doctor.sh" || log_warn "Doctor reported problems. Run 'zedbot doctor' for details."
-  fi
+  validate_first_install_intent
+  start_dependencies
+  bash "${APP_DIR}/scripts/bootstrap-deployment.sh"
   setup_https_if_requested
   setup_firewall_if_requested
   print_summary

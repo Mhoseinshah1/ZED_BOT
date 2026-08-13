@@ -4,6 +4,7 @@ import { errorMessage } from "@zedbot/shared";
 import { createBot } from "./app.js";
 import { getBotToken } from "./config/env.js";
 import { logger } from "./core/logger.js";
+import { completeBotStartupReadiness, removeBotReadiness } from "./core/readiness-marker.js";
 import { runShutdownSequence } from "./core/shutdown.js";
 import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
 import { startMiniAppCommerceConsumer } from "./services/miniapp-commerce-consumer.js";
@@ -35,7 +36,8 @@ if (token === null) {
   // tight crash loop while the operator fixes the configuration.
   setTimeout(() => process.exit(1), 60_000);
 } else {
-  run(token).catch((err: unknown) => {
+  run(token).catch(async (err: unknown) => {
+    await removeBotReadiness().catch(() => undefined);
     // start() rejects for non-retryable failures, e.g. 401 from an invalid
     // token. Network errors are retried internally by grammY and never land
     // here. Exit slowly to keep the restart loop calm.
@@ -45,7 +47,9 @@ if (token === null) {
 }
 
 async function run(botToken: string): Promise<void> {
+  await removeBotReadiness();
   const bot = createBot(botToken);
+  let databaseInitialized = false;
 
   // Wallet auto-renewal EXECUTE consumer (Phase 1): the bot's only BullMQ
   // consumer. It runs the wallet charge + in-place renewal for attempts the
@@ -76,6 +80,7 @@ async function run(botToken: string): Promise<void> {
   let supportNotificationLoop: SupportNotificationLoopController | null = null;
 
   const shutdown = async (signal: string): Promise<void> => {
+    await removeBotReadiness().catch(() => undefined);
     logger.info(`received ${signal}, stopping bot`);
     // The order — and the fact that each step FINISHES before the next starts
     // — is the contract, so it lives in runShutdownSequence where a test can
@@ -126,6 +131,7 @@ async function run(botToken: string): Promise<void> {
 
   try {
     await connectDatabase();
+    databaseInitialized = true;
     logger.info("database connection established");
     // Ops log (SYSTEM topic): fire-and-forget, never blocks startup.
     void writeSystemLog({
@@ -185,11 +191,14 @@ async function run(botToken: string): Promise<void> {
   supportNotificationLoop = startSupportNotificationLoop(bot.api);
 
   await bot.start({
-    onStart: (botInfo) => {
+    onStart: async (botInfo) => {
+      const generation = runningGitSha();
+      if (generation === null) throw new Error("bot-readiness-generation-unavailable");
+      await completeBotStartupReadiness({ databaseInitialized, generation });
       // Deployment identity in the boot line: "unknown" = image built
       // without the GIT_SHA build arg (e.g. local dev).
       logger.info(`ZED_BOT bot service started (long polling) as @${botInfo.username}`, {
-        gitSha: runningGitSha() ?? "unknown",
+        gitSha: generation,
       });
     },
   });

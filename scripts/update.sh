@@ -2,7 +2,7 @@
 # =============================================================================
 # ZED_BOT updater (self-healing):
 #   safety archive -> database backup + verification gate -> validate running app
-#   -> fail-closed fetch/fast-forward
+#   -> fail-closed fetch + exact local-main verification (no checkout mutation)
 #   -> migrate legacy .env -> refresh installed CLI -> build (with identity)
 #   -> migrate DB -> force-recreate -> record deploy -> post-deploy smoke
 #   -> doctor
@@ -23,21 +23,24 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 DEPLOYMENT_METADATA_ACTIVE=0
 APPLICATION_RECREATED=0
+APPLICATION_RECREATION_ATTEMPTED=0
+SOURCE_SNAPSHOT=""
+SOURCE_SHA=""
+SOURCE_TREE=""
+CANDIDATE_METADATA=""
 
 set_rollback_state() {
-  local state="$1" tmp
+  local state="$1"
   [ "$DEPLOYMENT_METADATA_ACTIVE" -eq 1 ] || return 0
-  tmp="$(mktemp "${ZEDBOT_DEPLOYMENT_DIR}/state.XXXXXX")"
-  jq --arg state "$state" '.state = $state' "$ZEDBOT_ROLLBACK_METADATA" > "$tmp"
-  atomic_write_metadata "$tmp"
-  rm -f "$tmp"
+  rewrite_generation_state "$CANDIDATE_METADATA" "$state"
 }
 
 on_update_error() {
   local rc=$?
   trap - ERR
-  if [ "$APPLICATION_RECREATED" -eq 1 ]; then
-    set_rollback_state "available-after-failed-deploy" || true
+  if [ "$APPLICATION_RECREATION_ATTEMPTED" -eq 1 ]; then
+    set_rollback_state "failed-after-recreation" || true
+    publish_failed_generation "$CANDIDATE_METADATA" "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || true
   fi
   log_error "ZED_BOT update FAILED. Your data and .env were NOT deleted."
   log_error "Recovery steps:"
@@ -48,6 +51,10 @@ on_update_error() {
   exit "$rc"
 }
 trap on_update_error ERR
+
+update_owned_cleanup() {
+  cleanup_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE"
+}
 
 # Finds the newest database backup file (any supported format) in the host
 # backup directory. Prints its path; prints nothing when none exists.
@@ -100,7 +107,7 @@ pre_update_database_backup() {
   # directory must be owned by the container runtime user with mode 750.
   ensure_backup_dir_permissions
 
-  if ! bash "${SCRIPT_DIR}/backup-db.sh"; then
+  if ! run_operation_child bash "${SCRIPT_DIR}/backup-db.sh"; then
     log_error "Pre-update database backup FAILED - ABORTING the update."
     log_error "The running installation was not modified."
     log_error "Fix the backup problem ('zedbot doctor', 'zedbot logs postgres') and retry,"
@@ -205,15 +212,37 @@ post_deploy_smoke() {
 
 main() {
   require_root
+  reset_deployment_state_fixed_identity
   app_cd
   load_env_if_exists
+  reset_deployment_state_fixed_identity
+  reset_compose_fixed_identity
+  ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
   detect_compose_command
   acquire_deployment_lock
+  local installation_class
+  installation_class="$(classify_installation observe)" || {
+    log_error "Installation identity is ambiguous or unsupported; preserve the evidence and follow docs/legacy-upgrade.md."
+    exit 1
+  }
+  [ "$installation_class" = existing-canonical ] || {
+    log_error "Update requires an existing canonical installation; found ${installation_class}."
+    exit 1
+  }
+  recover_metadata_transition
+  validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || {
+    log_error "Current generation metadata is absent, legacy, or incomplete; bootstrap/reconciliation is required."
+    exit 1
+  }
+  validate_generation_owned_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || exit 1
+  assert_no_unresolved_failed_generation
+  validate_compose_application_images
+  validate_dependencies_healthy
 
   log_info "Starting ZED_BOT update ..."
 
   log_info "[1/14] Creating a safety archive (.env + database) before updating ..."
-  bash "${SCRIPT_DIR}/backup.sh"
+  run_operation_child bash "${SCRIPT_DIR}/backup.sh"
 
   log_info "[2/14] Creating and verifying a database backup (update gate) ..."
   pre_update_database_backup
@@ -233,93 +262,132 @@ main() {
   baseline_csv="$(run_compose exec -T worker sh -c 'find packages/database/prisma/migrations -mindepth 2 -maxdepth 2 -name migration.sql -printf "%h\n" | sed "s#.*/##" | sort | paste -sd, -')"
   [ -n "$baseline_csv" ] || { log_error "No complete baseline migrations found."; exit 1; }
 
-  log_info "[4/14] Fetching and fast-forwarding exactly origin/main ..."
-  # --add appends duplicates on every run; only add when missing.
-  if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ZEDBOT_APP_DIR"; then
-    git config --global --add safe.directory "$ZEDBOT_APP_DIR" >/dev/null 2>&1 || true
-  fi
-  # Script modes on this appliance are the installer's job, not git's: the
-  # pre-PR92 installer chmod +x'ed scripts that were committed 644, which
-  # made every legacy tree permanently "dirty" and silently blocked ff-only
-  # pulls (the update then "succeeded" without ever fetching new code).
-  # Ignoring mode bits removes that whole failure class.
-  git config core.fileMode false
-  local target_deploy_sha
-  target_deploy_sha="$(prepare_exact_origin_main)" || {
-    log_error "Fetching, fast-forwarding or verifying origin/main failed; aborting before source preparation."
+  log_info "[4/14] Fetching canonical origin/main and verifying unchanged local main ..."
+  local target_deploy_sha target_tree snapshot_result
+  snapshot_result="$(prepare_exact_origin_main)" || {
+    log_error "Fetching and verifying the unchanged local main against canonical origin/main failed. The updater does not fast-forward the checkout."
     exit 1
   }
+  read -r target_deploy_sha target_tree SOURCE_SNAPSHOT <<< "$snapshot_result"
+  verify_source_snapshot "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Immutable source snapshot verification failed."; exit 1; }
+  register_source_snapshot "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Could not register ownership of the source snapshot."; exit 1; }
+  SOURCE_SHA="$target_deploy_sha"
+  SOURCE_TREE="$target_tree"
+  set_update_compose_contract "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Immutable source Compose contract is invalid."; exit 1; }
+  validate_compose_application_images || { log_error "Immutable source Compose application images are invalid."; exit 1; }
 
   log_info "[5/14] Migrating the .env to the current layout (append-only) ..."
+  require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before post-fetch mutation."; exit 1; }
   migrate_legacy_env
   # Re-load so freshly appended keys (ZEDBOT_BACKUP_DIR & co) take effect.
   load_env_if_exists
+  reset_deployment_state_fixed_identity
+  reset_compose_fixed_identity
+  set_update_compose_contract "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Compose identity changed while reloading runtime environment."; exit 1; }
+  validate_compose_application_images || { log_error "Compose identity changed while reloading runtime environment."; exit 1; }
   ensure_backup_dir_permissions
 
   log_info "[6/14] Refreshing the installed zedbot CLI ..."
   # Failure to refresh the CLI must fail the update: a stale installed CLI
   # driving new code is exactly the class of bug this updater prevents.
-  if ! refresh_cli; then
+  if ! install -m 0755 "$SOURCE_SNAPSHOT/scripts/zedbot.sh" "$ZEDBOT_CLI_PATH"; then
     log_error "Could not refresh ${ZEDBOT_CLI_PATH} from the updated repository - ABORTING the update."
     log_error "Fix the problem (disk full? read-only /usr/local/bin?) and retry: zedbot update"
     exit 1
   fi
 
   log_info "[7/14] Retaining the verified previous application image and metadata ..."
-  local rollback_tag compatibility_file compatibility_sha compatibility_declarations metadata_tmp
-  rollback_tag="zedbot-app:rollback-${pre_deploy_sha}"
-  compatibility_file="packages/database/prisma/rollback-compatibility.json"
-  jq -e '.formatVersion == 1 and (.backwardCompatibleMigrations | type == "array")' "$compatibility_file" >/dev/null \
-    || { log_error "Rollback compatibility manifest is malformed."; exit 1; }
-  compatibility_sha="$(sha256sum "$compatibility_file" | awk '{print $1}')"
-  compatibility_declarations="$(jq -c '.backwardCompatibleMigrations' "$compatibility_file")"
-  docker image tag "$pre_deploy_image_id" "$rollback_tag"
-  [ "$(docker image inspect -f '{{.Id}}' "$rollback_tag" 2>/dev/null)" = "$pre_deploy_image_id" ] \
-    || { log_error "Retained rollback image tag does not resolve to the verified image ID."; exit 1; }
-  metadata_tmp="$(mktemp "${ZEDBOT_DEPLOYMENT_DIR}/metadata.XXXXXX")"
+  local rollback_tag compatibility_sha compatibility_declarations metadata_tmp generation failed_tag target_image_id migration_evidence_dir compose_evidence_sha
+  generation="$(date -u +%Y%m%dT%H%M%SZ)-${target_deploy_sha:0:12}"
+  CANDIDATE_METADATA="$ZEDBOT_DEPLOYMENT_DIR/candidate-${generation}.json"
+  initialize_operation_state update "$generation"
+  rollback_tag="zedbot-app:rollback-${generation}"
+  validate_migration_declaration_pair "$SOURCE_SNAPSHOT" || { log_error "Immutable source migration declaration validation failed."; exit 1; }
+  compatibility_sha="$MIGRATION_MANIFEST_SHA256"
+  compatibility_declarations="$MIGRATION_DECLARATIONS_JSON"
+  migration_evidence_dir="$ZEDBOT_DEPLOYMENT_DIR/evidence-${generation}"
+  persist_migration_declaration_evidence "$SOURCE_SNAPSHOT" "$migration_evidence_dir" || {
+    log_error "Could not persist exact generation migration evidence."; exit 1;
+  }
+  compose_evidence_sha="$(sha256sum "$migration_evidence_dir/docker-compose.yml" | awk '{print $1}')"
+  require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before image retention."; exit 1; }
+  validate_compose_application_images || { log_error "Compose identity changed before image retention."; exit 1; }
+  retain_known_good_image "$pre_deploy_image_id" "$rollback_tag"
+  advance_operation_state current-validated current-image-retained
+  metadata_tmp="$(operation_mktemp "${ZEDBOT_DEPLOYMENT_DIR}/metadata.XXXXXX")"
   jq -n \
     --arg preDeploySha "$pre_deploy_sha" --arg preDeployImageId "$pre_deploy_image_id" \
     --arg targetDeploySha "$target_deploy_sha" --arg retainedImageTag "$rollback_tag" \
     --arg capturedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg baseline "$baseline_csv" \
     --arg compatibilityManifestSha256 "$compatibility_sha" \
     --argjson compatibilityDeclarations "$compatibility_declarations" \
-    '{formatVersion:1,preDeploySha:$preDeploySha,preDeployImageId:$preDeployImageId,targetDeploySha:$targetDeploySha,retainedImageTag:$retainedImageTag,capturedAt:$capturedAt,preDeployMigrations:($baseline|split(",")),compatibilityManifestSha256:$compatibilityManifestSha256,compatibilityDeclarations:$compatibilityDeclarations,state:"prepared"}' > "$metadata_tmp"
-  atomic_write_metadata "$metadata_tmp"
+    --arg generation "$generation" --arg targetTree "$target_tree" --arg migrationEvidencePath "$migration_evidence_dir" \
+    --arg composeEvidenceSha256 "$compose_evidence_sha" \
+    '{formatVersion:2,lifecycleRole:"candidate",generation:$generation,sourceTree:$targetTree,preDeploySha:$preDeploySha,preDeployImageId:$preDeployImageId,targetDeploySha:$targetDeploySha,retainedImageTag:$retainedImageTag,capturedAt:$capturedAt,preDeployMigrations:($baseline|split(",")),declarationFormatVersion:2,declarationSourceCategory:"generation-evidence",migrationEvidencePath:$migrationEvidencePath,composeEvidencePath:($migrationEvidencePath+"/docker-compose.yml"),composeEvidenceSha256:$composeEvidenceSha256,composeProjectName:"zedbot",composeApplicationImage:"zedbot-app:latest",compatibilityManifestSha256:$compatibilityManifestSha256,compatibilityDeclarations:$compatibilityDeclarations,recreationAttempted:false,healthConfirmed:false,state:"prepared"}' > "$metadata_tmp"
+  atomic_write_metadata "$metadata_tmp" "$CANDIDATE_METADATA"
   rm -f "$metadata_tmp"
+  validate_generation_metadata_core "$CANDIDATE_METADATA" candidate
+  advance_operation_state current-image-retained candidate-metadata-prepared
   DEPLOYMENT_METADATA_ACTIVE=1
 
   log_info "[8/14] Revalidating source and building updated images ..."
   # GIT_SHA travels into the image as its LAST layers (see Dockerfile), so
   # identity-only rebuilds stay cheap.
-  [ "$(repo_head_sha)" = "$target_deploy_sha" ] || { log_error "HEAD changed before build; aborting."; exit 1; }
+  verify_source_snapshot "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Source snapshot changed before build."; exit 1; }
+  validate_compose_application_images || { log_error "Compose identity changed before build."; exit 1; }
   GIT_SHA="$target_deploy_sha"
   export GIT_SHA
-  run_compose build
+  # Docker consumes the already verified snapshot directory itself. No archive
+  # is regenerated from the mutable deployment checkout after verification.
+  build_verified_source_snapshot "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source verification or image build failed."; exit 1; }
+  target_image_id="$(run_clean_docker image inspect -f '{{.Id}}' zedbot-app:latest)"; valid_image_id "$target_image_id" || exit 1
+  advance_operation_state candidate-metadata-prepared candidate-image-built
+  failed_tag="zedbot-app:failed-${generation}"
+  retain_known_good_image "$target_image_id" "zedbot-app:generation-${generation}"
+  metadata_tmp="$(operation_mktemp "${ZEDBOT_DEPLOYMENT_DIR}/.candidate-image.XXXXXXXX")"
+  jq --arg targetImageId "$target_image_id" --arg failedTargetTag "$failed_tag" --arg immutableImageTag "zedbot-app:generation-${generation}" '.targetImageId=$targetImageId|.failedTargetTag=$failedTargetTag|.immutableImageTag=$immutableImageTag' "$CANDIDATE_METADATA" > "$metadata_tmp"
+  atomic_write_metadata "$metadata_tmp" "$CANDIDATE_METADATA"
+  rm -f "$metadata_tmp"
+  validate_generation_metadata_core "$CANDIDATE_METADATA" candidate
+  advance_operation_state candidate-image-built deployment-reference-tagged
 
   log_info "[9/14] Validating rollback compatibility of pending migrations ..."
   local compatibility_json
+  require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before compatibility validation."; exit 1; }
+  validate_compose_application_images || { log_error "Compose identity changed before compatibility validation."; exit 1; }
   compatibility_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/rollback-compatibility.js update "$baseline_csv")" || {
     log_error "Migration compatibility check failed: $(printf '%s' "$compatibility_json" | jq -r '.blocker // "unavailable"' 2>/dev/null || echo unavailable)"
     exit 1
   }
   [ "$(printf '%s' "$compatibility_json" | jq -r '.manifestSha256')" = "$compatibility_sha" ] \
     || { log_error "Compatibility manifest checksum changed during deployment."; exit 1; }
+  advance_operation_state deployment-reference-tagged compatibility-confirmed
 
   log_info "[10/14] Applying database migrations (before the new app containers run) ..."
   # `compose run` inside migrate.sh starts postgres/redis itself. The app
   # services still run the OLD code at this point - the safe direction (old
   # code on a newer schema beats new code on an older schema). migrate.sh's
   # legacy self-heal no-ops here: steps 4-5 already converged env + CLI.
-  bash "${SCRIPT_DIR}/migrate.sh"
+  require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before migration."; exit 1; }
+  validate_compose_application_images || { log_error "Compose identity changed before migration."; exit 1; }
+  run_compose run --rm --no-deps api node packages/database/dist/referral-migration-preflight.js
+  run_compose run --rm --no-deps api sh -c 'cd packages/database && node_modules/.bin/prisma migrate deploy'
+  advance_operation_state compatibility-confirmed migrations-confirmed
 
   log_info "[11/14] Revalidating source and recreating services ..."
   # --force-recreate is THE fix for the stale-container symptom observed in
   # production: a plain `up -d` can leave the previous containers (previous
   # image, previous mounts, previous env) running after a rebuild.
-  [ "$(repo_head_sha)" = "$target_deploy_sha" ] || { log_error "HEAD changed before service recreation; aborting."; exit 1; }
+  require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source or deployment checkout identity changed before service recreation."; exit 1; }
+  validate_dependencies_healthy
+  validate_compose_application_images
+  APPLICATION_RECREATION_ATTEMPTED=1
+  recreate_application_services
+  verify_application_recreation_set "$target_image_id"
+  record_bot_recreation_boundary "$target_image_id" "$target_deploy_sha"
   APPLICATION_RECREATED=1
   set_rollback_state "application-recreated"
-  run_compose up -d --force-recreate --remove-orphans
+  advance_operation_state migrations-confirmed application-recreated
 
   log_info "[12/14] Recording the deployed version ..."
   record_deployed_sha
@@ -328,9 +396,14 @@ main() {
   post_deploy_smoke
 
   log_info "[14/14] Running health checks ..."
-  if bash "${SCRIPT_DIR}/doctor.sh"; then
+  if run_operation_child bash "${SCRIPT_DIR}/doctor.sh"; then
     validate_running_application "$target_deploy_sha" >/dev/null
-    set_rollback_state "available"
+    set_rollback_state "healthy-candidate"
+    advance_operation_state application-recreated health-confirmed
+    begin_metadata_transition update "$CANDIDATE_METADATA"
+    advance_operation_state health-confirmed promotion-prepared
+    recover_metadata_transition
+    advance_operation_state promotion-prepared promoted
     log_success "ZED_BOT update completed successfully."
   else
     log_error "Update health checks failed; deployment was not marked successful."
@@ -338,4 +411,5 @@ main() {
   fi
 }
 
+install_operation_traps update_owned_cleanup
 main "$@"

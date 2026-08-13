@@ -10,38 +10,64 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 metadata_field() { jq -er "$1" "$ZEDBOT_ROLLBACK_METADATA"; }
 
 validate_metadata() {
-  [ -f "$ZEDBOT_ROLLBACK_METADATA" ] || { log_error "Rollback metadata is unavailable."; return 1; }
-  [ "$(stat -c %u "$ZEDBOT_ROLLBACK_METADATA")" = "0" ] || { log_error "Rollback metadata is not root-owned."; return 1; }
-  [ "$(stat -c %a "$ZEDBOT_ROLLBACK_METADATA")" = "600" ] || { log_error "Rollback metadata mode must be 600."; return 1; }
-  jq -e '
-    .formatVersion == 1 and
+  secure_deployment_dir || return 1
+  validate_generation_metadata_core "$ZEDBOT_ROLLBACK_METADATA" previous || return 1
+  jq -e --arg deploymentDir "$ZEDBOT_DEPLOYMENT_DIR" '
+    .formatVersion == 2 and
+    (.lifecycleRole == "previous") and
+    (.generation|type=="string" and test("^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$")) and
+    (.sourceTree|type=="string" and test("^[a-f0-9]{40}$")) and
     (.preDeploySha|type=="string" and test("^[a-f0-9]{40}$")) and
     (.targetDeploySha|type=="string" and test("^[a-f0-9]{40}$")) and
     (.preDeployImageId|type=="string" and test("^sha256:[a-f0-9]{64}$")) and
-    (.retainedImageTag == ("zedbot-app:rollback-" + .preDeploySha)) and
+    (.retainedImageTag == ("zedbot-app:rollback-" + .generation)) and
+    (.targetImageId|type=="string" and test("^sha256:[a-f0-9]{64}$")) and
+    (.failedTargetTag == ("zedbot-app:failed-" + .generation)) and
+    (.declarationFormatVersion == 2) and
+    (.declarationSourceCategory == "generation-evidence") and
+    (.migrationEvidencePath == ($deploymentDir + "/evidence-" + .generation)) and
+    (.composeEvidencePath == (.migrationEvidencePath + "/docker-compose.yml")) and
+    (.composeEvidenceSha256|type=="string" and test("^[a-f0-9]{64}$")) and
+    (.composeProjectName == "zedbot") and
+    (.composeApplicationImage == "zedbot-app:latest") and
     (.compatibilityManifestSha256|type=="string" and test("^[a-f0-9]{64}$")) and
-    (.compatibilityDeclarations|type=="array" and all(test("^[0-9]{14}_[a-z0-9_]+$"))) and
+    (.compatibilityDeclarations|type=="array" and
+      all(.compatibilityDeclarations[];
+        type=="object" and keys==["name","sqlSha256"] and
+        (.name|type=="string" and test("^[0-9]{14}_[a-z0-9_]+$")) and
+        (.sqlSha256|type=="string" and test("^[a-f0-9]{64}$"))) and
+      ((.compatibilityDeclarations|map(.name)|length) ==
+       (.compatibilityDeclarations|map(.name)|unique|length))) and
     (.preDeployMigrations|type=="array" and length>0 and all(test("^[0-9]{14}_[a-z0-9_]+$"))) and
-    (.state|IN("prepared","application-recreated","available","available-after-failed-deploy","rolled-back"))
+    (.recreationAttempted == true) and .healthConfirmed == true and
+    (.state == "known-good") and
+    (.immutableImageTag|type=="string" and startswith("zedbot-app:generation-"))
   ' "$ZEDBOT_ROLLBACK_METADATA" >/dev/null || { log_error "Rollback metadata is malformed or incomplete."; return 1; }
 }
 
+configure_rollback_compose_contract() {
+  set_rollback_compose_contract "$(metadata_field '.migrationEvidencePath')" "$(metadata_field '.composeEvidenceSha256')" || return 1
+  validate_compose_application_images
+}
+
 validate_retained_image() {
-  local expected_id expected_sha tag actual_id image_sha
-  expected_id="$(metadata_field '.preDeployImageId')"
-  expected_sha="$(metadata_field '.preDeploySha')"
-  tag="$(metadata_field '.retainedImageTag')"
-  actual_id="$(docker image inspect -f '{{.Id}}' "$tag" 2>/dev/null)" || { log_error "Retained rollback image is missing."; return 1; }
-  [ "$actual_id" = "$expected_id" ] || { log_error "Retained image tag does not match recorded image ID."; return 1; }
-  image_sha="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$expected_id" | sed -n 's/^GIT_SHA=//p' | tail -n 1)"
+  local expected_id expected_sha tag image_sha
+  validate_retained_generation_image "$ZEDBOT_ROLLBACK_METADATA" || return 1
+  expected_id="$(metadata_field '.targetImageId')"
+  expected_sha="$(metadata_field '.targetDeploySha')"
+  tag="$(metadata_field '.immutableImageTag')"
+  image_sha="$(run_clean_docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$expected_id" | sed -n 's/^GIT_SHA=//p' | tail -n 1)"
   [ "$image_sha" = "$expected_sha" ] || { log_error "Retained image GIT_SHA does not match metadata."; return 1; }
 }
 
 validate_compatibility() {
-  local expected checksum baseline result
+  local expected baseline result evidence recorded
   expected="$(metadata_field '.compatibilityManifestSha256')"
-  checksum="$(sha256sum packages/database/prisma/rollback-compatibility.json | awk '{print $1}')"
-  [ "$checksum" = "$expected" ] || { log_error "Compatibility declaration differs from the recorded deployment declaration."; return 1; }
+  evidence="$(metadata_field '.migrationEvidencePath')"
+  validate_migration_declaration_pair "$evidence" || { log_error "Recorded generation migration evidence is unavailable or invalid."; return 1; }
+  [ "$MIGRATION_MANIFEST_SHA256" = "$expected" ] || { log_error "Recorded manifest-byte checksum differs from generation evidence."; return 1; }
+  recorded="$(jq -cS '.compatibilityDeclarations|sort_by(.name)' "$ZEDBOT_ROLLBACK_METADATA")" || return 1
+  [ "$MIGRATION_DECLARATIONS_JSON" = "$recorded" ] || { log_error "Recorded declaration set differs from generation evidence."; return 1; }
   baseline="$(jq -r '.preDeployMigrations|join(",")' "$ZEDBOT_ROLLBACK_METADATA")"
   result="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/rollback-compatibility.js rollback "$baseline")" || {
     log_error "Rollback migration compatibility check failed: $(printf '%s' "$result" | jq -r '.blocker // "unavailable"' 2>/dev/null || echo unavailable)"
@@ -51,42 +77,62 @@ validate_compatibility() {
 }
 
 show_status() {
-  validate_metadata || return 1
-  local pre target state tag
-  pre="$(metadata_field '.preDeploySha')"; target="$(metadata_field '.targetDeploySha')"
-  state="$(metadata_field '.state')"; tag="$(metadata_field '.retainedImageTag')"
-  log_info "Rollback state       : ${state}"
-  log_info "Previous application : ${pre}"
-  log_info "Target deployment    : ${target}"
-  log_info "Retained image tag   : ${tag}"
-  validate_retained_image
-  log_success "Rollback metadata and retained image are internally consistent."
+  local mode="${1:---json}" result rc status reason eligible current previous
+  if result="$(inspect_rollback_status)"; then rc=0; else rc=$?; fi
+  case "$mode" in
+    --json) printf '%s\n' "$result" ;;
+    --human)
+      status="$(printf '%s' "$result" | /usr/bin/jq -r .rollbackStatus)"
+      reason="$(printf '%s' "$result" | /usr/bin/jq -r .reason)"
+      eligible="$(printf '%s' "$result" | /usr/bin/jq -r .eligible)"
+      current="$(printf '%s' "$result" | /usr/bin/jq -r '.currentGeneration // "not-validated"')"
+      previous="$(printf '%s' "$result" | /usr/bin/jq -r '.previousGeneration // "not-validated"')"
+      printf 'Rollback status: %s\nEligible: %s\nCurrent generation: %s\nPrevious generation: %s\nReason: %s\n' "$status" "$eligible" "$current" "$previous" "$reason"
+      ;;
+    *) rollback_status_emit indeterminate null INVALID_ARGUMENT "Use --json or --human." indeterminate false false false false false false false false; return 4;;
+  esac
+  return "$rc"
 }
 
 perform_rollback() {
-  local assume_yes="$1" pre target target_id state state_tmp service cid image_id image_sha target_running_id=""
+  local assume_yes="$1" pre target state service cid image_id image_sha target_running_id="" installation_class
   acquire_deployment_lock
+  installation_class="$(classify_installation observe)" || { log_error "Rollback requires unambiguous canonical installation metadata."; return 1; }
+  [ "$installation_class" = existing-canonical ] || { log_error "Rollback is unavailable for installation class ${installation_class}."; return 1; }
+  ZEDBOT_ROLLBACK_METADATA="$(select_rollback_generation)"
+  validate_rollback_eligibility_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" "$ZEDBOT_ROLLBACK_METADATA" || { log_error "Rollback eligibility evidence is invalid or inconsistent."; return 1; }
+  initialize_operation_state rollback "$(metadata_field '.generation')"
   validate_metadata
+  validate_generation_owned_evidence "$ZEDBOT_ROLLBACK_METADATA"
+  confirm_operation_state previous-selected rollback-evidence-validated
+  configure_rollback_compose_contract
   validate_retained_image
+  confirm_operation_state rollback-evidence-validated retained-image-validated
+  retag_validated_previous_reference "$ZEDBOT_ROLLBACK_METADATA"
+  metadata_transition_hook rollback-retagged
+  confirm_operation_state retained-image-validated deployment-reference-retagged
   validate_compatibility
-  pre="$(metadata_field '.preDeploySha')"; target="$(metadata_field '.targetDeploySha')"
+  confirm_operation_state deployment-reference-retagged compatibility-confirmed
+  validate_compose_application_images
+  validate_dependencies_healthy
+  pre="$(metadata_field '.targetDeploySha')"
+  target="$(/usr/bin/jq -r '.targetDeploySha' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")"
   state="$(metadata_field '.state')"
-  [ "$state" != "prepared" ] || { log_error "Deployment never recreated the application; rollback is unnecessary and refused."; return 1; }
   [ "$state" != "rolled-back" ] || { log_error "This rollback was already completed; refusing to run it again."; return 1; }
   # A failed Compose recreation may leave a mix of old and target application
   # containers. Both identities must be known; no third image is accepted.
   for service in api bot worker; do
     cid="$(run_compose ps -q "$service" 2>/dev/null | head -n 1)"
     [ -n "$cid" ] || { log_error "${service} container identity is unavailable."; return 1; }
-    image_id="$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null)"
-    image_sha="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" | sed -n 's/^GIT_SHA=//p' | tail -n 1)"
+    image_id="$(run_clean_docker inspect -f '{{.Image}}' "$cid" 2>/dev/null)"
+    image_sha="$(run_clean_docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" | sed -n 's/^GIT_SHA=//p' | tail -n 1)"
     case "$image_sha" in
       "$target")
         [ -z "$target_running_id" ] && target_running_id="$image_id"
         [ "$image_id" = "$target_running_id" ] || { log_error "Target containers use inconsistent images."; return 1; }
         ;;
       "$pre")
-        [ "$image_id" = "$(metadata_field '.preDeployImageId')" ] || { log_error "Previous-version container image is inconsistent with metadata."; return 1; }
+        [ "$image_id" = "$(metadata_field '.targetImageId')" ] || { log_error "Previous-version container image is inconsistent with metadata."; return 1; }
         ;;
       *) log_error "${service} carries an unknown application SHA."; return 1 ;;
     esac
@@ -97,33 +143,30 @@ perform_rollback() {
     return 1
   fi
 
-  # Preserve the current target identity before moving the mutable Compose tag.
-  target_id="$(docker image inspect -f '{{.Id}}' zedbot-app:latest 2>/dev/null)" || { log_error "Current application image is unavailable."; return 1; }
-  [ -z "$target_running_id" ] || [ "$target_id" = "$target_running_id" ] || { log_error "Mutable application tag does not match the running target image."; return 1; }
-  docker image tag "$target_id" "zedbot-app:failed-${target}"
-  docker image tag "$(metadata_field '.preDeployImageId')" zedbot-app:latest
-  run_compose up -d --no-deps --no-build --force-recreate api bot worker
-
-  if ! validate_running_application "$pre" >/dev/null; then
+  # Only previous.json supplies rollback material. failed.json is diagnostic.
+  if ! execute_validated_rollback_transition "$ZEDBOT_ROLLBACK_METADATA"; then
     log_error "Post-rollback application health validation failed. Both image identities and diagnostics were preserved."
     return 1
   fi
   record_deployed_sha "$pre"
-  state_tmp="$(mktemp "${ZEDBOT_DEPLOYMENT_DIR}/state.XXXXXX")"
-  jq '.state="rolled-back"' "$ZEDBOT_ROLLBACK_METADATA" > "$state_tmp"
-  atomic_write_metadata "$state_tmp"
-  rm -f "$state_tmp"
-  bash "${SCRIPT_DIR}/doctor.sh" || true
+  run_operation_child bash "${SCRIPT_DIR}/doctor.sh" || true
   log_success "Application rollback completed. PostgreSQL and Redis were untouched."
 }
 
 main() {
   require_root
+  reset_deployment_state_fixed_identity
+  if [ "${1:-}" = status ]; then
+    show_status "${2:---json}"
+    return
+  fi
   app_cd
   load_env_if_exists
+  reset_deployment_state_fixed_identity
+  reset_compose_fixed_identity
+  ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
   detect_compose_command
   case "${1:-rollback}" in
-    status) show_status ;;
     rollback)
       case "${2:-}" in
         "") perform_rollback 0 ;;
@@ -135,4 +178,7 @@ main() {
   esac
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  [ "${1:-}" = status ] || install_operation_traps
+  main "$@"
+fi
