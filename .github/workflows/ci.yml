@@ -159,31 +159,67 @@ jobs:
         # cannot create that evidence, so run the application tests as root
         # instead of weakening ownership validation in production code.
         run: |
-          node_command="$(command -v node)"
-          pnpm_command="$(command -v pnpm)"
-          node_path="$(realpath -e -- "$node_command")"
-          pnpm_path="$(realpath -e -- "$pnpm_command")"
-          node_bin="$(dirname -- "$node_path")"
-          tool_root="$(dirname -- "$node_bin")"
+          ci_tool_fail() {
+            printf 'CI trusted tool validation failed: %s\n' "$1" >&2
+            exit 1
+          }
+          trusted_owner_and_mode() {
+            local artifact="$1" owner mode
+            owner="$(/usr/bin/stat -c '%u' -- "$artifact" 2>/dev/null)" || ci_tool_fail STAT_UNAVAILABLE
+            mode="$(/usr/bin/stat -c '%a' -- "$artifact" 2>/dev/null)" || ci_tool_fail STAT_UNAVAILABLE
+            { [ "$owner" = 0 ] || [ "$owner" = "$runner_uid" ]; } || ci_tool_fail OWNER_UNTRUSTED
+            [ $((8#$mode & 8#022)) -eq 0 ] || ci_tool_fail MODE_WRITABLE
+          }
+
+          node_command="$(command -v node 2>/dev/null)" || ci_tool_fail NODE_MISSING
+          pnpm_command="$(command -v pnpm 2>/dev/null)" || ci_tool_fail PNPM_MISSING
+          case "$node_command:$pnpm_command" in
+            /*:/*) ;;
+            *) ci_tool_fail COMMAND_PATH_NOT_ABSOLUTE ;;
+          esac
+          node_bin="$(/usr/bin/dirname -- "$node_command")" || ci_tool_fail NODE_PARENT_INVALID
+          tool_root="$(/usr/bin/dirname -- "$node_bin")" || ci_tool_fail TOOL_ROOT_INVALID
           case "$tool_root" in
             /opt/hostedtoolcache/node/*/x64) ;;
-            *) echo "setup-node/Corepack executable identity is unsafe" >&2; exit 1 ;;
+            *) ci_tool_fail TOOL_ROOT_UNTRUSTED ;;
           esac
-          test "$node_path" = "$node_bin/node"
-          test "$pnpm_path" = "$tool_root/lib/node_modules/corepack/dist/pnpm.js"
-          runner_uid="$(id -u)"
-          for trusted in "$tool_root" "$node_bin" "$node_path" "$pnpm_path"; do
-            test -e "$trusted" && test ! -L "$trusted"
-            owner_mode="$(stat -c '%u:%a' "$trusted")"
-            owner="${owner_mode%%:*}"
-            mode="${owner_mode#*:}"
-            test "$owner" = 0 || test "$owner" = "$runner_uid"
-            test $((8#$mode & 8#022)) -eq 0
+          tool_version="${tool_root#/opt/hostedtoolcache/node/}"
+          tool_version="${tool_version%/x64}"
+          case "$tool_version" in
+            ''|*/*|.|..) ci_tool_fail TOOL_ROOT_UNTRUSTED ;;
+          esac
+          [ "$node_command" = "$node_bin/node" ] || ci_tool_fail NODE_LOCATION_UNEXPECTED
+          [ "$pnpm_command" = "$node_bin/pnpm" ] || ci_tool_fail PNPM_SHIM_LOCATION_UNEXPECTED
+          [ "$(/usr/bin/realpath -e -- "$tool_root" 2>/dev/null)" = "$tool_root" ] || ci_tool_fail TOOL_ROOT_SUBSTITUTED
+          [ "$(/usr/bin/realpath -e -- "$node_bin" 2>/dev/null)" = "$node_bin" ] || ci_tool_fail NODE_PARENT_SUBSTITUTED
+
+          runner_uid="$(/usr/bin/id -u)"
+          payload="$tool_root/lib/node_modules/corepack/dist/pnpm.js"
+          for trusted_dir in \
+            "$tool_root" "$node_bin" "$tool_root/lib" "$tool_root/lib/node_modules" \
+            "$tool_root/lib/node_modules/corepack" "$tool_root/lib/node_modules/corepack/dist"; do
+            [ -d "$trusted_dir" ] && [ ! -L "$trusted_dir" ] || ci_tool_fail TRUSTED_PARENT_INVALID
+            [ "$(/usr/bin/realpath -e -- "$trusted_dir" 2>/dev/null)" = "$trusted_dir" ] || ci_tool_fail TRUSTED_PARENT_SUBSTITUTED
+            trusted_owner_and_mode "$trusted_dir"
           done
-          test -x "$node_path" && test -x "$pnpm_path"
+
+          [ -f "$node_command" ] && [ ! -L "$node_command" ] && [ -x "$node_command" ] || ci_tool_fail NODE_INVALID
+          [ "$(/usr/bin/realpath -e -- "$node_command" 2>/dev/null)" = "$node_command" ] || ci_tool_fail NODE_SUBSTITUTED
+          trusted_owner_and_mode "$node_command"
+
+          [ -L "$pnpm_command" ] || ci_tool_fail PNPM_SHIM_NOT_SYMLINK
+          shim_owner="$(/usr/bin/stat -c '%u' -- "$pnpm_command" 2>/dev/null)" || ci_tool_fail PNPM_SHIM_STAT_UNAVAILABLE
+          { [ "$shim_owner" = 0 ] || [ "$shim_owner" = "$runner_uid" ]; } || ci_tool_fail PNPM_SHIM_OWNER_UNTRUSTED
+          shim_target="$(/usr/bin/readlink -- "$pnpm_command" 2>/dev/null)" || ci_tool_fail PNPM_SHIM_TARGET_UNREADABLE
+          [ "$shim_target" = '../lib/node_modules/corepack/dist/pnpm.js' ] || ci_tool_fail PNPM_SHIM_TARGET_UNEXPECTED
+          payload_path="$(/usr/bin/realpath -e -- "$pnpm_command" 2>/dev/null)" || ci_tool_fail PNPM_PAYLOAD_MISSING
+          [ "$payload_path" = "$payload" ] || ci_tool_fail PNPM_PAYLOAD_LOCATION_UNEXPECTED
+          [ -f "$payload_path" ] && [ ! -L "$payload_path" ] && [ -r "$payload_path" ] || ci_tool_fail PNPM_PAYLOAD_INVALID
+          trusted_owner_and_mode "$payload_path"
+
           sudo --preserve-env=CI,NODE_ENV,APP_NAME,APP_DOMAIN,APP_BASE_URL,API_PORT,LOG_LEVEL,TELEGRAM_BOT_TOKEN,ADMIN_TELEGRAM_IDS,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,DATABASE_URL,REDIS_HOST,REDIS_PORT,REDIS_PASSWORD,REDIS_URL \
             PATH="${node_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-            "$pnpm_path" test
+            "$pnpm_command" test
 
       - name: API health smoke test
         run: |

@@ -45,6 +45,7 @@ describe("authoritative readiness evidence", () => {
     ["dependency exited", (e: MutableEvidence) => e.services[0].status = "exited"],
     ["dependency restarting", (e: MutableEvidence) => e.services[0].status = "restarting"],
     ["dependency dead", (e: MutableEvidence) => e.services[0].status = "dead"],
+    ["restarted dependency", (e: MutableEvidence) => e.services[0].restartCount = 1],
     ["unknown state", (e: MutableEvidence) => e.services[0].health = "mystery"],
     ["missing field", (e: MutableEvidence) => delete e.services[0].health],
     ["wrong field type", (e: MutableEvidence) => e.services[0].restartCount = "zero" as unknown as number],
@@ -62,6 +63,7 @@ describe("authoritative readiness evidence", () => {
     ["mixed generation", (e: MutableEvidence) => e.services[1].generation = "f".repeat(40)],
     ["wrong immutable image", (e: MutableEvidence) => e.services[2].imageId = `sha256:${"e".repeat(64)}`],
     ["substituted app service", (e: MutableEvidence) => e.services[0].service = e.services[0].declaredService = "postgres"],
+    ["restarted application", (e: MutableEvidence) => e.services[0].restartCount = 1],
   ])("rejects %s", (_name, mutate) => { const e = evidence("application") as MutableEvidence; mutate(e); expect(evaluate(e, "application").status).toBe(2); });
 
   it.each([
@@ -69,7 +71,9 @@ describe("authoritative readiness evidence", () => {
   ])("rejects %s", (_name, value) => expect(evaluate(value).status).toBe(2));
   it("rejects stale evidence from an earlier operation", () => expect(evaluate(evidence("dependency", { attempt: "old-attempt" })).status).toBe(2));
   it("rejects stale observed time", () => expect(evaluate(evidence("dependency", { observedAt: 90 }), "dependency", 100, 100).status).toBe(2));
-  it("treats only a complete starting set as retryable", () => { const e = evidence("dependency"); e.services.forEach((s) => s.health = "starting"); expect(evaluate(e).status).toBe(1); });
+  it("treats a complete starting set as retryable", () => { const e = evidence("dependency"); e.services.forEach((s) => s.health = "starting"); expect(evaluate(e).status).toBe(1); });
+  it("treats a complete mixed healthy and starting set as retryable", () => { const e = evidence("application"); e.services[1].health = "starting"; expect(evaluate(e, "application").status).toBe(1); });
+  it("never treats a missing mandatory service as ready or retryable", () => { const e = evidence("application"); e.services.pop(); expect(evaluate(e, "application").status).toBe(2); });
 });
 
 describe("bounded polling and flow suppression", () => {
@@ -80,8 +84,11 @@ describe("bounded polling and flow suppression", () => {
     const result = shell(body); return { result, calls: readFileSync(calls, "utf8").trim().split("\n").length };
   }
   const starting = () => { const e = evidence("dependency"); e.services.forEach((s) => s.health = "starting"); return e; };
+  const converging = () => { const e = evidence("dependency"); e.services[1].health = "starting"; return e; };
   it("retries and succeeds before the deadline", () => { const r = poll([starting(), evidence("dependency")]); expect(r.result.status).toBe(0); expect(r.calls).toBe(2); });
   it("expires at a finite deadline without a busy loop", () => { const r = poll([starting(), starting(), starting(), starting()], 9); expect(r.result.status).not.toBe(0); expect(r.calls).toBe(4); });
+  it("retries a mixed healthy and starting set until all services are healthy", () => { const r = poll([converging(), evidence("dependency")]); expect(r.result.status).toBe(0); expect(r.calls).toBe(2); });
+  it("a mixed healthy and starting set fails at the bounded deadline", () => { const r = poll([converging(), converging(), converging(), converging()], 9); expect(r.result.status).not.toBe(0); expect(r.calls).toBe(4); });
   it("cancellation is failure and stops polling", () => { const r = poll([starting(), evidence("dependency")], 9, true); expect(r.result.status).not.toBe(0); expect(r.calls).toBe(1); });
   it("terminal failure stops additional polling", () => { const bad = evidence("dependency"); bad.services[0].status = "exited"; const r = poll([bad, evidence("dependency")]); expect(r.result.status).not.toBe(0); expect(r.calls).toBe(1); });
   it("a failed inspection command rejects valid-looking later content", () => { const result = shell(`validate_compose_readiness_contract(){ return 0; }; readiness_now(){ echo 100; }; collect_readiness_evidence(){ printf '%s' '${JSON.stringify(evidence("dependency"))}'; return 1; }; wait_for_readiness_policy dependency '${attempt}' '' '' 9 3`); expect(result.status).not.toBe(0); });

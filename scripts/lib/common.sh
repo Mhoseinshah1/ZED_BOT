@@ -567,11 +567,16 @@ evaluate_readiness_evidence() {
     all(.services[]; type=="object" and keys==["containerId","declaredService","generation","health","imageId","imageRef","project","restartCount","service","status"] and
       (.service|type=="string") and (.containerId|type=="string" and length>0) and .declaredService==.service and .project=="zedbot" and
       (.imageId|type=="string" and test("^sha256:[a-f0-9]{64}$")) and .imageRef==$refs[.service] and
-      (.status|type=="string") and (.health|type=="string") and (.restartCount|type=="number" and .>=0) and
+      (.status|type=="string") and (.health|type=="string") and (.restartCount|type=="number" and .==0) and
       (if $kind=="application" then .imageId==$image and .generation==$sha else .generation=="" end))
   ' >/dev/null 2>&1 || return 2
   if printf '%s' "$evidence" | /usr/bin/jq -e 'all(.services[]; .status=="running" and .health=="healthy")' >/dev/null; then return 0; fi
-  if printf '%s' "$evidence" | /usr/bin/jq -e 'all(.services[]; (.status=="running" or .status=="created") and (.health=="starting" or .health=="missing"))' >/dev/null; then return 1; fi
+  if printf '%s' "$evidence" | /usr/bin/jq -e '
+    all(.services[];
+      (.status=="running" and .health=="healthy") or
+      ((.status=="running" or .status=="created") and (.health=="starting" or .health=="missing"))) and
+    any(.services[]; .status!="running" or .health!="healthy")
+  ' >/dev/null; then return 1; fi
   return 2
 }
 

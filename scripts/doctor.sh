@@ -100,6 +100,38 @@ check_any_container_running() {
     compose_service_running postgres || compose_service_running redis
 }
 
+# Purely observational deployment-state consistency check. It neither acquires
+# the operation lock nor repairs, recovers, promotes, converts, or removes any
+# evidence. Empty first-install state and a completed canonical installation are
+# valid; every partial, conflicting, failed, or unfinished transition fails.
+check_deployment_state_consistency() {
+  local classification stage
+  reset_deployment_state_fixed_identity
+  validate_deployment_path_contract || return 1
+
+  if [ ! -e "$ZEDBOT_DEPLOYMENT_DIR" ] && [ ! -L "$ZEDBOT_DEPLOYMENT_DIR" ]; then
+    return 0
+  fi
+  [ -d "$ZEDBOT_DEPLOYMENT_DIR" ] && [ ! -L "$ZEDBOT_DEPLOYMENT_DIR" ] || return 1
+
+  classification="$(classify_installation first-install)" || return 1
+  case "$classification" in
+    genuine-first-install) return 0 ;;
+    existing-canonical) ;;
+    *) return 1 ;;
+  esac
+
+  [ ! -e "$ZEDBOT_METADATA_TRANSITION" ] && [ ! -L "$ZEDBOT_METADATA_TRANSITION" ] || return 1
+  if [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; then
+    validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 1
+    stage="$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE")" || return 1
+    [ "$stage" = promoted ] || return 1
+  fi
+  if [ -e "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ]; then
+    assert_no_unresolved_failed_generation || return 1
+  fi
+}
+
 check_postgres_reachable() {
   # -h 127.0.0.1 probes TCP (what the apps use), not just the unix socket.
   run_compose exec -T postgres pg_isready -h 127.0.0.1 -U "${POSTGRES_USER:-zedbot}" -d "${POSTGRES_DB:-zedbot}"
@@ -225,6 +257,7 @@ main() {
   core_check "Docker Compose available" check_compose_available
   core_check "App directory exists (${ZEDBOT_APP_DIR})" test -d "$ZEDBOT_APP_DIR"
   core_check "docker-compose.yml exists" test -f "${ZEDBOT_APP_DIR}/docker-compose.yml"
+  core_check "Canonical deployment state is complete and consistent" check_deployment_state_consistency
   optional_check ".env exists" "run the installer to create it" test -f "$ZEDBOT_ENV_FILE"
   # Telegram token readiness — presence + conflict only, never the value. The bot
   # and worker share TELEGRAM_BOT_TOKEN (BOT_TOKEN is a legacy fallback); a

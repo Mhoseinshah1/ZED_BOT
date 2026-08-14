@@ -590,17 +590,28 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     const workflow = readFileSync(path.join(repoRoot, ".github/workflows/ci.yml"), "utf8");
     const rootPackage = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: { test: string } };
     expect(rootPackage.scripts.test).toBe("pnpm -r --if-present run test");
-    expect(workflow).toContain('node_path="$(realpath -e -- "$node_command")"');
-    expect(workflow).toContain('pnpm_path="$(realpath -e -- "$pnpm_command")"');
-    expect(workflow).toContain('test "$node_path" = "$node_bin/node"');
-    expect(workflow).toContain('test "$pnpm_path" = "$tool_root/lib/node_modules/corepack/dist/pnpm.js"');
-    expect(workflow).toContain('test ! -L "$trusted"');
-    expect(workflow).toContain('test "$owner" = 0 || test "$owner" = "$runner_uid"');
-    expect(workflow).toContain('test $((8#$mode & 8#022)) -eq 0');
+    expect(workflow).toContain("ci_tool_fail()");
+    expect(workflow).toContain('[ -L "$pnpm_command" ] || ci_tool_fail PNPM_SHIM_NOT_SYMLINK');
+    expect(workflow).toContain("[ \"$shim_target\" = '../lib/node_modules/corepack/dist/pnpm.js' ]");
+    expect(workflow).toContain('[ "$payload_path" = "$payload" ] || ci_tool_fail PNPM_PAYLOAD_LOCATION_UNEXPECTED');
+    expect(workflow).toContain('[ -f "$payload_path" ] && [ ! -L "$payload_path" ] && [ -r "$payload_path" ]');
+    expect(workflow).not.toContain('[ -x "$payload_path" ]');
+    expect(workflow).toContain('[ -f "$node_command" ] && [ ! -L "$node_command" ] && [ -x "$node_command" ]');
+    expect(workflow).toContain("trusted_owner_and_mode");
+    expect(workflow).toContain("MODE_WRITABLE");
+    expect(workflow).toContain("OWNER_UNTRUSTED");
+    expect(workflow).toContain("TRUSTED_PARENT_SUBSTITUTED");
+    for (const reason of [
+      "NODE_MISSING", "PNPM_MISSING", "COMMAND_PATH_NOT_ABSOLUTE", "TOOL_ROOT_UNTRUSTED",
+      "NODE_INVALID", "NODE_SUBSTITUTED", "PNPM_SHIM_NOT_SYMLINK", "PNPM_SHIM_OWNER_UNTRUSTED",
+      "PNPM_SHIM_TARGET_UNEXPECTED", "PNPM_PAYLOAD_MISSING", "PNPM_PAYLOAD_LOCATION_UNEXPECTED",
+      "PNPM_PAYLOAD_INVALID", "OWNER_UNTRUSTED", "MODE_WRITABLE",
+    ]) expect(workflow).toContain(`ci_tool_fail ${reason}`);
     expect(workflow).toContain("sudo --preserve-env=CI,NODE_ENV,APP_NAME,APP_DOMAIN,APP_BASE_URL,API_PORT,LOG_LEVEL,TELEGRAM_BOT_TOKEN,ADMIN_TELEGRAM_IDS,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,DATABASE_URL,REDIS_HOST,REDIS_PORT,REDIS_PASSWORD,REDIS_URL \\");
     expect(workflow).toContain('PATH="${node_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"');
-    expect(workflow).toContain('"$pnpm_path" test');
-    expect(workflow).not.toMatch(/pnpm_path.*test.*(?:--filter|--exclude|--skip)/);
+    expect(workflow).toContain('"$pnpm_command" test');
+    expect(workflow).not.toContain('"$payload_path" test');
+    expect(workflow).not.toMatch(/pnpm_command.*test.*(?:--filter|--exclude|--skip)/);
     expect(workflow).not.toContain("--preserve-env ");
   });
 
@@ -639,6 +650,9 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     expect(script).toContain("worker container GIT_SHA");
     expect(script).toContain("bot container GIT_SHA");
     expect(script).toContain("command not found");
+    expect(script).toContain("legacy updater swallowed a migration/readiness failure");
+    expect(script).toContain("legacy updater reported success without canonical current evidence");
+    expect(script).toContain("update completed successfully");
   });
 });
 

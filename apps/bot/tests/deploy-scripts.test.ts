@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -374,6 +374,42 @@ describe("deploy scripts (Phase 36)", () => {
       const common = readFileSync(path.join(scriptsDir, "lib", "common.sh"), "utf8");
       expect(doctor).toMatch(/\bcompose_service_running\b/);
       expect(common).toMatch(/^compose_service_running\(\) \{/m);
+    });
+
+    it("fails incomplete canonical operation state without acquiring a lock or mutating evidence", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-state-"));
+      const operationState = path.join(dir, "operation-state.json");
+      writeFileSync(operationState, '{"stage":"application-recreated"}\n');
+      const before = readFileSync(operationState, "utf8");
+      const snippet = `source '${doctorScript}' >/dev/null 2>&1 || true; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; classify_installation(){ echo existing-canonical; }; validate_operation_state(){ return 0; }; if check_deployment_state_consistency; then exit 99; fi`;
+      const result = bash(["-c", snippet]);
+      expect(result.status).toBe(0);
+      expect(readFileSync(operationState, "utf8")).toBe(before);
+      expect(existsSync(path.join(dir, "deployment.lock"))).toBe(false);
+    });
+
+    it("makes Doctor nonzero when an older updater leaves an incomplete canonical operation", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-main-"));
+      const app = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-app-"));
+      writeFileSync(path.join(dir, "operation-state.json"), '{"stage":"application-recreated"}\n');
+      writeFileSync(path.join(app, "docker-compose.yml"), "services: {}\n");
+      const snippet = `source '${doctorScript}' >/dev/null 2>&1 || true; ZEDBOT_APP_DIR='${app}'; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; classify_installation(){ echo existing-canonical; }; validate_operation_state(){ return 0; }; require_root(){ :; }; load_env_if_exists(){ :; }; has_command(){ :; }; docker(){ :; }; check_compose_available(){ :; }; main`;
+      const result = bash(["-c", snippet]);
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain("Canonical deployment state is complete and consistent");
+      expect(existsSync(path.join(dir, "deployment.lock"))).toBe(false);
+    });
+
+    it("accepts genuine empty first install and completed canonical operation state observationally", () => {
+      const empty = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-empty-"));
+      const complete = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-complete-"));
+      writeFileSync(path.join(complete, "operation-state.json"), '{"stage":"promoted"}\n');
+      const emptyResult = bash(["-c", `source '${doctorScript}' >/dev/null 2>&1 || true; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${empty}'; }; classify_installation(){ echo genuine-first-install; }; check_deployment_state_consistency`]);
+      const completeResult = bash(["-c", `source '${doctorScript}' >/dev/null 2>&1 || true; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${complete}'; }; classify_installation(){ echo existing-canonical; }; validate_operation_state(){ return 0; }; check_deployment_state_consistency`]);
+      expect(emptyResult.status).toBe(0);
+      expect(completeResult.status).toBe(0);
+      expect(existsSync(path.join(empty, "deployment.lock"))).toBe(false);
+      expect(existsSync(path.join(complete, "deployment.lock"))).toBe(false);
     });
 
     function tokenCheck(tg: string, bt: string) {

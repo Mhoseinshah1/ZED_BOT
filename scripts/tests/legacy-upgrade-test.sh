@@ -458,6 +458,13 @@ assert_converged() {
   if grep -qF 'command not found' "${WORK}/update-1.log"; then
     fail "legacy update or installed doctor reported an unresolved command"
   fi
+  if grep -qF 'Database migrations reported an error' "${WORK}/update-1.log"; then
+    fail "legacy updater swallowed a migration/readiness failure"
+  fi
+  if grep -qF 'update completed successfully' "${WORK}/update-1.log" &&
+     [ ! -f "${BASE_DIR}/deployments/current.json" ]; then
+    fail "legacy updater reported success without canonical current evidence"
+  fi
 
   echo "all convergence assertions passed."
 }
