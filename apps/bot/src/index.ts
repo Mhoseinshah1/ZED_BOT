@@ -2,7 +2,7 @@ import { connectDatabase, disconnectDatabase } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
 
 import { createBot } from "./app.js";
-import { getBotToken } from "./config/env.js";
+import { getBotToken, getTelegramApiRoot } from "./config/env.js";
 import { logger } from "./core/logger.js";
 import { completeBotStartupReadiness, removeBotReadiness } from "./core/readiness-marker.js";
 import { runShutdownSequence } from "./core/shutdown.js";
@@ -48,7 +48,7 @@ if (token === null) {
 
 async function run(botToken: string): Promise<void> {
   await removeBotReadiness();
-  const bot = createBot(botToken);
+  const bot = createBot(botToken, getTelegramApiRoot());
   let databaseInitialized = false;
 
   // Wallet auto-renewal EXECUTE consumer (Phase 1): the bot's only BullMQ

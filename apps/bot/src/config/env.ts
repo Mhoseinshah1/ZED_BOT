@@ -10,3 +10,34 @@ import { getTelegramBotToken } from "@zedbot/shared";
 export function getBotToken(): string | null {
   return getTelegramBotToken();
 }
+
+/**
+ * Optional grammY Bot API endpoint. This is primarily useful for bounded,
+ * network-local integration fixtures and self-hosted Telegram Bot API servers.
+ * The value is trusted configuration, but still fail-closed: credentials,
+ * fragments, queries, non-HTTP protocols, and non-root paths are rejected.
+ */
+export function getTelegramApiRoot(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const raw = env.TELEGRAM_API_ROOT?.trim();
+  if (!raw) return undefined;
+
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("TELEGRAM_API_ROOT is invalid");
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    (url.pathname !== "" && url.pathname !== "/")
+  ) {
+    throw new Error("TELEGRAM_API_ROOT is invalid");
+  }
+  return url.origin;
+}

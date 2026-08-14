@@ -598,6 +598,9 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     expect(workflow).not.toContain('[ -x "$payload_path" ]');
     expect(workflow).toContain('[ -f "$node_command" ] && [ ! -L "$node_command" ] && [ -x "$node_command" ]');
     expect(workflow).toContain("trusted_owner_and_mode");
+    expect(workflow).toContain('[ "$tool_root_owner:$tool_root_group:$tool_root_mode" = "$runner_uid:$runner_gid:775" ]');
+    expect(workflow).toContain('sudo /usr/bin/chmod 0755 -- "$tool_root"');
+    expect(workflow).toContain("TOOL_ROOT_HARDEN_CONFIRM_FAILED");
     expect(workflow).toContain("MODE_WRITABLE");
     expect(workflow).toContain("OWNER_UNTRUSTED");
     expect(workflow).toContain("TRUSTED_PARENT_SUBSTITUTED");
@@ -653,6 +656,10 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     expect(script).toContain("legacy updater swallowed a migration/readiness failure");
     expect(script).toContain("legacy updater reported success without canonical current evidence");
     expect(script).toContain("update completed successfully");
+    expect(script).toContain("start_telegram_api_mock");
+    expect(script).toContain("TELEGRAM_API_ROOT='http://%s:%s'");
+    expect(script).toContain('kill "$TELEGRAM_MOCK_PID"');
+    expect(script).not.toContain("api.telegram.org");
   });
 });
 

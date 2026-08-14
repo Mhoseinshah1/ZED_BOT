@@ -40,6 +40,7 @@ unset NODE_ENV APP_NAME APP_DOMAIN APP_BASE_URL API_PORT LOG_LEVEL \
   ZEDBOT_BASE_DIR ZEDBOT_APP_DIR ZEDBOT_DATA_DIR ZEDBOT_BACKUP_DIR \
   ZEDBOT_LOGS_DIR ZEDBOT_ENV_FILE ZEDBOT_CLI_PATH ZEDBOT_REPO_URL \
   ZEDBOT_SKIP_PREUPDATE_BACKUP ZEDBOT_SMOKE_TIMEOUT_SECONDS \
+  TELEGRAM_API_ROOT \
   2>/dev/null || true
 
 # --- Constants ---------------------------------------------------------------
@@ -59,6 +60,7 @@ WORK=""
 NEW_SHA=""
 PG_PW=""
 REDIS_PW=""
+TELEGRAM_MOCK_PID=""
 
 # --- Helpers -----------------------------------------------------------------
 phase() { printf '\n=== [iteration %s] %s ===\n' "$ITERATION" "$*"; }
@@ -145,9 +147,7 @@ generate_password() {
 
 file_sha256() { sha256sum "$1" | awk '{print $1}'; }
 
-# --- Probes used with retry (the bot 401-crash-loops by design with the
-# --- dummy token: it sleeps before exiting, so the container is Running
-# --- most of the time, but a single exec can hit the restart gap) -----------
+# --- Probes used with retry --------------------------------------------------
 worker_heartbeat_present() {
   local hb
   hb="$(dc exec -T redis redis-cli GET zedbot:worker:heartbeat 2>/dev/null | tr -d '[:space:]' || true)"
@@ -196,6 +196,7 @@ setup_origin() {
 # --- Per-iteration phases ----------------------------------------------------
 reset_environment() {
   phase "reset (down -v, wipe ${BASE_DIR}, remove installed CLI)"
+  stop_telegram_api_mock
   if [ -f "${APP_DIR}/docker-compose.yml" ]; then
     (cd "$APP_DIR" && docker compose down -v --remove-orphans) || true
   fi
@@ -204,6 +205,68 @@ reset_environment() {
   docker network rm zedbot >/dev/null 2>&1 || true
   rm -rf "$BASE_DIR"
   rm -f "$CLI_PATH"
+}
+
+stop_telegram_api_mock() {
+  if [ -n "$TELEGRAM_MOCK_PID" ]; then
+    kill "$TELEGRAM_MOCK_PID" >/dev/null 2>&1 || true
+    wait "$TELEGRAM_MOCK_PID" 2>/dev/null || true
+    TELEGRAM_MOCK_PID=""
+  fi
+}
+
+trap stop_telegram_api_mock EXIT
+
+start_telegram_api_mock() {
+  local gateway port mock_script
+  gateway="$(docker network inspect zedbot -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)" \
+    || fail "cannot resolve the disposable zedbot network gateway"
+  case "$gateway" in
+    [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;;
+    *) fail "disposable zedbot network gateway is malformed" ;;
+  esac
+  port=$((18080 + ITERATION))
+  mock_script="${WORK}/telegram-api-mock.py"
+  cat > "$mock_script" <<'PY'
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        method = self.path.rsplit("/", 1)[-1]
+        length = int(self.headers.get("content-length", "0"))
+        if length:
+            self.rfile.read(min(length, 1024 * 1024))
+        if method == "getMe":
+            result = {"id": 123456789, "is_bot": True, "first_name": "CI fixture", "username": "zedbot_ci_fixture"}
+        elif method == "getUpdates":
+            result = []
+        else:
+            result = True
+        body = json.dumps({"ok": True, "result": result}, separators=(",", ":")).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format, *_args):
+        return
+
+ThreadingHTTPServer((sys.argv[1], int(sys.argv[2])), Handler).serve_forever()
+PY
+  python3 "$mock_script" "$gateway" "$port" &
+  TELEGRAM_MOCK_PID=$!
+  for _ in $(seq 1 20); do
+    if kill -0 "$TELEGRAM_MOCK_PID" 2>/dev/null &&
+       curl -fsS -X POST "http://${gateway}:${port}/bot-fixture/getMe" >/dev/null 2>&1; then
+      printf "\nTELEGRAM_API_ROOT='http://%s:%s'\n" "$gateway" "$port" >> "${APP_DIR}/.env"
+      return 0
+    fi
+    sleep 1
+  done
+  fail "bounded local Telegram API fixture did not start"
 }
 
 create_legacy_layout() {
@@ -328,6 +391,7 @@ start_legacy_stack() {
   dc up -d postgres redis
   wait_healthy zedbot-postgres 180
   wait_healthy zedbot-redis 120
+  start_telegram_api_mock
   # The old installer ran migrate.sh through run_migrations_if_available;
   # at PRE_SHA the script exists, so run it exactly like the installer did.
   (cd "$APP_DIR" && bash scripts/migrate.sh) || fail "OLD migrate.sh failed on the legacy stack"
