@@ -8,10 +8,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function validateMarker(value: unknown): asserts value is Record<string, unknown> {
+export function validateMarker(value: unknown): asserts value is Record<string, unknown> {
   if (!isRecord(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys)) throw new Error("bot-readiness-schema-invalid");
   if (value.formatVersion !== 1 || value.state !== "ready") throw new Error("bot-readiness-state-invalid");
-  if (typeof value.processId !== "number" || !Number.isSafeInteger(value.processId) || value.processId <= 1) throw new Error("bot-readiness-pid-invalid");
+  // PID 1 is the bot's own, expected identity: docker-compose runs it as the
+  // sole process in its container with no init/tini wrapper, so grammY's own
+  // process is container PID 1. Only non-positive values are impossible.
+  if (typeof value.processId !== "number" || !Number.isSafeInteger(value.processId) || value.processId < 1) throw new Error("bot-readiness-pid-invalid");
   if (typeof value.processInstanceId !== "string" || !/^[a-f0-9-]{36}$/.test(value.processInstanceId)) throw new Error("bot-readiness-instance-invalid");
   if (typeof value.processStartTicks !== "string" || !/^[0-9]+$/.test(value.processStartTicks)) throw new Error("bot-readiness-process-start-invalid");
   if (typeof value.processStartedAt !== "number" || typeof value.readyAt !== "number" || value.processStartedAt > value.readyAt) throw new Error("bot-readiness-time-invalid");
@@ -31,13 +34,17 @@ async function main(): Promise<void> {
   process.stdout.write(`${JSON.stringify(marker)}\n`);
 }
 
-main().catch((error: unknown) => {
-  if (isRecord(error) && error.code === "ENOENT") {
-    process.stdout.write('{"formatVersion":1,"state":"starting"}\n');
-    process.exitCode = 3;
-    return;
-  }
-  // Fixed non-secret diagnostic only. Never print marker contents or env.
-  process.stderr.write(`bot-readiness-unavailable:${BOT_READINESS_MARKER_PATH}\n`);
-  process.exitCode = 1;
-});
+// Guarded so tests can import validateMarker() without triggering a live
+// readiness probe (process.kill, /proc reads) as an import side effect.
+if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error: unknown) => {
+    if (isRecord(error) && error.code === "ENOENT") {
+      process.stdout.write('{"formatVersion":1,"state":"starting"}\n');
+      process.exitCode = 3;
+      return;
+    }
+    // Fixed non-secret diagnostic only. Never print marker contents or env.
+    process.stderr.write(`bot-readiness-unavailable:${BOT_READINESS_MARKER_PATH}\n`);
+    process.exitCode = 1;
+  });
+}

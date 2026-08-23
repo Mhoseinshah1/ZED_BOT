@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { validateMarker } from "../src/cli/readiness.js";
 import { completeBotStartupReadiness, linuxProcessStartTicks, publishBotReadiness, readBotReadiness, removeBotReadiness } from "../src/core/readiness-marker.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -41,8 +42,30 @@ describe("Bot-owned readiness marker", () => {
   it("removes only a regular marker and refuses a symlink", async () => { const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")); const target = path.join(dir, "target"); const file = path.join(dir, "ready.json"); writeFileSync(target, "safe"); symlinkSync(target, file); await expect(removeBotReadiness(file)).rejects.toThrow("unsafe"); expect(readFileSync(target, "utf8")).toBe("safe"); });
 });
 
+describe("readiness CLI marker schema validation", () => {
+  // Regression: docker-compose runs the bot as the sole process in its
+  // container (no init/tini), so grammY's own process is container PID 1.
+  // A boundary bug here (`processId <= 1`) rejected that legitimate identity
+  // on every single check, permanently failing the bot's Docker healthcheck
+  // and, in turn, `wait_for_readiness_policy application` and
+  // `wait_for_real_bot_readiness` - never a timing race, always closed.
+  it("accepts processId 1 (the bot's own container PID when it is the sole process)", () => {
+    expect(() => validateMarker(marker())).not.toThrow();
+    const m: Marker = { ...marker(), processId: 1 };
+    expect(() => validateMarker(m)).not.toThrow();
+  });
+  it.each([0, -1])("rejects a non-positive processId (%d)", (processId) => {
+    const m: Marker = { ...marker(), processId };
+    expect(() => validateMarker(m)).toThrow("bot-readiness-pid-invalid");
+  });
+});
+
 describe("real Bot structured evidence", () => {
   it("accepts valid current-operation, current-generation readiness", () => expect(evaluate(evidence()).status).toBe(0));
+  it("accepts processId 1 (container PID 1 - the bot's own identity when it is the sole container process)", () => {
+    const value = evidence({ marker: { ...marker(), processId: 1 } });
+    expect(evaluate(value).status).toBe(0);
+  });
   it.each([
     ["empty", ""], ["malformed", "{"], ["truncated", '{"formatVersion":1'],
   ])("rejects %s evidence", (_name, value) => expect(evaluate(value).status).toBe(2));

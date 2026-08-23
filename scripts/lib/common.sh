@@ -1170,7 +1170,7 @@ evaluate_real_bot_readiness_evidence() {
     .bot.status=="running" and (.bot.marker|type=="object") and
     (.bot.marker|keys==["components","formatVersion","generation","processId","processInstanceId","processStartTicks","processStartedAt","readyAt","state"]) and
     .bot.marker.formatVersion==1 and .bot.marker.state=="ready" and .bot.marker.generation==$sha and
-    (.bot.marker.processId|type=="number" and .>1) and (.bot.marker.processInstanceId|type=="string" and test("^[a-f0-9-]{36}$")) and (.bot.marker.processStartTicks|type=="string" and test("^[0-9]+$")) and
+    (.bot.marker.processId|type=="number" and .>=1) and (.bot.marker.processInstanceId|type=="string" and test("^[a-f0-9-]{36}$")) and (.bot.marker.processStartTicks|type=="string" and test("^[0-9]+$")) and
     (.bot.marker.processStartedAt|type=="number") and (.bot.marker.readyAt|type=="number") and .bot.marker.processStartedAt<=.bot.marker.readyAt and .bot.marker.readyAt<=($now*1000+5000) and
     (.bot.marker.components=={application:true,handlers:true,localLoops:true,shutdownHandlers:true})
   ' >/dev/null; then return 0; fi
