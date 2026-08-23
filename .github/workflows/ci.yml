@@ -167,8 +167,16 @@ jobs:
             local artifact="$1" owner mode
             owner="$(/usr/bin/stat -c '%u' -- "$artifact" 2>/dev/null)" || ci_tool_fail STAT_UNAVAILABLE
             mode="$(/usr/bin/stat -c '%a' -- "$artifact" 2>/dev/null)" || ci_tool_fail STAT_UNAVAILABLE
-            { [ "$owner" = 0 ] || [ "$owner" = "$runner_uid" ]; } || ci_tool_fail OWNER_UNTRUSTED
-            [ $((8#$mode & 8#022)) -eq 0 ] || ci_tool_fail MODE_WRITABLE
+            if ! { [ "$owner" = 0 ] || [ "$owner" = "$runner_uid" ]; }; then
+              printf 'trusted_owner_and_mode: artifact=%s owner=%s (expected 0 or %s)\n' \
+                "$artifact" "$owner" "$runner_uid" >&2
+              ci_tool_fail OWNER_UNTRUSTED
+            fi
+            if [ $((8#$mode & 8#022)) -ne 0 ]; then
+              printf 'trusted_owner_and_mode: artifact=%s mode=%s (group/other-writable)\n' \
+                "$artifact" "$mode" >&2
+              ci_tool_fail MODE_WRITABLE
+            fi
           }
 
           node_command="$(command -v node 2>/dev/null)" || ci_tool_fail NODE_MISSING
