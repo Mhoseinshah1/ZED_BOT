@@ -815,6 +815,7 @@ publish_first_install_current() {
   [ "$(/usr/bin/jq -r '.state+":"+(.healthConfirmed|tostring)' "$candidate")" = healthy-candidate:true ] || return 1
   write_lifecycle_role "$candidate" current "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || return 1
   validate_generation_owned_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || return 1
+  remove_canonical_state_file "$candidate" || return 1
   advance_installation_bootstrap health-confirmed promoted
 }
 
@@ -1694,6 +1695,7 @@ recover_metadata_transition() {
     fi
     write_lifecycle_role "$candidate" current "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || return 1
     metadata_transition_hook update-current-written || return 1
+    remove_canonical_state_file "$candidate" || return 1
   else
     current_generation="$(/usr/bin/jq -r '.generation' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" 2>/dev/null || true)"
     if [ ! -e "$ZEDBOT_ROLLBACK_METADATA" ] && [ "$current_generation" = "$target_generation" ]; then

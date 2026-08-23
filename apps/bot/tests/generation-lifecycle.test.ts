@@ -75,6 +75,11 @@ describe("four-role generation lifecycle", () => {
     expect(generation(f.previous)).toBe(genA); expect(generation(f.current)).toBe(genB);
     expect(JSON.parse(readFileSync(f.previous, "utf8")).lifecycleRole).toBe("previous");
     expect(JSON.parse(readFileSync(f.current, "utf8")).lifecycleRole).toBe("current");
+    // Regression: the candidate file's content is fully absorbed into
+    // current.json above; leaving candidate-<generation>.json behind
+    // permanently blocks rollback-status (it treats the file's mere
+    // presence, not its content, as an incomplete operation).
+    expect(existsSync(f.candidate)).toBe(false);
   });
 
   it.each(["retention", "build", "tag", "migration", "recreation", "health"])("a %s failure preserves current and previous", () => {
