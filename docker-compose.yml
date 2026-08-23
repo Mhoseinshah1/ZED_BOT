@@ -118,6 +118,12 @@ services:
     image: zedbot-app:latest
     container_name: zedbot-bot
     restart: unless-stopped
+    # Graceful shutdown drains the support-notification sweep, awaits
+    # in-flight update handlers, and closes 4 BullMQ workers before
+    # disconnecting. Docker's default 10s grace period could SIGKILL mid-
+    # sequence (an in-flight wallet charge, an active Telegram fan-out);
+    # give it real room before the hard kill.
+    stop_grace_period: 60s
     command: ["node", "apps/bot/dist/index.js"]
     env_file:
       - .env
@@ -162,6 +168,11 @@ services:
     image: zedbot-app:latest
     container_name: zedbot-worker
     restart: unless-stopped
+    # Graceful shutdown awaits 4 BullMQ engines' active jobs (a running
+    # backup, a payment reconciliation pass) before closing workers/queues
+    # and disconnecting. Docker's default 10s grace period could SIGKILL
+    # mid-job; give it real room before the hard kill.
+    stop_grace_period: 60s
     command: ["node", "apps/worker/dist/index.js"]
     env_file:
       - .env

@@ -78,53 +78,76 @@ async function run(botToken: string): Promise<void> {
   // Assigned after startup below; declared here so the shutdown closure can
   // stop it. Null only in the window before startup reaches the start call.
   let supportNotificationLoop: SupportNotificationLoopController | null = null;
+  // Assigned once bot.start() is called below. bot.stop() only flips
+  // polling off and aborts the in-flight getUpdates call - it does not wait
+  // for a handler already running against the current batch of updates to
+  // finish. Only the promise bot.start() returned settles once that drain
+  // completes, so shutdown must hold onto it and await it after stop().
+  let pollingPromise: Promise<void> | null = null;
+  // A second SIGTERM/SIGINT (or SIGINT racing a just-received SIGTERM) must
+  // not start a second concurrent runShutdownSequence: that would double-run
+  // drainSupportNotifications and disconnectDatabase while the first pass is
+  // still mid-sequence, exactly the interleaving the ordered-sequence
+  // contract exists to prevent. One in-flight shutdown, always the same one.
+  let shuttingDown: Promise<void> | null = null;
 
-  const shutdown = async (signal: string): Promise<void> => {
-    await removeBotReadiness().catch(() => undefined);
-    logger.info(`received ${signal}, stopping bot`);
-    // The order — and the fact that each step FINISHES before the next starts
-    // — is the contract, so it lives in runShutdownSequence where a test can
-    // execute it rather than read it. Stopping the notification loop is not
-    // enough on its own: a sweep already running holds claims in SENDING, and
-    // disconnecting underneath it strands them until the next process's stale
-    // sweep. So ticks are stopped, then drained, and only then does anything
-    // else tear down.
-    await runShutdownSequence(
-      {
-        stopSupportNotificationTicks: () => supportNotificationLoop?.stop(),
-        drainSupportNotifications: async () => {
-          await supportNotificationLoop?.drain();
+  const shutdown = (signal: string): Promise<void> => {
+    if (shuttingDown !== null) {
+      return shuttingDown;
+    }
+    shuttingDown = (async () => {
+      await removeBotReadiness().catch(() => undefined);
+      logger.info(`received ${signal}, stopping bot`);
+      // The order — and the fact that each step FINISHES before the next starts
+      // — is the contract, so it lives in runShutdownSequence where a test can
+      // execute it rather than read it. Stopping the notification loop is not
+      // enough on its own: a sweep already running holds claims in SENDING, and
+      // disconnecting underneath it strands them until the next process's stale
+      // sweep. So ticks are stopped, then drained, and only then does anything
+      // else tear down.
+      await runShutdownSequence(
+        {
+          stopSupportNotificationTicks: () => supportNotificationLoop?.stop(),
+          drainSupportNotifications: async () => {
+            await supportNotificationLoop?.drain();
+          },
+          writeStoppingLog: () =>
+            writeSystemLog({
+              level: "INFO",
+              eventType: OPS_EVENTS.BOT_STOPPED,
+              message: "bot service stopping",
+              metadata: { signal },
+              topicKey: "SYSTEM",
+            }),
+          stopBot: async () => {
+            await bot.stop();
+            if (pollingPromise !== null) {
+              await pollingPromise;
+            }
+          },
+          stopConsumers: async () => {
+            if (autoRenewalConsumer !== null) {
+              await autoRenewalConsumer.stop();
+            }
+            if (miniAppCommerceConsumer !== null) {
+              await miniAppCommerceConsumer.stop();
+            }
+            if (starsSubscriptionConsumer !== null) {
+              await starsSubscriptionConsumer.stop();
+            }
+            if (referralExecuteConsumer !== null) {
+              await referralExecuteConsumer.stop();
+            }
+          },
+          disconnectDatabase: () => disconnectDatabase(),
         },
-        writeStoppingLog: () =>
-          writeSystemLog({
-            level: "INFO",
-            eventType: OPS_EVENTS.BOT_STOPPED,
-            message: "bot service stopping",
-            metadata: { signal },
-            topicKey: "SYSTEM",
-          }),
-        stopBot: () => bot.stop(),
-        stopConsumers: async () => {
-          if (autoRenewalConsumer !== null) {
-            await autoRenewalConsumer.stop();
-          }
-          if (miniAppCommerceConsumer !== null) {
-            await miniAppCommerceConsumer.stop();
-          }
-          if (starsSubscriptionConsumer !== null) {
-            await starsSubscriptionConsumer.stop();
-          }
-          if (referralExecuteConsumer !== null) {
-            await referralExecuteConsumer.stop();
-          }
+        (step, err) => {
+          logger.warn("error during shutdown", { step, error: errorMessage(err) });
         },
-        disconnectDatabase: () => disconnectDatabase(),
-      },
-      (step, err) => {
-        logger.warn("error during shutdown", { step, error: errorMessage(err) });
-      },
-    );
-    process.exit(0);
+      );
+      process.exit(0);
+    })();
+    return shuttingDown;
   };
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
@@ -190,7 +213,7 @@ async function run(botToken: string): Promise<void> {
   // stop the ones after it.
   supportNotificationLoop = startSupportNotificationLoop(bot.api);
 
-  await bot.start({
+  pollingPromise = bot.start({
     onStart: async (botInfo) => {
       const generation = runningGitSha();
       if (generation === null) throw new Error("bot-readiness-generation-unavailable");
@@ -202,4 +225,5 @@ async function run(botToken: string): Promise<void> {
       });
     },
   });
+  await pollingPromise;
 }
