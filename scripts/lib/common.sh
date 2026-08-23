@@ -1188,10 +1188,18 @@ record_bot_recreation_boundary() {
 }
 
 collect_real_bot_readiness_evidence() {
-  local attempt="$1" observed="$2" expected_sha="$3" operation ids cid inspection marker marker_rc
+  local attempt="$1" observed="$2" expected_sha="$3" generation ids cid inspection marker marker_rc
   validate_bot_recreation_boundary || return 1
-  operation="${attempt%:*}"
-  [ "$(/usr/bin/jq -r '.operation' "$ZEDBOT_BOT_RECREATION_BOUNDARY")" = "$operation" ] || return 1
+  # attempt is either "<kind>:<generation>:<stage>" (an active operation) or
+  # the "preflight:<generation>:current-validated" sentinel current_readiness_
+  # attempt() falls back to outside any active operation - the latter has no
+  # real kind to compare against the boundary's install/update/rollback
+  # .operation field, so match on the middle (generation) segment alone: it
+  # already uniquely identifies the operation (timestamp + source SHA
+  # prefix) that both current.json and this boundary were written by.
+  generation="${attempt#*:}"; generation="${generation%%:*}"
+  [ -n "$generation" ] || return 1
+  [ "$(/usr/bin/jq -r '.generation' "$ZEDBOT_BOT_RECREATION_BOUNDARY")" = "$generation" ] || return 1
   ids="$(run_compose ps --all -q bot)" || return 1
   [ "$(printf '%s\n' "$ids" | /usr/bin/sed '/^$/d' | /usr/bin/wc -l)" -eq 1 ] || return 1
   cid="$(printf '%s\n' "$ids" | /usr/bin/sed '/^$/d')"
@@ -1211,13 +1219,18 @@ collect_real_bot_readiness_evidence() {
 
 # Returns 0 ready, 1 retryable startup, or 2 terminal/invalid.
 evaluate_real_bot_readiness_evidence() {
-  local evidence="$1" attempt="$2" started="$3" now="$4" expected_image="$5" expected_sha="$6" operation
-  operation="${attempt%:*}"
-  printf '%s' "$evidence" | /usr/bin/jq -e --arg attempt "$attempt" --arg operation "$operation" --argjson started "$started" --argjson now "$now" --arg image "$expected_image" --arg sha "$expected_sha" '
+  local evidence="$1" attempt="$2" started="$3" now="$4" expected_image="$5" expected_sha="$6" generation
+  # See collect_real_bot_readiness_evidence: match on the attempt's generation
+  # segment, not a reconstructed "<kind>:<generation>" operation string - the
+  # "preflight:<generation>:current-validated" sentinel used outside any
+  # active operation has no real kind to compare against the boundary's
+  # install/update/rollback .operation field.
+  generation="${attempt#*:}"; generation="${generation%%:*}"
+  printf '%s' "$evidence" | /usr/bin/jq -e --arg attempt "$attempt" --arg generation "$generation" --argjson started "$started" --argjson now "$now" --arg image "$expected_image" --arg sha "$expected_sha" '
     . as $root | type=="object" and keys==["attempt","bot","boundary","formatVersion","kind","observedAt"] and .formatVersion==1 and .kind=="real-bot" and
     .attempt==$attempt and (.observedAt|type=="number") and .observedAt >= $started and .observedAt <= $now and ($now-.observedAt)<=5 and
     (.boundary|type=="object" and keys==["containerId","formatVersion","generation","imageId","imageRef","operation","project","recreatedAt","service"] and
-      .formatVersion==1 and .operation==$operation and .imageId==$image and .imageRef=="zedbot-app:latest" and .project=="zedbot" and .service=="bot") and
+      .formatVersion==1 and .generation==$generation and .imageId==$image and .imageRef=="zedbot-app:latest" and .project=="zedbot" and .service=="bot") and
     (.bot|type=="object" and keys==["containerId","generation","imageId","imageRef","marker","project","restartCount","service","status"] and
       .service=="bot" and .project=="zedbot" and .containerId==$root.boundary.containerId and .imageId==$image and .imageId==$root.boundary.imageId and
       .imageRef=="zedbot-app:latest" and .generation==$sha and (.restartCount|type=="number" and .==0) and (.status|type=="string"))

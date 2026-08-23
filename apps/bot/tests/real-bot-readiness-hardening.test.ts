@@ -91,6 +91,24 @@ describe("real Bot structured evidence", () => {
     ["duplicate/ambiguous identity", (e: Evidence) => { (e as unknown as Record<string, unknown>).bots = [e.bot]; }],
   ])("rejects %s", (_name, mutate) => { const value = evidence(); mutate(value); expect(evaluate(value).status).toBe(2); });
   it("treats only the exact starting marker as retryable", () => expect(evaluate(evidence({ marker: { formatVersion: 1, state: "starting" } })).status).toBe(1));
+  // Regression: current_readiness_attempt()'s fallback outside any active
+  // operation returns the "preflight:<generation>:current-validated"
+  // sentinel (no real kind exists yet to report), but the boundary's own
+  // .operation field always records the REAL kind that recreated the bot
+  // (install/update/rollback). Comparing a reconstructed "<kind>:<generation>"
+  // string built from "preflight:..." against that field can never match any
+  // real kind, so update.sh's own step 3 ("capture the healthy running
+  // application rollback candidate", which calls validate_running_application
+  // with no SHA and so hits this exact fallback) failed on every single
+  // legacy-upgrade run once the backup-verification gate ahead of it was
+  // fixed - not a timing race, a combination that could never succeed.
+  it("matches a preflight (no active operation) attempt against a boundary recorded by any real operation kind", () => {
+    const preflightAttempt = `preflight:${generation}:current-validated`;
+    const value = evidence({ attempt: preflightAttempt });
+    value.boundary.operation = `install:${generation}`;
+    const result = shell(`evaluate_real_bot_readiness_evidence '${JSON.stringify(value)}' '${preflightAttempt}' '100' '100' '${imageId}' '${sha}'`);
+    expect(result.status, result.stderr).toBe(0);
+  });
 });
 
 describe("bounded real Bot polling and state suppression", () => {
