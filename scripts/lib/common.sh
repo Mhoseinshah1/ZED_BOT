@@ -1057,20 +1057,29 @@ application_container_image_id() {
 
 # Reads the worker heartbeat through the worker's own Redis configuration. It
 # neither writes Redis nor addresses the redis/postgres Compose services.
+# Diagnostics are a fixed, non-secret reason code plus (only for staleness)
+# the observed age in milliseconds - never the connection options, the
+# heartbeat value itself, or any error detail that could carry a credential.
 check_fresh_worker_heartbeat() {
   run_compose exec -T worker node --input-type=module -e '
     import { RedisConnection } from "bullmq";
     import { getRedisOptions, WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from "@zedbot/shared";
     const options = getRedisOptions();
-    if (options === null) process.exit(2);
+    if (options === null) { process.stderr.write("worker-heartbeat-check:no-redis-options\n"); process.exit(2); }
     const connection = new RedisConnection({ ...options, maxRetriesPerRequest: 1, connectTimeout: 5000 }, { shared: false, blocking: false, skipVersionCheck: true });
     try {
       const redis = await connection.client;
       const value = await redis.get(WORKER_HEARTBEAT_KEY);
       const age = value === null ? Infinity : Date.now() - Date.parse(value);
-      if (!Number.isFinite(age) || age < 0 || age > WORKER_HEARTBEAT_TTL_SECONDS * 1000) process.exitCode = 3;
+      if (!Number.isFinite(age) || age < 0 || age > WORKER_HEARTBEAT_TTL_SECONDS * 1000) {
+        process.stderr.write(`worker-heartbeat-check:stale-or-missing age_ms=${Number.isFinite(age) ? age : "n/a"}\n`);
+        process.exitCode = 3;
+      }
+    } catch (error) {
+      process.stderr.write(`worker-heartbeat-check:connection-error name=${error?.name ?? "unknown"}\n`);
+      process.exitCode = 4;
     } finally { await connection.close(); }
-  ' >/dev/null 2>&1
+  ' >/dev/null
 }
 
 validate_running_application() {
