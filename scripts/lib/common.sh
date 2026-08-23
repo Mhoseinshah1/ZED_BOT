@@ -161,12 +161,16 @@ run_operation_child() {
   ) &
   ZEDBOT_OPERATION_ACTIVE_CHILD_PID=$!
   ZEDBOT_OPERATION_ACTIVE_CHILD_START="$(operation_process_start "$ZEDBOT_OPERATION_ACTIVE_CHILD_PID")" || {
+    log_error "run_operation_child: could not read the start time of PID ${ZEDBOT_OPERATION_ACTIVE_CHILD_PID} (command: $*) - /proc/<pid>/stat was unavailable, so the child may have already exited."
     terminate_owned_child; return 1;
   }
   if wait "$ZEDBOT_OPERATION_ACTIVE_CHILD_PID"; then rc=0; else rc=$?; fi
   ZEDBOT_OPERATION_ACTIVE_CHILD_PID=""
   ZEDBOT_OPERATION_ACTIVE_CHILD_START=""
-  [ "$ZEDBOT_OPERATION_INTERRUPTED" -eq 0 ] || return "${ZEDBOT_OPERATION_SIGNAL_STATUS:-1}"
+  if [ "$ZEDBOT_OPERATION_INTERRUPTED" -ne 0 ]; then
+    log_error "run_operation_child: a signal was received while waiting on '$*' (child exit ${rc})."
+    return "${ZEDBOT_OPERATION_SIGNAL_STATUS:-1}"
+  fi
   return "$rc"
 }
 
