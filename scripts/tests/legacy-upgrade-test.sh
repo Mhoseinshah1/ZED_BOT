@@ -75,6 +75,19 @@ dump_diagnostics() {
     (cd "$APP_DIR" && docker compose logs --no-color --tail 150 api) >&2 || true
     (cd "$APP_DIR" && docker compose logs --no-color --tail 60 postgres redis worker bot) >&2 || true
   fi
+  # `zedbot update`'s own captured output (readiness-wait diagnostics, doctor
+  # output, etc.) never reaches the CI console otherwise - only the container
+  # logs above do. Without this, on-failure stderr written by readiness
+  # checks inside the updater (e.g. why the worker heartbeat never went
+  # fresh) is invisible even though it was captured to disk.
+  if [ -n "$WORK" ] && [ -d "$WORK" ]; then
+    local log
+    for log in "$WORK"/*.log; do
+      [ -f "$log" ] || continue
+      printf -- '--- %s (tail 150) ---\n' "${log##*/}" >&2
+      tail -n 150 "$log" >&2 || true
+    done
+  fi
   return 0
 }
 
