@@ -155,11 +155,23 @@ terminate_owned_child() {
 run_operation_child() {
   local rc
   operation_assert_active || return 1
+  # Bash redirects an asynchronous command's stdin from /dev/null unless the
+  # command has its own explicit redirection - the "(...) &" below counts as
+  # one even when the CALLER piped/redirected real input into this function
+  # (e.g. `run_compose exec ... pg_restore --list < dump.file`), silently
+  # starving the child of that input. Save the inherited stdin on fd 8 in
+  # this (non-backgrounded) parent context before forking, then have the
+  # subshell explicitly restore it from there - only an explicit
+  # redirection inside the async command itself is exempt from the
+  # /dev/null substitution.
+  exec 8<&0
   (
     exec 9>&- 2>/dev/null || true
+    exec 0<&8 8<&-
     exec setsid -- "$@"
   ) &
   ZEDBOT_OPERATION_ACTIVE_CHILD_PID=$!
+  exec 8<&-
   ZEDBOT_OPERATION_ACTIVE_CHILD_START="$(operation_process_start "$ZEDBOT_OPERATION_ACTIVE_CHILD_PID")" || {
     log_error "run_operation_child: could not read the start time of PID ${ZEDBOT_OPERATION_ACTIVE_CHILD_PID} (command: $*) - /proc/<pid>/stat was unavailable, so the child may have already exited."
     terminate_owned_child; return 1;

@@ -30,6 +30,22 @@ describe("area 9 authoritative signals and owned children", () => {
   it("preserves a child's ordinary failure", () => expect(shell("install_operation_traps; run_operation_child bash -c 'exit 37'").status).toBe(37));
   it("refuses to launch a new child after interruption", () => expect(shell("ZEDBOT_OPERATION_INTERRUPTED=1; run_operation_child bash -c 'exit 0'").status).not.toBe(0));
   it("closes deployment lock fd 9 in an owned child", () => { const dir = fixture(); const result = shell(`set_deployment_state_paths '${dir}'; install_operation_traps; acquire_deployment_lock; run_operation_child bash -c 'test ! -e /proc/$$$$/fd/9'`); expect(result.status, result.stderr).toBe(0); });
+  // Regression: bash redirects an asynchronous command's stdin from
+  // /dev/null unless the command itself has an explicit redirection - the
+  // "(...) &" run_operation_child backgrounds counts as one even when the
+  // CALLER piped/redirected real input into this function, silently
+  // starving the child of it. Every run_compose call that reads from stdin
+  // (e.g. `pg_restore --list < dump.file`) goes through this function, so
+  // this silently broke the pre-update database backup verification gate:
+  // pg_restore received /dev/null instead of the dump and exited 0 with an
+  // empty listing (cat on empty stdin does the same - exit 0, no output),
+  // which is why it surfaced as a bare, unexplained gate failure in CI.
+  it("passes the caller's redirected stdin through to the backgrounded child", () => {
+    const dir = fixture(); const input = path.join(dir, "input.txt"); writeFileSync(input, "hello from file\n");
+    const result = spawnSync("bash", ["-c", `. '${common}'; run_operation_child bash -c 'cat' < '${input}'`], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe("hello from file\n");
+  });
 });
 
 describe("area 9 cleanup ownership and idempotency", () => {
