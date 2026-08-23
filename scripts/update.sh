@@ -404,6 +404,7 @@ main() {
     advance_operation_state health-confirmed promotion-prepared
     recover_metadata_transition
     advance_operation_state promotion-prepared promoted
+    finalize_promoted_operation_state
     log_success "ZED_BOT update completed successfully."
   else
     log_error "Update health checks failed; deployment was not marked successful."

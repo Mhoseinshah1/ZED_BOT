@@ -827,6 +827,22 @@ remove_canonical_state_file() {
   rm -f -- "$file"
 }
 
+# operation-state.json is a live in-flight marker, not a permanent record:
+# current_readiness_attempt() and initialize_operation_state() already treat
+# its absence as "no operation is currently running", and rollback-status
+# treats its mere PRESENCE - regardless of stage - as an incomplete
+# operation. Leaving it on disk with stage "promoted" forever after every
+# operation that has ever completed would permanently and silently block
+# rollback-status starting with the very first successful install/update/
+# rollback. Best-effort: an already-successful operation must not be
+# reported as failed over this bookkeeping step.
+finalize_promoted_operation_state() {
+  validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 0
+  [ "$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE" 2>/dev/null)" = promoted ] || return 0
+  remove_canonical_state_file "$ZEDBOT_OPERATION_STATE" || log_warn "Could not clear the completed operation-state marker; rerun 'zedbot doctor' if rollback-status later reports an incomplete operation."
+  return 0
+}
+
 # update and rollback are mutually exclusive. An unlocked, valid persistent
 # lock inode is the only accepted stale-lock state; it is safe to reacquire.
 acquire_deployment_lock() {
@@ -953,6 +969,7 @@ publish_validated_legacy_self_heal() {
   convert_supported_legacy_installation || return 1
   advance_operation_state health-confirmed promotion-prepared || return 1
   advance_operation_state promotion-prepared promoted || return 1
+  finalize_promoted_operation_state
   [ ! -e "$ZEDBOT_ROLLBACK_METADATA" ] && [ "$(classify_installation observe)" = existing-canonical ]
 }
 
@@ -1781,7 +1798,8 @@ execute_validated_rollback_transition() {
   begin_metadata_transition rollback "" || return 1
   confirm_operation_state health-confirmed promotion-prepared || return 1
   recover_metadata_transition || return 1
-  confirm_operation_state promotion-prepared promoted
+  confirm_operation_state promotion-prepared promoted || return 1
+  finalize_promoted_operation_state
 }
 
 retag_validated_previous_reference() {

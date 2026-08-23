@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +29,37 @@ describe("confirmed deployment state ordering", () => {
   it("runs one complete successful rollback with the exact confirmed sequence", () => {
     const f = fixture(); const result = shell(f, flow("rollback", rollbackStages, f.trace)); expect(result.status, result.stderr).toBe(0);
     expect(stage(f)).toBe("promoted"); expect(readFileSync(f.trace, "utf8").trim().split("\n")).toEqual(rollbackStages.slice(1));
+  });
+
+  // Regression: operation-state.json is a live in-flight marker, not a
+  // permanent record. Leaving it behind with stage "promoted" forever after
+  // every completed operation made rollback-status permanently report
+  // OPERATION_INCOMPLETE starting with the very first successful
+  // install/update/rollback (inspect_rollback_status blocks on the file's
+  // mere PRESENCE, not its stage - see rollback-status-readonly.test.ts).
+  it("finalize_promoted_operation_state clears the marker once an operation reaches promoted", () => {
+    const f = fixture();
+    expect(shell(f, flow("update", updateStages, f.trace)).status).toBe(0);
+    expect(existsSync(f.state)).toBe(true);
+    const result = shell(f, "finalize_promoted_operation_state");
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(f.state)).toBe(false);
+  });
+
+  it("finalize_promoted_operation_state is a safe no-op when no operation state exists", () => {
+    const f = fixture();
+    const result = shell(f, "finalize_promoted_operation_state");
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("finalize_promoted_operation_state leaves a not-yet-promoted operation state untouched", () => {
+    const f = fixture();
+    expect(shell(f, flow("update", updateStages.slice(0, -1), f.trace)).status).toBe(0);
+    expect(stage(f)).toBe("promotion-prepared");
+    const result = shell(f, "finalize_promoted_operation_state");
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(f.state)).toBe(true);
+    expect(stage(f)).toBe("promotion-prepared");
   });
 
   it.each(updateStages.slice(1))("update failure before %s preserves the last confirmed predecessor", (next) => {

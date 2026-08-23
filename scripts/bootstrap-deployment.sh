@@ -84,6 +84,7 @@ main() {
   advance_operation_state health-confirmed promotion-prepared || return 1
   publish_first_install_current "$candidate" || return 1
   advance_operation_state promotion-prepared promoted || return 1
+  finalize_promoted_operation_state
   record_deployed_sha "$target"
   log_success "Canonical first installation completed. Rollback is unavailable until a later update creates previous.json."
 }
