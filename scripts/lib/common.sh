@@ -1079,12 +1079,30 @@ application_container_image_id() {
 # the observed age in milliseconds - never the connection options, the
 # heartbeat value itself, or any error detail that could carry a credential.
 check_fresh_worker_heartbeat() {
-  run_compose exec -T worker node --input-type=module -e '
+  # `timeout` (in-container, busybox on node:22-alpine) bounds the whole
+  # probe against ioredis's default retryStrategy, which - unlike
+  # maxRetriesPerRequest, a per-command limit that does not apply to the
+  # initial connection - retries an unreachable/misconfigured Redis
+  # forever. Without an explicit retryStrategy override AND an external
+  # bound, one bad connection attempt can hang past the entire polling
+  # budget with zero diagnostic output, indistinguishable from a stale
+  # heartbeat except that it never even gets that far.
+  run_compose exec -T worker timeout -s KILL 8 node --input-type=module -e '
     import { RedisConnection } from "bullmq";
     import { getRedisOptions, WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from "@zedbot/shared";
     const options = getRedisOptions();
     if (options === null) { process.stderr.write("worker-heartbeat-check:no-redis-options\n"); process.exit(2); }
-    const connection = new RedisConnection({ ...options, maxRetriesPerRequest: 1, connectTimeout: 5000 }, { shared: false, blocking: false, skipVersionCheck: true });
+    const connection = new RedisConnection(
+      { ...options, maxRetriesPerRequest: 1, connectTimeout: 5000, retryStrategy: () => null },
+      { shared: false, blocking: false, skipVersionCheck: true },
+    );
+    // RedisConnection is an EventEmitter; a connection-level failure (wrong
+    // password, refused connection) emits "error" as well as rejecting the
+    // client promise below. With zero listeners, Node treats that emission
+    // as an uncaught exception and crashes the whole probe before the
+    // catch block below ever runs. A no-op listener lets the rejection
+    // below be the single, catchable outcome.
+    connection.on("error", () => {});
     try {
       const redis = await connection.client;
       const value = await redis.get(WORKER_HEARTBEAT_KEY);
@@ -1096,7 +1114,7 @@ check_fresh_worker_heartbeat() {
     } catch (error) {
       process.stderr.write(`worker-heartbeat-check:connection-error name=${error?.name ?? "unknown"}\n`);
       process.exitCode = 4;
-    } finally { await connection.close(); }
+    } finally { await connection.close().catch(() => undefined); }
   ' >/dev/null
 }
 
