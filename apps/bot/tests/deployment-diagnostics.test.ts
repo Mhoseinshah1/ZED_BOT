@@ -598,8 +598,14 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     expect(workflow).not.toContain('[ -x "$payload_path" ]');
     expect(workflow).toContain('[ -f "$node_command" ] && [ ! -L "$node_command" ] && [ -x "$node_command" ]');
     expect(workflow).toContain("trusted_owner_and_mode");
-    expect(workflow).toContain('[ "$tool_root_owner:$tool_root_group:$tool_root_mode" = "$runner_uid:$runner_gid:775" ]');
+    // tool_root itself is a directory io.mkdirP() creates at a runner-controlled
+    // umask (not the trusted-tree's usual mode), so only owner:group are checked
+    // here - the mode is unconditionally hardened to 0755 and that hardening is
+    // then confirmed, rather than compared against an assumed pre-existing mode.
+    expect(workflow).toContain('[ "$tool_root_owner:$tool_root_group" != "$runner_uid:$runner_gid" ]');
+    expect(workflow).toContain("ci_tool_fail TOOL_ROOT_LAYOUT_UNEXPECTED");
     expect(workflow).toContain('sudo /usr/bin/chmod 0755 -- "$tool_root"');
+    expect(workflow).toContain('"$tool_root_inode:$runner_uid:$runner_gid:755"');
     expect(workflow).toContain("TOOL_ROOT_HARDEN_CONFIRM_FAILED");
     expect(workflow).toContain("MODE_WRITABLE");
     expect(workflow).toContain("OWNER_UNTRUSTED");
@@ -608,7 +614,7 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
       "NODE_MISSING", "PNPM_MISSING", "COMMAND_PATH_NOT_ABSOLUTE", "TOOL_ROOT_UNTRUSTED",
       "NODE_INVALID", "NODE_SUBSTITUTED", "PNPM_SHIM_NOT_SYMLINK", "PNPM_SHIM_OWNER_UNTRUSTED",
       "PNPM_SHIM_TARGET_UNEXPECTED", "PNPM_PAYLOAD_MISSING", "PNPM_PAYLOAD_LOCATION_UNEXPECTED",
-      "PNPM_PAYLOAD_INVALID", "OWNER_UNTRUSTED", "MODE_WRITABLE",
+      "PNPM_PAYLOAD_INVALID", "OWNER_UNTRUSTED", "MODE_WRITABLE", "TOOL_ROOT_LAYOUT_UNEXPECTED",
     ]) expect(workflow).toContain(`ci_tool_fail ${reason}`);
     expect(workflow).toContain("sudo --preserve-env=CI,NODE_ENV,APP_NAME,APP_DOMAIN,APP_BASE_URL,API_PORT,LOG_LEVEL,TELEGRAM_BOT_TOKEN,ADMIN_TELEGRAM_IDS,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,DATABASE_URL,REDIS_HOST,REDIS_PORT,REDIS_PASSWORD,REDIS_URL \\");
     expect(workflow).toContain('PATH="${node_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"');

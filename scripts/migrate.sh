@@ -16,6 +16,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # shellcheck source=lib/common.sh
 . "${SCRIPT_DIR}/lib/common.sh"
 
+SOURCE_SNAPSHOT=""
+SOURCE_SHA=""
+SOURCE_TREE=""
+migrate_owned_cleanup() {
+  cleanup_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE"
+}
+
 # =============================================================================
 # LEGACY SELF-HEAL - THE hook the PRE-PR92 updater executes on new code.
 #
@@ -36,7 +43,7 @@ legacy_self_heal() {
     return 0
   fi
 
-  local cli_refresh_failed=0 snapshot_result snapshot sha tree
+  local cli_refresh_failed=0 snapshot_result
 
   log_warn "=================================================================="
   log_warn "Legacy installation detected - finishing the upgrade"
@@ -79,11 +86,11 @@ legacy_self_heal() {
   reset_deployment_state_fixed_identity
   acquire_deployment_lock
   snapshot_result="$(prepare_exact_origin_main)" || return 1
-  read -r sha tree snapshot <<< "$snapshot_result"
-  register_source_snapshot "$snapshot" "$sha" "$tree" || return 1
-  publish_validated_legacy_self_heal "$sha" "$tree" "$snapshot" || return 1
-  record_deployed_sha "$sha"
-  cleanup_source_snapshot "$snapshot" "$sha" "$tree" || return 1
+  read -r SOURCE_SHA SOURCE_TREE SOURCE_SNAPSHOT <<< "$snapshot_result"
+  register_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE" || return 1
+  publish_validated_legacy_self_heal "$SOURCE_SHA" "$SOURCE_TREE" "$SOURCE_SNAPSHOT" || return 1
+  record_deployed_sha "$SOURCE_SHA"
+  cleanup_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE" || return 1
   release_deployment_lock || return 1
 
   if [ "$cli_refresh_failed" -ne 0 ]; then
@@ -124,4 +131,5 @@ main() {
   legacy_self_heal
 }
 
+install_operation_traps migrate_owned_cleanup
 main "$@"
