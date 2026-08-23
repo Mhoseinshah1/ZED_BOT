@@ -400,6 +400,29 @@ describe("deploy scripts (Phase 36)", () => {
       expect(existsSync(path.join(dir, "deployment.lock"))).toBe(false);
     });
 
+    // Regression: update.sh's own "[14/14] Running health checks" step runs
+    // this doctor.sh instance from INSIDE its own locked, still-in-progress
+    // operation, well before it advances the stage to "promoted". Without
+    // distinguishing "my own live operation" from "an abandoned one", this
+    // check made every update/rollback fail its own final health-check step.
+    it("tolerates a non-promoted operation stage while the deployment lock is actively held (the operation running it, not an abandoned one)", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-locked-"));
+      writeFileSync(path.join(dir, "operation-state.json"), '{"stage":"application-recreated"}\n');
+      writeFileSync(path.join(dir, "deployment.lock"), "");
+      const snippet = `source '${doctorScript}' >/dev/null 2>&1 || true; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; classify_installation(){ echo existing-canonical; }; validate_operation_state(){ return 0; }; exec 9<'${dir}/deployment.lock'; flock 9; check_deployment_state_consistency`;
+      const result = bash(["-c", snippet]);
+      expect(result.status, result.stderr).toBe(0);
+    });
+
+    it("still fails a non-promoted operation stage when the lock file exists but nothing holds it (a genuinely abandoned operation)", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-unlocked-"));
+      writeFileSync(path.join(dir, "operation-state.json"), '{"stage":"application-recreated"}\n');
+      writeFileSync(path.join(dir, "deployment.lock"), "");
+      const snippet = `source '${doctorScript}' >/dev/null 2>&1 || true; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; classify_installation(){ echo existing-canonical; }; validate_operation_state(){ return 0; }; check_deployment_state_consistency`;
+      const result = bash(["-c", snippet]);
+      expect(result.status).not.toBe(0);
+    });
+
     it("accepts genuine empty first install and completed canonical operation state observationally", () => {
       const empty = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-empty-"));
       const complete = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-complete-"));

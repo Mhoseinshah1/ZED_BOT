@@ -100,12 +100,33 @@ check_any_container_running() {
     compose_service_running postgres || compose_service_running redis
 }
 
+# True only while no process currently holds the deployment lock: a
+# non-blocking trial acquisition that releases immediately. Never creates the
+# lock file itself, so a first-install with no lock file yet is "free" too.
+deployment_lock_is_free() {
+  [ -e "$ZEDBOT_DEPLOYMENT_LOCK" ] || return 0
+  exec 8<"$ZEDBOT_DEPLOYMENT_LOCK" 2>/dev/null || return 0
+  if /usr/bin/flock -n 8; then
+    /usr/bin/flock -u 8
+    exec 8<&-
+    return 0
+  fi
+  exec 8<&-
+  return 1
+}
+
 # Purely observational deployment-state consistency check. It neither acquires
 # the operation lock nor repairs, recovers, promotes, converts, or removes any
-# evidence. Empty first-install state and a completed canonical installation are
-# valid; every partial, conflicting, failed, or unfinished transition fails.
+# evidence (the free/held probe above is a released trial lock, not the real
+# one). Empty first-install state and a completed canonical installation are
+# valid; every partial, conflicting, failed, or unfinished transition fails -
+# UNLESS the deployment lock is currently held, in which case a non-promoted
+# stage or a live metadata-transition file is the expected shape of the very
+# update/rollback that is running right now (e.g. update.sh's own "[14/14]
+# Running health checks" step invokes this doctor.sh instance from inside its
+# own locked, still-in-progress operation), not evidence of an abandoned one.
 check_deployment_state_consistency() {
-  local classification stage
+  local classification stage lock_held=0
   reset_deployment_state_fixed_identity
   validate_deployment_path_contract || return 1
 
@@ -121,11 +142,15 @@ check_deployment_state_consistency() {
     *) return 1 ;;
   esac
 
-  [ ! -e "$ZEDBOT_METADATA_TRANSITION" ] && [ ! -L "$ZEDBOT_METADATA_TRANSITION" ] || return 1
+  deployment_lock_is_free || lock_held=1
+
+  if [ -e "$ZEDBOT_METADATA_TRANSITION" ] || [ -L "$ZEDBOT_METADATA_TRANSITION" ]; then
+    [ "$lock_held" -eq 1 ] || return 1
+  fi
   if [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; then
     validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 1
     stage="$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE")" || return 1
-    [ "$stage" = promoted ] || return 1
+    [ "$stage" = promoted ] || [ "$lock_held" -eq 1 ] || return 1
   fi
   if [ -e "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ]; then
     assert_no_unresolved_failed_generation || return 1
