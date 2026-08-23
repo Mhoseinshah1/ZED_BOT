@@ -33,7 +33,12 @@ function evaluate(value: unknown, kind: Kind = "dependency", started = 100, now 
 describe("authoritative readiness evidence", () => {
   it.each(["dependency", "application"] as Kind[])("accepts a complete fresh %s set", (kind) => expect(evaluate(evidence(kind), kind).status).toBe(0));
   it("collects and evaluates fresh dependency inspections through the real collector", () => {
-    const body = `run_compose(){ [ "$1" = ps ] && printf '%s-id\\n' "$4"; }; run_clean_docker(){ s="\${2%-id}"; [ "$s" = postgres ] && ref=postgres:16-alpine || ref=redis:7-alpine; [ "$s" = postgres ] && char=c || char=d; id=$(printf "$char%.0s" {1..64}); jq -cn --arg s "$s" --arg ref "$ref" --arg id "sha256:$id" '[{Id:($s+"-id"),Image:$id,RestartCount:0,Config:{Image:$ref,Env:[],Labels:{"com.docker.compose.project":"zedbot","com.docker.compose.service":$s}},State:{Status:"running",Health:{Status:"healthy"}}}]'; }; value=$(collect_readiness_evidence dependency '${attempt}' 100 ''); evaluate_readiness_evidence "$value" dependency '${attempt}' 100 100 '' ''`;
+    // run_clean_docker now serves both the container-id lookup (a direct
+    // "docker ps" label filter, so a leftover "compose run --rm" oneoff
+    // container can never masquerade as a second instance of a service -
+    // "docker compose ps" has no general label filter to express that) and
+    // the inspect call the original mock already covered.
+    const body = `run_clean_docker(){ if [ "$1" = ps ]; then s="\${6#*service=}"; printf '%s-id\\n' "$s"; else s="\${2%-id}"; [ "$s" = postgres ] && ref=postgres:16-alpine || ref=redis:7-alpine; [ "$s" = postgres ] && char=c || char=d; id=$(printf "$char%.0s" {1..64}); jq -cn --arg s "$s" --arg ref "$ref" --arg id "sha256:$id" '[{Id:($s+"-id"),Image:$id,RestartCount:0,Config:{Image:$ref,Env:[],Labels:{"com.docker.compose.project":"zedbot","com.docker.compose.service":$s}},State:{Status:"running",Health:{Status:"healthy"}}}]'; fi; }; value=$(collect_readiness_evidence dependency '${attempt}' 100 ''); evaluate_readiness_evidence "$value" dependency '${attempt}' 100 100 '' ''`;
     expect(shell(body).status).toBe(0);
   });
 

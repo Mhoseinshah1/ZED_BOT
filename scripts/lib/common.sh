@@ -526,7 +526,17 @@ collect_readiness_evidence() {
   local services=(postgres redis) records='[]'
   [ "$kind" = application ] && services=(api bot worker)
   for service in "${services[@]}"; do
-    ids="$(run_compose ps --all -q "$service")" || return 1
+    # docker compose ps has no general label filter, and "docker compose run"
+    # tags its container with the SAME service label as the long-running one
+    # from "up -d" - only the "oneoff" label tells them apart. Filtering on
+    # it directly through docker (not compose) means a leftover run --rm
+    # container (e.g. left behind by a killed migration-status/preflight
+    # invocation) can never masquerade as a second instance of this service
+    # and permanently break the exactly-one-container invariant below.
+    ids="$(run_clean_docker ps -aq \
+      --filter "label=com.docker.compose.project=$ZEDBOT_COMPOSE_PROJECT_NAME" \
+      --filter "label=com.docker.compose.service=$service" \
+      --filter "label=com.docker.compose.oneoff=False")" || return 1
     [ "$(printf '%s\n' "$ids" | /usr/bin/sed '/^$/d' | /usr/bin/wc -l)" -eq 1 ] || return 1
     cid="$(printf '%s\n' "$ids" | /usr/bin/sed '/^$/d')"
     inspection="$(run_clean_docker inspect "$cid")" || return 1
