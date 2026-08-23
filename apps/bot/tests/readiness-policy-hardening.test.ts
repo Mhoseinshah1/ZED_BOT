@@ -107,20 +107,21 @@ describe("bounded polling and flow suppression", () => {
   });
   it("update and rollback use the same dependency and application policy", () => { const result = shell(`declare -f validate_dependencies_healthy validate_running_application wait_for_readiness_policy >/dev/null`); expect(result.status).toBe(0); });
   it("recreation remains exactly api bot worker", () => { const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-services-")); const trace = path.join(dir, "trace"); const result = shell(`validate_compose_application_images(){ return 0; }; run_compose(){ printf '%s\n' "$@" >'${trace}'; }; recreate_application_services`); expect(result.status).toBe(0); const argv = readFileSync(trace, "utf8").trim().split("\n"); expect(argv.slice(-3)).toEqual(["api", "bot", "worker"]); expect(argv).not.toContain("postgres"); expect(argv).not.toContain("redis"); });
-  // Regression: without an explicit retryStrategy, ioredis retries an
-  // unreachable/misconfigured Redis forever on the initial connection (a
-  // per-command limit like maxRetriesPerRequest does not bound it), and
-  // RedisConnection's unhandled "error" EventEmitter emission crashes the
-  // whole probe process before its own try/catch ever runs - both silently
-  // consuming the entire readiness-polling budget with zero diagnostic
-  // output. Verified directly against a real Redis (auth failure and
-  // connection-refused) during development; only the static shape is
-  // re-checked here since spinning up Redis is out of scope for this suite.
-  it("worker heartbeat probe is bounded against a hanging or crashing Redis connection", () => {
+  // Regression: an earlier version of this probe spawned a fresh
+  // `docker compose exec ... node -e` (loading bullmq's ESM dependency
+  // graph) on every readiness poll. In real CI that cold start was
+  // empirically SIGKILLed by the probe's own internal timeout on EVERY
+  // single poll for the whole readiness budget - never printing so much as
+  // its own start marker - which permanently starved worker readiness.
+  // Query Redis directly with the redis image's own tiny static redis-cli
+  // binary instead (no cold ESM resolution, no bespoke RedisConnection/
+  // retryStrategy/EventEmitter-crash handling needed), bounded by an outer
+  // timeout as a defensive backstop.
+  it("worker heartbeat probe queries Redis directly through redis-cli, bounded by an outer timeout", () => {
     const source = readFileSync(common, "utf8");
     const block = source.slice(source.indexOf("check_fresh_worker_heartbeat() {"), source.indexOf("validate_running_application() {"));
-    expect(block).toMatch(/timeout -s KILL \d+ node/);
-    expect(block).toMatch(/retryStrategy:\s*\(\)\s*=>\s*null/);
-    expect(block).toMatch(/connection\.on\(["']error["'],/);
+    expect(block).toMatch(/run_compose exec -T redis timeout -s KILL \d+ redis-cli GET zedbot:worker:heartbeat/);
+    expect(block).not.toContain("node --input-type=module");
+    expect(block).not.toContain("RedisConnection");
   });
 });

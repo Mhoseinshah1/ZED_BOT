@@ -1089,43 +1089,24 @@ application_container_image_id() {
 # the observed age in milliseconds - never the connection options, the
 # heartbeat value itself, or any error detail that could carry a credential.
 check_fresh_worker_heartbeat() {
-  # `timeout` (in-container, busybox on node:22-alpine) bounds the whole
-  # probe against ioredis's default retryStrategy, which - unlike
-  # maxRetriesPerRequest, a per-command limit that does not apply to the
-  # initial connection - retries an unreachable/misconfigured Redis
-  # forever. Without an explicit retryStrategy override AND an external
-  # bound, one bad connection attempt can hang past the entire polling
-  # budget with zero diagnostic output, indistinguishable from a stale
-  # heartbeat except that it never even gets that far.
-  run_compose exec -T worker timeout -s KILL 8 node --input-type=module -e '
-    import { RedisConnection } from "bullmq";
-    import { getRedisOptions, WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from "@zedbot/shared";
-    const options = getRedisOptions();
-    if (options === null) { process.stderr.write("worker-heartbeat-check:no-redis-options\n"); process.exit(2); }
-    const connection = new RedisConnection(
-      { ...options, maxRetriesPerRequest: 1, connectTimeout: 5000, retryStrategy: () => null },
-      { shared: false, blocking: false, skipVersionCheck: true },
-    );
-    // RedisConnection is an EventEmitter; a connection-level failure (wrong
-    // password, refused connection) emits "error" as well as rejecting the
-    // client promise below. With zero listeners, Node treats that emission
-    // as an uncaught exception and crashes the whole probe before the
-    // catch block below ever runs. A no-op listener lets the rejection
-    // below be the single, catchable outcome.
-    connection.on("error", () => {});
-    try {
-      const redis = await connection.client;
-      const value = await redis.get(WORKER_HEARTBEAT_KEY);
-      const age = value === null ? Infinity : Date.now() - Date.parse(value);
-      if (!Number.isFinite(age) || age < 0 || age > WORKER_HEARTBEAT_TTL_SECONDS * 1000) {
-        process.stderr.write(`worker-heartbeat-check:stale-or-missing age_ms=${Number.isFinite(age) ? age : "n/a"}\n`);
-        process.exitCode = 3;
-      }
-    } catch (error) {
-      process.stderr.write(`worker-heartbeat-check:connection-error name=${error?.name ?? "unknown"}\n`);
-      process.exitCode = 4;
-    } finally { await connection.close().catch(() => undefined); }
-  ' >/dev/null
+  # A cold `docker compose exec` plus fresh Node ESM module resolution for
+  # bullmq's dependency graph, repeated on every readiness poll, was
+  # empirically SIGKILLed by an earlier version of this probe's own internal
+  # timeout on EVERY attempt for a whole 90s readiness budget in real CI -
+  # confirmed by zero diagnostic output (not even the probe's own error
+  # branches ever got a chance to print). Query Redis directly instead: the
+  # key (packages/shared/src/ops.ts WORKER_HEARTBEAT_KEY) already carries its
+  # own TTL (EX WORKER_HEARTBEAT_TTL_SECONDS, refreshed on every worker
+  # heartbeat tick), so a present, non-nil value already IS a fresh one -
+  # Redis deletes it itself once the worker stops ticking, no manual age
+  # comparison needed. redis-cli is the redis image's own tiny static
+  # binary (no cold ESM module resolution) and reads REDISCLI_AUTH from its
+  # own container env for auth, same as doctor.sh's own `redis-cli ping`
+  # health probe and legacy-upgrade-test.sh's independent heartbeat
+  # assertion (both already proven to work in this exact CI environment).
+  local value
+  value="$(run_compose exec -T redis timeout -s KILL 8 redis-cli GET zedbot:worker:heartbeat 2>/dev/null | tr -d '[:space:]')" || return 1
+  [ -n "$value" ] && [ "$value" != "(nil)" ]
 }
 
 validate_running_application() {
