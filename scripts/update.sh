@@ -22,7 +22,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 . "${SCRIPT_DIR}/lib/common.sh"
 
 DEPLOYMENT_METADATA_ACTIVE=0
-APPLICATION_RECREATED=0
 APPLICATION_RECREATION_ATTEMPTED=0
 SOURCE_SNAPSHOT=""
 SOURCE_SHA=""
@@ -217,6 +216,8 @@ main() {
   load_env_if_exists
   reset_deployment_state_fixed_identity
   reset_compose_fixed_identity
+  # shellcheck disable=SC2034  # re-pinned after load_env_if_exists could have
+  # sourced a hostile .env; read by run_compose() etc. in the sourced common.sh.
   ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
   detect_compose_command
   acquire_deployment_lock
@@ -385,7 +386,6 @@ main() {
   recreate_application_services
   verify_application_recreation_set "$target_image_id"
   record_bot_recreation_boundary "$target_image_id" "$target_deploy_sha"
-  APPLICATION_RECREATED=1
   set_rollback_state "application-recreated"
   advance_operation_state migrations-confirmed application-recreated
 

@@ -195,16 +195,26 @@ jobs:
 
           runner_uid="$(/usr/bin/id -u)"
           runner_gid="$(/usr/bin/id -g)"
-          # actions/setup-node creates only this version root with the runner's
-          # private-group umask (0775).  Harden that exact, already-validated
-          # directory before root executes anything beneath it; every child
-          # remains subject to the stricter non-writable validation below.
+          # actions/setup-node creates only this version root, owned by the
+          # runner's own user:private-group. Its mode comes from mkdir(2)
+          # masked by whatever umask the runner process happens to run with
+          # (0002 -> 775, 0022 -> 755); both are safe starting states because
+          # only the trusted owner/group can write either way. Validate the
+          # security property - trusted owner, trusted group, no other-write
+          # bit - rather than one literal mode, then still harden to 0755
+          # unconditionally before root executes anything beneath it; every
+          # child remains subject to the stricter non-writable validation
+          # below.
           tool_root_owner="$(/usr/bin/stat -c '%u' -- "$tool_root" 2>/dev/null)" || ci_tool_fail TOOL_ROOT_STAT_UNAVAILABLE
           tool_root_group="$(/usr/bin/stat -c '%g' -- "$tool_root" 2>/dev/null)" || ci_tool_fail TOOL_ROOT_STAT_UNAVAILABLE
           tool_root_mode="$(/usr/bin/stat -c '%a' -- "$tool_root" 2>/dev/null)" || ci_tool_fail TOOL_ROOT_STAT_UNAVAILABLE
           tool_root_inode="$(/usr/bin/stat -c '%d:%i' -- "$tool_root" 2>/dev/null)" || ci_tool_fail TOOL_ROOT_STAT_UNAVAILABLE
-          [ "$tool_root_owner:$tool_root_group:$tool_root_mode" = "$runner_uid:$runner_gid:775" ] \
-            || ci_tool_fail TOOL_ROOT_LAYOUT_UNEXPECTED
+          if [ "$tool_root_owner:$tool_root_group" != "$runner_uid:$runner_gid" ] \
+            || [ $((8#$tool_root_mode & 8#002)) -ne 0 ]; then
+            printf 'tool_root=%s owner=%s group=%s mode=%s (expected owner=%s group=%s, no other-write bit)\n' \
+              "$tool_root" "$tool_root_owner" "$tool_root_group" "$tool_root_mode" "$runner_uid" "$runner_gid" >&2
+            ci_tool_fail TOOL_ROOT_LAYOUT_UNEXPECTED
+          fi
           sudo /usr/bin/chmod 0755 -- "$tool_root" || ci_tool_fail TOOL_ROOT_HARDEN_FAILED
           [ "$(/usr/bin/stat -c '%d:%i:%u:%g:%a' -- "$tool_root" 2>/dev/null)" = "$tool_root_inode:$runner_uid:$runner_gid:755" ] \
             || ci_tool_fail TOOL_ROOT_HARDEN_CONFIRM_FAILED
@@ -294,6 +304,7 @@ jobs:
           bash -n scripts/backup-db.sh
           bash -n scripts/doctor.sh
           bash -n scripts/migrate.sh
+          bash -n scripts/bootstrap-deployment.sh
           bash -n scripts/validate-env.sh
           bash -n scripts/zedbot
           bash -n scripts/zedbot.sh
@@ -316,6 +327,7 @@ jobs:
             scripts/backup-db.sh \
             scripts/doctor.sh \
             scripts/migrate.sh \
+            scripts/bootstrap-deployment.sh \
             scripts/referral-migration-preflight.sh \
             scripts/referral-migration-lineage-status.sh \
             scripts/validate-env.sh \

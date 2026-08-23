@@ -137,11 +137,11 @@ operation_child_is_owned() {
 operation_cleanup_pause() { sleep "$1"; }
 
 terminate_owned_child() {
-  local pid="$ZEDBOT_OPERATION_ACTIVE_CHILD_PID" i
+  local pid="$ZEDBOT_OPERATION_ACTIVE_CHILD_PID"
   [ -n "$pid" ] || return 0
   if operation_child_is_owned; then
     kill -TERM -- "-$pid" 2>/dev/null || true
-    for i in 1 2 3 4; do
+    for _ in 1 2 3 4; do
       operation_child_is_owned || break
       operation_cleanup_pause 0.25 || true
     done
@@ -523,7 +523,7 @@ readiness_pause() { sleep "$1"; }
 # required service; command failure is never hidden by a successful parse.
 collect_readiness_evidence() {
   local kind="$1" attempt="$2" observed="$3" expected_sha="${4:-}" service ids cid inspection health generation
-  local services=(postgres redis) records='[]' expected_ref
+  local services=(postgres redis) records='[]'
   [ "$kind" = application ] && services=(api bot worker)
   for service in "${services[@]}"; do
     ids="$(run_compose ps --all -q "$service")" || return 1
@@ -538,8 +538,6 @@ collect_readiness_evidence() {
       esac
     fi
     generation="$(printf '%s' "$inspection" | /usr/bin/jq -r '[.[0].Config.Env[]? | select(startswith("GIT_SHA=")) | ltrimstr("GIT_SHA=")] | if length==1 then .[0] else "" end')"
-    expected_ref="$ZEDBOT_EXPECTED_APPLICATION_IMAGE"
-    case "$service" in postgres) expected_ref="$ZEDBOT_EXPECTED_POSTGRES_IMAGE" ;; redis) expected_ref="$ZEDBOT_EXPECTED_REDIS_IMAGE" ;; esac
     records="$(printf '%s' "$inspection" | /usr/bin/jq -c --argjson records "$records" --arg service "$service" --arg health "$health" --arg generation "$generation" '
       $records + [{service:$service,containerId:.[0].Id,imageId:.[0].Image,imageRef:.[0].Config.Image,
         project:(.[0].Config.Labels["com.docker.compose.project"] // ""), declaredService:(.[0].Config.Labels["com.docker.compose.service"] // ""),
@@ -663,6 +661,9 @@ validate_state_regular_file() {
 # --- Installation identity and legacy conversion (Area 10) -----------------
 # Installation identity is derived only from canonical, schema-validated state.
 # Container/tag/environment/timestamp observations are deliberately irrelevant.
+# shellcheck disable=SC2120  # every call site uses the canonical default; the
+# override parameter exists so a future/test caller can validate an arbitrary
+# bootstrap-evidence file without duplicating the schema check.
 validate_installation_bootstrap() {
   local file="${1:-$ZEDBOT_INSTALLATION_BOOTSTRAP}"
   validate_state_regular_file "$file" || return 1
@@ -1090,6 +1091,9 @@ validate_running_application() {
   printf '%s %s\n' "$expected_sha" "$expected_image_id"
 }
 
+# shellcheck disable=SC2120  # every call site uses the canonical default;
+# the override parameter follows this file's validate_* convention and is
+# immediately pinned back to the one true canonical path below.
 validate_bot_recreation_boundary() {
   local file="${1:-$ZEDBOT_BOT_RECREATION_BOUNDARY}"
   [ "$file" = "$ZEDBOT_BOT_RECREATION_BOUNDARY" ] || return 1
@@ -1295,7 +1299,7 @@ validate_operation_state() {
 
 initialize_operation_state() {
   local kind="$1" generation="$2" first tmp
-  case "$kind" in install) first=bootstrap-initialized ;; update) first=current-validated ;; rollback) first=previous-selected ;; *) return 1;; esac
+  case "$kind" in install) first="bootstrap-initialized" ;; update) first="current-validated" ;; rollback) first="previous-selected" ;; *) return 1;; esac
   if [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; then
     validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 1
     if [ "$(/usr/bin/jq -r '.kind+":"+.generation' "$ZEDBOT_OPERATION_STATE")" = "$kind:$generation" ]; then return 0; fi
@@ -1560,7 +1564,7 @@ inspect_rollback_status() {
     [ "$bootstrap_phase" = promoted ] && [ "$(/usr/bin/jq -r .generation "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = "$current_gen" ] || { rollback_status_emit blocked false OPERATION_INCOMPLETE "Installation bootstrap or upgrade is incomplete." recoverable-bootstrap true true true false false false false false "$current_gen" "$previous_gen"; return 2; }
     [ "$bootstrap_kind" = first-install ] || [ "$bootstrap_kind" = legacy-upgrade ] || return 3
   fi
-  classification=existing-canonical
+  classification="existing-canonical"
   observation_before="$(rollback_status_observation_identity)" || { rollback_status_emit indeterminate null EVIDENCE_CHANGED "Canonical evidence could not be bound to one observation." existing-canonical true true true false false false false false "$current_gen" "$previous_gen"; return 3; }
   validate_rollback_eligibility_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" "$ZEDBOT_ROLLBACK_METADATA" || { rollback_status_emit blocked false ROLLBACK_EVIDENCE_MISMATCH "Current and previous rollback evidence is inconsistent." existing-canonical true true true false false false false false "$current_gen" "$previous_gen"; return 2; }
   observation_after="$(rollback_status_observation_identity)" || { rollback_status_emit indeterminate null EVIDENCE_CHANGED "Canonical evidence changed or disappeared during inspection." existing-canonical true true true false false false false false "$current_gen" "$previous_gen"; return 3; }

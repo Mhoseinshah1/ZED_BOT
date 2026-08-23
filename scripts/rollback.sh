@@ -51,11 +51,13 @@ configure_rollback_compose_contract() {
 }
 
 validate_retained_image() {
-  local expected_id expected_sha tag image_sha
+  local expected_id expected_sha image_sha
+  # validate_retained_generation_image() above already re-derives the
+  # immutable tag from metadata and cross-checks it against the retained
+  # image ID; this function only adds the GIT_SHA baked-identity check.
   validate_retained_generation_image "$ZEDBOT_ROLLBACK_METADATA" || return 1
   expected_id="$(metadata_field '.targetImageId')"
   expected_sha="$(metadata_field '.targetDeploySha')"
-  tag="$(metadata_field '.immutableImageTag')"
   image_sha="$(run_clean_docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$expected_id" | sed -n 's/^GIT_SHA=//p' | tail -n 1)"
   [ "$image_sha" = "$expected_sha" ] || { log_error "Retained image GIT_SHA does not match metadata."; return 1; }
 }
@@ -164,6 +166,8 @@ main() {
   load_env_if_exists
   reset_deployment_state_fixed_identity
   reset_compose_fixed_identity
+  # shellcheck disable=SC2034  # re-pinned after load_env_if_exists could have
+  # sourced a hostile .env; read by run_compose() etc. in the sourced common.sh.
   ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
   detect_compose_command
   case "${1:-rollback}" in

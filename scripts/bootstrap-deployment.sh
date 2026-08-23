@@ -17,6 +17,8 @@ main() {
   load_env_if_exists
   reset_deployment_state_fixed_identity
   reset_compose_fixed_identity
+  # shellcheck disable=SC2034  # re-pinned after load_env_if_exists could have
+  # sourced a hostile .env; read by run_compose() etc. in the sourced common.sh.
   ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
   detect_compose_command
   acquire_deployment_lock
