@@ -203,29 +203,43 @@ jobs:
 
           runner_uid="$(/usr/bin/id -u)"
           runner_gid="$(/usr/bin/id -g)"
-          # actions/setup-node creates only this version root as a bare empty
-          # directory (via @actions/io's mkdirP, before the extracted tarball
-          # contents are copied in beneath it). Confirmed on GitHub's hosted
-          # runner image: that mkdirP call inherits the runner process's own
-          # umask, which on this image is permissive enough to leave the
-          # directory mode-777 - unlike its children, which come from the
-          # official Node.js tarball (or corepack's own install below) and do
-          # carry sane, non-writable modes; those stay under the strict
-          # trusted_owner_and_mode check in the loop below. A single
+          # A handful of directories in this tree are freshly created ON THIS
+          # RUNNER rather than shipped with sane modes inside the official
+          # Node.js tarball, so their mode reflects the runner process's own
+          # umask instead of being meaningful trust signal:
+          #   - tool_root itself: actions/setup-node's @actions/io mkdirP call
+          #     creates it as a bare empty directory before the tarball
+          #     contents are copied in beneath it (confirmed mode-777 on
+          #     GitHub's hosted runner image).
+          #   - the corepack directory and its dist/ child: corepack
+          #     materializes the specific pnpm version here (mkdir -p under
+          #     the same umask) the first time it is activated/prepared,
+          #     rather than shipping it pre-populated in the tarball
+          #     (confirmed mode-777 the same way).
+          # Both are handled the same way: verify owner/group only (an
           # attacker-empty, freshly created directory's mode is not signal on
-          # this runner, so validate only owner/group here, then still harden
-          # to 0755 unconditionally before root executes anything beneath it.
-          tool_root_owner="$(/usr/bin/stat -c '%u' -- "$tool_root" 2>/dev/null)" || ci_tool_fail TOOL_ROOT_STAT_UNAVAILABLE
-          tool_root_group="$(/usr/bin/stat -c '%g' -- "$tool_root" 2>/dev/null)" || ci_tool_fail TOOL_ROOT_STAT_UNAVAILABLE
-          tool_root_inode="$(/usr/bin/stat -c '%d:%i' -- "$tool_root" 2>/dev/null)" || ci_tool_fail TOOL_ROOT_STAT_UNAVAILABLE
-          if [ "$tool_root_owner:$tool_root_group" != "$runner_uid:$runner_gid" ]; then
-            printf 'tool_root=%s owner=%s group=%s (expected owner=%s group=%s)\n' \
-              "$tool_root" "$tool_root_owner" "$tool_root_group" "$runner_uid" "$runner_gid" >&2
-            ci_tool_fail TOOL_ROOT_LAYOUT_UNEXPECTED
-          fi
-          sudo /usr/bin/chmod 0755 -- "$tool_root" || ci_tool_fail TOOL_ROOT_HARDEN_FAILED
-          [ "$(/usr/bin/stat -c '%d:%i:%u:%g:%a' -- "$tool_root" 2>/dev/null)" = "$tool_root_inode:$runner_uid:$runner_gid:755" ] \
-            || ci_tool_fail TOOL_ROOT_HARDEN_CONFIRM_FAILED
+          # this runner), then harden to 0755 unconditionally and confirm the
+          # harden took effect, before root executes anything beneath them.
+          # Everything else in the loop below (bin/, lib/, lib/node_modules/,
+          # the node binary, the pnpm payload) comes from the tarball or the
+          # corepack payload file itself and keeps the strict mode check.
+          harden_owner_and_mode() {
+            local artifact="$1" mode="$2" owner group inode
+            owner="$(/usr/bin/stat -c '%u' -- "$artifact" 2>/dev/null)" || ci_tool_fail HARDEN_STAT_UNAVAILABLE
+            group="$(/usr/bin/stat -c '%g' -- "$artifact" 2>/dev/null)" || ci_tool_fail HARDEN_STAT_UNAVAILABLE
+            inode="$(/usr/bin/stat -c '%d:%i' -- "$artifact" 2>/dev/null)" || ci_tool_fail HARDEN_STAT_UNAVAILABLE
+            if [ "$owner:$group" != "$runner_uid:$runner_gid" ]; then
+              printf 'harden_owner_and_mode: artifact=%s owner=%s group=%s (expected owner=%s group=%s)\n' \
+                "$artifact" "$owner" "$group" "$runner_uid" "$runner_gid" >&2
+              ci_tool_fail HARDEN_LAYOUT_UNEXPECTED
+            fi
+            sudo /usr/bin/chmod "$mode" -- "$artifact" || ci_tool_fail HARDEN_CHMOD_FAILED
+            [ "$(/usr/bin/stat -c '%d:%i:%u:%g:%a' -- "$artifact" 2>/dev/null)" = "$inode:$runner_uid:$runner_gid:$mode" ] \
+              || ci_tool_fail HARDEN_CONFIRM_FAILED
+          }
+          harden_owner_and_mode "$tool_root" 755
+          harden_owner_and_mode "$tool_root/lib/node_modules/corepack" 755
+          harden_owner_and_mode "$tool_root/lib/node_modules/corepack/dist" 755
           payload="$tool_root/lib/node_modules/corepack/dist/pnpm.js"
           for trusted_dir in \
             "$tool_root" "$node_bin" "$tool_root/lib" "$tool_root/lib/node_modules" \
