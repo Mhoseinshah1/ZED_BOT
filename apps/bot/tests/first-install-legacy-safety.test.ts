@@ -282,7 +282,16 @@ esac
     const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-postgres-sync-empty-"));
     const envFile = path.join(dir, ".env"); writeFileSync(envFile, "POSTGRES_USER='zedbot'\n");
     const script = `ENV_FILE='${envFile}'; APP_DIR='${dir}'; COMPOSE_CMD=(false); log_info(){ :; }; log_warn(){ :; }; ${body}\nsync_postgres_password`;
-    const result = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+    // sync_postgres_password() {}'s .env file above deliberately omits
+    // POSTGRES_PASSWORD to exercise the empty-password no-op path - but the
+    // CI job sets POSTGRES_PASSWORD ambiently (for its own postgres service
+    // container), and spawnSync inherits the full parent process.env by
+    // default. Without scrubbing it here, this test silently exercised the
+    // NON-empty-password branch in CI, hitting the pg_isready retry loop
+    // against the always-failing COMPOSE_CMD=(false) mock for up to 120s -
+    // past vitest's 60s default timeout - while passing locally every time,
+    // since a local shell has no such ambient variable.
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf8", env: { ...process.env, POSTGRES_PASSWORD: "" } });
     expect(result.status, result.stderr).toBe(0);
   });
   it("update and rollback invoke the authoritative classifier after locking", () => { for (const file of ["scripts/update.sh", "scripts/rollback.sh"]) { const text = readFileSync(path.join(root, file), "utf8"); expect(text).toContain("classify_installation observe"); expect(text.indexOf("acquire_deployment_lock")).toBeLessThan(text.indexOf("classify_installation observe")); } });
