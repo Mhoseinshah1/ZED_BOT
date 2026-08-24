@@ -70,6 +70,12 @@ main() {
   require_source_integrity "$target" "$tree" "$SOURCE_SNAPSHOT" || return 1
   run_compose run --rm --no-deps api node packages/database/dist/referral-migration-preflight.js || return 1
   run_compose run --rm --no-deps api sh -c 'cd packages/database && node_modules/.bin/prisma migrate deploy' || return 1
+  # Idempotent baseline data (OWNER admins from ADMIN_TELEGRAM_IDS, default
+  # settings, log topics, message templates, button texts) - the legacy
+  # installer path this replaces always ran this via migrate.sh. Without it
+  # a fresh install finishes with no configured admin records even when
+  # ADMIN_TELEGRAM_IDS is supplied, leaving every admin bot flow unusable.
+  run_compose run --rm --no-deps api node packages/database/dist/seed.js || return 1
   advance_operation_state candidate-image-built migrations-confirmed || return 1
 
   recreate_application_services || return 1
