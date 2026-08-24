@@ -839,24 +839,32 @@ validate_existing_installation_auxiliary() {
 # behind by a failure during migrations or application readiness, not just
 # dependency-readiness or the image build) are still recognized as
 # recoverable-bootstrap rather than rejected outright.
+#
+# A legacy-upgrade bootstrap never produces candidate-<gen>.json (only
+# first-install does), but it DOES legitimately coexist with its own
+# already-published legacy-install-v1.json - begin_installation_bootstrap
+# only ever creates a legacy-upgrade bootstrap once classify_installation has
+# already returned supported-legacy, i.e. legacy-install-v1.json is always
+# already on disk the moment this bootstrap exists - plus the same
+# operation-state.json/evidence-<gen>/bot-recreation.json residue a
+# first-install bootstrap can accumulate. Recognizing that coexistence here
+# (rather than rejecting it outright) is what lets publish_validated_legacy_
+# self_heal's resume path retry a legacy conversion interrupted after
+# bootstrap.json was written but before promotion completed.
 installation_bootstrap_owns_entries() {
   local entries="$1" kind gen entry
   kind="$(/usr/bin/jq -r .kind "$ZEDBOT_INSTALLATION_BOOTSTRAP")" || return 1
   gen="$(/usr/bin/jq -r .generation "$ZEDBOT_INSTALLATION_BOOTSTRAP")" || return 1
+  case "$kind" in first-install|legacy-upgrade) ;; *) return 1;; esac
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     [ "$entry" = bootstrap.json ] && continue
-    # legacy-upgrade bootstraps never produce candidate/evidence artifacts;
-    # keep their (narrower) accepted set exactly as it was.
-    [ "$kind" = first-install ] || { log_error "Bootstrap metadata conflicts with other installation evidence."; return 1; }
     case "$entry" in
       operation-state.json)
         validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 1
         [ "$(/usr/bin/jq -r '.kind+":"+.generation' "$ZEDBOT_OPERATION_STATE")" = "install:$gen" ] || {
           log_error "Bootstrap metadata conflicts with other installation evidence."; return 1;
         } ;;
-      "candidate-${gen}.json")
-        validate_generation_metadata_core "$ZEDBOT_DEPLOYMENT_DIR/$entry" candidate || return 1 ;;
       "evidence-${gen}")
         [ -d "$ZEDBOT_DEPLOYMENT_DIR/$entry" ] && [ ! -L "$ZEDBOT_DEPLOYMENT_DIR/$entry" ] || {
           log_error "Bootstrap metadata conflicts with other installation evidence."; return 1;
@@ -864,6 +872,15 @@ installation_bootstrap_owns_entries() {
       bot-recreation.json)
         validate_bot_recreation_boundary || return 1
         [ "$(/usr/bin/jq -r .generation "$ZEDBOT_BOT_RECREATION_BOUNDARY")" = "$gen" ] || {
+          log_error "Bootstrap metadata conflicts with other installation evidence."; return 1;
+        } ;;
+      "candidate-${gen}.json")
+        [ "$kind" = first-install ] || { log_error "Bootstrap metadata conflicts with other installation evidence."; return 1; }
+        validate_generation_metadata_core "$ZEDBOT_DEPLOYMENT_DIR/$entry" candidate || return 1 ;;
+      legacy-install-v1.json)
+        [ "$kind" = legacy-upgrade ] || { log_error "Bootstrap metadata conflicts with other installation evidence."; return 1; }
+        validate_supported_legacy_installation || return 1
+        [ "$(/usr/bin/jq -r .generation "$ZEDBOT_LEGACY_INSTALLATION")" = "$gen" ] || {
           log_error "Bootstrap metadata conflicts with other installation evidence."; return 1;
         } ;;
       *) log_error "Bootstrap metadata conflicts with other installation evidence."; return 1 ;;
@@ -1143,58 +1160,198 @@ secure_deployment_dir() {
   [ "$(stat -c %u:%a "$ZEDBOT_DEPLOYMENT_DIR")" = "0:700" ] || { log_error "Deployment-state directory must be root-owned with mode 700."; return 1; }
 }
 
-publish_validated_legacy_self_heal() {
-  local sha="$1" tree="$2" snapshot="$3" generation operation image_id evidence compose_sha tmp baseline migration_json
+# publish_validated_legacy_self_heal (below) writes several artifacts as side
+# effects of real work - operation-state.json, evidence-<generation>/,
+# bot-recreation.json - BEFORE it is ever safe to write legacy-install-v1.json
+# itself (whose schema records facts only known after the migration-status
+# check, evidence persistence, and application health check all succeed).
+# If legacy_self_heal (scripts/migrate.sh) is interrupted anywhere in that
+# window - dependency readiness, the migration-status check, evidence
+# persistence, or the health check - those artifacts are left behind while
+# legacy-install-v1.json was NEVER written. classify_installation's own
+# genuine-first-install check requires $ZEDBOT_DEPLOYMENT_DIR to be empty
+# (modulo the lock), so without this reset a retry fails immediately at
+# publish_validated_legacy_self_heal's own top guard forever - contradicting
+# migrate.sh's own "safe to run multiple times" guarantee.
+#
+# Scoped strictly to the window before ANYTHING permanent exists yet:
+# current.json, legacy-install-v1.json and bootstrap.json - the three anchors
+# classify_installation keys its supported-legacy/recoverable-bootstrap/
+# existing-canonical classifications off - must ALL be absent, or this is a
+# no-op and either the resume branch below or classify_installation's own
+# error paths handle it instead. require_deployment_lock is what makes any
+# operation-state.json found here provably ABANDONED rather than concurrent
+# (acquire_deployment_lock is a non-blocking flock that fails loudly if a
+# live process holds it, and operation_cleanup's EXIT trap always releases it
+# on exit) - the same argument reset_abandoned_first_install_bootstrap's own
+# comment and initialize_operation_state's self-heal both already rely on.
+#
+# initialize_operation_state (below) already self-heals a stale operation-
+# state.json with a DIFFERENT kind/generation automatically once it is
+# actually reached, so this function's real job is only getting PAST
+# publish_validated_legacy_self_heal's top-of-function classify_installation
+# guard cleanly - it does not need to duplicate that self-heal logic, just
+# clear the non-lock entries that would otherwise make classify_installation
+# first-install's empty-state check reject the retry.
+reset_abandoned_legacy_self_heal_residue() {
+  local gen stage
   require_deployment_lock || return 1
-  [ "$(classify_installation first-install)" = genuine-first-install ] || return 1
-  require_source_integrity "$sha" "$tree" "$snapshot" || return 1
-  set_update_compose_contract "$snapshot" "$sha" "$tree" || return 1
-  validate_compose_application_images || return 1
-  validate_migration_declaration_pair "$snapshot" || return 1
-  image_id="$(run_clean_docker image inspect -f '{{.Id}}' "$ZEDBOT_EXPECTED_APPLICATION_IMAGE")" || return 1
-  valid_image_id "$image_id" || return 1
-  verify_application_recreation_set "$image_id" || return 1
-  generation="$(date -u +%Y%m%dT%H%M%SZ)-${sha:0:12}"
-  operation="$(< /proc/sys/kernel/random/uuid)"
-  initialize_operation_state install "$generation" || return 1
-  validate_dependencies_healthy || return 1
-  advance_operation_state bootstrap-initialized dependency-ready || return 1
-  require_source_integrity "$sha" "$tree" "$snapshot" || return 1
-  retain_known_good_image "$image_id" "zedbot-app:rollback-${generation}" || return 1
-  retain_known_good_image "$image_id" "zedbot-app:generation-${generation}" || return 1
-  advance_operation_state dependency-ready candidate-image-built || return 1
-  baseline="$(find "$snapshot/packages/database/prisma/migrations" -mindepth 2 -maxdepth 2 -name migration.sql -printf '%h\n' | sed 's#.*/##' | sort | paste -sd, -)"
-  [ -n "$baseline" ] || return 1
-  migration_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/migration-status.js | tail -n 1)" || return 1
-  [ "$(printf '%s' "$migration_json" | /usr/bin/jq -r '.ok == true and .upToDate == true and .failedCount == 0')" = true ] || return 1
-  evidence="$ZEDBOT_DEPLOYMENT_DIR/evidence-${generation}"
-  persist_migration_declaration_evidence "$snapshot" "$evidence" || return 1
-  compose_sha="$(sha256sum "$evidence/docker-compose.yml" | awk '{print $1}')" || return 1
-  advance_operation_state candidate-image-built migrations-confirmed || return 1
-  record_bot_recreation_boundary "$image_id" "$sha" || return 1
-  advance_operation_state migrations-confirmed application-recreated || return 1
-  validate_running_application "$sha" >/dev/null || return 1
-  advance_operation_state application-recreated health-confirmed || return 1
-  tmp="$(operation_mktemp "$ZEDBOT_DEPLOYMENT_DIR/.legacy-current.XXXXXXXX")" || return 1
-  /usr/bin/jq -n --arg generation "$generation" --arg tree "$tree" --arg sha "$sha" --arg image "$image_id" \
-    --arg capturedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg baseline "$baseline" --arg evidence "$evidence" \
-    --arg composeSha "$compose_sha" --arg manifestSha "$MIGRATION_MANIFEST_SHA256" --argjson declarations "$MIGRATION_DECLARATIONS_JSON" \
-    '{formatVersion:2,installationKind:null,lifecycleRole:"current",generation:$generation,sourceTree:$tree,
-      preDeploySha:$sha,preDeployImageId:$image,targetDeploySha:$sha,targetImageId:$image,
-      retainedImageTag:("zedbot-app:rollback-"+$generation),immutableImageTag:("zedbot-app:generation-"+$generation),
-      failedTargetTag:("zedbot-app:failed-"+$generation),capturedAt:$capturedAt,preDeployMigrations:($baseline|split(",")),
-      declarationFormatVersion:2,declarationSourceCategory:"generation-evidence",migrationEvidencePath:$evidence,
-      composeEvidencePath:($evidence+"/docker-compose.yml"),composeEvidenceSha256:$composeSha,composeProjectName:"zedbot",
-      composeApplicationImage:"zedbot-app:latest",compatibilityManifestSha256:$manifestSha,compatibilityDeclarations:$declarations,
-      recreationAttempted:true,healthConfirmed:true,state:"known-good"}' > "$tmp" || return 1
-  atomic_write_metadata "$tmp" "$ZEDBOT_LEGACY_INSTALLATION" || return 1
-  rm -f "$tmp"
-  validate_supported_legacy_installation || return 1
-  tmp="$(operation_mktemp "$ZEDBOT_DEPLOYMENT_DIR/.bootstrap.XXXXXXXX")" || return 1
-  /usr/bin/jq -n --arg generation "$generation" --arg operation "$operation" --arg sourceSha "$sha" --arg sourceTree "$tree" \
-    '{formatVersion:1,kind:"legacy-upgrade",generation:$generation,operation:$operation,phase:"initialized",sourceSha:$sourceSha,sourceTree:$sourceTree}' > "$tmp" || return 1
-  atomic_write_metadata "$tmp" "$ZEDBOT_INSTALLATION_BOOTSTRAP" || return 1
-  rm -f "$tmp"
+  if { [ -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ]; } ||
+     { [ -e "$ZEDBOT_LEGACY_INSTALLATION" ] || [ -L "$ZEDBOT_LEGACY_INSTALLATION" ]; } ||
+     { [ -e "$ZEDBOT_INSTALLATION_BOOTSTRAP" ] || [ -L "$ZEDBOT_INSTALLATION_BOOTSTRAP" ]; }; then
+    return 0
+  fi
+  { [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; } || return 0
+  validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 0
+  [ "$(/usr/bin/jq -r .kind "$ZEDBOT_OPERATION_STATE")" = install ] || return 0
+  stage="$(/usr/bin/jq -r .stage "$ZEDBOT_OPERATION_STATE")"
+  [ "$stage" != promoted ] || return 0
+  gen="$(/usr/bin/jq -r .generation "$ZEDBOT_OPERATION_STATE")"
+  log_warn "Clearing abandoned legacy self-heal residue (generation ${gen}, stage ${stage}) left by a previous failed attempt; this conversion restarts from a clean state."
+  # Order matters, same discipline as reset_abandoned_first_install_bootstrap:
+  # operation-state.json is what gates re-entry into this cleanup on a later
+  # rerun, so it is removed LAST. A crash mid-reset leaves a strictly smaller
+  # residue set that this same function still recognizes and finishes
+  # clearing on the very next invocation.
+  if [ -e "$ZEDBOT_BOT_RECREATION_BOUNDARY" ] || [ -L "$ZEDBOT_BOT_RECREATION_BOUNDARY" ]; then
+    remove_canonical_state_file "$ZEDBOT_BOT_RECREATION_BOUNDARY" || return 1
+  fi
+  remove_generation_evidence_directory "$ZEDBOT_DEPLOYMENT_DIR/evidence-${gen}" || return 1
+  remove_canonical_state_file "$ZEDBOT_OPERATION_STATE" || return 1
+  [ "$(classify_installation first-install)" = genuine-first-install ]
+}
+
+publish_validated_legacy_self_heal() {
+  local sha="$1" tree="$2" snapshot="$3"
+  local generation operation image_id evidence compose_sha tmp baseline migration_json
+  local classification recorded_sha recorded_tree recorded_image
+  require_deployment_lock || return 1
+  reset_abandoned_legacy_self_heal_residue || return 1
+  classification="$(classify_installation first-install)" || return 1
+  case "$classification" in
+    genuine-first-install|supported-legacy) ;;
+    # recoverable-bootstrap only means "resume the legacy conversion" when
+    # the recoverable bootstrap is ITSELF a legacy-upgrade one (its
+    # legacy-install-v1.json already co-validated by installation_bootstrap_
+    # owns_entries above) - a recoverable FIRST-INSTALL bootstrap is a wholly
+    # unrelated, concurrent-in-time installation attempt this function must
+    # never touch.
+    recoverable-bootstrap) [ "$(/usr/bin/jq -r .kind "$ZEDBOT_INSTALLATION_BOOTSTRAP" 2>/dev/null)" = legacy-upgrade ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  if [ "$classification" = supported-legacy ] || [ "$classification" = recoverable-bootstrap ]; then
+    # RESUME: an earlier, interrupted attempt already published legacy-
+    # install-v1.json (current.json is still absent - classify_installation
+    # would otherwise have returned existing-canonical instead of getting
+    # here). That record is a permanent, immutable forensic artifact (see
+    # ZEDBOT_LEGACY_INSTALLATION's schema comment above), so this branch
+    # NEVER rewrites it and NEVER re-derives a fresh generation - it resumes
+    # using the facts already recorded. legacy_self_heal() (scripts/
+    # migrate.sh) rebuilds and force-recreates the application containers
+    # again on every invocation, including a retry, before ever calling this
+    # function - so the drift checks below prove the freshly rebuilt/
+    # recreated system is still bit-for-bit the exact artifact this record
+    # already validated healthy, not a silently different one, before any of
+    # the remaining (idempotent) publish bookkeeping proceeds. classification
+    # may be either supported-legacy (bootstrap.json not written yet) or
+    # recoverable-bootstrap (bootstrap.json already written, unpromoted) -
+    # both resume identically; the shared tail below already skips rewriting
+    # bootstrap.json when it is already present.
+    require_source_integrity "$sha" "$tree" "$snapshot" || return 1
+    validate_supported_legacy_installation || return 1
+    generation="$(/usr/bin/jq -r '.generation' "$ZEDBOT_LEGACY_INSTALLATION")"
+    recorded_sha="$(/usr/bin/jq -r '.targetDeploySha' "$ZEDBOT_LEGACY_INSTALLATION")"
+    recorded_tree="$(/usr/bin/jq -r '.sourceTree' "$ZEDBOT_LEGACY_INSTALLATION")"
+    recorded_image="$(/usr/bin/jq -r '.targetImageId' "$ZEDBOT_LEGACY_INSTALLATION")"
+    [ "$sha" = "$recorded_sha" ] && [ "$tree" = "$recorded_tree" ] || {
+      log_error "Source identity drifted since the published legacy record; run 'zedbot doctor' before retrying."; return 1;
+    }
+    image_id="$(run_clean_docker image inspect -f '{{.Id}}' "$ZEDBOT_EXPECTED_APPLICATION_IMAGE")" || return 1
+    valid_image_id "$image_id" || return 1
+    [ "$image_id" = "$recorded_image" ] || {
+      log_error "Rebuilt image identity drifted since the published legacy record; run 'zedbot doctor' before retrying."; return 1;
+    }
+    verify_application_recreation_set "$image_id" || return 1
+    initialize_operation_state install "$generation" || return 1
+    validate_dependencies_healthy || return 1
+    confirm_operation_state bootstrap-initialized dependency-ready || return 1
+    retain_known_good_image "$image_id" "zedbot-app:rollback-${generation}" || return 1
+    retain_known_good_image "$image_id" "zedbot-app:generation-${generation}" || return 1
+    confirm_operation_state dependency-ready candidate-image-built || return 1
+    # Migration status and evidence were already checked and persisted by the
+    # attempt that published legacy-install-v1.json: evidence-${generation}
+    # is generation-scoped and persist_migration_declaration_evidence refuses
+    # to touch a destination that already exists, and validate_supported_
+    # legacy_installation above already re-verified that evidence's own
+    # checksum against this record. Re-deriving it here would be redundant.
+    confirm_operation_state candidate-image-built migrations-confirmed || return 1
+    # record_bot_recreation_boundary's wrapper requires operation-state to be
+    # exactly at "migrations-confirmed"; a resumed generation's state is
+    # already past that. Its own boundary-writing core has no such
+    # requirement (the same reason record_bot_recreation_boundary_after_
+    # restart calls it directly) - use it directly so what gets validated
+    # below is the container legacy_self_heal() just recreated, not the
+    # earlier attempt's now-replaced one.
+    record_bot_recreation_boundary_core "install:${generation}" "$generation" "$image_id" "$sha" || return 1
+    confirm_operation_state migrations-confirmed application-recreated || return 1
+    validate_running_application "$sha" >/dev/null || return 1
+    confirm_operation_state application-recreated health-confirmed || return 1
+  else
+    require_source_integrity "$sha" "$tree" "$snapshot" || return 1
+    set_update_compose_contract "$snapshot" "$sha" "$tree" || return 1
+    validate_compose_application_images || return 1
+    validate_migration_declaration_pair "$snapshot" || return 1
+    image_id="$(run_clean_docker image inspect -f '{{.Id}}' "$ZEDBOT_EXPECTED_APPLICATION_IMAGE")" || return 1
+    valid_image_id "$image_id" || return 1
+    verify_application_recreation_set "$image_id" || return 1
+    generation="$(date -u +%Y%m%dT%H%M%SZ)-${sha:0:12}"
+    initialize_operation_state install "$generation" || return 1
+    validate_dependencies_healthy || return 1
+    advance_operation_state bootstrap-initialized dependency-ready || return 1
+    require_source_integrity "$sha" "$tree" "$snapshot" || return 1
+    retain_known_good_image "$image_id" "zedbot-app:rollback-${generation}" || return 1
+    retain_known_good_image "$image_id" "zedbot-app:generation-${generation}" || return 1
+    advance_operation_state dependency-ready candidate-image-built || return 1
+    baseline="$(find "$snapshot/packages/database/prisma/migrations" -mindepth 2 -maxdepth 2 -name migration.sql -printf '%h\n' | sed 's#.*/##' | sort | paste -sd, -)"
+    [ -n "$baseline" ] || return 1
+    migration_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/migration-status.js | tail -n 1)" || return 1
+    [ "$(printf '%s' "$migration_json" | /usr/bin/jq -r '.ok == true and .upToDate == true and .failedCount == 0')" = true ] || return 1
+    evidence="$ZEDBOT_DEPLOYMENT_DIR/evidence-${generation}"
+    persist_migration_declaration_evidence "$snapshot" "$evidence" || return 1
+    compose_sha="$(sha256sum "$evidence/docker-compose.yml" | awk '{print $1}')" || return 1
+    advance_operation_state candidate-image-built migrations-confirmed || return 1
+    record_bot_recreation_boundary "$image_id" "$sha" || return 1
+    advance_operation_state migrations-confirmed application-recreated || return 1
+    validate_running_application "$sha" >/dev/null || return 1
+    advance_operation_state application-recreated health-confirmed || return 1
+    tmp="$(operation_mktemp "$ZEDBOT_DEPLOYMENT_DIR/.legacy-current.XXXXXXXX")" || return 1
+    /usr/bin/jq -n --arg generation "$generation" --arg tree "$tree" --arg sha "$sha" --arg image "$image_id" \
+      --arg capturedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg baseline "$baseline" --arg evidence "$evidence" \
+      --arg composeSha "$compose_sha" --arg manifestSha "$MIGRATION_MANIFEST_SHA256" --argjson declarations "$MIGRATION_DECLARATIONS_JSON" \
+      '{formatVersion:2,installationKind:null,lifecycleRole:"current",generation:$generation,sourceTree:$tree,
+        preDeploySha:$sha,preDeployImageId:$image,targetDeploySha:$sha,targetImageId:$image,
+        retainedImageTag:("zedbot-app:rollback-"+$generation),immutableImageTag:("zedbot-app:generation-"+$generation),
+        failedTargetTag:("zedbot-app:failed-"+$generation),capturedAt:$capturedAt,preDeployMigrations:($baseline|split(",")),
+        declarationFormatVersion:2,declarationSourceCategory:"generation-evidence",migrationEvidencePath:$evidence,
+        composeEvidencePath:($evidence+"/docker-compose.yml"),composeEvidenceSha256:$composeSha,composeProjectName:"zedbot",
+        composeApplicationImage:"zedbot-app:latest",compatibilityManifestSha256:$manifestSha,compatibilityDeclarations:$declarations,
+        recreationAttempted:true,healthConfirmed:true,state:"known-good"}' > "$tmp" || return 1
+    atomic_write_metadata "$tmp" "$ZEDBOT_LEGACY_INSTALLATION" || return 1
+    rm -f "$tmp"
+    validate_supported_legacy_installation || return 1
+  fi
+  # Shared tail for both branches: bootstrap.json is written only if a prior
+  # attempt did not already get this far (never rewritten - matches the
+  # invariant that it, like legacy-install-v1.json, is a permanent record),
+  # then the same validate/convert/promote/finalize sequence runs either way.
+  if [ ! -e "$ZEDBOT_INSTALLATION_BOOTSTRAP" ] && [ ! -L "$ZEDBOT_INSTALLATION_BOOTSTRAP" ]; then
+    operation="$(< /proc/sys/kernel/random/uuid)"
+    tmp="$(operation_mktemp "$ZEDBOT_DEPLOYMENT_DIR/.bootstrap.XXXXXXXX")" || return 1
+    /usr/bin/jq -n --arg generation "$generation" --arg operation "$operation" --arg sourceSha "$sha" --arg sourceTree "$tree" \
+      '{formatVersion:1,kind:"legacy-upgrade",generation:$generation,operation:$operation,phase:"initialized",sourceSha:$sourceSha,sourceTree:$sourceTree}' > "$tmp" || return 1
+    atomic_write_metadata "$tmp" "$ZEDBOT_INSTALLATION_BOOTSTRAP" || return 1
+    rm -f "$tmp"
+  fi
   validate_installation_bootstrap || return 1
   convert_supported_legacy_installation || return 1
   advance_operation_state health-confirmed promotion-prepared || return 1

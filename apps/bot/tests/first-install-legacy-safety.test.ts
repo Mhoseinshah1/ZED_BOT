@@ -491,3 +491,187 @@ describe("area 10 interrupted first-install resume and reset", () => {
     expect(resetIndex).toBeLessThan(text.indexOf('[ "$(classify_installation first-install)"'));
   });
 });
+
+// Regression: publish_validated_legacy_self_heal (the only writer of
+// legacy-install-v1.json) writes several artifacts as side effects of real
+// work - operation-state.json, evidence-<generation>/, bot-recreation.json -
+// BEFORE it is ever safe to write legacy-install-v1.json itself. An
+// interruption in that window left those artifacts behind with legacy-
+// install-v1.json never written, permanently blocking every retry at the
+// function's own top classify_installation guard. A SECOND, separate window
+// exists once legacy-install-v1.json IS published but something fails before
+// promotion (bootstrap.json write, convert_supported_legacy_installation, or
+// the final promotion) - classify_installation then returns supported-legacy
+// forever, which the old top guard also rejected outright. Neither window is
+// recoverable without resuming: legacy-install-v1.json is a permanent,
+// immutable forensic record (see its schema comment on
+// ZEDBOT_LEGACY_INSTALLATION) that must never be deleted or rewritten by any
+// recovery path, even here.
+describe("area 10 legacy self-heal retry and resume", () => {
+  const d64 = "d".repeat(64);
+  const img = `sha256:${"2".repeat(64)}`;
+  const dockerImageMock = `run_clean_docker(){ case "$*" in *'image inspect'*) echo '${img}';; esac; };`;
+
+  function abandonedLegacySelfHealResidue(dir: string) {
+    const r = shell(dir, `initialize_operation_state install '${generation}'; advance_operation_state bootstrap-initialized dependency-ready; advance_operation_state dependency-ready candidate-image-built; advance_operation_state candidate-image-built migrations-confirmed`, true);
+    expect(r.status, r.stderr).toBe(0);
+    mkdirSync(path.join(dir, `evidence-${generation}`));
+    write(path.join(dir, "bot-recreation.json"), { formatVersion: 1, operation: `install:${generation}`, generation, containerId: "c".repeat(64), imageId: img, imageRef: "zedbot-app:latest", project: "zedbot", service: "bot", recreatedAt: 0 });
+  }
+
+  it("reset_abandoned_legacy_self_heal_residue restores a genuinely clean state before legacy-install-v1.json was ever published", () => {
+    const dir = fixture(); abandonedLegacySelfHealResidue(dir);
+    const result = shell(dir, "reset_abandoned_legacy_self_heal_residue; classify_installation first-install", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("genuine-first-install");
+    for (const name of ["operation-state.json", `evidence-${generation}`, "bot-recreation.json", "legacy-install-v1.json", "bootstrap.json"]) {
+      expect(existsSync(path.join(dir, name))).toBe(false);
+    }
+  });
+
+  it("reset_abandoned_legacy_self_heal_residue requires the deployment lock", () => {
+    const dir = fixture(); abandonedLegacySelfHealResidue(dir);
+    const result = shell(dir, "reset_abandoned_legacy_self_heal_residue");
+    expect(result.status).not.toBe(0);
+    expect(existsSync(path.join(dir, "operation-state.json"))).toBe(true);
+    expect(existsSync(path.join(dir, `evidence-${generation}`))).toBe(true);
+  });
+
+  it.each<[string, () => unknown]>([
+    ["current.json", () => metadata()],
+    ["legacy-install-v1.json", () => metadata()],
+    ["bootstrap.json", () => ({ formatVersion: 1, kind: "legacy-upgrade", generation, operation, phase: "initialized", sourceSha: sha, sourceTree: tree })],
+  ])("is a no-op when %s (an installation anchor) is already present", (name, value) => {
+    const dir = fixture(); abandonedLegacySelfHealResidue(dir);
+    write(path.join(dir, name), value());
+    const result = shell(dir, "reset_abandoned_legacy_self_heal_residue", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(path.join(dir, "operation-state.json"))).toBe(true);
+    expect(existsSync(path.join(dir, `evidence-${generation}`))).toBe(true);
+    expect(existsSync(path.join(dir, "bot-recreation.json"))).toBe(true);
+  });
+
+  it("reset_abandoned_legacy_self_heal_residue is a no-op with nothing abandoned", () => {
+    const dir = fixture();
+    expect(shell(dir, "reset_abandoned_legacy_self_heal_residue", true).status).toBe(0);
+  });
+
+  it("resumes from an already-published legacy record and completes without modifying its bytes", () => {
+    const dir = fixture();
+    const legacy = path.join(dir, "legacy-install-v1.json");
+    write(legacy, metadata());
+    const before = readFileSync(legacy, "utf8");
+    const body = `require_source_integrity(){ :; }; ${dockerImageMock} verify_application_recreation_set(){ :; }; validate_dependencies_healthy(){ :; }; record_bot_recreation_boundary_core(){ printf '{}\n' >"$ZEDBOT_BOT_RECREATION_BOUNDARY"; chmod 600 "$ZEDBOT_BOT_RECREATION_BOUNDARY"; }; validate_running_application(){ :; }; publish_validated_legacy_self_heal '${sha}' '${tree}' '/nonexistent'; printf '%s\n' "$(classify_installation observe)"`;
+    const result = shell(dir, body, true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("existing-canonical");
+    expect(readFileSync(legacy, "utf8")).toBe(before);
+    expect(existsSync(path.join(dir, "current.json"))).toBe(true);
+  });
+
+  it("resumes when an earlier attempt already wrote an unpromoted bootstrap.json, without rewriting it", () => {
+    const dir = fixture();
+    write(path.join(dir, "legacy-install-v1.json"), metadata());
+    const bootstrapped = shell(dir, `begin_installation_bootstrap legacy-upgrade '${generation}' '${sha}' '${tree}' '${operation}'`, true);
+    expect(bootstrapped.status, bootstrapped.stderr).toBe(0);
+    const operationBefore = JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).operation;
+    const body = `require_source_integrity(){ :; }; ${dockerImageMock} verify_application_recreation_set(){ :; }; validate_dependencies_healthy(){ :; }; record_bot_recreation_boundary_core(){ printf '{}\n' >"$ZEDBOT_BOT_RECREATION_BOUNDARY"; chmod 600 "$ZEDBOT_BOT_RECREATION_BOUNDARY"; }; validate_running_application(){ :; }; publish_validated_legacy_self_heal '${sha}' '${tree}' '/nonexistent'; printf '%s\n' "$(classify_installation observe)"`;
+    const result = shell(dir, body, true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("existing-canonical");
+    // phase legitimately advances to "promoted" via the real convert - but
+    // the "operation" UUID, minted once when bootstrap.json was first
+    // written, must be unchanged: a fresh rewrite would mint a new one, so
+    // this proves the resume branch's guard genuinely skipped rewriting it.
+    const bootstrapAfter = JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8"));
+    expect(bootstrapAfter.operation).toBe(operationBefore);
+    expect(bootstrapAfter.phase).toBe("promoted");
+  });
+
+  it("resume fails closed, without touching legacy-install-v1.json, when the freshly supplied source identity has drifted from the published record", () => {
+    const dir = fixture();
+    const legacy = path.join(dir, "legacy-install-v1.json");
+    write(legacy, metadata());
+    const before = readFileSync(legacy, "utf8");
+    const differentSha = "f".repeat(40);
+    const result = shell(dir, `require_source_integrity(){ :; }; publish_validated_legacy_self_heal '${differentSha}' '${tree}' '/nonexistent'`, true);
+    expect(result.status).not.toBe(0);
+    expect(readFileSync(legacy, "utf8")).toBe(before);
+    expect(existsSync(path.join(dir, "current.json"))).toBe(false);
+  });
+
+  it("resume fails closed, without touching legacy-install-v1.json, when the currently tagged image has drifted from the published record", () => {
+    const dir = fixture();
+    const legacy = path.join(dir, "legacy-install-v1.json");
+    write(legacy, metadata());
+    const before = readFileSync(legacy, "utf8");
+    const driftedImageMock = `run_clean_docker(){ case "$*" in *'image inspect'*) echo 'sha256:${"9".repeat(64)}';; esac; };`;
+    const result = shell(dir, `require_source_integrity(){ :; }; ${driftedImageMock} publish_validated_legacy_self_heal '${sha}' '${tree}' '/nonexistent'`, true);
+    expect(result.status).not.toBe(0);
+    expect(readFileSync(legacy, "utf8")).toBe(before);
+    expect(existsSync(path.join(dir, "current.json"))).toBe(false);
+  });
+
+  it("end-to-end: a first attempt interrupted before legacy-install-v1.json is published is fully retryable, and a second attempt completes", () => {
+    const dir = fixture();
+    const snapshot = fixture();
+    const migrations = path.join(snapshot, "packages/database/prisma/migrations/20260101000000_initial");
+    mkdirSync(migrations, { recursive: true });
+    writeFileSync(path.join(migrations, "migration.sql"), "SELECT 1;");
+    const compose = path.join(snapshot, "docker-compose.yml");
+    writeFileSync(compose, "services: {}\n");
+    const sharedMocks = `require_source_integrity(){ :; }; set_update_compose_contract(){ :; }; validate_compose_application_images(){ :; }; validate_migration_declaration_pair(){ MIGRATION_MANIFEST_SHA256='${d64}'; MIGRATION_DECLARATIONS_JSON='[]'; }; ${dockerImageMock} verify_application_recreation_set(){ :; }; validate_dependencies_healthy(){ :; }; run_compose(){ echo '{"ok":true,"upToDate":true,"failedCount":0}'; }; persist_migration_declaration_evidence(){ mkdir "$2"; cp '${compose}' "$2/docker-compose.yml"; MIGRATION_MANIFEST_SHA256='${d64}'; MIGRATION_DECLARATIONS_JSON='[]'; }; record_bot_recreation_boundary(){ printf '{}\n' >"$ZEDBOT_BOT_RECREATION_BOUNDARY"; chmod 600 "$ZEDBOT_BOT_RECREATION_BOUNDARY"; };`;
+
+    // Attempt 1: everything up through application-recreated succeeds for
+    // real (minting genuine evidence/bot-recreation residue), then the
+    // health check fails - legacy-install-v1.json is never written.
+    const first = shell(dir, `${sharedMocks} validate_running_application(){ return 1; }; publish_validated_legacy_self_heal '${sha}' '${tree}' '${snapshot}'`, true);
+    expect(first.status).not.toBe(0);
+    expect(existsSync(path.join(dir, "legacy-install-v1.json"))).toBe(false);
+    expect(existsSync(path.join(dir, "operation-state.json"))).toBe(true);
+    expect(existsSync(path.join(dir, "bot-recreation.json"))).toBe(true);
+
+    // Attempt 2: identical mocks, health check now succeeds. The new reset
+    // clears attempt 1's residue before classify_installation is consulted.
+    const second = shell(dir, `${sharedMocks} validate_running_application(){ :; }; publish_validated_legacy_self_heal '${sha}' '${tree}' '${snapshot}'; printf '%s\n' "$(classify_installation observe)"`, true);
+    expect(second.status, second.stderr).toBe(0);
+    expect(second.stdout.trim()).toBe("existing-canonical");
+    expect(existsSync(path.join(dir, "legacy-install-v1.json"))).toBe(true);
+  });
+
+  it("end-to-end: a first attempt interrupted after legacy-install-v1.json is published resumes on a second attempt without rewriting it", () => {
+    const dir = fixture();
+    const snapshot = fixture();
+    const migrations = path.join(snapshot, "packages/database/prisma/migrations/20260101000000_initial");
+    mkdirSync(migrations, { recursive: true });
+    writeFileSync(path.join(migrations, "migration.sql"), "SELECT 1;");
+    const compose = path.join(snapshot, "docker-compose.yml");
+    writeFileSync(compose, "services: {}\n");
+    // A schema-valid record, not the "{}" placeholder other tests get away
+    // with: this test's attempt 1 leaves bootstrap.json (kind legacy-upgrade)
+    // coexisting with bot-recreation.json, and installation_bootstrap_owns_
+    // entries' legacy-upgrade case (unlike its old first-install-only form)
+    // now genuinely schema-validates that coexistence via classify_
+    // installation - exercised for real when attempt 2 re-classifies.
+    const validBotBoundary = `/usr/bin/jq -n --arg generation "$(/usr/bin/jq -r .generation "$ZEDBOT_OPERATION_STATE")" --arg image '${img}' '{formatVersion:1,operation:("install:"+$generation),generation:$generation,containerId:("c"*64),imageId:$image,imageRef:"zedbot-app:latest",project:"zedbot",service:"bot",recreatedAt:0}' > "$ZEDBOT_BOT_RECREATION_BOUNDARY"; chmod 600 "$ZEDBOT_BOT_RECREATION_BOUNDARY";`;
+    const freshMocks = `require_source_integrity(){ :; }; set_update_compose_contract(){ :; }; validate_compose_application_images(){ :; }; validate_migration_declaration_pair(){ MIGRATION_MANIFEST_SHA256='${d64}'; MIGRATION_DECLARATIONS_JSON='[]'; }; ${dockerImageMock} verify_application_recreation_set(){ :; }; validate_dependencies_healthy(){ :; }; run_compose(){ echo '{"ok":true,"upToDate":true,"failedCount":0}'; }; persist_migration_declaration_evidence(){ mkdir "$2"; cp '${compose}' "$2/docker-compose.yml"; MIGRATION_MANIFEST_SHA256='${d64}'; MIGRATION_DECLARATIONS_JSON='[]'; }; record_bot_recreation_boundary(){ ${validBotBoundary} }; validate_running_application(){ :; };`;
+
+    // Attempt 1: legacy-install-v1.json and bootstrap.json (phase
+    // "initialized") are both published for real; convert is interrupted.
+    const first = shell(dir, `${freshMocks} convert_supported_legacy_installation(){ return 1; }; publish_validated_legacy_self_heal '${sha}' '${tree}' '${snapshot}'`, true);
+    expect(first.status).not.toBe(0);
+    expect(existsSync(path.join(dir, "legacy-install-v1.json"))).toBe(true);
+    expect(existsSync(path.join(dir, "bootstrap.json"))).toBe(true);
+    expect(existsSync(path.join(dir, "current.json"))).toBe(false);
+    const legacyBefore = readFileSync(path.join(dir, "legacy-install-v1.json"), "utf8");
+
+    // Attempt 2: no mocked convert failure this time - the real resume
+    // branch and the real convert_supported_legacy_installation both run.
+    const resumeMocks = `require_source_integrity(){ :; }; ${dockerImageMock} verify_application_recreation_set(){ :; }; validate_dependencies_healthy(){ :; }; record_bot_recreation_boundary_core(){ printf '{}\n' >"$ZEDBOT_BOT_RECREATION_BOUNDARY"; chmod 600 "$ZEDBOT_BOT_RECREATION_BOUNDARY"; }; validate_running_application(){ :; };`;
+    const second = shell(dir, `${resumeMocks} publish_validated_legacy_self_heal '${sha}' '${tree}' '${snapshot}'; printf '%s\n' "$(classify_installation observe)"`, true);
+    expect(second.status, second.stderr).toBe(0);
+    expect(second.stdout.trim()).toBe("existing-canonical");
+    expect(readFileSync(path.join(dir, "legacy-install-v1.json"), "utf8")).toBe(legacyBefore);
+    expect(existsSync(path.join(dir, "current.json"))).toBe(true);
+  });
+});
