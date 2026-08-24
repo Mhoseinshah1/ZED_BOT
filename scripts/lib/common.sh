@@ -451,6 +451,49 @@ set_rollback_compose_contract() {
   validate_compose_contract_paths
 }
 
+# Binds run_compose's live Compose contract to the CURRENTLY PROMOTED
+# generation's own checksum-verified evidence copy (current.json's
+# composeEvidencePath/composeEvidenceSha256) instead of leaving it pointed
+# at the persistent checkout's own, independently mutable docker-compose.yml.
+#
+# sync_deployment_checkout (git merge --ff-only) can only ever move the
+# checkout's HEAD forward. After a rollback to an OLDER generation the
+# checkout's own docker-compose.yml stays on the NEWER commit - there is no
+# ff-only path back - so a command that just defaults to the checkout's file
+# would run against a Compose definition that does not match what is
+# actually deployed, until the next update happens to fast-forward past it.
+# current.json is rewritten to describe exactly the active generation on
+# every promotion, together with an immutable, checksum-verified copy of
+# that generation's own docker-compose.yml - so binding to it here is always
+# accurate, independent of how the checkout's mutable git state drifted.
+#
+# No current.json existing yet (a genuine pre-bootstrap first install) is
+# not an error: the already-set checkout-default binding is correct there.
+#
+#   (default) hard failure: a present-but-invalid/unverifiable current.json
+#             returns 1 and changes nothing. Use for anything that mutates
+#             what is running.
+#   --soft:   the same failure instead logs a warning, explicitly resets
+#             ZEDBOT_CANONICAL_COMPOSE_FILE to the checkout default, and
+#             returns 0. Use for read-only inspection commands.
+bind_current_generation_compose_contract() {
+  local mode="${1:-}"
+  if [ ! -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ] && [ ! -L "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ]; then
+    return 0
+  fi
+  if validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current \
+      && validate_generation_owned_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA"; then
+    return 0
+  fi
+  if [ "$mode" = "--soft" ]; then
+    log_warn "Current deployment metadata is missing or invalid; showing state from the checkout's own docker-compose.yml, which may not match what is actually deployed. Run: zedbot doctor"
+    ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
+    return 0
+  fi
+  log_error "Current deployment metadata is missing or invalid; refusing to guess the active Compose contract. Run: zedbot doctor"
+  return 1
+}
+
 # Runs one fixed Compose contract without current-directory or ambient-control
 # resolution. The explicit env file is for interpolation and service env_file.
 run_compose() {

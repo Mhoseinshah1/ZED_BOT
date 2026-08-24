@@ -399,4 +399,134 @@ describe("strict format-2 migration declarations", () => {
     expect(spawnSync("bash", ["-c", command, "gate", pair.dir]).status).not.toBe(0);
     expect(() => readFileSync(record)).toThrow();
   });
+
+  // Regression: sync_deployment_checkout (git merge --ff-only) can only ever
+  // move the persistent checkout's HEAD forward, so after a rollback to an
+  // OLDER generation the checkout's own docker-compose.yml stays on the
+  // newer commit forever - there is no ff-only path back. Any command that
+  // just defaulted to the checkout's file (zedbot.sh's status/logs/restart/
+  // start/stop/shell/deploy-status/backup verify/repair backups, doctor.sh,
+  // backup.sh, backup-db.sh) would then run against a Compose definition
+  // that does not match what is actually deployed, until the next update
+  // happens to fast-forward past it. current.json is rewritten to describe
+  // exactly the active generation on every promotion, together with an
+  // immutable, checksum-verified copy of that generation's own
+  // docker-compose.yml, so binding to it instead is always accurate.
+  describe("binding the live Compose contract to the currently promoted generation", () => {
+    const zedbot = path.join(root, "scripts/zedbot.sh");
+    const doctor = path.join(root, "scripts/doctor.sh");
+    const backupScript = path.join(root, "scripts/backup.sh");
+    const backupDbScript = path.join(root, "scripts/backup-db.sh");
+
+    function currentEvidenceFixture(compose: string) {
+      const pair = fixture();
+      const state = mkdtempSync(path.join(os.tmpdir(), "zedbot-current-evidence-"));
+      chmodSync(state, 0o700);
+      const generation = "20260101T000000Z-eeeeeeeeeeee";
+      const evidence = path.join(state, `evidence-${generation}`);
+      renameSync(pair.dir, evidence);
+      writeFileSync(path.join(evidence, "docker-compose.yml"), compose);
+      const manifestBytes = readFileSync(path.join(evidence, "packages/database/prisma/rollback-compatibility.json"));
+      const metadataPath = path.join(state, "current.json");
+      writeFileSync(metadataPath, JSON.stringify({
+        formatVersion: 2, installationKind: null, lifecycleRole: "current", generation,
+        sourceTree: "a".repeat(40), preDeploySha: "e".repeat(40), preDeployImageId: `sha256:${"3".repeat(64)}`,
+        targetDeploySha: "b".repeat(40), targetImageId: `sha256:${"1".repeat(64)}`,
+        retainedImageTag: `zedbot-app:rollback-${generation}`, immutableImageTag: `zedbot-app:generation-${generation}`,
+        failedTargetTag: `zedbot-app:failed-${generation}`, capturedAt: "2026-08-14T12:00:00Z",
+        preDeployMigrations: [nameA], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+        migrationEvidencePath: evidence, composeEvidencePath: path.join(evidence, "docker-compose.yml"),
+        composeEvidenceSha256: sha(compose), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+        compatibilityManifestSha256: sha(manifestBytes), compatibilityDeclarations: pair.declarations,
+        recreationAttempted: true, healthConfirmed: true, state: "known-good",
+      }));
+      chmodSync(metadataPath, 0o600);
+      return { state, evidence, generation };
+    }
+
+    it("binds to current.json's own evidence, not the checkout default", () => {
+      const { state, evidence } = currentEvidenceFixture("services: {promoted: true}\n");
+      const command = `. '${common}'; set_deployment_state_paths '${state}'; validate_compose_contract_paths(){ :; }; ZEDBOT_CANONICAL_PROJECT_DIR='/opt/zedbot/app'; ZEDBOT_CANONICAL_COMPOSE_FILE='/opt/zedbot/app/docker-compose.yml'; bind_current_generation_compose_contract && printf '%s' "$ZEDBOT_CANONICAL_COMPOSE_FILE"`;
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe(path.join(evidence, "docker-compose.yml"));
+    });
+
+    it("falls back to the checkout default when no current.json exists yet (a genuine pre-bootstrap first install)", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-no-current-"));
+      const command = `. '${common}'; set_deployment_state_paths '${dir}'; ZEDBOT_CANONICAL_PROJECT_DIR='/opt/zedbot/app'; ZEDBOT_CANONICAL_COMPOSE_FILE='/opt/zedbot/app/docker-compose.yml'; bind_current_generation_compose_contract && printf '%s' "$ZEDBOT_CANONICAL_COMPOSE_FILE"`;
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe("/opt/zedbot/app/docker-compose.yml");
+    });
+
+    it("hard mode fails closed and soft mode falls back with a warning on invalid current.json", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-bad-current-"));
+      writeFileSync(path.join(dir, "current.json"), "not-json");
+      chmodSync(path.join(dir, "current.json"), 0o600);
+      const hard = spawnSync("bash", ["-c", `. '${common}'; set_deployment_state_paths '${dir}'; bind_current_generation_compose_contract`], { encoding: "utf8" });
+      expect(hard.status).not.toBe(0);
+      const soft = spawnSync("bash", ["-c", `. '${common}'; set_deployment_state_paths '${dir}'; ZEDBOT_CANONICAL_PROJECT_DIR='/opt/zedbot/app'; ZEDBOT_CANONICAL_COMPOSE_FILE='/opt/zedbot/app/docker-compose.yml'; bind_current_generation_compose_contract --soft && printf '%s' "$ZEDBOT_CANONICAL_COMPOSE_FILE"`], { encoding: "utf8" });
+      expect(soft.status, soft.stderr).toBe(0);
+      expect(soft.stdout).toBe("/opt/zedbot/app/docker-compose.yml");
+    });
+
+    it("zedbot.sh binds the compose contract before every run_compose-touching command", () => {
+      const text = readFileSync(zedbot, "utf8");
+      // Anchored on "\n<indent><label>" (the real case-arm indentation,
+      // which varies between the outer case and nested SUB cases) - a bare
+      // indexOf(label) can false-match prose mentioning the command name,
+      // e.g. usage/restore_help text like "(zedbot start)." or "...or logs):".
+      function caseBody(label: string): string {
+        const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const match = /\n[ ]+/.source + escaped;
+        const start = text.search(new RegExp(match));
+        expect(start, `case label not found: ${label}`).toBeGreaterThan(-1);
+        const nextCase = text.indexOf("\n  ", text.indexOf(";;", start));
+        return text.slice(start, nextCase === -1 ? undefined : nextCase);
+      }
+      for (const label of ["status | ps)", "logs)", "restart)", "start)", "stop)", "shell)"]) {
+        const body = caseBody(label);
+        const bindIndex = body.indexOf("bind_current_generation_compose_contract");
+        const runIndex = body.indexOf("run_compose");
+        expect(bindIndex, `${label} does not bind`).toBeGreaterThan(-1);
+        expect(runIndex, `${label} does not call run_compose`).toBeGreaterThan(-1);
+        expect(bindIndex).toBeLessThan(runIndex);
+      }
+      for (const label of ["deploy-status)", "verify)", "backups)", "health)"]) {
+        expect(caseBody(label).indexOf("bind_current_generation_compose_contract")).toBeGreaterThan(-1);
+      }
+    });
+
+    it("doctor.sh binds the compose contract (soft) before any run_compose-based check", () => {
+      const text = readFileSync(doctor, "utf8");
+      const mainStart = text.indexOf("main() {");
+      const bindIndex = text.indexOf("bind_current_generation_compose_contract --soft", mainStart);
+      const firstCheck = text.indexOf("core_check", mainStart);
+      expect(bindIndex).toBeGreaterThan(mainStart);
+      expect(bindIndex).toBeLessThan(firstCheck);
+    });
+
+    it("backup.sh binds the compose contract before its own pg_dump call", () => {
+      const text = readFileSync(backupScript, "utf8");
+      const bindIndex = text.indexOf("bind_current_generation_compose_contract");
+      const dumpIndex = text.indexOf("pg_dump", bindIndex + 1);
+      expect(bindIndex).toBeGreaterThan(-1);
+      expect(dumpIndex).toBeGreaterThan(bindIndex);
+    });
+
+    it("backup-db.sh binds the compose contract before main() touches postgres", () => {
+      // main() calls compose_service_running/run_compose by name; the
+      // literal pg_dump/run_compose invocations live in helper functions
+      // defined (and hence textually positioned) earlier in the file, so
+      // main()'s own call order - not raw text order across the whole
+      // file - is what determines execution order here.
+      const text = readFileSync(backupDbScript, "utf8");
+      const mainStart = text.indexOf("main() {");
+      const bindIndex = text.indexOf("bind_current_generation_compose_contract", mainStart);
+      const firstMainComposeCall = text.indexOf("compose_service_running", mainStart);
+      expect(bindIndex).toBeGreaterThan(mainStart);
+      expect(firstMainComposeCall).toBeGreaterThan(bindIndex);
+    });
+  });
 });

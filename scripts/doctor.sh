@@ -256,6 +256,7 @@ report_version_row() {
 main() {
   require_root
   load_env_if_exists
+  bind_current_generation_compose_contract --soft
 
   FIX_MODE=0
   local arg

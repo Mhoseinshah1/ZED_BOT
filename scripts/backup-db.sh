@@ -281,6 +281,7 @@ main() {
   app_cd
   load_env_if_exists
   detect_compose_command
+  bind_current_generation_compose_contract || exit 1
 
   # Host directory; the containers see it as ${CONTAINER_BACKUP_DIR}.
   local backup_dir="$ZEDBOT_BACKUP_DIR"

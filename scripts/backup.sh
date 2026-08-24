@@ -34,6 +34,7 @@ main() {
   require_root
   app_cd
   load_env
+  bind_current_generation_compose_contract || exit 1
 
   # Host backup location (BACKUP_DIR is the IN-CONTAINER path since the ops
   # phase; relocate host backups via ZEDBOT_BACKUP_DIR). The shared dir is

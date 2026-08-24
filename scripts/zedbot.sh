@@ -411,12 +411,14 @@ case "$CMD" in
     require_root
     app_cd
     detect_compose_command
+    bind_current_generation_compose_contract --soft
     run_compose ps
     ;;
   logs)
     require_root
     app_cd
     detect_compose_command
+    bind_current_generation_compose_contract --soft
     run_compose logs --tail=200 -f "$@"
     ;;
   restart)
@@ -425,6 +427,7 @@ case "$CMD" in
     detect_compose_command
     install_operation_traps
     acquire_deployment_lock
+    bind_current_generation_compose_contract || exit 1
     # `compose restart` never re-reads .env; recreating the containers does.
     run_compose up -d --force-recreate --remove-orphans
     if record_bot_recreation_boundary_after_restart; then restart_boundary_rc=0; else restart_boundary_rc=$?; fi
@@ -440,6 +443,13 @@ case "$CMD" in
     require_root
     app_cd
     detect_compose_command
+    # Participates in the same deployment lock as update/rollback/restart:
+    # once a candidate build retags zedbot-app:latest (before its own
+    # compatibility validation or migrations have run), an unlocked `start`
+    # could recreate services from that unvalidated candidate concurrently.
+    install_operation_traps
+    acquire_deployment_lock
+    bind_current_generation_compose_contract || exit 1
     run_compose up -d
     log_success "All services started."
     ;;
@@ -447,6 +457,9 @@ case "$CMD" in
     require_root
     app_cd
     detect_compose_command
+    install_operation_traps
+    acquire_deployment_lock
+    bind_current_generation_compose_contract || exit 1
     run_compose stop
     log_success "All services stopped."
     ;;
@@ -464,6 +477,7 @@ case "$CMD" in
     app_cd
     detect_compose_command
     load_env_if_exists
+    bind_current_generation_compose_contract --soft
     deploy_status
     ;;
   backup)
@@ -483,6 +497,7 @@ case "$CMD" in
         app_cd
         detect_compose_command
         load_env_if_exists
+        bind_current_generation_compose_contract --soft
         backup_verify "${1:-}"
         ;;
       *)
@@ -499,6 +514,7 @@ case "$CMD" in
         app_cd
         detect_compose_command
         load_env_if_exists
+        bind_current_generation_compose_contract --soft
         repair_backups
         ;;
       *)
@@ -512,6 +528,7 @@ case "$CMD" in
     app_cd
     detect_compose_command
     load_env_if_exists
+    bind_current_generation_compose_contract --soft
     health_summary
     ;;
   doctor)
@@ -521,6 +538,7 @@ case "$CMD" in
     require_root
     app_cd
     detect_compose_command
+    bind_current_generation_compose_contract --soft
     SERVICE="${1:-bot}"
     run_compose exec "$SERVICE" bash 2>/dev/null || run_compose exec "$SERVICE" sh
     ;;
