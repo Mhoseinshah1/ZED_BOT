@@ -79,6 +79,21 @@ describe("Area 11 authoritative rollback status", () => {
   it("reports valid incomplete bootstrap blocked", () => { const f = fixture(); rmSync(f.dir, { recursive: true }); mkdirSync(f.dir, { mode: 0o700 }); write(path.join(f.dir, "bootstrap.json"), { formatVersion: 1, kind: "first-install", phase: "initialized", generation: currentGeneration, sourceSha: "a".repeat(40), sourceTree: "b".repeat(40), operation: "11111111-1111-4111-8111-111111111111" }); const out = parsed(f); expect(out.result.status).toBe(2); expect(out.json.reasonCode).toBe("OPERATION_INCOMPLETE"); });
   it("keeps converted legacy current without real previous unavailable", () => { const f = fixture(false); cpSync(f.current, path.join(f.dir, "legacy-install-v1.json")); write(path.join(f.dir, "bootstrap.json"), { formatVersion: 1, kind: "legacy-upgrade", phase: "promoted", generation: currentGeneration, sourceSha: "a".repeat(40), sourceTree: "b".repeat(40), operation: "11111111-1111-4111-8111-111111111111" }); const out = parsed(f); expect(out.result.status).toBe(2); expect(out.json.reasonCode).toBe("NO_PREVIOUS_GENERATION"); });
   it("evaluates a valid completed legacy conversion normally", () => { const f = fixture(); cpSync(f.current, path.join(f.dir, "legacy-install-v1.json")); write(path.join(f.dir, "bootstrap.json"), { formatVersion: 1, kind: "legacy-upgrade", phase: "promoted", generation: currentGeneration, sourceSha: "a".repeat(40), sourceTree: "b".repeat(40), operation: "11111111-1111-4111-8111-111111111111" }); expect(status(f).status).toBe(0); });
+  // Regression: bootstrap.json/legacy-install-v1.json are permanent
+  // provenance written once at conversion and never updated again, while
+  // current.json's generation advances on every later update. This must
+  // stay available after a later update moved current.json past the
+  // conversion's own (unchanged) generation - not be rejected as mixed
+  // evidence forever.
+  it("evaluates a completed legacy conversion normally after a later update moved current past it", () => {
+    const f = fixture();
+    const legacyGeneration = "20260811T120000Z-cccccccccccc";
+    write(path.join(f.dir, "legacy-install-v1.json"), metadata(f.dir, legacyGeneration, "current"));
+    write(path.join(f.dir, "bootstrap.json"), { formatVersion: 1, kind: "legacy-upgrade", phase: "promoted", generation: legacyGeneration, sourceSha: "a".repeat(40), sourceTree: "b".repeat(40), operation: "11111111-1111-4111-8111-111111111111" });
+    const out = parsed(f);
+    expect(out.result.status, out.result.stderr).toBe(0);
+    expect(out.json.rollbackStatus).toBe("available");
+  });
 
   it.each([["empty", ""], ["truncated", "{"], ["malformed", "not-json"]])("rejects %s current metadata", (_name, value) => { const f = fixture(); write(f.current, value); expect(parsed(f).json.reasonCode).toBe("INVALID_CURRENT_METADATA"); });
   it.each([["empty", ""], ["truncated", "{"], ["malformed", "not-json"]])("rejects %s previous metadata", (_name, value) => { const f = fixture(); write(f.previous, value); expect(parsed(f).json.reasonCode).toBe("INVALID_PREVIOUS_METADATA"); });
@@ -93,6 +108,49 @@ describe("Area 11 authoritative rollback status", () => {
   it("rejects a symlinked state parent", () => { const f = fixture(); const parent = mkdtempSync(path.join(os.tmpdir(), "zedbot-area11-parent-")); const link = path.join(parent, "state"); symlinkSync(f.dir, link); const linked = { dir: link, current: path.join(link, "current.json"), previous: path.join(link, "previous.json"), lock: path.join(link, "deployment.lock") }; expect(status(linked).status).toBe(3); });
   it("detects identity-changing evidence during the bounded read", () => { const f = fixture(); const extra = `rollback_status_read_observer(){ if [ "$1" = '${f.previous}' ]; then cp '${f.previous}' '${f.previous}.new'; chmod 600 '${f.previous}.new'; mv '${f.previous}.new' '${f.previous}'; fi; }`; expect(status(f, extra).status).toBe(3); });
   it("detects disappearing evidence during the bounded read", () => { const f = fixture(); const extra = `rollback_status_read_observer(){ [ "$1" != '${f.previous}' ] || rm -f '${f.previous}'; }`; expect(status(f, extra).status).toBe(3); });
+
+  // Regression: a successful install/update/rollback always writes
+  // bot-recreation.json (record_bot_recreation_boundary), but this allowlist
+  // never accepted it, so every healthy installation permanently reported
+  // PARTIAL_INSTALLATION_EVIDENCE instead of available.
+  it("accepts a genuine bot recreation boundary bound to the current generation", () => {
+    const f = fixture();
+    write(path.join(f.dir, "bot-recreation.json"), {
+      formatVersion: 1, operation: `update:${currentGeneration}`, generation: currentGeneration,
+      containerId: "c".repeat(64), imageId: `sha256:${"4".repeat(64)}`, imageRef: "zedbot-app:latest",
+      project: "zedbot", service: "bot", recreatedAt: 1,
+    });
+    const out = parsed(f);
+    expect(out.result.status, out.result.stderr).toBe(0);
+    expect(out.json.rollbackStatus).toBe("available");
+  });
+  it.each([
+    ["wrong generation", { generation: previousGeneration }],
+    ["bad imageId", { imageId: "sha256:not-hex" }],
+    ["wrong imageRef", { imageRef: "zedbot-app:candidate" }],
+  ])("rejects an invalid bot recreation boundary: %s", (_name, override) => {
+    const f = fixture();
+    write(path.join(f.dir, "bot-recreation.json"), {
+      formatVersion: 1, operation: `update:${currentGeneration}`, generation: currentGeneration,
+      containerId: "c".repeat(64), imageId: `sha256:${"4".repeat(64)}`, imageRef: "zedbot-app:latest",
+      project: "zedbot", service: "bot", recreatedAt: 1, ...override,
+    });
+    const out = parsed(f);
+    expect(out.result.status).toBe(3);
+    expect(out.json.reasonCode).toBe("INVALID_BOT_RECREATION_EVIDENCE");
+  });
+  // Regression: evidence-<generation> directories are never pruned once a
+  // generation ages out of current/previous (persist_migration_declaration_
+  // evidence creates them; nothing deletes them). A retained directory from
+  // an older, no-longer-referenced generation is expected, ordinary state
+  // -not ambiguity- and must not permanently block rollback-status.
+  it("does not treat a retained evidence directory from an aged-out generation as ambiguous", () => {
+    const f = fixture();
+    generationEvidence(f.dir, "20260811T120000Z-cccccccccccc");
+    const out = parsed(f);
+    expect(out.result.status, out.result.stderr).toBe(0);
+    expect(out.json.rollbackStatus).toBe("available");
+  });
 });
 
 describe("Area 11 strict read-only and execution consistency", () => {

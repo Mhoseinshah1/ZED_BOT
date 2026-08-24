@@ -1626,12 +1626,20 @@ rollback_status_observation_identity() {
 }
 
 rollback_status_validate_entry_set() {
-  local entries="$1" current_gen="$2" previous_gen="$3" entry
+  local entries="$1" entry
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$entry" in
-      current.json|previous.json|bootstrap.json|legacy-install-v1.json) ;;
-      "evidence-$current_gen"|"evidence-$previous_gen") ;;
+      current.json|previous.json|bootstrap.json|legacy-install-v1.json|bot-recreation.json) ;;
+      # Generation evidence directories are never pruned when a generation
+      # ages out of current/previous, so a retained evidence-<generation>
+      # from an older promotion is expected, ordinary state, not ambiguity.
+      # Any entry matching the exact generation-directory naming contract is
+      # a known, self-consistent shape this system itself writes
+      # (persist_migration_declaration_evidence); it is not externally
+      # injectable without deployment-directory write access, at which point
+      # this check is not the relevant defense anyway.
+      evidence-*) printf '%s' "$entry" | /usr/bin/grep -Eq '^evidence-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$' || return 1 ;;
       *) return 1 ;;
     esac
   done <<< "$entries"
@@ -1651,8 +1659,12 @@ inspect_rollback_status() {
     rollback_status_safe_file "$ZEDBOT_LEGACY_INSTALLATION" && validate_generation_metadata_core "$ZEDBOT_LEGACY_INSTALLATION" current >/dev/null 2>&1 && validate_generation_owned_evidence_readonly "$ZEDBOT_LEGACY_INSTALLATION" >/dev/null 2>&1 || { rollback_status_emit indeterminate null INVALID_LEGACY_EVIDENCE "Legacy installation evidence is invalid or unsupported." unsafe false false false false false false false false; return 3; }
     if [ ! -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ]; then rollback_status_emit blocked false LEGACY_NOT_CONVERTED "Supported legacy installation has not been converted." supported-legacy false false false false false false false false; return 2; fi
     rollback_status_safe_file "$ZEDBOT_INSTALLATION_BOOTSTRAP" && validate_installation_bootstrap >/dev/null 2>&1 || { rollback_status_emit indeterminate null MIXED_INSTALLATION_EVIDENCE "Canonical and legacy evidence are inconsistent." ambiguous false false false false false false false false; return 3; }
-    [ "$(/usr/bin/jq -r '.kind+":"+.phase' "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = legacy-upgrade:promoted ] &&
-      [ "$(/usr/bin/jq -r .generation "$ZEDBOT_LEGACY_INSTALLATION")" = "$(/usr/bin/jq -r .generation "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" 2>/dev/null)" ] || { rollback_status_emit indeterminate null MIXED_INSTALLATION_EVIDENCE "Canonical and legacy evidence are inconsistent." ambiguous false false false false false false false false; return 3; }
+    # legacy-install-v1.json's generation is permanent provenance, matched
+    # against current.json only once at conversion time
+    # (convert_supported_legacy_installation) - it is never updated on later
+    # updates, so it is not compared against current.json's (ever-advancing)
+    # generation here.
+    [ "$(/usr/bin/jq -r '.kind+":"+.phase' "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = legacy-upgrade:promoted ] || { rollback_status_emit indeterminate null MIXED_INSTALLATION_EVIDENCE "Canonical and legacy evidence are inconsistent." ambiguous false false false false false false false false; return 3; }
   fi
   if [ -e "$ZEDBOT_INSTALLATION_BOOTSTRAP" ] || [ -L "$ZEDBOT_INSTALLATION_BOOTSTRAP" ]; then
     if [ ! -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ]; then rollback_status_safe_file "$ZEDBOT_INSTALLATION_BOOTSTRAP" && validate_installation_bootstrap >/dev/null 2>&1 || { rollback_status_emit indeterminate null INVALID_BOOTSTRAP_EVIDENCE "Bootstrap evidence is invalid or unsafe." unsafe false false false false false false false false; return 3; }; rollback_status_emit blocked false OPERATION_INCOMPLETE "Installation bootstrap is incomplete." recoverable-bootstrap false false false false false false false false; return 2; fi
@@ -1667,11 +1679,20 @@ inspect_rollback_status() {
   if [ ! -e "$ZEDBOT_ROLLBACK_METADATA" ] && [ ! -L "$ZEDBOT_ROLLBACK_METADATA" ]; then rollback_status_emit unavailable false NO_PREVIOUS_GENERATION "No previous known-good generation is recorded." existing-canonical true false false true true true true false "$current_gen" "" "Operational image and database state require fresh locked rollback preflight."; return 2; fi
   rollback_status_safe_file "$ZEDBOT_ROLLBACK_METADATA" && validate_generation_metadata_core "$ZEDBOT_ROLLBACK_METADATA" previous >/dev/null 2>&1 || { rollback_status_emit indeterminate null INVALID_PREVIOUS_METADATA "Previous generation metadata is invalid or unsafe." existing-canonical true true false true false false false false "$current_gen"; return 3; }
   previous_gen="$(/usr/bin/jq -r .generation "$ZEDBOT_ROLLBACK_METADATA")"
-  rollback_status_validate_entry_set "$entries" "$current_gen" "$previous_gen" || { rollback_status_emit indeterminate null PARTIAL_INSTALLATION_EVIDENCE "Installation evidence contains an unsupported or conflicting artifact." ambiguous true true true false false false false false "$current_gen" "$previous_gen"; return 3; }
+  rollback_status_validate_entry_set "$entries" || { rollback_status_emit indeterminate null PARTIAL_INSTALLATION_EVIDENCE "Installation evidence contains an unsupported or conflicting artifact." ambiguous true true true false false false false false "$current_gen" "$previous_gen"; return 3; }
+  if [ -e "$ZEDBOT_BOT_RECREATION_BOUNDARY" ] || [ -L "$ZEDBOT_BOT_RECREATION_BOUNDARY" ]; then
+    rollback_status_safe_file "$ZEDBOT_BOT_RECREATION_BOUNDARY" && validate_bot_recreation_boundary >/dev/null 2>&1 || { rollback_status_emit indeterminate null INVALID_BOT_RECREATION_EVIDENCE "Bot recreation boundary evidence is invalid or unsafe." unsafe true true true false false false false false "$current_gen" "$previous_gen"; return 3; }
+    [ "$(/usr/bin/jq -r .generation "$ZEDBOT_BOT_RECREATION_BOUNDARY")" = "$current_gen" ] || { rollback_status_emit indeterminate null INVALID_BOT_RECREATION_EVIDENCE "Bot recreation boundary does not match the current generation." unsafe true true true false false false false false "$current_gen" "$previous_gen"; return 3; }
+  fi
   if [ -e "$ZEDBOT_INSTALLATION_BOOTSTRAP" ] || [ -L "$ZEDBOT_INSTALLATION_BOOTSTRAP" ]; then
     rollback_status_safe_file "$ZEDBOT_INSTALLATION_BOOTSTRAP" && validate_installation_bootstrap >/dev/null 2>&1 || { rollback_status_emit indeterminate null INVALID_BOOTSTRAP_EVIDENCE "Bootstrap evidence is invalid or unsafe." unsafe true true true false false false false false "$current_gen" "$previous_gen"; return 3; }
     bootstrap_kind="$(/usr/bin/jq -r .kind "$ZEDBOT_INSTALLATION_BOOTSTRAP")"; bootstrap_phase="$(/usr/bin/jq -r .phase "$ZEDBOT_INSTALLATION_BOOTSTRAP")"
-    [ "$bootstrap_phase" = promoted ] && [ "$(/usr/bin/jq -r .generation "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = "$current_gen" ] || { rollback_status_emit blocked false OPERATION_INCOMPLETE "Installation bootstrap or upgrade is incomplete." recoverable-bootstrap true true true false false false false false "$current_gen" "$previous_gen"; return 2; }
+    # bootstrap.json's generation is permanent provenance, matched against
+    # current.json only once at promotion time
+    # (publish_first_install_current) - not compared here, or this would
+    # reject an otherwise healthy installation as soon as a second
+    # generation is promoted.
+    [ "$bootstrap_phase" = promoted ] || { rollback_status_emit blocked false OPERATION_INCOMPLETE "Installation bootstrap or upgrade is incomplete." recoverable-bootstrap true true true false false false false false "$current_gen" "$previous_gen"; return 2; }
     [ "$bootstrap_kind" = first-install ] || [ "$bootstrap_kind" = legacy-upgrade ] || return 3
   fi
   classification="existing-canonical"
