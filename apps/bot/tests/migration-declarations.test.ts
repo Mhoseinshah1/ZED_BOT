@@ -238,6 +238,88 @@ describe("strict format-2 migration declarations", () => {
     expect(spawnSync("bash", ["-c", `. '${rollback}'; validate_metadata`], { env }).status).not.toBe(0);
   });
 
+  // Regression: the first update after a first install promotes that
+  // first-install's current.json - which documents null preDeploySha,
+  // preDeployImageId, retainedImageTag, and an empty preDeployMigrations,
+  // since there is no prior deployment to describe - straight into
+  // previous.json. rollback.sh's own validate_metadata duplicated a second,
+  // stricter schema on top of validate_generation_metadata_core (which
+  // already handles this nullable shape correctly) that unconditionally
+  // required these as non-null, so the very first rollback after the very
+  // first update was rejected outright.
+  function firstInstallDerivedPrevious(generation: string, evidenceDir: string) {
+    return {
+      formatVersion: 2, installationKind: "first-install", lifecycleRole: "previous", generation,
+      sourceTree: "a".repeat(40), preDeploySha: null, preDeployImageId: null,
+      targetDeploySha: "b".repeat(40), targetImageId: `sha256:${"1".repeat(64)}`,
+      retainedImageTag: null, immutableImageTag: `zedbot-app:generation-${generation}`,
+      failedTargetTag: `zedbot-app:failed-${generation}`, capturedAt: "2026-08-14T12:00:00Z",
+      preDeployMigrations: [], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: evidenceDir, composeEvidencePath: path.join(evidenceDir, "docker-compose.yml"),
+      composeEvidenceSha256: "c".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "d".repeat(64), compatibilityDeclarations: [],
+      recreationAttempted: true, healthConfirmed: true, state: "known-good",
+    };
+  }
+
+  it("validate_metadata accepts a first-install-derived previous.json with its documented nulls", () => {
+    const state = mkdtempSync(path.join(os.tmpdir(), "zedbot-first-install-previous-")); chmodSync(state, 0o700);
+    const generation = "20260101T000000Z-aaaaaaaaaaaa";
+    const metadata = path.join(state, "previous.json");
+    writeFileSync(metadata, JSON.stringify(firstInstallDerivedPrevious(generation, path.join(state, `evidence-${generation}`))));
+    chmodSync(metadata, 0o600);
+    const env = { ...process.env, ZEDBOT_BASE_DIR: state, ZEDBOT_DEPLOYMENT_DIR: state, ZEDBOT_ROLLBACK_METADATA: metadata };
+    const result = spawnSync("bash", ["-c", `. '${rollback}'; validate_metadata`], { env, encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("validate_metadata still rejects a normal previous.json that carries those same nulls without installationKind", () => {
+    const state = mkdtempSync(path.join(os.tmpdir(), "zedbot-non-first-install-nulls-")); chmodSync(state, 0o700);
+    const generation = "20260101T000000Z-bbbbbbbbbbbb";
+    const metadata = path.join(state, "previous.json");
+    const payload = firstInstallDerivedPrevious(generation, path.join(state, `evidence-${generation}`));
+    delete (payload as { installationKind?: string }).installationKind;
+    writeFileSync(metadata, JSON.stringify(payload));
+    chmodSync(metadata, 0o600);
+    const env = { ...process.env, ZEDBOT_BASE_DIR: state, ZEDBOT_DEPLOYMENT_DIR: state, ZEDBOT_ROLLBACK_METADATA: metadata };
+    expect(spawnSync("bash", ["-c", `. '${rollback}'; validate_metadata`], { env }).status).not.toBe(0);
+  });
+
+  // Regression: independent of the first-install nullability above,
+  // validate_metadata's compatibilityDeclarations check piped the array
+  // into an `and`-chain - `.compatibilityDeclarations|type=="array" and
+  // all(.compatibilityDeclarations[]; ...)` - which (jq's `|` binds looser
+  // than `and`) redirected every clause after the pipe, not just the first,
+  // to receive the ARRAY itself as ".". `all(.compatibilityDeclarations[];
+  // ...)` then tried to index that array by the string
+  // "compatibilityDeclarations", which jq rejects outright - so
+  // validate_metadata could never actually SUCCEED for ANY well-formed
+  // metadata, empty declarations or not. No prior test exercised
+  // validate_metadata's success path all the way through, so this was
+  // never caught: rollback was completely non-functional.
+  it("validate_metadata accepts a normal previous.json with a non-empty, well-formed compatibilityDeclarations array", () => {
+    const state = mkdtempSync(path.join(os.tmpdir(), "zedbot-normal-previous-")); chmodSync(state, 0o700);
+    const generation = "20260101T000000Z-cccccccccccc";
+    const metadata = path.join(state, "previous.json");
+    const payload = {
+      formatVersion: 2, installationKind: null, lifecycleRole: "previous", generation,
+      sourceTree: "a".repeat(40), preDeploySha: "e".repeat(40), preDeployImageId: `sha256:${"3".repeat(64)}`,
+      targetDeploySha: "b".repeat(40), targetImageId: `sha256:${"1".repeat(64)}`,
+      retainedImageTag: `zedbot-app:rollback-${generation}`, immutableImageTag: `zedbot-app:generation-${generation}`,
+      failedTargetTag: `zedbot-app:failed-${generation}`, capturedAt: "2026-08-14T12:00:00Z",
+      preDeployMigrations: [nameA], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: path.join(state, `evidence-${generation}`), composeEvidencePath: path.join(state, `evidence-${generation}`, "docker-compose.yml"),
+      composeEvidenceSha256: "c".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "d".repeat(64), compatibilityDeclarations: [{ name: nameA, sqlSha256: "f".repeat(64) }],
+      recreationAttempted: true, healthConfirmed: true, state: "known-good",
+    };
+    writeFileSync(metadata, JSON.stringify(payload));
+    chmodSync(metadata, 0o600);
+    const env = { ...process.env, ZEDBOT_BASE_DIR: state, ZEDBOT_DEPLOYMENT_DIR: state, ZEDBOT_ROLLBACK_METADATA: metadata };
+    const result = spawnSync("bash", ["-c", `. '${rollback}'; validate_metadata`], { env, encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+  });
+
   it("suppresses every later mocked mutation after declaration failure", () => {
     const pair = fixture(); writeFileSync(path.join(pair.migrations, nameA, "migration.sql"), "changed by one byte!");
     const record = path.join(pair.dir, "mutations");

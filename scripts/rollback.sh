@@ -41,10 +41,24 @@ validate_metadata() {
     (.lifecycleRole == "previous") and
     (.generation|type=="string" and test("^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$")) and
     (.sourceTree|type=="string" and test("^[a-f0-9]{40}$")) and
-    (.preDeploySha|type=="string" and test("^[a-f0-9]{40}$")) and
     (.targetDeploySha|type=="string" and test("^[a-f0-9]{40}$")) and
-    (.preDeployImageId|type=="string" and test("^sha256:[a-f0-9]{64}$")) and
-    (.retainedImageTag == ("zedbot-app:rollback-" + .generation)) and
+    # A first install has no prior deployment to describe: the first update
+    # after it promotes that first-install current.json straight into
+    # previous.json, still carrying installationKind:"first-install" and the
+    # nulls validate_generation_metadata_core already accepts for it above.
+    # Mirror that same nullable shape here instead of unconditionally
+    # requiring these as non-null strings, or the very first rollback after
+    # the very first update is rejected outright despite the retained
+    # immutable image still being genuinely available.
+    (if .installationKind == "first-install" then
+       .preDeploySha == null and .preDeployImageId == null and .retainedImageTag == null and (.preDeployMigrations|length == 0)
+     else
+       .installationKind == null and
+       (.preDeploySha|type=="string" and test("^[a-f0-9]{40}$")) and
+       (.preDeployImageId|type=="string" and test("^sha256:[a-f0-9]{64}$")) and
+       (.retainedImageTag == ("zedbot-app:rollback-" + .generation)) and
+       (.preDeployMigrations|type=="array" and length>0 and all(test("^[0-9]{14}_[a-z0-9_]+$")))
+     end) and
     (.targetImageId|type=="string" and test("^sha256:[a-f0-9]{64}$")) and
     (.failedTargetTag == ("zedbot-app:failed-" + .generation)) and
     (.declarationFormatVersion == 2) and
@@ -55,14 +69,20 @@ validate_metadata() {
     (.composeProjectName == "zedbot") and
     (.composeApplicationImage == "zedbot-app:latest") and
     (.compatibilityManifestSha256|type=="string" and test("^[a-f0-9]{64}$")) and
-    (.compatibilityDeclarations|type=="array" and
+    # `|` binds looser than `and`: piping .compatibilityDeclarations into an
+    # `and`-chain redirects EVERY clause after the pipe (not just the first)
+    # to receive the array itself as "." - all(.compatibilityDeclarations[];
+    # ...) below would then try to index that array by the string
+    # "compatibilityDeclarations" and jq would abort with a type error for
+    # ANY well-formed metadata, unconditionally. Each clause is parenthesized
+    # separately so "." stays the top-level object throughout.
+    (.compatibilityDeclarations|type=="array") and
       all(.compatibilityDeclarations[];
         type=="object" and keys==["name","sqlSha256"] and
         (.name|type=="string" and test("^[0-9]{14}_[a-z0-9_]+$")) and
         (.sqlSha256|type=="string" and test("^[a-f0-9]{64}$"))) and
       ((.compatibilityDeclarations|map(.name)|length) ==
-       (.compatibilityDeclarations|map(.name)|unique|length))) and
-    (.preDeployMigrations|type=="array" and length>0 and all(test("^[0-9]{14}_[a-z0-9_]+$"))) and
+       (.compatibilityDeclarations|map(.name)|unique|length)) and
     (.recreationAttempted == true) and .healthConfirmed == true and
     (.state == "known-good") and
     (.immutableImageTag|type=="string" and startswith("zedbot-app:generation-"))
