@@ -313,6 +313,23 @@ main() {
   set_update_compose_contract "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Immutable source Compose contract is invalid."; exit 1; }
   validate_compose_application_images || { log_error "Immutable source Compose application images are invalid."; exit 1; }
 
+  # origin/main has not moved past what is already running: there is no new
+  # code to build, recreate, or promote. Bailing out here - before a
+  # candidate generation is ever created - is what keeps this a true no-op.
+  # Continuing on into step 7 would still retag the running image under a
+  # brand-new generation and unconditionally rotate current.json into
+  # previous.json (promote_healthy_candidate -> write_lifecycle_role), which
+  # would overwrite the real previous release's rollback evidence with a
+  # duplicate of the generation that is already running - making that real
+  # prior release permanently unreachable via `zedbot rollback` even though
+  # nothing was actually deployed. A drift repair with no new code belongs
+  # to `zedbot restart`, not `zedbot update`.
+  if [ "$target_deploy_sha" = "$pre_deploy_sha" ]; then
+    log_success "Already up to date at ${target_deploy_sha:0:10} - no new commits on origin/main to deploy."
+    log_info "Rollback history was left untouched. To recreate the running containers without deploying new code, use: zedbot restart"
+    exit 0
+  fi
+
   log_info "[5/14] Migrating the .env to the current layout (append-only) ..."
   require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before post-fetch mutation."; exit 1; }
   migrate_legacy_env

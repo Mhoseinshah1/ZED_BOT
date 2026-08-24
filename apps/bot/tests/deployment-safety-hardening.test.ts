@@ -470,6 +470,45 @@ fi
     expect(confirmedIndex).toBeLessThan(recreateIndex);
   });
 
+  // Regression: when origin/main is already the SHA recorded as running
+  // (current.json's own targetDeploySha, captured as pre_deploy_sha), a
+  // routine repeated `zedbot update` still built a new candidate,
+  // retagged the running image under a fresh generation, and promoted it -
+  // which unconditionally overwrites previous.json with a duplicate of the
+  // generation that is already current (promote_healthy_candidate ->
+  // write_lifecycle_role), permanently losing the real prior release as a
+  // rollback target even though nothing was actually deployed. The guard
+  // must fire (and exit successfully) before ANY candidate generation
+  // state is created, and must NOT fire when the source genuinely changed.
+  it("update.sh finishes without rotating generation metadata when origin/main has not moved past what is already running", () => {
+    const guardStart = update.indexOf('if [ "$target_deploy_sha" = "$pre_deploy_sha" ]; then');
+    expect(guardStart).toBeGreaterThan(-1);
+    const guardEnd = update.indexOf('\n\n  log_info "[5/14]', guardStart);
+    expect(guardEnd).toBeGreaterThan(guardStart);
+    const guard = update.slice(guardStart, guardEnd);
+
+    const rotationStart = update.indexOf('CANDIDATE_METADATA="$ZEDBOT_DEPLOYMENT_DIR/candidate-');
+    expect(rotationStart).toBeGreaterThan(guardStart);
+
+    const run = (targetSha: string, preSha: string) =>
+      spawnSync(
+        "bash",
+        ["-c", `target_deploy_sha='${targetSha}'; pre_deploy_sha='${preSha}'; log_success(){ printf 'SUCCESS:%s\\n' "$*"; }; log_info(){ printf 'INFO:%s\\n' "$*"; }; ${guard}\necho REACHED_STEP_5`],
+        { encoding: "utf8" },
+      );
+
+    const sha = "a".repeat(40);
+    const noop = run(sha, sha);
+    expect(noop.status).toBe(0);
+    expect(noop.stdout).toContain("SUCCESS:Already up to date");
+    expect(noop.stdout).not.toContain("REACHED_STEP_5");
+
+    const changed = run(sha, "b".repeat(40));
+    expect(changed.status).toBe(0);
+    expect(changed.stdout).toContain("REACHED_STEP_5");
+    expect(changed.stdout).not.toContain("SUCCESS:Already up to date");
+  });
+
   it("update_owned_cleanup restores the reference only when recreation was never attempted", () => {
     const body = update.slice(update.indexOf("update_owned_cleanup() {"), update.indexOf("\n# Finds the newest database backup"));
     const trace = path.join(os.tmpdir(), `zedbot-cleanup-trace-${process.pid}-${Date.now()}`);
