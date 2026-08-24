@@ -787,6 +787,47 @@ validate_existing_installation_auxiliary() {
   shopt -u nullglob dotglob
 }
 
+# Every non-lock entry beside an incomplete bootstrap.json must be an
+# artifact of THAT bootstrap's own generation. Anything else - a foreign
+# generation, a stale forensic temporary, legacy or canonical evidence -
+# still makes the installation identity ambiguous and fails closed exactly
+# as before. This widens the old two-file-only allowlist so an interrupted
+# first install's own candidate/evidence/bot-recreation artifacts (left
+# behind by a failure during migrations or application readiness, not just
+# dependency-readiness or the image build) are still recognized as
+# recoverable-bootstrap rather than rejected outright.
+installation_bootstrap_owns_entries() {
+  local entries="$1" kind gen entry
+  kind="$(/usr/bin/jq -r .kind "$ZEDBOT_INSTALLATION_BOOTSTRAP")" || return 1
+  gen="$(/usr/bin/jq -r .generation "$ZEDBOT_INSTALLATION_BOOTSTRAP")" || return 1
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    [ "$entry" = bootstrap.json ] && continue
+    # legacy-upgrade bootstraps never produce candidate/evidence artifacts;
+    # keep their (narrower) accepted set exactly as it was.
+    [ "$kind" = first-install ] || { log_error "Bootstrap metadata conflicts with other installation evidence."; return 1; }
+    case "$entry" in
+      operation-state.json)
+        validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 1
+        [ "$(/usr/bin/jq -r '.kind+":"+.generation' "$ZEDBOT_OPERATION_STATE")" = "install:$gen" ] || {
+          log_error "Bootstrap metadata conflicts with other installation evidence."; return 1;
+        } ;;
+      "candidate-${gen}.json")
+        validate_generation_metadata_core "$ZEDBOT_DEPLOYMENT_DIR/$entry" candidate || return 1 ;;
+      "evidence-${gen}")
+        [ -d "$ZEDBOT_DEPLOYMENT_DIR/$entry" ] && [ ! -L "$ZEDBOT_DEPLOYMENT_DIR/$entry" ] || {
+          log_error "Bootstrap metadata conflicts with other installation evidence."; return 1;
+        } ;;
+      bot-recreation.json)
+        validate_bot_recreation_boundary || return 1
+        [ "$(/usr/bin/jq -r .generation "$ZEDBOT_BOT_RECREATION_BOUNDARY")" = "$gen" ] || {
+          log_error "Bootstrap metadata conflicts with other installation evidence."; return 1;
+        } ;;
+      *) log_error "Bootstrap metadata conflicts with other installation evidence."; return 1 ;;
+    esac
+  done <<< "$entries"
+}
+
 classify_installation() {
   local intent="${1:-observe}" entries
   validate_deployment_path_contract || return 1
@@ -825,8 +866,7 @@ classify_installation() {
   fi
   if [ -e "$ZEDBOT_INSTALLATION_BOOTSTRAP" ] || [ -L "$ZEDBOT_INSTALLATION_BOOTSTRAP" ]; then
     validate_installation_bootstrap || return 1
-    case "$entries" in bootstrap.json|$'bootstrap.json\noperation-state.json'|$'operation-state.json\nbootstrap.json') ;;
-      *) log_error "Bootstrap metadata conflicts with other installation evidence."; return 1;; esac
+    installation_bootstrap_owns_entries "$entries" || return 1
     printf '%s\n' recoverable-bootstrap; return 0
   fi
   if [ -e "$ZEDBOT_LEGACY_INSTALLATION" ] || [ -L "$ZEDBOT_LEGACY_INSTALLATION" ]; then
@@ -929,6 +969,65 @@ finalize_promoted_operation_state() {
   [ "$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE" 2>/dev/null)" = promoted ] || return 0
   remove_canonical_state_file "$ZEDBOT_OPERATION_STATE" || log_warn "Could not clear the completed operation-state marker; rerun 'zedbot doctor' if rollback-status later reports an incomplete operation."
   return 0
+}
+
+# evidence-<generation> directories are chmod -R a-w by
+# persist_migration_declaration_evidence, so write permission must be
+# restored before deletion. Mirrors remove_canonical_state_file's lock +
+# identity discipline, scoped to the one directory shape this system ever
+# creates directly under the deployment-state directory.
+remove_generation_evidence_directory() {
+  local dir="$1"
+  require_deployment_lock || return 1
+  [ -e "$dir" ] || [ -L "$dir" ] || return 0
+  [ "${dir%/*}" = "$ZEDBOT_DEPLOYMENT_DIR" ] || return 1
+  printf '%s' "${dir##*/}" | /usr/bin/grep -Eq '^evidence-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$' || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  chmod -R u+w -- "$dir" || return 1
+  find -P "$dir" -depth -delete
+}
+
+# A first-install bootstrap that never reached "promoted" is a dead identity,
+# not a resumable one: bootstrap-deployment.sh mints a fresh timestamp-based
+# generation on every invocation, and publish_first_install_current requires
+# bootstrap.generation == candidate.generation, so the leftover generation
+# can never be completed by any rerun. Nothing downstream is preserved
+# either - prepare_exact_origin_main re-fetches, build_verified_source_
+# snapshot rebuilds, and migrate deploy/seed are idempotent - so "reset and
+# start over" is the only meaningful recovery, and it risks nothing: no
+# current.json exists yet, so there is no canonical installation and no
+# rollback target to protect. require_deployment_lock is what makes the
+# leftover provably ABANDONED rather than concurrent (acquire_deployment_
+# lock is a non-blocking flock that fails loudly if a live process holds
+# it, and operation_cleanup's EXIT trap always releases it on exit) - the
+# same argument initialize_operation_state relies on for its own abandoned-
+# state recovery.
+reset_abandoned_first_install_bootstrap() {
+  local gen phase
+  require_deployment_lock || return 1
+  { [ -e "$ZEDBOT_INSTALLATION_BOOTSTRAP" ] || [ -L "$ZEDBOT_INSTALLATION_BOOTSTRAP" ]; } || return 0
+  [ "$(classify_installation first-install)" = recoverable-bootstrap ] || return 0
+  [ "$(/usr/bin/jq -r .kind "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = first-install ] || return 0
+  gen="$(/usr/bin/jq -r .generation "$ZEDBOT_INSTALLATION_BOOTSTRAP")"
+  phase="$(/usr/bin/jq -r .phase "$ZEDBOT_INSTALLATION_BOOTSTRAP")"
+  log_warn "Clearing an abandoned first-install bootstrap (generation ${gen}, phase ${phase}) left by a previous failed attempt; this installation restarts from a clean state."
+  # Order matters: bootstrap.json is the identity anchor that makes this
+  # whole set classifiable at all. Removing it LAST means a crash mid-reset
+  # leaves a strictly smaller set that still classifies as recoverable-
+  # bootstrap, so the next rerun simply finishes the job. Removing it first
+  # would orphan the rest into a permanently unclassifiable state.
+  if [ -e "$ZEDBOT_BOT_RECREATION_BOUNDARY" ] || [ -L "$ZEDBOT_BOT_RECREATION_BOUNDARY" ]; then
+    remove_canonical_state_file "$ZEDBOT_BOT_RECREATION_BOUNDARY" || return 1
+  fi
+  if [ -e "$ZEDBOT_DEPLOYMENT_DIR/candidate-${gen}.json" ] || [ -L "$ZEDBOT_DEPLOYMENT_DIR/candidate-${gen}.json" ]; then
+    remove_canonical_state_file "$ZEDBOT_DEPLOYMENT_DIR/candidate-${gen}.json" || return 1
+  fi
+  remove_generation_evidence_directory "$ZEDBOT_DEPLOYMENT_DIR/evidence-${gen}" || return 1
+  if [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; then
+    remove_canonical_state_file "$ZEDBOT_OPERATION_STATE" || return 1
+  fi
+  remove_canonical_state_file "$ZEDBOT_INSTALLATION_BOOTSTRAP" || return 1
+  [ "$(classify_installation first-install)" = genuine-first-install ]
 }
 
 # update and rollback are mutually exclusive. An unlocked, valid persistent

@@ -526,7 +526,13 @@ validate_first_install_intent() {
     log_error "Existing, partial, legacy, or ambiguous deployment state forbids first-install mutation. Use zedbot update or the documented legacy reconciliation path."
     return 1
   }
-  [ "$classification" = genuine-first-install ] || { log_error "Installer cannot replace installation class ${classification}."; return 1; }
+  case "$classification" in
+    genuine-first-install) ;;
+    recoverable-bootstrap)
+      log_warn "A previous first install did not complete. This run discards that incomplete attempt and installs from scratch."
+      log_warn "No canonical installation exists yet, so nothing known-good is at risk." ;;
+    *) log_error "Installer cannot replace installation class ${classification}."; return 1 ;;
+  esac
 }
 
 # Runs validate_first_install_intent BEFORE this installer touches anything

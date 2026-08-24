@@ -56,8 +56,8 @@ describe("area 10 locked atomic bootstrap and conversion", () => {
     expect(body.indexOf("convert_supported_legacy_installation")).toBeGreaterThan(readiness);
   });
 
-  it("executes the complete first-install orchestrator through mandatory mocked gates", () => { const dir = fixture(); const snapshot = fixture(); const trace = path.join(dir, "trace"); const body = `. '${bootstrapScript}'; set_deployment_state_paths '${dir}'; require_root(){ :; }; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; app_cd(){ :; }; load_env_if_exists(){ :; }; reset_compose_fixed_identity(){ :; }; detect_compose_command(){ :; }; acquire_deployment_lock(){ ZEDBOT_DEPLOYMENT_LOCK_HELD=1; }; classify_installation(){ echo genuine-first-install; }; prepare_exact_origin_main(){ echo '${sha} ${tree} ${snapshot}'; }; verify_source_snapshot(){ :; }; register_source_snapshot(){ :; }; set_update_compose_contract(){ :; }; validate_compose_application_images(){ echo compose >> '${trace}'; }; validate_migration_declaration_pair(){ MIGRATION_MANIFEST_SHA256='${"d".repeat(64)}'; MIGRATION_DECLARATIONS_JSON='[]'; echo declarations >> '${trace}'; }; begin_installation_bootstrap(){ echo bootstrap >> '${trace}'; }; initialize_operation_state(){ echo state-init >> '${trace}'; }; validate_dependencies_healthy(){ echo dependencies >> '${trace}'; }; advance_operation_state(){ echo "state:$1:$2" >> '${trace}'; }; require_source_integrity(){ echo source >> '${trace}'; }; build_verified_source_snapshot(){ echo build >> '${trace}'; }; run_clean_docker(){ echo 'sha256:${"2".repeat(64)}'; }; persist_migration_declaration_evidence(){ mkdir -p "$2"; cp '${path.join(root, "docker-compose.yml")}' "$2/docker-compose.yml"; }; operation_mktemp(){ mktemp "$1"; }; atomic_write_metadata(){ cp "$1" "$2"; chmod 600 "$2"; }; validate_generation_metadata_core(){ :; }; validate_generation_owned_evidence(){ :; }; advance_installation_bootstrap(){ echo "bootstrap:$1:$2" >> '${trace}'; }; run_compose(){ echo "compose-cmd:$*" >> '${trace}'; }; recreate_application_services(){ echo recreate >> '${trace}'; }; verify_application_recreation_set(){ echo recreate-verified >> '${trace}'; }; record_bot_recreation_boundary(){ echo bot-boundary >> '${trace}'; }; rewrite_generation_state(){ echo "candidate:$2" >> '${trace}'; }; validate_running_application(){ echo generic-and-bot-ready >> '${trace}'; }; publish_first_install_current(){ echo publish-current >> '${trace}'; }; record_deployed_sha(){ echo record-sha >> '${trace}'; }; log_success(){ :; }; main; cat '${trace}'`;
-    const result = spawnSync("bash", ["-c", body], { encoding: "utf8" }); expect(result.status, result.stderr).toBe(0); const traceText = result.stdout; for (const gate of ["compose", "declarations", "bootstrap", "dependencies", "build", "compose-cmd:run --rm --no-deps api", "compose-cmd:run --rm --no-deps api node packages/database/dist/seed.js", "recreate", "recreate-verified", "bot-boundary", "generic-and-bot-ready", "publish-current"]) expect(traceText).toContain(gate); expect(traceText.indexOf("recreate")).toBeLessThan(traceText.indexOf("generic-and-bot-ready")); expect(traceText.indexOf("generic-and-bot-ready")).toBeLessThan(traceText.indexOf("publish-current"));
+  it("executes the complete first-install orchestrator through mandatory mocked gates", () => { const dir = fixture(); const snapshot = fixture(); const trace = path.join(dir, "trace"); const body = `. '${bootstrapScript}'; set_deployment_state_paths '${dir}'; require_root(){ :; }; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; app_cd(){ :; }; load_env_if_exists(){ :; }; reset_compose_fixed_identity(){ :; }; detect_compose_command(){ :; }; acquire_deployment_lock(){ ZEDBOT_DEPLOYMENT_LOCK_HELD=1; }; reset_abandoned_first_install_bootstrap(){ echo reset-check >> '${trace}'; }; classify_installation(){ echo genuine-first-install; }; prepare_exact_origin_main(){ echo '${sha} ${tree} ${snapshot}'; }; verify_source_snapshot(){ :; }; register_source_snapshot(){ :; }; set_update_compose_contract(){ :; }; validate_compose_application_images(){ echo compose >> '${trace}'; }; validate_migration_declaration_pair(){ MIGRATION_MANIFEST_SHA256='${"d".repeat(64)}'; MIGRATION_DECLARATIONS_JSON='[]'; echo declarations >> '${trace}'; }; begin_installation_bootstrap(){ echo bootstrap >> '${trace}'; }; initialize_operation_state(){ echo state-init >> '${trace}'; }; validate_dependencies_healthy(){ echo dependencies >> '${trace}'; }; advance_operation_state(){ echo "state:$1:$2" >> '${trace}'; }; require_source_integrity(){ echo source >> '${trace}'; }; build_verified_source_snapshot(){ echo build >> '${trace}'; }; run_clean_docker(){ echo 'sha256:${"2".repeat(64)}'; }; persist_migration_declaration_evidence(){ mkdir -p "$2"; cp '${path.join(root, "docker-compose.yml")}' "$2/docker-compose.yml"; }; operation_mktemp(){ mktemp "$1"; }; atomic_write_metadata(){ cp "$1" "$2"; chmod 600 "$2"; }; validate_generation_metadata_core(){ :; }; validate_generation_owned_evidence(){ :; }; advance_installation_bootstrap(){ echo "bootstrap:$1:$2" >> '${trace}'; }; run_compose(){ echo "compose-cmd:$*" >> '${trace}'; }; recreate_application_services(){ echo recreate >> '${trace}'; }; verify_application_recreation_set(){ echo recreate-verified >> '${trace}'; }; record_bot_recreation_boundary(){ echo bot-boundary >> '${trace}'; }; rewrite_generation_state(){ echo "candidate:$2" >> '${trace}'; }; validate_running_application(){ echo generic-and-bot-ready >> '${trace}'; }; publish_first_install_current(){ echo publish-current >> '${trace}'; }; record_deployed_sha(){ echo record-sha >> '${trace}'; }; log_success(){ :; }; main; cat '${trace}'`;
+    const result = spawnSync("bash", ["-c", body], { encoding: "utf8" }); expect(result.status, result.stderr).toBe(0); const traceText = result.stdout; for (const gate of ["reset-check", "compose", "declarations", "bootstrap", "dependencies", "build", "compose-cmd:run --rm --no-deps api", "compose-cmd:run --rm --no-deps api node packages/database/dist/seed.js", "recreate", "recreate-verified", "bot-boundary", "generic-and-bot-ready", "publish-current"]) expect(traceText).toContain(gate); expect(traceText.indexOf("reset-check")).toBeLessThan(traceText.indexOf("bootstrap")); expect(traceText.indexOf("recreate")).toBeLessThan(traceText.indexOf("generic-and-bot-ready")); expect(traceText.indexOf("generic-and-bot-ready")).toBeLessThan(traceText.indexOf("publish-current"));
     // Regression: the first-install path used to apply migrations but never
     // seed baseline data (OWNER admins from ADMIN_TELEGRAM_IDS, default
     // settings), unlike the legacy installer path it replaced (migrate.sh).
@@ -280,4 +280,139 @@ esac
   it("retry rejects changed bootstrap-bound source identity", () => { const dir = fixture(); const result = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; test "$(jq -r .sourceSha "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = '${"f".repeat(40)}'`, true); expect(result.status).not.toBe(0); });
   it("temporary files, image tags and containers cannot create rollback eligibility", () => { const dir = fixture(); write(path.join(dir, ".image-tag"), "zedbot-app:latest"); expect(shell(dir, "classify_installation first-install").status).not.toBe(0); expect(existsSync(path.join(dir, "previous.json"))).toBe(false); });
   it("preserves legacy forensic evidence during failed conversion cleanup", () => { const dir = fixture(); const legacy = path.join(dir, "legacy-install-v1.json"); write(legacy, metadata()); const before = readFileSync(legacy, "utf8"); shell(dir, `begin_installation_bootstrap legacy-upgrade '${generation}' '${sha}' '${tree}' '${operation}'; ZEDBOT_OPERATION_INTERRUPTED=1; convert_supported_legacy_installation`, true); expect(readFileSync(legacy, "utf8")).toBe(before); });
+});
+
+// Regression: a first-install bootstrap interrupted anywhere after
+// begin_installation_bootstrap (dependency readiness, the image build,
+// migrations, or application readiness) left bootstrap.json and its
+// generation-owned artifacts behind. classify_installation's recoverable-
+// bootstrap check only ever accepted the narrow bootstrap.json[+operation-
+// state.json] shape, so every later artifact (candidate-<gen>.json,
+// evidence-<gen>/, bot-recreation.json) made classification fail outright -
+// the installer rejected every rerun despite its own error handler telling
+// the operator to retry, and `zedbot update` rejected it too since no
+// current.json exists yet.
+describe("area 10 interrupted first-install resume and reset", () => {
+  const bootstrapPhase = (phase: string) => `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; ${phase !== "initialized" ? "advance_installation_bootstrap initialized canonical-published;" : ""} ${phase === "health-confirmed" ? "advance_installation_bootstrap canonical-published health-confirmed;" : ""}`;
+  function abandonedFirstInstall(dir: string) {
+    const r = shell(dir, `${bootstrapPhase("canonical-published")} initialize_operation_state install '${generation}'`, true);
+    expect(r.status, r.stderr).toBe(0);
+    write(path.join(dir, `candidate-${generation}.json`), metadata("candidate"));
+    mkdirSync(path.join(dir, `evidence-${generation}`));
+    write(path.join(dir, "bot-recreation.json"), { formatVersion: 1, operation: `install:${generation}`, generation, containerId: "c".repeat(64), imageId: `sha256:${"2".repeat(64)}`, imageRef: "zedbot-app:latest", project: "zedbot", service: "bot", recreatedAt: 0 });
+  }
+
+  it("still classifies bootstrap.json alone, and with operation-state.json, as recoverable-bootstrap", () => {
+    const dir = fixture(); expect(shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'`, true).status).toBe(0);
+    expect(shell(dir, "classify_installation first-install").stdout.trim()).toBe("recoverable-bootstrap");
+    const dir2 = fixture(); expect(shell(dir2, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; initialize_operation_state install '${generation}'`, true).status).toBe(0);
+    expect(shell(dir2, "classify_installation first-install").stdout.trim()).toBe("recoverable-bootstrap");
+  });
+
+  it.each(["initialized", "canonical-published", "health-confirmed"])("classifies the full abandoned artifact set at phase %s as recoverable-bootstrap", (phase) => {
+    const dir = fixture();
+    const r = shell(dir, `${bootstrapPhase(phase)} initialize_operation_state install '${generation}'`, true);
+    expect(r.status, r.stderr).toBe(0);
+    write(path.join(dir, `candidate-${generation}.json`), metadata("candidate"));
+    mkdirSync(path.join(dir, `evidence-${generation}`));
+    write(path.join(dir, "bot-recreation.json"), { formatVersion: 1, operation: `install:${generation}`, generation, containerId: "c".repeat(64), imageId: `sha256:${"2".repeat(64)}`, imageRef: "zedbot-app:latest", project: "zedbot", service: "bot", recreatedAt: 0 });
+    expect(shell(dir, "classify_installation first-install").stdout.trim()).toBe("recoverable-bootstrap");
+  });
+
+  it.each([
+    ["a foreign-generation candidate", (dir: string) => write(path.join(dir, "candidate-20260814T120000Z-eeeeeeeeeeee.json"), metadata("candidate"))],
+    ["a foreign-generation evidence directory", (dir: string) => mkdirSync(path.join(dir, "evidence-20260814T120000Z-eeeeeeeeeeee"))],
+    ["a stale forensic temporary", (dir: string) => write(path.join(dir, ".bootstrap.AAAAAAAA"), "forensic")],
+    ["a bot-recreation boundary for a different generation", (dir: string) => write(path.join(dir, "bot-recreation.json"), { formatVersion: 1, operation: `install:20260814T120000Z-eeeeeeeeeeee`, generation: "20260814T120000Z-eeeeeeeeeeee", containerId: "c".repeat(64), imageId: `sha256:${"2".repeat(64)}`, imageRef: "zedbot-app:latest", project: "zedbot", service: "bot", recreatedAt: 0 })],
+    ["an unrelated legacy record", (dir: string) => write(path.join(dir, "legacy-install-v1.json"), metadata())],
+  ])("still fails closed with %s alongside an abandoned bootstrap", (_label, plant) => {
+    const dir = fixture();
+    const r = shell(dir, `${bootstrapPhase("canonical-published")}`, true);
+    expect(r.status, r.stderr).toBe(0);
+    plant(dir);
+    expect(shell(dir, "classify_installation first-install").status).not.toBe(0);
+  });
+
+  it("reset_abandoned_first_install_bootstrap restores a genuinely clean first-install state", () => {
+    const dir = fixture(); abandonedFirstInstall(dir);
+    const result = shell(dir, "reset_abandoned_first_install_bootstrap; classify_installation first-install", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("genuine-first-install");
+    for (const name of ["bootstrap.json", "operation-state.json", `candidate-${generation}.json`, `evidence-${generation}`, "bot-recreation.json"]) {
+      expect(existsSync(path.join(dir, name))).toBe(false);
+    }
+  });
+
+  it("reset_abandoned_first_install_bootstrap requires the deployment lock", () => {
+    const dir = fixture(); abandonedFirstInstall(dir);
+    const result = shell(dir, "reset_abandoned_first_install_bootstrap");
+    expect(result.status).not.toBe(0);
+    expect(existsSync(path.join(dir, "bootstrap.json"))).toBe(true);
+  });
+
+  it("reset_abandoned_first_install_bootstrap is a no-op on an ambiguous set, leaving the explicit classify check to reject it", () => {
+    // reset_abandoned_first_install_bootstrap only acts when classification is
+    // EXACTLY recoverable-bootstrap; for any other outcome (including an
+    // ambiguous one) it is a documented no-op and returns 0, deferring to the
+    // caller's own subsequent classify_installation check - exactly how
+    // bootstrap-deployment.sh's main() actually chains the two calls.
+    const dir = fixture();
+    const r = shell(dir, `${bootstrapPhase("canonical-published")}`, true);
+    expect(r.status, r.stderr).toBe(0);
+    write(path.join(dir, "candidate-20260814T120000Z-eeeeeeeeeeee.json"), metadata("candidate"));
+    const resetOnly = shell(dir, "reset_abandoned_first_install_bootstrap", true);
+    expect(resetOnly.status, resetOnly.stderr).toBe(0);
+    expect(existsSync(path.join(dir, "bootstrap.json"))).toBe(true);
+    expect(existsSync(path.join(dir, "candidate-20260814T120000Z-eeeeeeeeeeee.json"))).toBe(true);
+    const combined = shell(dir, "reset_abandoned_first_install_bootstrap || exit 1; classify_installation first-install", true);
+    expect(combined.status).not.toBe(0);
+    expect(existsSync(path.join(dir, "bootstrap.json"))).toBe(true);
+    expect(existsSync(path.join(dir, "candidate-20260814T120000Z-eeeeeeeeeeee.json"))).toBe(true);
+  });
+
+  it("reset_abandoned_first_install_bootstrap is a no-op with no bootstrap.json, and with an already-genuine state", () => {
+    const dir = fixture();
+    expect(shell(dir, "reset_abandoned_first_install_bootstrap", true).status).toBe(0);
+  });
+
+  it("write-protected evidence (chmod -R a-w, as persist_migration_declaration_evidence leaves it) is still removable", () => {
+    const dir = fixture(); abandonedFirstInstall(dir);
+    chmodSync(path.join(dir, `evidence-${generation}`), 0o500);
+    const result = shell(dir, "reset_abandoned_first_install_bootstrap", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(path.join(dir, `evidence-${generation}`))).toBe(false);
+  });
+
+  it("install.sh's pre-mutation guard accepts recoverable-bootstrap and still rejects an existing canonical installation", () => {
+    // validate_first_install_intent classifies via a NESTED `bash -c` that
+    // sources "${APP_DIR}/scripts/lib/common.sh" fresh - a function override
+    // in the outer test shell does not propagate into it. Stub that sourced
+    // file itself instead, exactly as install.sh expects to find it.
+    const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    const body = text.slice(text.indexOf("validate_first_install_intent() {"), text.indexOf("\nmain() {"));
+    function run(classification: string) {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-first-install-intent-"));
+      mkdirSync(path.join(dir, "app/scripts/lib"), { recursive: true });
+      writeFileSync(path.join(dir, "app/scripts/lib/common.sh"), `classify_installation(){ echo ${classification}; }\nset_deployment_state_paths(){ :; }\n`);
+      return spawnSync("bash", ["-c", `APP_DIR='${dir}/app'; ZEDBOT_BASE_DIR='${dir}'; log_warn(){ :; }; log_error(){ :; }; ${body}\nvalidate_first_install_intent`], { encoding: "utf8" });
+    }
+    const recoverable = run("recoverable-bootstrap");
+    expect(recoverable.status, recoverable.stderr).toBe(0);
+    const canonical = run("existing-canonical");
+    expect(canonical.status).not.toBe(0);
+  });
+
+  it("update.sh names the remedy for a recoverable-bootstrap installation", () => {
+    const text = readFileSync(path.join(root, "scripts/update.sh"), "utf8");
+    expect(text).toContain("recoverable-bootstrap");
+    expect(text).toContain("Re-run the installer to discard the incomplete attempt");
+  });
+
+  it("bootstrap-deployment.sh resets an abandoned bootstrap before classifying", () => {
+    const text = readFileSync(bootstrapScript, "utf8");
+    const resetIndex = text.indexOf("reset_abandoned_first_install_bootstrap");
+    expect(resetIndex).toBeGreaterThan(-1);
+    expect(resetIndex).toBeGreaterThan(text.indexOf("acquire_deployment_lock"));
+    expect(resetIndex).toBeLessThan(text.indexOf('[ "$(classify_installation first-install)"'));
+  });
 });

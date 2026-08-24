@@ -22,6 +22,14 @@ main() {
   ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
   detect_compose_command
   acquire_deployment_lock
+  # An ordinary transient failure during a previous first-install attempt
+  # (dependency readiness, the image build, migrations, or application
+  # readiness) leaves bootstrap.json and its generation-owned artifacts
+  # behind. That generation can never be completed by a rerun (a fresh
+  # timestamp-based generation is minted below), so clear it before
+  # classifying - see reset_abandoned_first_install_bootstrap's own comment
+  # for why this is safe.
+  reset_abandoned_first_install_bootstrap || return 1
   [ "$(classify_installation first-install)" = genuine-first-install ] || { log_error "First-install bootstrap requires an empty canonical state identity."; return 1; }
 
   snapshot_result="$(prepare_exact_origin_main)" || return 1

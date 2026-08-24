@@ -255,6 +255,8 @@ main() {
   }
   [ "$installation_class" = existing-canonical ] || {
     log_error "Update requires an existing canonical installation; found ${installation_class}."
+    [ "$installation_class" != recoverable-bootstrap ] ||
+      log_error "A previous first install never completed. Re-run the installer to discard the incomplete attempt and install from scratch."
     exit 1
   }
   recover_metadata_transition
