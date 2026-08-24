@@ -72,8 +72,20 @@ export function evaluateUpdateCompatibility(
     if (!target.applied.includes(declaration.name)) continue;
     const recorded = target.appliedChecksums[declaration.name];
     if (recorded === undefined) return { ok: false, newlyPending: [], unsafe: [], blocker: `checksum-missing:${declaration.name}` };
-    const accepted = HISTORICAL_CHECKSUM_ALLOWLIST.get(declaration.name) ?? new Set([declaration.sqlSha256]);
-    if (!accepted.has(recorded)) return { ok: false, newlyPending: [], unsafe: [], blocker: `checksum-mismatch:${declaration.name}` };
+    const historical = HISTORICAL_CHECKSUM_ALLOWLIST.get(declaration.name);
+    if (historical === undefined) {
+      if (recorded !== declaration.sqlSha256) return { ok: false, newlyPending: [], unsafe: [], blocker: `checksum-mismatch:${declaration.name}` };
+      continue;
+    }
+    // The manifest's own declared checksum must itself be one of the
+    // empirically verified historical variants - otherwise an edited or
+    // corrupted manifest could declare an unverified checksum for this
+    // name, and a database that happens to have applied one of the FOUR
+    // allowlisted variants would be accepted regardless of what the
+    // manifest actually claims, silently ignoring a manifest that no
+    // longer describes a verified byte form at all.
+    if (!historical.has(declaration.sqlSha256)) return { ok: false, newlyPending: [], unsafe: [], blocker: `checksum-declaration-unverified:${declaration.name}` };
+    if (!historical.has(recorded)) return { ok: false, newlyPending: [], unsafe: [], blocker: `checksum-mismatch:${declaration.name}` };
   }
   if (baseline.some((name) => !target.applied.includes(name))) return { ok: false, newlyPending: [], unsafe: [], blocker: "baseline-not-applied" };
   const newlyPending = uniqueSorted(target.pending.filter((name) => !baseline.includes(name)));
