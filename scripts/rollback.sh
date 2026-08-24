@@ -162,7 +162,19 @@ perform_rollback() {
   validate_rollback_eligibility_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" "$ZEDBOT_ROLLBACK_METADATA" || { log_error "Rollback eligibility evidence is invalid or inconsistent."; return 1; }
   initialize_operation_state rollback "$(metadata_field '.generation')"
   validate_metadata
-  validate_generation_owned_evidence "$ZEDBOT_ROLLBACK_METADATA"
+  # The READONLY variant: validate_generation_owned_evidence (non-readonly)
+  # ends by calling set_rollback_compose_contract as a side effect, which
+  # would rebind run_compose to the PREVIOUS generation's Compose contract
+  # right here - before validate_compatibility below ever runs, silently
+  # defeating its own explicit ordering (validate_compatibility must run
+  # under the CURRENT generation's contract; configure_rollback_compose_contract,
+  # further down, is the one deliberate place that switches to previous's).
+  # validate_rollback_eligibility_evidence above already covers this exact
+  # validation (readonly, on both current and previous), so this call is
+  # otherwise redundant - it exists only to keep this stage's own evidence
+  # check explicit and to preserve the "rollback-evidence-validated"
+  # operation-state stage's meaning.
+  validate_generation_owned_evidence_readonly "$ZEDBOT_ROLLBACK_METADATA"
   confirm_operation_state previous-selected rollback-evidence-validated
   validate_retained_image
   confirm_operation_state rollback-evidence-validated retained-image-validated

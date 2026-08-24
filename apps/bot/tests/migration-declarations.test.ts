@@ -320,6 +320,78 @@ describe("strict format-2 migration declarations", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
+  // Regression: validate_generation_owned_evidence (the non-readonly
+  // variant) ends by calling set_rollback_compose_contract as a side
+  // effect. rollback.sh's perform_rollback used to call it on previous.json
+  // right after validate_metadata - well before validate_compatibility,
+  // which its own comment says must run under the CURRENT generation's
+  // Compose contract - silently rebinding run_compose to previous's
+  // contract early and defeating that ordering guarantee even after it was
+  // otherwise fixed. Switched to validate_generation_owned_evidence_readonly,
+  // which performs the identical validation with no such side effect.
+  function evidenceFixture(compose: string) {
+    const pair = fixture();
+    const state = mkdtempSync(path.join(os.tmpdir(), "zedbot-evidence-sideeffect-"));
+    chmodSync(state, 0o700);
+    const generation = "20260101T000000Z-dddddddddddd";
+    const evidence = path.join(state, `evidence-${generation}`);
+    renameSync(pair.dir, evidence);
+    writeFileSync(path.join(evidence, "docker-compose.yml"), compose);
+    const manifestBytes = readFileSync(path.join(evidence, "packages/database/prisma/rollback-compatibility.json"));
+    const metadataPath = path.join(state, "previous.json");
+    writeFileSync(metadataPath, JSON.stringify({
+      formatVersion: 2, installationKind: null, lifecycleRole: "previous", generation,
+      sourceTree: "a".repeat(40), preDeploySha: "e".repeat(40), preDeployImageId: `sha256:${"3".repeat(64)}`,
+      targetDeploySha: "b".repeat(40), targetImageId: `sha256:${"1".repeat(64)}`,
+      retainedImageTag: `zedbot-app:rollback-${generation}`, immutableImageTag: `zedbot-app:generation-${generation}`,
+      failedTargetTag: `zedbot-app:failed-${generation}`, capturedAt: "2026-08-14T12:00:00Z",
+      preDeployMigrations: [nameA], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: evidence, composeEvidencePath: path.join(evidence, "docker-compose.yml"),
+      composeEvidenceSha256: sha(compose), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: sha(manifestBytes), compatibilityDeclarations: pair.declarations,
+      recreationAttempted: true, healthConfirmed: true, state: "known-good",
+    }));
+    chmodSync(metadataPath, 0o600);
+    return { state, metadataPath };
+  }
+
+  it("validate_generation_owned_evidence_readonly leaves the active Compose contract untouched", () => {
+    const { state, metadataPath } = evidenceFixture("services: {}\n");
+    const sentinel = "/sentinel/docker-compose.yml";
+    const command = `. '${common}'; set_deployment_state_paths '${state}'; validate_compose_contract_paths(){ :; }; ZEDBOT_CANONICAL_COMPOSE_FILE='${sentinel}'; validate_generation_owned_evidence_readonly '${metadataPath}' && printf '%s' "$ZEDBOT_CANONICAL_COMPOSE_FILE"`;
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(sentinel);
+  });
+
+  it("validate_generation_owned_evidence (non-readonly), by contrast, rebinds the active Compose contract", () => {
+    const { state, metadataPath } = evidenceFixture("services: {}\n");
+    const sentinel = "/sentinel/docker-compose.yml";
+    const command = `. '${common}'; set_deployment_state_paths '${state}'; validate_compose_contract_paths(){ :; }; ZEDBOT_CANONICAL_COMPOSE_FILE='${sentinel}'; validate_generation_owned_evidence '${metadataPath}' && printf '%s' "$ZEDBOT_CANONICAL_COMPOSE_FILE"`;
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).not.toBe(sentinel);
+    expect(result.stdout).toBe(path.join(state, "evidence-20260101T000000Z-dddddddddddd", "docker-compose.yml"));
+  });
+
+  it("perform_rollback validates previous's evidence via the side-effect-free readonly variant before compatibility is checked", () => {
+    const rollbackText = readFileSync(rollback, "utf8");
+    const perform = rollbackText.slice(rollbackText.indexOf("perform_rollback() {"), rollbackText.indexOf("\nmain() {"));
+    const evidenceCheck = perform.indexOf("validate_generation_owned_evidence_readonly");
+    // The standalone call (its own line, no arguments) - not any mention of
+    // the name inside a comment, including this file's own explanatory one.
+    const compatibilityCheck = perform.indexOf("\n  validate_compatibility\n");
+    const contractSwitch = perform.indexOf("\n  configure_rollback_compose_contract\n");
+    expect(evidenceCheck).toBeGreaterThan(-1);
+    expect(evidenceCheck).toBeLessThan(compatibilityCheck);
+    expect(compatibilityCheck).toBeLessThan(contractSwitch);
+    // The mutating (non-readonly) validate_generation_owned_evidence must
+    // not be CALLED anywhere in perform_rollback - only the readonly
+    // variant. Matches the actual call shape (a quoted argument), not
+    // prose mentioning the function name in a comment.
+    expect(perform).not.toMatch(/[^_]validate_generation_owned_evidence\s+"/);
+  });
+
   it("suppresses every later mocked mutation after declaration failure", () => {
     const pair = fixture(); writeFileSync(path.join(pair.migrations, nameA, "migration.sql"), "changed by one byte!");
     const record = path.join(pair.dir, "mutations");
