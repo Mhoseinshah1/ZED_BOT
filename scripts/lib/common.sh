@@ -166,7 +166,16 @@ run_operation_child() {
   # /dev/null substitution.
   exec 8<&0
   (
-    exec 9>&- 2>/dev/null || true
+    # Closing an fd that was never open is already silent (verified: `N>&-`
+    # on an unopened fd exits 0 with no output) - the "2>/dev/null" here was
+    # unnecessary defense, but as a bare `exec` (no command operand) it
+    # doesn't just suppress this one close: it rebinds fd 2 to /dev/null for
+    # the rest of the subshell, so the actual child launched by `exec setsid`
+    # below inherits a dead stderr too. That silently discarded every
+    # diagnostic a caller tried to capture from a child's stderr (e.g.
+    # backup-db.sh's pg_restore failure detail) regardless of what the
+    # caller redirected fd 2 to before calling in.
+    exec 9>&-
     exec 0<&8 8<&-
     exec setsid -- "$@"
   ) &
@@ -574,8 +583,21 @@ collect_readiness_evidence() {
 }
 
 # Returns 0 ready, 1 retryable (only missing/starting), or 2 terminal failure.
+#
+# restartCount is checked as a DELTA against baseline_restarts (a
+# {service:count} map from the first evidence collected THIS wait), not
+# required to equal zero outright: postgres/redis are never recreated
+# between deploys, so any historical restart from before this readiness
+# wait even began (an old OOM kill, a host reboot) would otherwise mark
+# every future evidence terminal permanently, with no operator action able
+# to clear it short of destroying and recreating an otherwise-healthy
+# database container. An INCREASE during this wait - the container
+# restarting again while we watch - is still exactly what should fail
+# closed. baseline_restarts defaults to "{}" (no known baseline: the
+# service's own current count, via `// .restartCount`, so the comparison
+# trivially passes on the very first observation of this wait).
 evaluate_readiness_evidence() {
-  local evidence="$1" kind="$2" attempt="$3" started="$4" now="$5" expected_image_id="${6:-}" expected_sha="${7:-}"
+  local evidence="$1" kind="$2" attempt="$3" started="$4" now="$5" expected_image_id="${6:-}" expected_sha="${7:-}" baseline_restarts="${8:-{\}}"
   local required refs
   case "$kind" in
     dependency) required='["postgres","redis"]'; refs='{"postgres":"postgres:16-alpine","redis":"redis:7-alpine"}' ;;
@@ -583,7 +605,7 @@ evaluate_readiness_evidence() {
     *) return 2 ;;
   esac
   printf '%s' "$evidence" | /usr/bin/jq -e --arg kind "$kind" --arg attempt "$attempt" --argjson started "$started" --argjson now "$now" \
-    --arg image "$expected_image_id" --arg sha "$expected_sha" --argjson required "$required" --argjson refs "$refs" '
+    --arg image "$expected_image_id" --arg sha "$expected_sha" --argjson required "$required" --argjson refs "$refs" --argjson baseline "$baseline_restarts" '
     type=="object" and keys==["attempt","formatVersion","kind","observedAt","services"] and .formatVersion==1 and
     .kind==$kind and .attempt==$attempt and (.observedAt|type=="number") and .observedAt >= $started and .observedAt <= $now and ($now-.observedAt)<=5 and
     (.services|type=="array") and ([.services[].service]|sort)==($required|sort) and
@@ -591,7 +613,8 @@ evaluate_readiness_evidence() {
     all(.services[]; type=="object" and keys==["containerId","declaredService","generation","health","imageId","imageRef","project","restartCount","service","status"] and
       (.service|type=="string") and (.containerId|type=="string" and length>0) and .declaredService==.service and .project=="zedbot" and
       (.imageId|type=="string" and test("^sha256:[a-f0-9]{64}$")) and .imageRef==$refs[.service] and
-      (.status|type=="string") and (.health|type=="string") and (.restartCount|type=="number" and .==0) and
+      (.status|type=="string") and (.health|type=="string") and
+      (.restartCount|type=="number" and . >= 0) and (.restartCount <= ($baseline[.service] // .restartCount)) and
       (if $kind=="application" then .imageId==$image and .generation==$sha else .generation=="" end))
   ' >/dev/null 2>&1 || return 2
   if printf '%s' "$evidence" | /usr/bin/jq -e 'all(.services[]; .status=="running" and .health=="healthy")' >/dev/null; then return 0; fi
@@ -606,7 +629,7 @@ evaluate_readiness_evidence() {
 
 wait_for_readiness_policy() {
   local kind="$1" attempt="$2" expected_image_id="${3:-}" expected_sha="${4:-}" timeout="${5:-90}" interval="${6:-3}"
-  local started now evidence rc
+  local started now evidence rc baseline_restarts=""
   [[ "$timeout" =~ ^[1-9][0-9]*$ && "$interval" =~ ^[1-9][0-9]*$ ]] || return 1
   validate_compose_readiness_contract || return 1
   started="$(readiness_now)" || return 1
@@ -615,7 +638,12 @@ wait_for_readiness_policy() {
     now="$(readiness_now)" || return 1
     [ "$now" -le $((started + timeout)) ] || { log_error "${kind} readiness timed out."; return 1; }
     evidence="$(collect_readiness_evidence "$kind" "$attempt" "$now" "$expected_sha")" || { log_error "${kind} readiness inspection failed."; return 1; }
-    if evaluate_readiness_evidence "$evidence" "$kind" "$attempt" "$started" "$now" "$expected_image_id" "$expected_sha"; then rc=0; else rc=$?; fi
+    # Baseline is each service's restartCount as first observed THIS wait -
+    # a nonzero count from before this call ever started must not, by
+    # itself, fail readiness (see evaluate_readiness_evidence's comment);
+    # only a further increase during this specific wait should.
+    [ -n "$baseline_restarts" ] || baseline_restarts="$(printf '%s' "$evidence" | /usr/bin/jq -c '[.services[] | {(.service): .restartCount}] | add // {}')" || return 1
+    if evaluate_readiness_evidence "$evidence" "$kind" "$attempt" "$started" "$now" "$expected_image_id" "$expected_sha" "$baseline_restarts"; then rc=0; else rc=$?; fi
     case "$rc" in 0) return 0 ;; 2) log_error "${kind} readiness evidence is terminal, malformed, stale, contradictory, or identity-mismatched."; return 1 ;; esac
     [ $((now + interval)) -le $((started + timeout)) ] || { log_error "${kind} readiness timed out."; return 1; }
     readiness_pause "$interval" || { log_error "${kind} readiness was cancelled or interrupted."; return 1; }

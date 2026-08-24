@@ -46,6 +46,20 @@ describe("area 9 authoritative signals and owned children", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toBe("hello from file\n");
   });
+  // Regression: the subshell's `exec 9>&- 2>/dev/null` is a bare exec (no
+  // command operand), so it doesn't just suppress output from closing fd 9
+  // (already silent on an unopened fd - closing one never errors) - it
+  // rebinds fd 2 to /dev/null for the REST of the subshell, so the real
+  // child launched moments later by `exec setsid` inherits a dead stderr
+  // too. That silently discarded every diagnostic a caller tried to capture
+  // from a child's stderr (e.g. backup-db.sh's pg_restore failure detail)
+  // regardless of what the caller redirected fd 2 to before calling in.
+  it("passes the child's stderr through, not just its stdout", () => {
+    const result = spawnSync("bash", ["-c", `. '${common}'; run_operation_child bash -c 'echo to-stdout; echo to-stderr >&2'`], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe("to-stdout\n");
+    expect(result.stderr).toContain("to-stderr");
+  });
 });
 
 describe("area 9 cleanup ownership and idempotency", () => {

@@ -25,9 +25,10 @@ function evidence(kind: Kind, overrides: Partial<{ attempt: string; observedAt: 
   return { formatVersion: 1, kind, attempt, observedAt: 100, services: names.map((name) => record(name, kind)), ...overrides };
 }
 function shell(body: string) { return spawnSync("bash", ["-c", `. '${common}'; ${body}`], { encoding: "utf8" }); }
-function evaluate(value: unknown, kind: Kind = "dependency", started = 100, now = 100) {
+function evaluate(value: unknown, kind: Kind = "dependency", started = 100, now = 100, baselineRestarts?: Record<string, number>) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-ready-")); const file = path.join(dir, "evidence.json"); writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value));
-  return shell(`evaluate_readiness_evidence "$(< '${file}')" '${kind}' '${attempt}' '${started}' '${now}' '${kind === "application" ? imageId : ""}' '${kind === "application" ? sha : ""}'`);
+  const baseline = baselineRestarts === undefined ? "" : `'${JSON.stringify(baselineRestarts)}'`;
+  return shell(`evaluate_readiness_evidence "$(< '${file}')" '${kind}' '${attempt}' '${started}' '${now}' '${kind === "application" ? imageId : ""}' '${kind === "application" ? sha : ""}' ${baseline}`);
 }
 
 describe("authoritative readiness evidence", () => {
@@ -50,7 +51,6 @@ describe("authoritative readiness evidence", () => {
     ["dependency exited", (e: MutableEvidence) => e.services[0].status = "exited"],
     ["dependency restarting", (e: MutableEvidence) => e.services[0].status = "restarting"],
     ["dependency dead", (e: MutableEvidence) => e.services[0].status = "dead"],
-    ["restarted dependency", (e: MutableEvidence) => e.services[0].restartCount = 1],
     ["unknown state", (e: MutableEvidence) => e.services[0].health = "mystery"],
     ["missing field", (e: MutableEvidence) => delete e.services[0].health],
     ["wrong field type", (e: MutableEvidence) => e.services[0].restartCount = "zero" as unknown as number],
@@ -68,8 +68,27 @@ describe("authoritative readiness evidence", () => {
     ["mixed generation", (e: MutableEvidence) => e.services[1].generation = "f".repeat(40)],
     ["wrong immutable image", (e: MutableEvidence) => e.services[2].imageId = `sha256:${"e".repeat(64)}`],
     ["substituted app service", (e: MutableEvidence) => e.services[0].service = e.services[0].declaredService = "postgres"],
-    ["restarted application", (e: MutableEvidence) => e.services[0].restartCount = 1],
   ])("rejects %s", (_name, mutate) => { const e = evidence("application") as MutableEvidence; mutate(e); expect(evaluate(e, "application").status).toBe(2); });
+
+  // Regression: postgres/redis are never recreated between deploys, so a
+  // single historical restart from before this readiness wait even began
+  // (an old OOM kill, a host reboot) must not by itself fail readiness -
+  // only a further increase DURING this wait (an active restart loop
+  // happening right now) should. restartCount is checked as a delta
+  // against baseline_restarts (each service's count as first observed this
+  // wait), not required to equal zero outright.
+  it("a nonzero restartCount with no known baseline (first observation of a wait) is not rejected", () => {
+    const e = evidence("dependency") as MutableEvidence; e.services[0].restartCount = 3;
+    expect(evaluate(e).status).toBe(0);
+  });
+  it("a restartCount at or below its baseline is accepted", () => {
+    const e = evidence("application") as MutableEvidence; e.services[0].restartCount = 2;
+    expect(evaluate(e, "application", 100, 100, { api: 2, bot: 0, worker: 0 }).status).toBe(0);
+  });
+  it("a restartCount that increased beyond its baseline during this wait is rejected", () => {
+    const e = evidence("application") as MutableEvidence; e.services[0].restartCount = 3;
+    expect(evaluate(e, "application", 100, 100, { api: 2, bot: 0, worker: 0 }).status).toBe(2);
+  });
 
   it.each([
     ["empty output", ""], ["malformed JSON", "{"], ["truncated JSON", '{"formatVersion":1'],
@@ -95,6 +114,21 @@ describe("bounded polling and flow suppression", () => {
   it("retries a mixed healthy and starting set until all services are healthy", () => { const r = poll([converging(), evidence("dependency")]); expect(r.result.status).toBe(0); expect(r.calls).toBe(2); });
   it("a mixed healthy and starting set fails at the bounded deadline", () => { const r = poll([converging(), converging(), converging(), converging()], 9); expect(r.result.status).not.toBe(0); expect(r.calls).toBe(4); });
   it("cancellation is failure and stops polling", () => { const r = poll([starting(), evidence("dependency")], 9, true); expect(r.result.status).not.toBe(0); expect(r.calls).toBe(1); });
+  // A restartCount that's already nonzero on the very FIRST poll of a wait
+  // becomes the baseline (accepted, not rejected) - but the SAME service
+  // increasing further on a LATER poll of that same wait is an active
+  // restart happening right now and must still fail closed.
+  it("tolerates a restartCount already nonzero on the first poll of a wait", () => {
+    const withHistoricalRestart = () => { const e = evidence("dependency"); e.services[0].restartCount = 2; return e; };
+    const r = poll([withHistoricalRestart()]);
+    expect(r.result.status).toBe(0); expect(r.calls).toBe(1);
+  });
+  it("still fails closed when restartCount increases during the wait", () => {
+    const first = () => { const e = evidence("dependency"); e.services.forEach((s) => s.health = "starting"); e.services[0].restartCount = 2; return e; };
+    const second = () => { const e = evidence("dependency"); e.services[0].restartCount = 3; return e; };
+    const r = poll([first(), second()]);
+    expect(r.result.status).not.toBe(0); expect(r.calls).toBe(2);
+  });
   it("terminal failure stops additional polling", () => { const bad = evidence("dependency"); bad.services[0].status = "exited"; const r = poll([bad, evidence("dependency")]); expect(r.result.status).not.toBe(0); expect(r.calls).toBe(1); });
   it("a failed inspection command rejects valid-looking later content", () => { const result = shell(`validate_compose_readiness_contract(){ return 0; }; readiness_now(){ echo 100; }; collect_readiness_evidence(){ printf '%s' '${JSON.stringify(evidence("dependency"))}'; return 1; }; wait_for_readiness_policy dependency '${attempt}' '' '' 9 3`); expect(result.status).not.toBe(0); });
   it("success exit with invalid content fails closed", () => { const result = shell(`validate_compose_readiness_contract(){ return 0; }; readiness_now(){ echo 100; }; collect_readiness_evidence(){ echo '{'; }; wait_for_readiness_policy dependency '${attempt}' '' '' 9 3`); expect(result.status).not.toBe(0); });
