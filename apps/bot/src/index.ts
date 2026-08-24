@@ -1,8 +1,9 @@
-import { connectDatabase, disconnectDatabase } from "@zedbot/database";
+import { disconnectDatabase } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
 
 import { createBot } from "./app.js";
 import { getBotToken, getTelegramApiRoot } from "./config/env.js";
+import { connectDatabaseWithRetry } from "./core/database-startup.js";
 import { logger } from "./core/logger.js";
 import { completeBotStartupReadiness, removeBotReadiness } from "./core/readiness-marker.js";
 import { runShutdownSequence } from "./core/shutdown.js";
@@ -152,9 +153,14 @@ async function run(botToken: string): Promise<void> {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
 
-  try {
-    await connectDatabase();
-    databaseInitialized = true;
+  // See connectDatabaseWithRetry's own comment for why a bounded retry here
+  // matters: without it, a single failed attempt eventually reaches
+  // completeBotStartupReadiness's hard throw below, which the outer catch
+  // (bottom of this file) treats as non-retryable and exits the whole
+  // process after a 30s cooldown - a full container restart cycle for a
+  // condition a few seconds of patience would have resolved.
+  databaseInitialized = await connectDatabaseWithRetry();
+  if (databaseInitialized) {
     logger.info("database connection established");
     // Ops log (SYSTEM topic): fire-and-forget, never blocks startup.
     void writeSystemLog({
@@ -163,8 +169,6 @@ async function run(botToken: string): Promise<void> {
       message: "bot service started",
       topicKey: "SYSTEM",
     });
-  } catch (err) {
-    logger.warn("database not reachable at startup, continuing", { error: errorMessage(err) });
   }
 
   // Crash recovery: resolve orders stuck in PROVISIONING and broadcasts
