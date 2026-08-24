@@ -1918,7 +1918,19 @@ validate_generation_metadata_core() {
     (.recreationAttempted|type=="boolean") and
     (.healthConfirmed|type=="boolean") and
     (if .lifecycleRole == "candidate" then
-     (.state|IN("prepared","application-recreated","healthy-candidate")) and
+     # failed-after-recreation (and rewrite_generation_state own further
+     # rollback-failed/rolled-back transitions from there) are legitimate
+     # candidate states, not just current/previous/failed-role ones:
+     # publish_failed_generation own precondition requires exactly one of
+     # them on the candidate it is given, and set_rollback_state writes
+     # failed-after-recreation onto CANDIDATE_METADATA (lifecycleRole stays
+     # "candidate" throughout - only the transformed copy in failed.json
+     # becomes lifecycleRole "failed") whenever an update fails after
+     # recreation begins. Excluding them here made that write valid but the
+     # very next read (publish_failed_generation own validate call, or any
+     # later doctor/rollback-status read of this same file) fail closed on
+     # a file this schema itself had just accepted moments earlier.
+     (.state|IN("prepared","application-recreated","healthy-candidate","failed-after-recreation","rollback-failed","rolled-back")) and
        (.healthConfirmed == (.state == "healthy-candidate")) and
        (if .state == "healthy-candidate" then .recreationAttempted == true and (.targetImageId|type=="string") and (.immutableImageTag|type=="string") and (.failedTargetTag|type=="string") else true end)
      elif (.lifecycleRole|IN("current","previous")) then

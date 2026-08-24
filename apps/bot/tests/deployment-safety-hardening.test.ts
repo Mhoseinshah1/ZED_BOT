@@ -548,17 +548,73 @@ fi
   // naming the old generation and NO failed.json recorded anywhere -
   // exactly the evidence on_update_error publishes for an ordinary post-
   // recreation error, just missing for this one exit path.
-  it("update_owned_cleanup publishes failed-generation evidence on a signal-driven exit after recreation, but never on the ordinary ERR-trap path", () => {
+  // Regression (found by review of an earlier version of this same fix): the
+  // first version of this test stubbed set_rollback_state/
+  // publish_failed_generation with trace-writing fakes, which is exactly why
+  // it never caught that both real functions - and atomic_write_metadata
+  // underneath them - gate on operation_assert_active, which unconditionally
+  // refuses further work once ZEDBOT_OPERATION_INTERRUPTED is set. That is
+  // precisely the condition this whole branch only runs under, so the real
+  // calls always failed, silently, via the `|| true` meant only to make each
+  // step best-effort - the fix compiled, the mocked test passed, and it
+  // still did not work. This version runs the REAL functions against real
+  // metadata fixtures so that gate is actually exercised.
+  it("update_owned_cleanup actually persists failed-generation evidence on a signal-driven exit (real functions, not stubs)", () => {
+    const setRollbackState = update.slice(update.indexOf("set_rollback_state() {"), update.indexOf("\non_update_error() {"));
+    const body = update.slice(update.indexOf("update_owned_cleanup() {"), update.indexOf("\n# Finds the newest database backup"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-signal-cleanup-real-"));
+    chmodSync(dir, 0o700);
+    const write = (file: string, value: unknown) => {
+      writeFileSync(file, JSON.stringify(value));
+      chmodSync(file, 0o600);
+    };
+    const candidateGeneration = "20260101T000000Z-aaaaaaaaaaaa";
+    const currentGeneration = "20251231T000000Z-bbbbbbbbbbbb";
+    const candidatePath = path.join(dir, `candidate-${candidateGeneration}.json`);
+    write(candidatePath, {
+      // targetImageId/immutableImageTag/failedTargetTag are populated by
+      // step 8 (candidate-image-built), well before recreation begins (step
+      // 11) and APPLICATION_RECREATION_ATTEMPTED is set - a real candidate
+      // reaching this cleanup always has them, and publish_failed_generation
+      // copies them as-is into failed.json, whose own schema requires them.
+      formatVersion: 2, lifecycleRole: "candidate", generation: candidateGeneration, sourceTree: "a".repeat(40),
+      preDeploySha: "b".repeat(40), preDeployImageId: `sha256:${"1".repeat(64)}`, targetDeploySha: "c".repeat(40),
+      targetImageId: `sha256:${"7".repeat(64)}`, retainedImageTag: `zedbot-app:rollback-${candidateGeneration}`,
+      immutableImageTag: `zedbot-app:generation-${candidateGeneration}`, failedTargetTag: `zedbot-app:failed-${candidateGeneration}`,
+      capturedAt: "2026-01-01T00:00:00Z",
+      preDeployMigrations: [], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: `${dir}/evidence-${candidateGeneration}`, composeEvidencePath: `${dir}/evidence-${candidateGeneration}/docker-compose.yml`,
+      composeEvidenceSha256: "d".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "e".repeat(64), compatibilityDeclarations: [],
+      recreationAttempted: true, healthConfirmed: false, state: "application-recreated",
+    });
+    const currentPath = path.join(dir, "current.json");
+    write(currentPath, {
+      formatVersion: 2, lifecycleRole: "current", generation: currentGeneration, sourceTree: "f".repeat(40),
+      preDeploySha: "1".repeat(40), preDeployImageId: `sha256:${"2".repeat(64)}`, targetDeploySha: "3".repeat(40),
+      targetImageId: `sha256:${"4".repeat(64)}`, retainedImageTag: `zedbot-app:rollback-${currentGeneration}`,
+      immutableImageTag: `zedbot-app:generation-${currentGeneration}`, failedTargetTag: `zedbot-app:failed-${currentGeneration}`,
+      capturedAt: "2025-12-31T00:00:00Z", preDeployMigrations: [], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: `${dir}/evidence-${currentGeneration}`, composeEvidencePath: `${dir}/evidence-${currentGeneration}/docker-compose.yml`,
+      composeEvidenceSha256: "5".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "6".repeat(64), compatibilityDeclarations: [],
+      recreationAttempted: true, healthConfirmed: true, state: "known-good",
+    });
+    const failedPath = path.join(dir, "failed.json");
+
+    const command = `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; acquire_deployment_lock; CANDIDATE_METADATA='${candidatePath}'; DEPLOYMENT_METADATA_ACTIVE=1; ZEDBOT_OPERATION_INTERRUPTED=1; APPLICATION_RECREATION_ATTEMPTED=1; DEPLOYMENT_REFERENCE_RESTORE_ID=''; SOURCE_SNAPSHOT=''; SOURCE_SHA=''; SOURCE_TREE=''; log_error(){ :; }; restore_deployment_reference(){ :; }; cleanup_source_snapshot(){ :; }; ${setRollbackState}\n${body}\nupdate_owned_cleanup`;
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(candidatePath, "utf8")).state).toBe("failed-after-recreation");
+    expect(existsSync(failedPath)).toBe(true);
+    expect(JSON.parse(readFileSync(failedPath, "utf8")).lifecycleRole).toBe("failed");
+  });
+
+  it("update_owned_cleanup never publishes failed-generation evidence on the ordinary ERR-trap path or without recreation", () => {
     const body = update.slice(update.indexOf("update_owned_cleanup() {"), update.indexOf("\n# Finds the newest database backup"));
     const trace = path.join(os.tmpdir(), `zedbot-signal-cleanup-trace-${process.pid}-${Date.now()}`);
     const harness = (interrupted: 0 | 1, recreationAttempted: 0 | 1) =>
       `ZEDBOT_OPERATION_INTERRUPTED=${interrupted}; APPLICATION_RECREATION_ATTEMPTED=${recreationAttempted}; DEPLOYMENT_REFERENCE_RESTORE_ID=''; CANDIDATE_METADATA='/candidate.json'; ZEDBOT_CURRENT_DEPLOYMENT_METADATA='/current.json'; log_error(){ :; }; restore_deployment_reference(){ :; }; cleanup_source_snapshot(){ :; }; set_rollback_state(){ echo "rollback-state:$1" >> '${trace}'; }; publish_failed_generation(){ echo "publish-failed:$1:$2" >> '${trace}'; }; ${body}\nupdate_owned_cleanup`;
-
-    // Interrupted AND recreation attempted: must publish.
-    spawnSync("bash", ["-c", harness(1, 1)], { encoding: "utf8" });
-    expect(readFileSync(trace, "utf8")).toContain("rollback-state:failed-after-recreation");
-    expect(readFileSync(trace, "utf8")).toContain("publish-failed:/candidate.json:/current.json");
-    rmSync(trace, { force: true });
 
     // Ordinary (non-signal) exit: on_update_error already covers this
     // itself before update_owned_cleanup ever runs - must NOT double-publish.

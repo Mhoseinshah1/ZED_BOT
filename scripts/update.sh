@@ -73,9 +73,28 @@ update_owned_cleanup() {
   # on_update_error's own two calls; gated on ZEDBOT_OPERATION_INTERRUPTED so
   # it never double-publishes on the ordinary ERR-trap path (which already
   # does this itself before this function ever runs) or on a clean exit.
+  #
+  # set_rollback_state (-> rewrite_generation_state) and
+  # publish_failed_generation both gate on operation_assert_active, which
+  # unconditionally refuses further work once ZEDBOT_OPERATION_INTERRUPTED
+  # is set - exactly the condition this branch only runs under, so both
+  # calls previously failed every single time, silently, via the `|| true`
+  # meant only to make each step best-effort. This one narrow write -
+  # durably recording that recreation was interrupted mid-flight - is
+  # precisely the kind of terminal, best-effort forensic record cleanup is
+  # supposed to be allowed to make; it is not new forward progress on the
+  # interrupted operation. Clear the flag only for these two calls and
+  # restore it immediately after: signal traps are already disabled by the
+  # time operation_exit_handler reaches this function (trap '' INT TERM
+  # HUP, set before operation_cleanup is ever called), so nothing else can
+  # observe or act on the flag mid-window, and operation_exit_handler's own
+  # later check (right after this function returns, to pick the correct
+  # final exit status) still sees the operation as interrupted.
   if [ "$ZEDBOT_OPERATION_INTERRUPTED" -eq 1 ] && [ "$APPLICATION_RECREATION_ATTEMPTED" -eq 1 ]; then
+    ZEDBOT_OPERATION_INTERRUPTED=0
     set_rollback_state "failed-after-recreation" || true
     publish_failed_generation "$CANDIDATE_METADATA" "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || true
+    ZEDBOT_OPERATION_INTERRUPTED=1
   fi
   # zedbot-app:latest moves to the candidate the instant the build succeeds
   # (build_verified_source_snapshot), well before compatibility validation,
