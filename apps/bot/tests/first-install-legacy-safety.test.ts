@@ -227,6 +227,55 @@ describe("area 10 failure boundaries and preserved policies", () => {
     expect(delegates.status).not.toBe(0);
     expect(existsSync(path.join(dir, "called"))).toBe(true);
   });
+  // Regression: PostgreSQL only reads POSTGRES_PASSWORD on first
+  // initialization of its data directory. A rerun that reuses an existing
+  // data directory (an install interrupted before any deployment-state
+  // metadata was written, so it still classifies as genuine-first-install)
+  // but replaces .env with a freshly generated password used to connect
+  // with a password Postgres never adopted, failing bootstrap after
+  // partial deployment evidence was already written. sync_postgres_password
+  // re-aligns Postgres's actual password to match .env; it existed but was
+  // never called from main().
+  it("re-aligns the PostgreSQL password after dependencies start and before canonical bootstrap", () => {
+    const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    expect(text).toContain("sync_postgres_password() {");
+    const main = text.slice(text.indexOf("\nmain() {"));
+    const sync = main.indexOf("sync_postgres_password");
+    expect(sync).toBeGreaterThan(-1);
+    expect(sync).toBeGreaterThan(main.indexOf("start_dependencies"));
+    expect(sync).toBeLessThan(main.indexOf('bash "${APP_DIR}/scripts/bootstrap-deployment.sh"'));
+  });
+  it("synchronizes the PostgreSQL password via ALTER USER over stdin, never on the command line", () => {
+    const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    const body = text.slice(text.indexOf("sync_postgres_password() {"), text.indexOf("\nrun_migrations_if_available() {"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-postgres-sync-"));
+    const envFile = path.join(dir, ".env");
+    writeFileSync(envFile, "POSTGRES_USER='zedbot'\nPOSTGRES_PASSWORD='new-secret'\n");
+    const bin = path.join(dir, "bin"); mkdirSync(bin);
+    const trace = path.join(dir, "trace");
+    writeFileSync(path.join(bin, "docker"), `#!/usr/bin/env bash
+case "$*" in
+  *pg_isready*) exit 0 ;;
+  *psql*) printf '%s\\n' "$*" > '${trace}'; cat >> '${trace}' ;;
+esac
+`, { mode: 0o755 });
+    const script = `ENV_FILE='${envFile}'; APP_DIR='${dir}'; COMPOSE_CMD=(docker); log_info(){ :; }; log_warn(){ :; }; ${body}\nsync_postgres_password`;
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    expect(result.status, result.stderr).toBe(0);
+    const traced = readFileSync(trace, "utf8");
+    expect(traced).toContain('ALTER USER "zedbot" WITH PASSWORD \'new-secret\';');
+    expect(result.stdout).not.toContain("new-secret");
+    expect(result.stderr).not.toContain("new-secret");
+  });
+  it("is a safe no-op when no password is configured", () => {
+    const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    const body = text.slice(text.indexOf("sync_postgres_password() {"), text.indexOf("\nrun_migrations_if_available() {"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-postgres-sync-empty-"));
+    const envFile = path.join(dir, ".env"); writeFileSync(envFile, "POSTGRES_USER='zedbot'\n");
+    const script = `ENV_FILE='${envFile}'; APP_DIR='${dir}'; COMPOSE_CMD=(false); log_info(){ :; }; log_warn(){ :; }; ${body}\nsync_postgres_password`;
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+  });
   it("update and rollback invoke the authoritative classifier after locking", () => { for (const file of ["scripts/update.sh", "scripts/rollback.sh"]) { const text = readFileSync(path.join(root, file), "utf8"); expect(text).toContain("classify_installation observe"); expect(text.indexOf("acquire_deployment_lock")).toBeLessThan(text.indexOf("classify_installation observe")); } });
   it("retry rejects changed bootstrap-bound source identity", () => { const dir = fixture(); const result = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; test "$(jq -r .sourceSha "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = '${"f".repeat(40)}'`, true); expect(result.status).not.toBe(0); });
   it("temporary files, image tags and containers cannot create rollback eligibility", () => { const dir = fixture(); write(path.join(dir, ".image-tag"), "zedbot-app:latest"); expect(shell(dir, "classify_installation first-install").status).not.toBe(0); expect(existsSync(path.join(dir, "previous.json"))).toBe(false); });

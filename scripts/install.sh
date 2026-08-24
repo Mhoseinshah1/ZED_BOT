@@ -717,6 +717,16 @@ main() {
   install_cli
   validate_first_install_intent
   start_dependencies
+  # PostgreSQL only reads POSTGRES_PASSWORD when its data directory is first
+  # initialized; a rerun that reuses an existing data directory (e.g. after
+  # an install was interrupted before any deployment-state metadata was
+  # written, so this still classifies as a genuine first install) but
+  # replaces .env with a freshly generated password would otherwise connect
+  # with a password Postgres never adopted. Runs after dependencies are up
+  # (needs a live container to exec into) and before bootstrap takes the
+  # deployment lock and starts writing state, so a failure here leaves
+  # nothing partial behind.
+  sync_postgres_password
   bash "${APP_DIR}/scripts/bootstrap-deployment.sh"
   setup_https_if_requested
   setup_firewall_if_requested
