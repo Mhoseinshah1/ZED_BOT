@@ -414,6 +414,15 @@ main() {
   validate_compose_application_images || { log_error "Compose identity changed before migration."; exit 1; }
   run_compose run --rm --no-deps api node packages/database/dist/referral-migration-preflight.js
   run_compose run --rm --no-deps api sh -c 'cd packages/database && node_modules/.bin/prisma migrate deploy'
+  # Idempotent baseline data (OWNER admins from ADMIN_TELEGRAM_IDS, default
+  # settings, log topics, message templates, button texts) - migrate.sh
+  # (the legacy path this direct-migration step replaced) always ran this
+  # after every migration, install or update. Without it, a release that
+  # ships new seed-registry entries, or a changed ADMIN_TELEGRAM_IDS, is
+  # promoted successfully by `zedbot update` without ever creating the
+  # required rows - see the identical fix in bootstrap-deployment.sh for
+  # the first-install path.
+  run_compose run --rm --no-deps api node packages/database/dist/seed.js
   advance_operation_state compatibility-confirmed migrations-confirmed
 
   log_info "[11/14] Revalidating source and recreating services ..."

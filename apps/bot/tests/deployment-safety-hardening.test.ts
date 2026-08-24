@@ -100,6 +100,20 @@ describe("typed rollback migration compatibility", () => {
     const snapshot = healthy([name], [name], [], { [name]: "c".repeat(64) });
     expect(evaluateUpdateCompatibility([name], snapshot, referralManifest)).toMatchObject({ ok: false, blocker: `checksum-mismatch:${name}` });
   });
+
+  // Regression: the historical-allowlist path only checked the APPLIED
+  // checksum against the four verified variants - it never checked that
+  // the MANIFEST's own declared checksum was one of them too. An edited or
+  // corrupted manifest declaring an unverified checksum for this name
+  // would still be accepted as long as the database happened to have
+  // applied any of the four allowlisted variants, regardless of what the
+  // manifest itself actually claims.
+  it("rejects the referral affiliate migration when the manifest's own declared checksum is not itself a verified historical variant", () => {
+    const name = REFERRAL_AFFILIATE_MIGRATION_NAME;
+    const referralManifest = { formatVersion: 2 as const, backwardCompatibleMigrations: [{ name, sqlSha256: "9".repeat(64) }] };
+    const snapshot = healthy([name], [name], [], { [name]: REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ALLOWLIST.ORIGINAL_LF });
+    expect(evaluateUpdateCompatibility([name], snapshot, referralManifest)).toMatchObject({ ok: false, blocker: `checksum-declaration-unverified:${name}` });
+  });
 });
 
 describe("deployment shell safety", () => {
@@ -431,6 +445,29 @@ fi
     expect(disarm).toBeLessThan(recreateCall);
     expect(update).toContain("restore_deployment_reference");
     expect(commonShell).toContain("restore_deployment_reference() {");
+  });
+
+  // Regression: update.sh replaced the legacy migrate.sh's migration step
+  // (which always ran packages/database/dist/seed.js afterward - OWNER
+  // admins from ADMIN_TELEGRAM_IDS, default settings, log topics, message
+  // templates, button texts) with a direct `prisma migrate deploy` call,
+  // but dropped the seed step. A release shipping new seed-registry entries,
+  // or a changed ADMIN_TELEGRAM_IDS, was promoted by `zedbot update` without
+  // ever creating the required rows - matching the identical bug already
+  // fixed for the first-install path in bootstrap-deployment.sh.
+  it("update.sh seeds baseline data after migrations and before recreation, matching the legacy installer's seed step", () => {
+    expect(update).toContain("packages/database/dist/seed.js");
+    const migrateIndex = update.indexOf("prisma migrate deploy");
+    const seedIndex = update.indexOf("packages/database/dist/seed.js");
+    const confirmedIndex = update.indexOf("advance_operation_state compatibility-confirmed migrations-confirmed");
+    const recreateIndex = update.indexOf("recreate_application_services");
+    expect(migrateIndex).toBeGreaterThan(-1);
+    expect(seedIndex).toBeGreaterThan(-1);
+    expect(confirmedIndex).toBeGreaterThan(-1);
+    expect(recreateIndex).toBeGreaterThan(-1);
+    expect(migrateIndex).toBeLessThan(seedIndex);
+    expect(seedIndex).toBeLessThan(confirmedIndex);
+    expect(confirmedIndex).toBeLessThan(recreateIndex);
   });
 
   it("update_owned_cleanup restores the reference only when recreation was never attempted", () => {
