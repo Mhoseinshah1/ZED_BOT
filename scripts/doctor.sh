@@ -100,9 +100,28 @@ check_any_container_running() {
     compose_service_running postgres || compose_service_running redis
 }
 
+# True only when the lock file EXISTS but is not what acquire_deployment_lock
+# itself would accept (a root-owned, mode-0600, non-symlink regular file) -
+# mirrors its own substitution/tamper check (common.sh's acquire_deployment_lock)
+# exactly. A lock in this state can never be safely probed for held/free
+# status by flock alone: acquire_deployment_lock would refuse it outright
+# ("Deployment lock was substituted or has unsafe attributes"), permanently
+# blocking every future update, rollback, or restart - regardless of what a
+# naive open+flock probe would report. Absence is fine, not unsafe.
+deployment_lock_is_unsafe() {
+  { [ -e "$ZEDBOT_DEPLOYMENT_LOCK" ] || [ -L "$ZEDBOT_DEPLOYMENT_LOCK" ]; } || return 1
+  [ -f "$ZEDBOT_DEPLOYMENT_LOCK" ] && [ ! -L "$ZEDBOT_DEPLOYMENT_LOCK" ] &&
+    [ "$(stat -Lc %u:%a "$ZEDBOT_DEPLOYMENT_LOCK" 2>/dev/null)" = "0:600" ] && return 1
+  return 0
+}
+
 # True only while no process currently holds the deployment lock: a
 # non-blocking trial acquisition that releases immediately. Never creates the
 # lock file itself, so a first-install with no lock file yet is "free" too.
+# Callers must check deployment_lock_is_unsafe first - this function assumes
+# the lock file (if present) already passed that check, and its own
+# open-failure fallback exists only as defense against a TOCTOU race, not as
+# the primary safety validation.
 deployment_lock_is_free() {
   [ -e "$ZEDBOT_DEPLOYMENT_LOCK" ] || return 0
   exec 8<"$ZEDBOT_DEPLOYMENT_LOCK" 2>/dev/null || return 0
@@ -142,6 +161,7 @@ check_deployment_state_consistency() {
     *) return 1 ;;
   esac
 
+  deployment_lock_is_unsafe && return 1
   deployment_lock_is_free || lock_held=1
 
   if [ -e "$ZEDBOT_METADATA_TRANSITION" ] || [ -L "$ZEDBOT_METADATA_TRANSITION" ]; then

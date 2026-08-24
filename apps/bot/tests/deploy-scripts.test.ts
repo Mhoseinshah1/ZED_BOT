@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -408,7 +408,7 @@ describe("deploy scripts (Phase 36)", () => {
     it("tolerates a non-promoted operation stage while the deployment lock is actively held (the operation running it, not an abandoned one)", () => {
       const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-locked-"));
       writeFileSync(path.join(dir, "operation-state.json"), '{"stage":"application-recreated"}\n');
-      writeFileSync(path.join(dir, "deployment.lock"), "");
+      writeFileSync(path.join(dir, "deployment.lock"), ""); chmodSync(path.join(dir, "deployment.lock"), 0o600);
       const snippet = `source '${doctorScript}' >/dev/null 2>&1 || true; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; classify_installation(){ echo existing-canonical; }; validate_operation_state(){ return 0; }; exec 9<'${dir}/deployment.lock'; flock 9; check_deployment_state_consistency`;
       const result = bash(["-c", snippet]);
       expect(result.status, result.stderr).toBe(0);
@@ -417,10 +417,33 @@ describe("deploy scripts (Phase 36)", () => {
     it("still fails a non-promoted operation stage when the lock file exists but nothing holds it (a genuinely abandoned operation)", () => {
       const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-unlocked-"));
       writeFileSync(path.join(dir, "operation-state.json"), '{"stage":"application-recreated"}\n');
-      writeFileSync(path.join(dir, "deployment.lock"), "");
+      writeFileSync(path.join(dir, "deployment.lock"), ""); chmodSync(path.join(dir, "deployment.lock"), 0o600);
       const snippet = `source '${doctorScript}' >/dev/null 2>&1 || true; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; classify_installation(){ echo existing-canonical; }; validate_operation_state(){ return 0; }; check_deployment_state_consistency`;
       const result = bash(["-c", snippet]);
       expect(result.status).not.toBe(0);
+    });
+
+    // Regression: deployment_lock_is_free previously treated an unreadable,
+    // symlinked, or wrong-owner/mode lock file as "free" - but
+    // acquire_deployment_lock (scripts/lib/common.sh) refuses a lock file
+    // that fails this exact same safety check ("Deployment lock was
+    // substituted or has unsafe attributes"), permanently blocking every
+    // future update/rollback/restart. Doctor previously reported PASS in
+    // exactly the state where every real operation would actually fail.
+    it("fails closed when the deployment lock file itself is unsafe (wrong mode), even with no other suspicious state", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-unsafe-lock-"));
+      writeFileSync(path.join(dir, "deployment.lock"), ""); chmodSync(path.join(dir, "deployment.lock"), 0o644);
+      const snippet = `source '${doctorScript}' >/dev/null 2>&1 || true; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; classify_installation(){ echo existing-canonical; }; check_deployment_state_consistency`;
+      const result = bash(["-c", snippet]);
+      expect(result.status).not.toBe(0);
+    });
+
+    it("still passes with a genuinely safe (root-owned, mode 600) lock file and no other suspicious state", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-safe-lock-"));
+      writeFileSync(path.join(dir, "deployment.lock"), ""); chmodSync(path.join(dir, "deployment.lock"), 0o600);
+      const snippet = `source '${doctorScript}' >/dev/null 2>&1 || true; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; classify_installation(){ echo existing-canonical; }; check_deployment_state_consistency`;
+      const result = bash(["-c", snippet]);
+      expect(result.status, result.stderr).toBe(0);
     });
 
     it("accepts genuine empty first install and completed canonical operation state observationally", () => {
