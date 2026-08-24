@@ -64,13 +64,26 @@ validate_retained_image() {
 
 validate_compatibility() {
   local expected baseline result evidence recorded
-  expected="$(metadata_field '.compatibilityManifestSha256')"
-  evidence="$(metadata_field '.migrationEvidencePath')"
+  # This check runs the CURRENT (about-to-be-rolled-back-from) worker's own
+  # live code, so every value compared against its output must come from
+  # $ZEDBOT_CURRENT_DEPLOYMENT_METADATA, not $ZEDBOT_ROLLBACK_METADATA
+  # (previous.json): the manifest the live worker reports is the CURRENT
+  # generation's own manifest (previous.json's predates it and, once current
+  # added any new migration, can never match), and the schema we are rolling
+  # BACK TO is described by CURRENT's own preDeployMigrations - the exact
+  # migration set that existed right before current was deployed, which
+  # validate_rollback_eligibility_evidence already proved equals previous's
+  # own shipped/applied set (current.preDeploySha == previous.targetDeploySha).
+  # previous.json's OWN preDeployMigrations describes the baseline from TWO
+  # generations back, not the schema this rollback restores.
+  validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || { log_error "Current generation metadata is invalid or unsafe."; return 1; }
+  expected="$(jq -er '.compatibilityManifestSha256' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")" || return 1
+  evidence="$(jq -er '.migrationEvidencePath' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")" || return 1
   validate_migration_declaration_pair "$evidence" || { log_error "Recorded generation migration evidence is unavailable or invalid."; return 1; }
   [ "$MIGRATION_MANIFEST_SHA256" = "$expected" ] || { log_error "Recorded manifest-byte checksum differs from generation evidence."; return 1; }
-  recorded="$(jq -cS '.compatibilityDeclarations|sort_by(.name)' "$ZEDBOT_ROLLBACK_METADATA")" || return 1
+  recorded="$(jq -cS '.compatibilityDeclarations|sort_by(.name)' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")" || return 1
   [ "$MIGRATION_DECLARATIONS_JSON" = "$recorded" ] || { log_error "Recorded declaration set differs from generation evidence."; return 1; }
-  baseline="$(jq -r '.preDeployMigrations|join(",")' "$ZEDBOT_ROLLBACK_METADATA")"
+  baseline="$(jq -er '.preDeployMigrations|join(",")' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")" || return 1
   result="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/rollback-compatibility.js rollback "$baseline")" || {
     log_error "Rollback migration compatibility check failed: $(printf '%s' "$result" | jq -r '.blocker // "unavailable"' 2>/dev/null || echo unavailable)"
     return 1

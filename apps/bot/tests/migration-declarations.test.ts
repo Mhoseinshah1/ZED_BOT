@@ -141,21 +141,70 @@ describe("strict format-2 migration declarations", () => {
   });
 
   it("rollback rejects a one-byte evidence mutation before any mocked operational command", () => {
+    // validate_compatibility runs the CURRENT (about-to-be-rolled-back-from)
+    // worker's own live code, so its evidence must come from
+    // $ZEDBOT_CURRENT_DEPLOYMENT_METADATA (current.json), not previous.json -
+    // see the fix comment in scripts/rollback.sh's validate_compatibility.
     const pair = fixture(); const state = mkdtempSync(path.join(os.tmpdir(), "zedbot-rollback-evidence-")); chmodSync(state, 0o700);
     const generation = "20260101T000000Z-aaaaaaaaaaaa"; const evidence = path.join(state, `evidence-${generation}`);
     renameSync(pair.dir, evidence);
     const manifestBytes = readFileSync(path.join(evidence, "packages/database/prisma/rollback-compatibility.json"));
-    const metadata = path.join(state, "previous.json"); const record = path.join(state, "operational-command");
+    const metadata = path.join(state, "current.json"); const record = path.join(state, "operational-command");
     writeFileSync(metadata, JSON.stringify({
+      formatVersion: 2, installationKind: null, lifecycleRole: "current", generation,
+      sourceTree: "c".repeat(40), preDeploySha: "a".repeat(40), preDeployImageId: `sha256:${"1".repeat(64)}`,
+      targetDeploySha: "b".repeat(40), targetImageId: `sha256:${"2".repeat(64)}`,
+      retainedImageTag: `zedbot-app:rollback-${generation}`, immutableImageTag: `zedbot-app:generation-${generation}`,
+      failedTargetTag: `zedbot-app:failed-${generation}`, capturedAt: "2026-01-01T00:00:00Z",
+      preDeployMigrations: [nameA], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: evidence, composeEvidencePath: path.join(evidence, "docker-compose.yml"),
+      composeEvidenceSha256: "d".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
       compatibilityManifestSha256: sha(manifestBytes), compatibilityDeclarations: pair.declarations,
-      migrationEvidencePath: evidence, preDeployMigrations: [nameA],
+      recreationAttempted: true, healthConfirmed: true, state: "known-good",
     })); chmodSync(metadata, 0o600);
     writeFileSync(path.join(evidence, "packages/database/prisma/migrations", nameA, "migration.sql"), "SELECT 2;\n");
     const command = `. '${rollback}'; run_compose(){ echo invoked >'${record}'; }; validate_compatibility`;
     const result = spawnSync("bash", ["-c", command], { env: { ...process.env, ZEDBOT_BASE_DIR: state,
-      ZEDBOT_DEPLOYMENT_DIR: state, ZEDBOT_ROLLBACK_METADATA: metadata } });
+      ZEDBOT_DEPLOYMENT_DIR: state, ZEDBOT_CURRENT_DEPLOYMENT_METADATA: metadata } });
     expect(result.status).not.toBe(0);
     expect(() => readFileSync(record)).toThrow();
+  });
+
+  it("rollback compares the live worker's manifest and baseline against the CURRENT generation, not previous's stale ones", () => {
+    const pair = fixture(); const state = mkdtempSync(path.join(os.tmpdir(), "zedbot-rollback-evidence-current-")); chmodSync(state, 0o700);
+    const generation = "20260101T000000Z-aaaaaaaaaaaa"; const evidence = path.join(state, `evidence-${generation}`);
+    renameSync(pair.dir, evidence);
+    const manifestBytes = readFileSync(path.join(evidence, "packages/database/prisma/rollback-compatibility.json"));
+    const currentManifestSha = sha(manifestBytes);
+    const currentMetadata = path.join(state, "current.json");
+    const currentPayload = {
+      formatVersion: 2, installationKind: null, lifecycleRole: "current", generation,
+      sourceTree: "c".repeat(40), preDeploySha: "a".repeat(40), preDeployImageId: `sha256:${"1".repeat(64)}`,
+      targetDeploySha: "b".repeat(40), targetImageId: `sha256:${"2".repeat(64)}`,
+      retainedImageTag: `zedbot-app:rollback-${generation}`, immutableImageTag: `zedbot-app:generation-${generation}`,
+      failedTargetTag: `zedbot-app:failed-${generation}`, capturedAt: "2026-01-01T00:00:00Z",
+      preDeployMigrations: [nameA], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: evidence, composeEvidencePath: path.join(evidence, "docker-compose.yml"),
+      composeEvidenceSha256: "d".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: currentManifestSha, compatibilityDeclarations: pair.declarations,
+      recreationAttempted: true, healthConfirmed: true, state: "known-good",
+    };
+    writeFileSync(currentMetadata, JSON.stringify(currentPayload)); chmodSync(currentMetadata, 0o600);
+    // previous.json intentionally has a DIFFERENT (stale, pre-migration)
+    // manifest hash, declaration set, and preDeployMigrations baseline - if
+    // validate_compatibility read any of these from previous.json (the old
+    // bug), this test would fail one of the pre-checks or pass the wrong
+    // baseline to the live worker, even though everything genuinely matches
+    // current.json.
+    const previousMetadata = path.join(state, "previous.json");
+    writeFileSync(previousMetadata, JSON.stringify({ ...currentPayload, lifecycleRole: "previous", compatibilityManifestSha256: "f".repeat(64), compatibilityDeclarations: [], preDeployMigrations: [] }));
+    chmodSync(previousMetadata, 0o600);
+    const seenBaseline = path.join(state, "seen-baseline");
+    const command = `. '${rollback}'; run_compose(){ echo -n "$8" >'${seenBaseline}'; echo '{"manifestSha256":"${currentManifestSha}"}'; }; validate_compatibility`;
+    const result = spawnSync("bash", ["-c", command], { env: { ...process.env, ZEDBOT_BASE_DIR: state,
+      ZEDBOT_DEPLOYMENT_DIR: state, ZEDBOT_CURRENT_DEPLOYMENT_METADATA: currentMetadata, ZEDBOT_ROLLBACK_METADATA: previousMetadata } });
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(seenBaseline, "utf8")).toBe(nameA);
   });
 
   it.each([
