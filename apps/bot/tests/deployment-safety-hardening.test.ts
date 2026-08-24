@@ -258,6 +258,47 @@ describe("deployment shell safety", () => {
     expect(update).toContain("cannot be retained as known-good");
   });
 
+  // Regression: since prepare_exact_origin_main no longer requires the
+  // persistent checkout to already equal the fetched target, update.sh's
+  // record_deployed_sha call must pass target_deploy_sha explicitly - its
+  // no-argument fallback (repo_head_sha) would otherwise record the stale
+  // local HEAD, and the installed CLI (which dispatches every future
+  // command through this checkout's own scripts/) must be fast-forwarded to
+  // what was actually deployed once the update is verified successful, or
+  // deployment tooling silently freezes at an old commit.
+  it("records the exact deployed SHA and syncs the deployment checkout only after a verified success", () => {
+    expect(update).toContain('record_deployed_sha "$target_deploy_sha"');
+    expect(update).not.toMatch(/\brecord_deployed_sha\s*\n/);
+    expect(update).toContain("sync_deployment_checkout");
+    expect(update.indexOf("finalize_promoted_operation_state")).toBeLessThan(update.indexOf("sync_deployment_checkout"));
+    expect(commonShell).toContain("sync_deployment_checkout() {");
+  });
+
+  it("fast-forwards the persistent checkout to the deployed target once an update succeeds", () => {
+    const pair = repositoryPair();
+    writeFileSync(path.join(pair.seed, "version"), "remote\n"); git(pair.seed, "commit", "-am", "remote"); git(pair.seed, "push");
+    const prepared = prepare(pair.app);
+    expect(prepared.status, prepared.stderr).toBe(0);
+    const [sha] = prepared.stdout.trim().split(" ");
+    expect(git(pair.app, "rev-parse", "HEAD")).not.toBe(sha);
+    const sync = spawnSync("bash", ["-c", `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${pair.dir}'; acquire_deployment_lock; sync_deployment_checkout '${sha}'`], {
+      encoding: "utf8", env: { ...process.env, ZEDBOT_APP_DIR: pair.app },
+    });
+    expect(sync.status, sync.stderr).toBe(0);
+    expect(git(pair.app, "rev-parse", "HEAD")).toBe(sha);
+    expect(readFileSync(path.join(pair.app, "version"), "utf8")).toBe("remote\n");
+  });
+
+  it("sync_deployment_checkout is a safe no-op when the checkout already matches the target", () => {
+    const pair = repositoryPair();
+    const head = git(pair.app, "rev-parse", "HEAD");
+    const sync = spawnSync("bash", ["-c", `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${pair.dir}'; acquire_deployment_lock; sync_deployment_checkout '${head}'`], {
+      encoding: "utf8", env: { ...process.env, ZEDBOT_APP_DIR: pair.app },
+    });
+    expect(sync.status, sync.stderr).toBe(0);
+    expect(git(pair.app, "rev-parse", "HEAD")).toBe(head);
+  });
+
   it("rollback targets only application services with mandatory isolation flags", () => {
     expect(rollback).toContain("execute_validated_rollback_transition");
     expect(commonShell).toContain("execute_validated_rollback_transition()");

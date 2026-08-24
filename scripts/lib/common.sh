@@ -2046,6 +2046,31 @@ repo_head_sha() {
   git -C "$ZEDBOT_APP_DIR" rev-parse HEAD 2>/dev/null || true
 }
 
+# Fast-forwards the persistent deployment checkout ($ZEDBOT_APP_DIR) to the
+# exact commit that was just built and deployed. prepare_exact_origin_main/
+# verify_deployment_checkout deliberately never mutate this checkout
+# themselves - the immutable build snapshot is self-sufficient and decoupled
+# from it - but the installed zedbot CLI dispatches every FUTURE update/
+# rollback/doctor invocation through this checkout's own scripts/ directory
+# (zedbot.sh sources "${ZEDBOT_APP_DIR}/scripts/lib/common.sh" and execs
+# "${ZEDBOT_APP_DIR}/scripts/*.sh"). Left unsynced, deployment tooling would
+# silently freeze at an old commit even as application code moves forward on
+# every update where origin/main had legitimately advanced.
+#
+# Only ever called AFTER a deployment has been fully verified successful:
+# best-effort (a failure here must not be reported as a failed update, and
+# must not touch already-running application code) and safe by construction
+# (verify_deployment_checkout already proved this branch is main, the tree
+# is clean, and HEAD is an ancestor of $target - a fast-forward merge cannot
+# fail from divergence, only from unexpected external interference).
+sync_deployment_checkout() {
+  local target="$1" head
+  require_deployment_lock || return 1
+  head="$(git -C "$ZEDBOT_APP_DIR" rev-parse --verify HEAD 2>/dev/null)" || return 1
+  [ "$head" != "$target" ] || return 0
+  git -C "$ZEDBOT_APP_DIR" merge --ff-only "$target" >/dev/null 2>&1
+}
+
 # Converts the supported HTTPS/SCP-style/ssh GitHub spellings to one identity.
 # Nothing else is accepted: no ports, credentials, subdomains, URL suffixes,
 # forks, or lookalike repository names.

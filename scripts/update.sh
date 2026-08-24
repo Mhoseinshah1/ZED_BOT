@@ -397,7 +397,13 @@ main() {
   advance_operation_state migrations-confirmed application-recreated
 
   log_info "[12/14] Recording the deployed version ..."
-  record_deployed_sha
+  # Must be explicit: prepare_exact_origin_main no longer requires the local
+  # checkout to already equal the fetched target (it may legitimately lag
+  # behind), so record_deployed_sha's no-argument repo_head_sha() fallback
+  # would record the stale local HEAD instead of what was actually built and
+  # deployed - a normal update where origin/main had advanced would then
+  # report a version mismatch against the running image forever after.
+  record_deployed_sha "$target_deploy_sha"
 
   log_info "[13/14] Running the post-deploy smoke test ..."
   post_deploy_smoke
@@ -412,6 +418,12 @@ main() {
     recover_metadata_transition
     advance_operation_state promotion-prepared promoted
     finalize_promoted_operation_state
+    # Only now, with the update fully verified successful, sync the
+    # persistent checkout's tooling to what was actually deployed - see
+    # sync_deployment_checkout's own comment for why this must not run any
+    # earlier (a failed update should leave known-working recovery scripts
+    # in place, not ones from a release that just failed to deploy).
+    sync_deployment_checkout "$target_deploy_sha" || log_warn "Could not fast-forward the deployment checkout to ${target_deploy_sha:0:10}; the installed CLI may run stale scripts until this is resolved manually (git -C \"\$ZEDBOT_APP_DIR\" pull --ff-only)."
     log_success "ZED_BOT update completed successfully."
   else
     log_error "Update health checks failed; deployment was not marked successful."
