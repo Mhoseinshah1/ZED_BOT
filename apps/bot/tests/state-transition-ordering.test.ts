@@ -9,7 +9,14 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const common = path.join(root, "scripts/lib/common.sh");
 const generation = "20260809T120000Z-bbbbbbbbbbbb";
 const updateStages = ["current-validated", "current-image-retained", "candidate-metadata-prepared", "candidate-image-built", "deployment-reference-tagged", "compatibility-confirmed", "migrations-confirmed", "application-recreated", "health-confirmed", "promotion-prepared", "promoted"];
-const rollbackStages = ["previous-selected", "rollback-evidence-validated", "retained-image-validated", "deployment-reference-retagged", "compatibility-confirmed", "application-recreated", "health-confirmed", "promotion-prepared", "promoted"];
+// compatibility-confirmed precedes deployment-reference-retagged (unlike
+// update's own sequence): rollback's compatibility check must run against
+// the CURRENT (about-to-be-rolled-back-from) image, whose code and manifest
+// are the only ones that know about the newest migration's own backward-
+// compatibility declaration - retagging zedbot-app:latest to the previous
+// image first would make the check run against code that predates that
+// migration entirely, unconditionally blocking every rollback past one.
+const rollbackStages = ["previous-selected", "rollback-evidence-validated", "retained-image-validated", "compatibility-confirmed", "deployment-reference-retagged", "application-recreated", "health-confirmed", "promotion-prepared", "promoted"];
 
 function fixture() { const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-state-order-")); return { dir, state: path.join(dir, "operation-state.json"), trace: path.join(dir, "trace") }; }
 function shell(f: ReturnType<typeof fixture>, body: string) {

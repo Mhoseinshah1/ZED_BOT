@@ -192,9 +192,15 @@ Update advances through `current-validated`, `current-image-retained`,
 `migrations-confirmed`, `application-recreated`, `health-confirmed`,
 `promotion-prepared`, `promoted`. Rollback advances through
 `previous-selected`, `rollback-evidence-validated`,
-`retained-image-validated`, `deployment-reference-retagged`,
-`compatibility-confirmed`, `application-recreated`, `health-confirmed`,
-`promotion-prepared`, `promoted`.
+`retained-image-validated`, `compatibility-confirmed`,
+`deployment-reference-retagged`, `application-recreated`, `health-confirmed`,
+`promotion-prepared`, `promoted`. Compatibility is confirmed before the
+retag (unlike update's own sequence): the check must run against the
+current, about-to-be-rolled-back-from image, since only that image's code
+and manifest know about the newest migration's own backward-compatibility
+declaration. Retagging `zedbot-app:latest` to the previous image first would
+run the check against code that predates that migration entirely,
+unconditionally blocking every rollback past one.
 
 Every successor requires the exact predecessor. The operation and its explicit
 verification run before a fresh state-directory-local temporary payload is

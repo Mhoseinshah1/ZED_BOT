@@ -110,11 +110,19 @@ perform_rollback() {
   configure_rollback_compose_contract
   validate_retained_image
   confirm_operation_state rollback-evidence-validated retained-image-validated
+  # Compatibility MUST be checked before zedbot-app:latest is retagged to the
+  # previous image below. This check runs the CURRENT (about-to-be-rolled-
+  # back-from) worker CLI, because only that image's code and manifest know
+  # about the newest migration's own backward-compatibility declaration - a
+  # migration added by the very deployment being rolled back past. The
+  # previous image predates that migration entirely, so retagging first
+  # would make this check run against code that has no way to know the
+  # rollback is even safe, unconditionally blocking it.
+  validate_compatibility
+  confirm_operation_state retained-image-validated compatibility-confirmed
   retag_validated_previous_reference "$ZEDBOT_ROLLBACK_METADATA"
   metadata_transition_hook rollback-retagged
-  confirm_operation_state retained-image-validated deployment-reference-retagged
-  validate_compatibility
-  confirm_operation_state deployment-reference-retagged compatibility-confirmed
+  confirm_operation_state compatibility-confirmed deployment-reference-retagged
   validate_compose_application_images
   validate_dependencies_healthy
   pre="$(metadata_field '.targetDeploySha')"

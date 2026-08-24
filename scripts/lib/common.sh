@@ -1193,7 +1193,7 @@ record_bot_recreation_boundary() {
   require_deployment_lock || return 1
   validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 1
   kind="$(/usr/bin/jq -r '.kind' "$ZEDBOT_OPERATION_STATE")"; generation="$(/usr/bin/jq -r '.generation' "$ZEDBOT_OPERATION_STATE")"; stage="$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE")"
-  case "$kind:$stage" in install:migrations-confirmed|update:migrations-confirmed|rollback:compatibility-confirmed) ;; *) log_error "Bot recreation boundary has an invalid operation predecessor."; return 1;; esac
+  case "$kind:$stage" in install:migrations-confirmed|update:migrations-confirmed|rollback:deployment-reference-retagged) ;; *) log_error "Bot recreation boundary has an invalid operation predecessor."; return 1;; esac
   operation="$kind:$generation"
   ids="$(run_compose ps --all -q bot)" || return 1
   [ "$(printf '%s\n' "$ids" | /usr/bin/sed '/^$/d' | /usr/bin/wc -l)" -eq 1 ] || return 1
@@ -1336,9 +1336,9 @@ operation_stage_successor() {
     update:promotion-prepared) echo promoted ;;
     rollback:previous-selected) echo rollback-evidence-validated ;;
     rollback:rollback-evidence-validated) echo retained-image-validated ;;
-    rollback:retained-image-validated) echo deployment-reference-retagged ;;
-    rollback:deployment-reference-retagged) echo compatibility-confirmed ;;
-    rollback:compatibility-confirmed) echo application-recreated ;;
+    rollback:retained-image-validated) echo compatibility-confirmed ;;
+    rollback:compatibility-confirmed) echo deployment-reference-retagged ;;
+    rollback:deployment-reference-retagged) echo application-recreated ;;
     rollback:application-recreated) echo health-confirmed ;;
     rollback:health-confirmed) echo promotion-prepared ;;
     rollback:promotion-prepared) echo promoted ;;
@@ -1360,8 +1360,8 @@ operation_stage_number() {
     update:current-validated | rollback:previous-selected) echo 1 ;;
     update:current-image-retained | rollback:rollback-evidence-validated) echo 2 ;;
     update:candidate-metadata-prepared | rollback:retained-image-validated) echo 3 ;;
-    update:candidate-image-built | rollback:deployment-reference-retagged) echo 4 ;;
-    update:deployment-reference-tagged | rollback:compatibility-confirmed) echo 5 ;;
+    update:candidate-image-built | rollback:compatibility-confirmed) echo 4 ;;
+    update:deployment-reference-tagged | rollback:deployment-reference-retagged) echo 5 ;;
     update:compatibility-confirmed | rollback:application-recreated) echo 6 ;;
     update:migrations-confirmed | rollback:health-confirmed) echo 7 ;;
     update:application-recreated | rollback:promotion-prepared) echo 8 ;;
