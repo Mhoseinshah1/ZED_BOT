@@ -271,6 +271,21 @@ describe("deployment shell safety", () => {
     expect(rollback).toContain("Post-rollback application health validation failed");
   });
 
+  // Regression: the interactive confirmation prompt used to run AFTER
+  // retag_validated_previous_reference had already retagged zedbot-app:latest
+  // to the previous image - a real, externally visible mutation. If the
+  // operator answered "no" at that point, perform_rollback returned without
+  // undoing the retag, contradicting its own "nothing was changed" message.
+  // Confirmation must be the last gate before the first mutation.
+  it("asks for rollback confirmation before the first infrastructure mutation", () => {
+    const perform = rollback.slice(rollback.indexOf("perform_rollback() {"), rollback.indexOf("\nmain() {"));
+    const confirmIndex = perform.indexOf('confirm "Restore application version');
+    expect(confirmIndex).toBeGreaterThan(-1);
+    expect(confirmIndex).toBeLessThan(perform.indexOf("retag_validated_previous_reference"));
+    expect(confirmIndex).toBeLessThan(perform.indexOf("execute_validated_rollback_transition"));
+    expect(perform.indexOf("Rollback cancelled; nothing was changed")).toBeLessThan(perform.indexOf("retag_validated_previous_reference"));
+  });
+
   it("metadata writes atomically at mode 600 without secret-shaped fields", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-metadata-test-"));
     const source = path.join(dir, "source.json"); const output = path.join(dir, "previous.json");

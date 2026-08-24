@@ -120,9 +120,6 @@ perform_rollback() {
   # rollback is even safe, unconditionally blocking it.
   validate_compatibility
   confirm_operation_state retained-image-validated compatibility-confirmed
-  retag_validated_previous_reference "$ZEDBOT_ROLLBACK_METADATA"
-  metadata_transition_hook rollback-retagged
-  confirm_operation_state compatibility-confirmed deployment-reference-retagged
   validate_compose_application_images
   validate_dependencies_healthy
   pre="$(metadata_field '.targetDeploySha')"
@@ -147,11 +144,22 @@ perform_rollback() {
       *) log_error "${service} carries an unknown application SHA."; return 1 ;;
     esac
   done
+  # Confirmation happens here, before the first mutation visible outside this
+  # process (the retag below). Everything above is read-only against the
+  # running system; operation-state.json has advanced, but that is an
+  # internal, self-healing marker (initialize_operation_state clears an
+  # abandoned one automatically on a later attempt), not a change to what is
+  # deployed - so "nothing was changed" on cancellation is accurate with
+  # respect to the actual running application.
   log_warn "Rollback interrupts API, Bot and Worker. PostgreSQL and Redis will not be recreated or restarted."
   if [ "$assume_yes" -ne 1 ] && ! confirm "Restore application version ${pre:0:10}?" n; then
     log_warn "Rollback cancelled; nothing was changed."
     return 1
   fi
+
+  retag_validated_previous_reference "$ZEDBOT_ROLLBACK_METADATA"
+  metadata_transition_hook rollback-retagged
+  confirm_operation_state compatibility-confirmed deployment-reference-retagged
 
   # Only previous.json supplies rollback material. failed.json is diagnostic.
   if ! execute_validated_rollback_transition "$ZEDBOT_ROLLBACK_METADATA"; then
