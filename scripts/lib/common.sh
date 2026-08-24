@@ -1863,6 +1863,26 @@ recover_metadata_transition() {
   kind="$(/usr/bin/jq -r .kind "$ZEDBOT_METADATA_TRANSITION")"; phase="$(/usr/bin/jq -r .phase "$ZEDBOT_METADATA_TRANSITION")"; candidate="$(/usr/bin/jq -r .candidatePath "$ZEDBOT_METADATA_TRANSITION")"
   candidate_sha="$(/usr/bin/jq -r .candidateSha256 "$ZEDBOT_METADATA_TRANSITION")"; source_generation="$(/usr/bin/jq -r .sourceGeneration "$ZEDBOT_METADATA_TRANSITION")"; target_generation="$(/usr/bin/jq -r .targetGeneration "$ZEDBOT_METADATA_TRANSITION")"
   if [ "$kind" = update ]; then
+    current_generation="$(/usr/bin/jq -r '.generation' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" 2>/dev/null || true)"
+    # The candidate is consumed - absorbed into current.json, then deleted -
+    # before the transition is marked complete (write_lifecycle_role below,
+    # then remove_canonical_state_file "$candidate"). An interruption
+    # anywhere between that deletion and this function's own final
+    # transition.json removal leaves a transition naming a candidate that
+    # can never exist again - the next call would otherwise fail permanently
+    # on a file the previous run deliberately removed after a genuinely
+    # successful promotion. current.json already carrying the target
+    # generation is durable proof that write_lifecycle_role and the
+    # deletion both already succeeded (nothing else ever writes the target
+    # generation into current.json), so finish the bookkeeping instead of
+    # validating a file that is supposed to be gone. Mirrors the rollback
+    # branch's own missing-previous completion case below. Fails closed
+    # whenever current.json is NOT the target: the candidate is then
+    # missing for some other reason and the transition must be preserved.
+    if [ ! -e "$candidate" ] && [ ! -L "$candidate" ] && [ "$phase" != prepared ] && [ "$current_generation" = "$target_generation" ]; then
+      validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || return 1
+      remove_canonical_state_file "$ZEDBOT_METADATA_TRANSITION"; return 0
+    fi
     validate_generation_metadata_core "$candidate" candidate || return 1
     [ "$(/usr/bin/sha256sum "$candidate" | /usr/bin/awk '{print $1}')" = "$candidate_sha" ] || { log_error "Candidate bytes changed during metadata transition."; return 1; }
     [ "$(/usr/bin/jq -r '.generation' "$candidate")" = "$target_generation" ] || return 1

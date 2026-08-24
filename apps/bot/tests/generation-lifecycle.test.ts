@@ -106,6 +106,47 @@ describe("four-role generation lifecycle", () => {
     expect(generation(f.previous)).toBe(genA); expect(generation(f.current)).toBe(genB); expect(existsSync(f.transition)).toBe(false);
   });
 
+  // Regression: the candidate is deleted before the transition is marked
+  // complete (write_lifecycle_role, then remove_canonical_state_file the
+  // candidate, THEN advance_metadata_transition/remove transition.json). An
+  // interruption anywhere in that window left transition.json naming a
+  // candidate that can never exist again - recover_metadata_transition
+  // validated that missing candidate before ever inspecting the phase, so
+  // recovery failed permanently on a deployment whose promotion had, in
+  // fact, already succeeded. metadata_transition_hook fires BEFORE the
+  // deletion, so no existing interruption test (including the
+  // "update-current-written" case above) can reach this window - simulate
+  // the crash directly by removing the candidate after a hook interception,
+  // exactly matching the on-disk state a real interruption in this window
+  // leaves behind.
+  it.each(["previous-written", "current-written"])("recovers an update interrupted after the candidate was deleted at phase %s", (phase) => {
+    const f = fixture();
+    expect(shell(f, `metadata_transition_hook(){ [ "$1" != 'update-current-written' ]; }; promote_healthy_candidate '${f.candidate}'`).status).not.toBe(0);
+    rmSync(f.candidate);
+    if (phase === "current-written") {
+      const t = JSON.parse(readFileSync(f.transition, "utf8"));
+      write(f.transition, { ...t, phase: "current-written" });
+    }
+    const recovered = shell(f, "recover_metadata_transition");
+    expect(recovered.status, recovered.stderr).toBe(0);
+    expect(generation(f.current)).toBe(genB); expect(generation(f.previous)).toBe(genA); expect(existsSync(f.transition)).toBe(false);
+    // The installation must no longer be wedged for the next operation.
+    const genC = "20260810T120000Z-cccccccccccc";
+    const next = path.join(f.dir, `candidate-${genC}.json`);
+    write(next, metadata(genC, "candidate"));
+    expect(shell(f, `promote_healthy_candidate '${next}'`).status).toBe(0);
+  });
+
+  it.each(["prepared", "previous-written"])("still fails closed when the candidate is missing but current was never rotated to the target (phase %s)", (phase) => {
+    const f = fixture();
+    const candidateSha = spawnSync("sha256sum", [f.candidate], { encoding: "utf8" }).stdout.split(" ")[0];
+    write(f.transition, { formatVersion: 1, kind: "update", phase, candidatePath: f.candidate, candidateSha256: candidateSha, sourceGeneration: genA, targetGeneration: genB });
+    rmSync(f.candidate);
+    const result = shell(f, "recover_metadata_transition");
+    expect(result.status).not.toBe(0);
+    expect(generation(f.current)).toBe(genA); expect(existsSync(f.transition)).toBe(true);
+  });
+
   it("fails closed if candidate bytes are substituted during an interrupted transition", () => {
     const f = fixture(); expect(shell(f, `metadata_transition_hook(){ return 1; }; promote_healthy_candidate '${f.candidate}'`).status).not.toBe(0);
     write(f.candidate, metadata(genB, "candidate", { capturedAt: "changed" }));
