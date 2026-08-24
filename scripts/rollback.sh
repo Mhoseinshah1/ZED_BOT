@@ -228,14 +228,25 @@ perform_rollback() {
   done
   # Confirmation happens here, before the first mutation visible outside this
   # process (the retag below). Everything above is read-only against the
-  # running system; operation-state.json has advanced, but that is an
-  # internal, self-healing marker (initialize_operation_state clears an
-  # abandoned one automatically on a later attempt), not a change to what is
-  # deployed - so "nothing was changed" on cancellation is accurate with
-  # respect to the actual running application.
+  # running system, so "nothing was changed" is accurate with respect to the
+  # actual running application - but operation-state.json has already
+  # advanced to compatibility-confirmed, and the strictly read-only `zedbot
+  # rollback-status` treats ANY operation-state marker as an incomplete
+  # operation regardless of stage. initialize_operation_state would clear it
+  # automatically, but only on a LATER mutating rollback attempt - merely
+  # answering "no" here must not leave rollback-status reporting a blocked
+  # deployment until someone happens to run rollback again. Clear it now,
+  # identity-checked against this exact attempt so an unrelated marker is
+  # never touched.
   log_warn "Rollback interrupts API, Bot and Worker. PostgreSQL and Redis will not be recreated or restarted."
   if [ "$assume_yes" -ne 1 ] && ! confirm "Restore application version ${pre:0:10}?" n; then
     log_warn "Rollback cancelled; nothing was changed."
+    if { [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; } &&
+        validate_operation_state "$ZEDBOT_OPERATION_STATE" &&
+        [ "$(jq -r '.kind+":"+.generation' "$ZEDBOT_OPERATION_STATE")" = "rollback:$(metadata_field '.generation')" ]; then
+      remove_canonical_state_file "$ZEDBOT_OPERATION_STATE" ||
+        log_warn "Could not clear the abandoned operation-state marker; rerun 'zedbot doctor' if rollback-status later reports an incomplete operation."
+    fi
     return 1
   fi
 

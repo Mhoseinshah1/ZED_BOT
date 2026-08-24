@@ -585,6 +585,54 @@ fi
     expect(perform.indexOf("Rollback cancelled; nothing was changed")).toBeLessThan(perform.indexOf("retag_validated_previous_reference"));
   });
 
+  // Regression: operation-state.json has already advanced to
+  // compatibility-confirmed by the time confirmation is asked, but the
+  // strictly read-only `zedbot rollback-status` treats ANY operation-state
+  // marker as an incomplete operation regardless of stage - answering "no"
+  // here used to leave rollback-status reporting a blocked deployment until
+  // another, mutating rollback attempt happened to clear it. The marker
+  // must be cleared on cancellation, but only when it is identity-checked
+  // to belong to THIS exact rollback attempt (kind rollback, matching
+  // generation) - never an unrelated marker.
+  it("clears the operation-state marker on cancellation when it belongs to this rollback attempt, but leaves an unrelated one alone", () => {
+    const perform = rollback.slice(rollback.indexOf("perform_rollback() {"), rollback.indexOf("\nmain() {"));
+    const guardStart = perform.indexOf('if [ "$assume_yes" -ne 1 ]');
+    expect(guardStart).toBeGreaterThan(-1);
+    const guardEnd = perform.indexOf("\n\n  # Armed before the retag below", guardStart);
+    expect(guardEnd).toBeGreaterThan(guardStart);
+    const guard = perform.slice(guardStart, guardEnd);
+    expect(guard).toContain("remove_canonical_state_file");
+
+    const thisGeneration = "20260101T000000Z-aaaaaaaaaaaa";
+    function run(operationState: Record<string, unknown> | null) {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-rollback-cancel-"));
+      chmodSync(dir, 0o700);
+      const rollbackMetadata = path.join(dir, "previous.json");
+      writeFileSync(rollbackMetadata, JSON.stringify({ generation: thisGeneration }));
+      const operationStatePath = path.join(dir, "operation-state.json");
+      if (operationState) {
+        writeFileSync(operationStatePath, JSON.stringify(operationState));
+        chmodSync(operationStatePath, 0o600);
+      }
+      const command = `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; ZEDBOT_ROLLBACK_METADATA='${rollbackMetadata}'; acquire_deployment_lock; metadata_field(){ jq -er "$1" "$ZEDBOT_ROLLBACK_METADATA"; }; assume_yes=0; pre='${"a".repeat(40)}'; confirm(){ return 1; }; run_guard(){ ${guard}\n}; run_guard`;
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+      return { result, exists: existsSync(operationStatePath) };
+    }
+
+    const matching = run({ formatVersion: 1, kind: "rollback", generation: thisGeneration, stage: "compatibility-confirmed" });
+    expect(matching.result.status, matching.result.stderr).toBe(1);
+    expect(matching.exists).toBe(false);
+
+    const foreignGeneration = run({ formatVersion: 1, kind: "rollback", generation: "20260102T000000Z-bbbbbbbbbbbb", stage: "compatibility-confirmed" });
+    expect(foreignGeneration.exists).toBe(true);
+
+    const foreignKind = run({ formatVersion: 1, kind: "update", generation: thisGeneration, stage: "compatibility-confirmed" });
+    expect(foreignKind.exists).toBe(true);
+
+    const none = run(null);
+    expect(none.result.status).toBe(1);
+  });
+
   // Regression: validate_compatibility deliberately runs the CURRENT (about-
   // to-be-rolled-back-from) worker's rollback-compatibility CLI, because only
   // that image's manifest knows about the newest migration's own backward-
