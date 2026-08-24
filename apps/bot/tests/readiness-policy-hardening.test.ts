@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,8 +91,10 @@ describe("authoritative readiness evidence", () => {
       expect(evaluate(e, "application", 100, 100, undefined, "api,worker").status).toBe(2);
     });
     it("collect_readiness_evidence only inspects the requested services, never bot", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-service-filter-"));
+      const boundary = path.join(dir, "bot-recreation.json"); writeFileSync(boundary, '{"recreatedAt":0}');
       const record_ = `run_clean_docker(){ if [ "$1" = ps ]; then s="\${6#*service=}"; printf '%s-id\\n' "$s"; else s="\${2%-id}"; jq -cn --arg s "$s" --arg id "${imageId}" '[{Id:($s+"-id"),Image:$id,RestartCount:0,Config:{Image:"zedbot-app:latest",Env:[("GIT_SHA="+"${sha}")],Labels:{"com.docker.compose.project":"zedbot","com.docker.compose.service":$s}},State:{Status:"running",Health:{Status:"healthy"}}}]'; fi; }`;
-      const body = `${record_}; value=$(collect_readiness_evidence application '${attempt}' 100 '${sha}' api,worker); printf '%s' "$value" | jq -r '[.services[].service] | sort | join(",")'`;
+      const body = `ZEDBOT_BOT_RECREATION_BOUNDARY='${boundary}'; ${record_}; validate_bot_recreation_boundary(){ :; }; check_fresh_worker_heartbeat(){ :; }; value=$(collect_readiness_evidence application '${attempt}' 100 '${sha}' api,worker); printf '%s' "$value" | jq -r '[.services[].service] | sort | join(",")'`;
       const result = shell(body);
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout.trim()).toBe("api,worker");
@@ -186,5 +188,53 @@ describe("bounded polling and flow suppression", () => {
     expect(block).toMatch(/run_compose exec -T redis timeout -s KILL \d+ redis-cli GET zedbot:worker:heartbeat/);
     expect(block).not.toContain("node --input-type=module");
     expect(block).not.toContain("RedisConnection");
+  });
+
+  // Regression: the old probe accepted ANY present, non-nil heartbeat value.
+  // Shutdown only clears the interval (apps/worker/src/index.ts); nothing
+  // ever DELs the key, so the stopped predecessor's key survives for up to
+  // WORKER_HEARTBEAT_TTL_SECONDS (45s). A recreated worker that dies before
+  // its first tick (e.g. connectDatabase() rejects, staying "running" for a
+  // deliberate 10s exit delay) would inherit the dead process's still-present
+  // key and be marked healthy. The heartbeat value is the worker's own
+  // ISO-8601 publish time, so requiring it to postdate the recreation
+  // boundary proves WHICH process wrote it.
+  describe("worker heartbeat is bound to the recreated worker instance", () => {
+    const iso = (epoch: number) => new Date(epoch * 1000).toISOString();
+    function probe(value: string, boundaryAt: number | string) {
+      return shell(`run_compose(){ printf '%s\\n' '${value}'; }; check_fresh_worker_heartbeat '${boundaryAt}'`);
+    }
+    it("rejects a heartbeat published before the recreation boundary", () => expect(probe(iso(999_970), 1_000_000).status).not.toBe(0));
+    it("rejects a heartbeat published in the same second as the boundary", () => expect(probe(iso(1_000_000), 1_000_000).status).not.toBe(0));
+    it("accepts a heartbeat published after the recreation boundary", () => expect(probe(iso(1_000_005), 1_000_000).status).toBe(0));
+    it.each([["", "absent"], ["(nil)", "nil"], ["not-a-timestamp", "garbage"], ["1787565600", "bare epoch, no ISO shape"]])
+      ("rejects %s (%s)", (value) => expect(probe(value, 1_000_000).status).not.toBe(0));
+    it("rejects a missing or malformed boundary argument", () => {
+      expect(probe(iso(2_000_000), "").status).not.toBe(0);
+      expect(probe(iso(2_000_000), "abc").status).not.toBe(0);
+    });
+  });
+
+  it("collect_readiness_evidence binds the worker heartbeat check to the recorded recreation boundary", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-worker-hb-"));
+    const boundaryTrace = path.join(dir, "boundary-seen");
+    const boundaryFile = path.join(dir, "bot-recreation.json");
+    writeFileSync(boundaryFile, JSON.stringify({
+      formatVersion: 1, operation: "update:20260810T120000Z-aaaaaaaaaaaa", generation: "20260810T120000Z-aaaaaaaaaaaa",
+      containerId: "bot-id", imageId, imageRef: "zedbot-app:latest", project: "zedbot", service: "bot", recreatedAt: 1_000_000,
+    }));
+    chmodSync(boundaryFile, 0o600);
+    const dockerStub = `run_clean_docker(){ if [ "$1" = ps ]; then s="\${6#*service=}"; printf '%s-id\\n' "$s"; else s="\${2%-id}"; jq -cn --arg s "$s" --arg id "${imageId}" '[{Id:($s+"-id"),Image:$id,RestartCount:0,Config:{Image:"zedbot-app:latest",Env:[("GIT_SHA="+"${sha}")],Labels:{"com.docker.compose.project":"zedbot","com.docker.compose.service":$s}},State:{Status:"running",Health:{Status:"healthy"}}}]'; fi; }`;
+    const body = `set_deployment_state_paths '${dir}'; ${dockerStub}; check_fresh_worker_heartbeat(){ printf '%s' "$1" > '${boundaryTrace}'; return 0; }; collect_readiness_evidence application '${attempt}' 100 '${sha}' api,worker >/dev/null`;
+    const result = shell(body);
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(boundaryTrace, "utf8")).toBe("1000000");
+  });
+
+  it("fails collection rather than reporting healthy when the recreation boundary is unavailable", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-worker-hb-missing-"));
+    const dockerStub = `run_clean_docker(){ if [ "$1" = ps ]; then s="\${6#*service=}"; printf '%s-id\\n' "$s"; else s="\${2%-id}"; jq -cn --arg s "$s" --arg id "${imageId}" '[{Id:($s+"-id"),Image:$id,RestartCount:0,Config:{Image:"zedbot-app:latest",Env:[("GIT_SHA="+"${sha}")],Labels:{"com.docker.compose.project":"zedbot","com.docker.compose.service":$s}},State:{Status:"running",Health:{Status:"healthy"}}}]'; fi; }`;
+    const result = shell(`set_deployment_state_paths '${dir}'; ${dockerStub}; collect_readiness_evidence application '${attempt}' 100 '${sha}' api,worker`);
+    expect(result.status).not.toBe(0);
   });
 });

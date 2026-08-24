@@ -547,7 +547,7 @@ readiness_pause() { sleep "$1"; }
 # implementation obtains a fresh, single-container inspection for every
 # required service; command failure is never hidden by a successful parse.
 collect_readiness_evidence() {
-  local kind="$1" attempt="$2" observed="$3" expected_sha="${4:-}" services_csv="${5:-}" service ids cid inspection health generation
+  local kind="$1" attempt="$2" observed="$3" expected_sha="${4:-}" services_csv="${5:-}" service ids cid inspection health generation boundary_at
   local services=(postgres redis) records='[]'
   if [ "$kind" = application ]; then
     if [ -n "$services_csv" ]; then
@@ -575,7 +575,10 @@ collect_readiness_evidence() {
     health="$(printf '%s' "$inspection" | /usr/bin/jq -r '.[0].State.Health.Status // "missing"')"
     if [ "$kind" = application ]; then
       case "$service" in
-        worker) check_fresh_worker_heartbeat && health=healthy || health=starting ;;
+        worker)
+          validate_bot_recreation_boundary || return 1
+          boundary_at="$(/usr/bin/jq -er '.recreatedAt' "$ZEDBOT_BOT_RECREATION_BOUNDARY")" || return 1
+          check_fresh_worker_heartbeat "$boundary_at" && health=healthy || health=starting ;;
       esac
     fi
     generation="$(printf '%s' "$inspection" | /usr/bin/jq -r '[.[0].Config.Env[]? | select(startswith("GIT_SHA=")) | ltrimstr("GIT_SHA=")] | if length==1 then .[0] else "" end')"
@@ -1170,17 +1173,30 @@ check_fresh_worker_heartbeat() {
   # confirmed by zero diagnostic output (not even the probe's own error
   # branches ever got a chance to print). Query Redis directly instead: the
   # key (packages/shared/src/ops.ts WORKER_HEARTBEAT_KEY) already carries its
-  # own TTL (EX WORKER_HEARTBEAT_TTL_SECONDS, refreshed on every worker
-  # heartbeat tick), so a present, non-nil value already IS a fresh one -
-  # Redis deletes it itself once the worker stops ticking, no manual age
-  # comparison needed. redis-cli is the redis image's own tiny static
-  # binary (no cold ESM module resolution) and reads REDISCLI_AUTH from its
-  # own container env for auth, same as doctor.sh's own `redis-cli ping`
-  # health probe and legacy-upgrade-test.sh's independent heartbeat
-  # assertion (both already proven to work in this exact CI environment).
-  local value
+  # own TTL (EX WORKER_HEARTBEAT_TTL_SECONDS) refreshed on every worker
+  # heartbeat tick. That TTL alone is not enough to prove THIS wait's
+  # recreated worker is what's ticking, though: the value the worker writes
+  # is its own ISO-8601 publish time (apps/worker/src/heartbeat.ts), and
+  # nothing DELs the key on shutdown (only clearInterval), so the previous
+  # process's key can outlive it by up to the full TTL. A recreated worker
+  # that dies before its first tick (e.g. connectDatabase() rejects, and it
+  # deliberately stays up for a 10s exit delay) would otherwise inherit the
+  # dead predecessor's still-fresh-looking key. Requiring the published
+  # timestamp to be AFTER the recreation boundary closes that: only the
+  # process started at-or-after the boundary could have written a value
+  # later than it. redis-cli is the redis image's own tiny static binary (no
+  # cold ESM module resolution) and reads REDISCLI_AUTH from its own
+  # container env for auth, same as doctor.sh's own `redis-cli ping` health
+  # probe and legacy-upgrade-test.sh's independent heartbeat assertion (both
+  # already proven to work in this exact CI environment).
+  local boundary_at="$1" value epoch
+  [[ "$boundary_at" =~ ^[0-9]+$ ]] || return 1
   value="$(run_compose exec -T redis timeout -s KILL 8 redis-cli GET zedbot:worker:heartbeat 2>/dev/null | tr -d '[:space:]')" || return 1
-  [ -n "$value" ] && [ "$value" != "(nil)" ]
+  [ -n "$value" ] && [ "$value" != "(nil)" ] || return 1
+  [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,3})?Z$ ]] || return 1
+  epoch="$(date -u -d "$value" +%s 2>/dev/null)" || return 1
+  [[ "$epoch" =~ ^[0-9]+$ ]] || return 1
+  [ "$epoch" -gt "$boundary_at" ]
 }
 
 # require_bot_readiness=0 skips the bot-specific grammY marker wait (used
