@@ -25,10 +25,11 @@ function evidence(kind: Kind, overrides: Partial<{ attempt: string; observedAt: 
   return { formatVersion: 1, kind, attempt, observedAt: 100, services: names.map((name) => record(name, kind)), ...overrides };
 }
 function shell(body: string) { return spawnSync("bash", ["-c", `. '${common}'; ${body}`], { encoding: "utf8" }); }
-function evaluate(value: unknown, kind: Kind = "dependency", started = 100, now = 100, baselineRestarts?: Record<string, number>) {
+function evaluate(value: unknown, kind: Kind = "dependency", started = 100, now = 100, baselineRestarts?: Record<string, number>, servicesCsv?: string) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-ready-")); const file = path.join(dir, "evidence.json"); writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value));
-  const baseline = baselineRestarts === undefined ? "" : `'${JSON.stringify(baselineRestarts)}'`;
-  return shell(`evaluate_readiness_evidence "$(< '${file}')" '${kind}' '${attempt}' '${started}' '${now}' '${kind === "application" ? imageId : ""}' '${kind === "application" ? sha : ""}' ${baseline}`);
+  const baseline = baselineRestarts === undefined ? (servicesCsv === undefined ? "" : "''") : `'${JSON.stringify(baselineRestarts)}'`;
+  const services = servicesCsv === undefined ? "" : `'${servicesCsv}'`;
+  return shell(`evaluate_readiness_evidence "$(< '${file}')" '${kind}' '${attempt}' '${started}' '${now}' '${kind === "application" ? imageId : ""}' '${kind === "application" ? sha : ""}' ${baseline} ${services}`);
 }
 
 describe("authoritative readiness evidence", () => {
@@ -69,6 +70,34 @@ describe("authoritative readiness evidence", () => {
     ["wrong immutable image", (e: MutableEvidence) => e.services[2].imageId = `sha256:${"e".repeat(64)}`],
     ["substituted app service", (e: MutableEvidence) => e.services[0].service = e.services[0].declaredService = "postgres"],
   ])("rejects %s", (_name, mutate) => { const e = evidence("application") as MutableEvidence; mutate(e); expect(evaluate(e, "application").status).toBe(2); });
+
+  // Regression: a token-less first install must not require the bot service
+  // for generic application readiness either (its own Docker healthcheck IS
+  // the real-bot marker check, so without a token it can never report
+  // healthy and keeps restarting) - see validate_running_application's
+  // require_bot_readiness parameter.
+  describe("custom application service set (token-less bootstrap)", () => {
+    function twoServiceEvidence() {
+      const e = evidence("application") as MutableEvidence; e.services = [record("api", "application"), record("worker", "application")]; return e;
+    }
+    it("accepts a complete api+worker set when bot is excluded from the requirement", () => {
+      expect(evaluate(twoServiceEvidence(), "application", 100, 100, undefined, "api,worker").status).toBe(0);
+    });
+    it("still rejects the full 3-service set as unexpected when only api+worker are required", () => {
+      expect(evaluate(evidence("application"), "application", 100, 100, undefined, "api,worker").status).toBe(2);
+    });
+    it("still rejects a genuinely partial api+worker set (missing worker)", () => {
+      const e = twoServiceEvidence(); e.services.pop();
+      expect(evaluate(e, "application", 100, 100, undefined, "api,worker").status).toBe(2);
+    });
+    it("collect_readiness_evidence only inspects the requested services, never bot", () => {
+      const record_ = `run_clean_docker(){ if [ "$1" = ps ]; then s="\${6#*service=}"; printf '%s-id\\n' "$s"; else s="\${2%-id}"; jq -cn --arg s "$s" --arg id "${imageId}" '[{Id:($s+"-id"),Image:$id,RestartCount:0,Config:{Image:"zedbot-app:latest",Env:[("GIT_SHA="+"${sha}")],Labels:{"com.docker.compose.project":"zedbot","com.docker.compose.service":$s}},State:{Status:"running",Health:{Status:"healthy"}}}]'; fi; }`;
+      const body = `${record_}; value=$(collect_readiness_evidence application '${attempt}' 100 '${sha}' api,worker); printf '%s' "$value" | jq -r '[.services[].service] | sort | join(",")'`;
+      const result = shell(body);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("api,worker");
+    });
+  });
 
   // Regression: postgres/redis are never recreated between deploys, so a
   // single historical restart from before this readiness wait even began

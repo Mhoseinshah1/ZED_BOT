@@ -181,6 +181,19 @@ describe("area 10 failure boundaries and preserved policies", () => {
   it("cleanup never targets canonical or legacy evidence", () => { const text = readFileSync(common, "utf8"); expect(text).not.toMatch(/operation_register_artifact.*(?:current\.json|legacy-install-v1\.json)/); });
   it("keeps the exact application-only recreation set", () => { const text = readFileSync(common, "utf8"); expect(text).toContain("--force-recreate api bot worker"); expect(text.match(/--force-recreate api bot worker/)?.[0]).not.toMatch(/postgres|redis/); });
   it("the installer starts dependencies separately and delegates application bootstrap", () => { const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8"); expect(text).toContain("up -d --no-deps --no-build postgres redis"); expect(text).toContain('bash "${APP_DIR}/scripts/bootstrap-deployment.sh"'); expect(text).not.toContain("up -d --build --remove-orphans"); });
+  // Regression: the installer explicitly allows leaving TELEGRAM_BOT_TOKEN
+  // empty ("can be added later" - install.sh's own prompt says so), but
+  // apps/bot/src/index.ts never calls run() without a token and so never
+  // publishes the real-bot readiness marker. Bootstrap must gate on generic
+  // application readiness only (not the bot-specific marker, and not the
+  // bot service's own crash-looping container at all) when no token is
+  // configured, completing the install with the bot pending configuration.
+  it("gates first-install readiness on the bot-specific marker only when a token is configured", () => {
+    const text = readFileSync(bootstrapScript, "utf8");
+    expect(text).toContain('if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then');
+    expect(text).toContain('validate_running_application "$target" 0 >/dev/null || return 1');
+    expect(text.indexOf("recreate_application_services")).toBeLessThan(text.indexOf('if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then'));
+  });
   // Regression: validate_first_install_intent used to run only after
   // clone_or_update_repo (git fetch + `pull --ff-only`, a real mutation of
   // an existing checkout), create_env_file, and install_cli had already

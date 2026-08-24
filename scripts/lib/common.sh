@@ -547,9 +547,15 @@ readiness_pause() { sleep "$1"; }
 # implementation obtains a fresh, single-container inspection for every
 # required service; command failure is never hidden by a successful parse.
 collect_readiness_evidence() {
-  local kind="$1" attempt="$2" observed="$3" expected_sha="${4:-}" service ids cid inspection health generation
+  local kind="$1" attempt="$2" observed="$3" expected_sha="${4:-}" services_csv="${5:-}" service ids cid inspection health generation
   local services=(postgres redis) records='[]'
-  [ "$kind" = application ] && services=(api bot worker)
+  if [ "$kind" = application ]; then
+    if [ -n "$services_csv" ]; then
+      IFS=',' read -r -a services <<< "$services_csv"
+    else
+      services=(api bot worker)
+    fi
+  fi
   for service in "${services[@]}"; do
     # docker compose ps has no general label filter, and "docker compose run"
     # tags its container with the SAME service label as the long-running one
@@ -597,11 +603,18 @@ collect_readiness_evidence() {
 # service's own current count, via `// .restartCount`, so the comparison
 # trivially passes on the very first observation of this wait).
 evaluate_readiness_evidence() {
-  local evidence="$1" kind="$2" attempt="$3" started="$4" now="$5" expected_image_id="${6:-}" expected_sha="${7:-}" baseline_restarts="${8:-{\}}"
+  local evidence="$1" kind="$2" attempt="$3" started="$4" now="$5" expected_image_id="${6:-}" expected_sha="${7:-}" baseline_restarts="${8:-{\}}" services_csv="${9:-}"
   local required refs
   case "$kind" in
     dependency) required='["postgres","redis"]'; refs='{"postgres":"postgres:16-alpine","redis":"redis:7-alpine"}' ;;
-    application) required='["api","bot","worker"]'; refs='{"api":"zedbot-app:latest","bot":"zedbot-app:latest","worker":"zedbot-app:latest"}' ;;
+    application)
+      if [ -n "$services_csv" ]; then
+        required="$(printf '%s' "$services_csv" | /usr/bin/jq -Rc 'split(",")')" || return 2
+        refs="$(printf '%s' "$services_csv" | /usr/bin/jq -Rc '[split(",")[] | {(.):"zedbot-app:latest"}] | add')" || return 2
+      else
+        required='["api","bot","worker"]'; refs='{"api":"zedbot-app:latest","bot":"zedbot-app:latest","worker":"zedbot-app:latest"}'
+      fi
+      ;;
     *) return 2 ;;
   esac
   printf '%s' "$evidence" | /usr/bin/jq -e --arg kind "$kind" --arg attempt "$attempt" --argjson started "$started" --argjson now "$now" \
@@ -628,7 +641,7 @@ evaluate_readiness_evidence() {
 }
 
 wait_for_readiness_policy() {
-  local kind="$1" attempt="$2" expected_image_id="${3:-}" expected_sha="${4:-}" timeout="${5:-90}" interval="${6:-3}"
+  local kind="$1" attempt="$2" expected_image_id="${3:-}" expected_sha="${4:-}" timeout="${5:-90}" interval="${6:-3}" services_csv="${7:-}"
   local started now evidence rc baseline_restarts=""
   [[ "$timeout" =~ ^[1-9][0-9]*$ && "$interval" =~ ^[1-9][0-9]*$ ]] || return 1
   validate_compose_readiness_contract || return 1
@@ -637,13 +650,13 @@ wait_for_readiness_policy() {
     operation_assert_active || return 1
     now="$(readiness_now)" || return 1
     [ "$now" -le $((started + timeout)) ] || { log_error "${kind} readiness timed out."; return 1; }
-    evidence="$(collect_readiness_evidence "$kind" "$attempt" "$now" "$expected_sha")" || { log_error "${kind} readiness inspection failed."; return 1; }
+    evidence="$(collect_readiness_evidence "$kind" "$attempt" "$now" "$expected_sha" "$services_csv")" || { log_error "${kind} readiness inspection failed."; return 1; }
     # Baseline is each service's restartCount as first observed THIS wait -
     # a nonzero count from before this call ever started must not, by
     # itself, fail readiness (see evaluate_readiness_evidence's comment);
     # only a further increase during this specific wait should.
     [ -n "$baseline_restarts" ] || baseline_restarts="$(printf '%s' "$evidence" | /usr/bin/jq -c '[.services[] | {(.service): .restartCount}] | add // {}')" || return 1
-    if evaluate_readiness_evidence "$evidence" "$kind" "$attempt" "$started" "$now" "$expected_image_id" "$expected_sha" "$baseline_restarts"; then rc=0; else rc=$?; fi
+    if evaluate_readiness_evidence "$evidence" "$kind" "$attempt" "$started" "$now" "$expected_image_id" "$expected_sha" "$baseline_restarts" "$services_csv"; then rc=0; else rc=$?; fi
     case "$rc" in 0) return 0 ;; 2) log_error "${kind} readiness evidence is terminal, malformed, stale, contradictory, or identity-mismatched."; return 1 ;; esac
     [ $((now + interval)) -le $((started + timeout)) ] || { log_error "${kind} readiness timed out."; return 1; }
     readiness_pause "$interval" || { log_error "${kind} readiness was cancelled or interrupted."; return 1; }
@@ -1170,8 +1183,17 @@ check_fresh_worker_heartbeat() {
   [ -n "$value" ] && [ "$value" != "(nil)" ]
 }
 
+# require_bot_readiness=0 skips the bot-specific grammY marker wait (used
+# only by the first-install bootstrap when TELEGRAM_BOT_TOKEN is
+# deliberately left empty - the documented "add it later, then zedbot
+# restart" flow). apps/bot/src/index.ts never calls run() without a token,
+# so it never publishes that marker; requiring it unconditionally would
+# make a token-less first install fail after building, migrating, and
+# recreating services, even though that configuration is explicitly
+# supported. Generic application readiness (containers running, healthy,
+# on the right image/generation) is still required either way.
 validate_running_application() {
-  local expected_sha="${1:-}" expected_image_id attempt
+  local expected_sha="${1:-}" require_bot_readiness="${2:-1}" expected_image_id attempt services_csv=""
   if [ -z "$expected_sha" ]; then
     validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || return 1
     expected_sha="$(/usr/bin/jq -r '.targetDeploySha' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")"
@@ -1183,8 +1205,18 @@ validate_running_application() {
     log_error "Application readiness cannot resolve the immutable deployment image identity."; return 1;
   }
   valid_image_id "$expected_image_id" || return 1
-  wait_for_readiness_policy application "$attempt" "$expected_image_id" "$expected_sha" 90 3 || return 1
-  wait_for_real_bot_readiness "$attempt" "$expected_image_id" "$expected_sha" 90 3 || return 1
+  # The bot's own Docker healthcheck (docker-compose.yml) IS this same
+  # real-bot marker check, so without a token it never reports healthy and
+  # the container keeps crash-looping (index.ts delay-exits after 60s with
+  # no token). Left in the required set, generic application readiness
+  # would also eventually fail closed on that container's growing
+  # restartCount - so the bot service is excluded from generic readiness
+  # too, not just from the bot-specific marker wait.
+  [ "$require_bot_readiness" -eq 1 ] || services_csv="api,worker"
+  wait_for_readiness_policy application "$attempt" "$expected_image_id" "$expected_sha" 90 3 "$services_csv" || return 1
+  if [ "$require_bot_readiness" -eq 1 ]; then
+    wait_for_real_bot_readiness "$attempt" "$expected_image_id" "$expected_sha" 90 3 || return 1
+  fi
   printf '%s %s\n' "$expected_sha" "$expected_image_id"
 }
 

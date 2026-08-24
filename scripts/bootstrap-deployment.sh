@@ -83,7 +83,19 @@ main() {
   record_bot_recreation_boundary "$image_id" "$target" || return 1
   rewrite_generation_state "$candidate" application-recreated || return 1
   advance_operation_state migrations-confirmed application-recreated || return 1
-  validate_running_application "$target" >/dev/null || return 1
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    validate_running_application "$target" >/dev/null || return 1
+  else
+    # The installer explicitly allows leaving TELEGRAM_BOT_TOKEN empty
+    # ("can be added later"). apps/bot/src/index.ts never calls run()
+    # without a token, so it never publishes the real-bot readiness marker
+    # this gate would otherwise wait for - only generic application
+    # readiness (containers running, healthy, on the right image) is
+    # required here. The operator adds the token and runs `zedbot restart`
+    # to activate the bot afterward.
+    log_warn "TELEGRAM_BOT_TOKEN is not configured; completing installation with the bot pending configuration."
+    validate_running_application "$target" 0 >/dev/null || return 1
+  fi
   rewrite_generation_state "$candidate" healthy-candidate || return 1
   advance_operation_state application-recreated health-confirmed || return 1
   advance_installation_bootstrap canonical-published health-confirmed || return 1
