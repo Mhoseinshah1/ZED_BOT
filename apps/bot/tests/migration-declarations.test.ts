@@ -528,5 +528,29 @@ describe("strict format-2 migration declarations", () => {
       expect(bindIndex).toBeGreaterThan(mainStart);
       expect(firstMainComposeCall).toBeGreaterThan(bindIndex);
     });
+
+    // Regression: perform_rollback's compatibility check was documented as
+    // running "under the CURRENT generation's own Compose contract", but
+    // nothing actually bound it there - it just trusted ZEDBOT_CANONICAL_
+    // COMPOSE_FILE's default (the persistent checkout's own docker-
+    // compose.yml), which is only accurate as long as sync_deployment_
+    // checkout has kept the checkout fast-forwarded. That sync is best-
+    // effort - it logs a warning and continues on failure, not one that
+    // aborts the update - so a prior update whose sync step failed would
+    // leave validate_compatibility silently running against a stale
+    // Compose definition (wrong commands, mounts, or environment),
+    // potentially accepting or rejecting a rollback on the wrong evidence.
+    it("rollback.sh binds the compose contract to current.json's own evidence before checking compatibility", () => {
+      const rollbackText = readFileSync(rollback, "utf8");
+      const perform = rollbackText.slice(rollbackText.indexOf("perform_rollback() {"), rollbackText.indexOf("\nmain() {"));
+      const evidenceCheck = perform.indexOf("validate_generation_owned_evidence_readonly");
+      const bindIndex = perform.indexOf("bind_current_generation_compose_contract");
+      const compatibilityCheck = perform.indexOf("\n  validate_compatibility\n");
+      const contractSwitch = perform.indexOf("\n  configure_rollback_compose_contract\n");
+      expect(evidenceCheck).toBeGreaterThan(-1);
+      expect(bindIndex).toBeGreaterThan(evidenceCheck);
+      expect(bindIndex).toBeLessThan(compatibilityCheck);
+      expect(compatibilityCheck).toBeLessThan(contractSwitch);
+    });
   });
 });

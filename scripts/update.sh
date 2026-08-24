@@ -59,6 +59,24 @@ trap on_update_error ERR
 
 update_owned_cleanup() {
   local rc=0
+  # A SIGINT/SIGTERM/SIGHUP during the update is handled entirely by
+  # operation_signal_handler (common.sh), which never runs on_update_error
+  # (the ERR trap is explicitly removed before this cleanup ever runs, and a
+  # signal-driven `exit` does not trigger ERR anyway) - it goes straight to
+  # this function via the EXIT trap. Without the check below, a signal that
+  # lands while recreate_application_services is partially recreating the
+  # api/bot/worker services would leave the host on a mix of old- and new-
+  # image containers with current.json still naming the old generation, but
+  # no failed.json and no failed-after-recreation state recorded anywhere -
+  # exactly the evidence on_update_error publishes for an ordinary post-
+  # recreation error, just missing for this one exit path. Mirrors
+  # on_update_error's own two calls; gated on ZEDBOT_OPERATION_INTERRUPTED so
+  # it never double-publishes on the ordinary ERR-trap path (which already
+  # does this itself before this function ever runs) or on a clean exit.
+  if [ "$ZEDBOT_OPERATION_INTERRUPTED" -eq 1 ] && [ "$APPLICATION_RECREATION_ATTEMPTED" -eq 1 ]; then
+    set_rollback_state "failed-after-recreation" || true
+    publish_failed_generation "$CANDIDATE_METADATA" "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || true
+  fi
   # zedbot-app:latest moves to the candidate the instant the build succeeds
   # (build_verified_source_snapshot), well before compatibility validation,
   # migrations, or recreation - but nothing committed to that candidate until
@@ -324,9 +342,19 @@ main() {
   # prior release permanently unreachable via `zedbot rollback` even though
   # nothing was actually deployed. A drift repair with no new code belongs
   # to `zedbot restart`, not `zedbot update`.
+  #
+  # The idempotent baseline seed still runs, though: an operator can change
+  # ADMIN_TELEGRAM_IDS (or pick up any other missing seed-registry default)
+  # without a new source commit to deploy, and `zedbot restart` - the tool
+  # this message points at for a no-op drift repair - only recreates
+  # containers, it never seeds. Nothing else from the pipeline is needed:
+  # there are no new migrations to apply when the source itself is unchanged.
   if [ "$target_deploy_sha" = "$pre_deploy_sha" ]; then
     log_success "Already up to date at ${target_deploy_sha:0:10} - no new commits on origin/main to deploy."
-    log_info "Rollback history was left untouched. To recreate the running containers without deploying new code, use: zedbot restart"
+    log_info "Re-running idempotent baseline seeding (OWNER admins from ADMIN_TELEGRAM_IDS, default settings) in case configuration changed since the last deploy ..."
+    require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before seeding."; exit 1; }
+    run_compose run --rm --no-deps api node packages/database/dist/seed.js
+    log_info "Rollback history was left untouched; no build, recreation, or promotion was needed."
     exit 0
   fi
 

@@ -458,9 +458,16 @@ fi
   it("update.sh seeds baseline data after migrations and before recreation, matching the legacy installer's seed step", () => {
     expect(update).toContain("packages/database/dist/seed.js");
     const migrateIndex = update.indexOf("prisma migrate deploy");
-    const seedIndex = update.indexOf("packages/database/dist/seed.js");
+    // The no-op guard (checked separately below) also re-runs seed.js
+    // earlier in the file - search from the real migration step onward for
+    // THIS step's own seed call, not that one.
+    const seedIndex = update.indexOf("packages/database/dist/seed.js", migrateIndex);
     const confirmedIndex = update.indexOf("advance_operation_state compatibility-confirmed migrations-confirmed");
-    const recreateIndex = update.indexOf("recreate_application_services");
+    // update_owned_cleanup's own explanatory comment (checked separately
+    // below) also mentions recreate_application_services in prose, earlier
+    // in the file - search from the migrations-confirmed marker onward for
+    // the real call.
+    const recreateIndex = update.indexOf("recreate_application_services", confirmedIndex);
     expect(migrateIndex).toBeGreaterThan(-1);
     expect(seedIndex).toBeGreaterThan(-1);
     expect(confirmedIndex).toBeGreaterThan(-1);
@@ -480,7 +487,7 @@ fi
   // rollback target even though nothing was actually deployed. The guard
   // must fire (and exit successfully) before ANY candidate generation
   // state is created, and must NOT fire when the source genuinely changed.
-  it("update.sh finishes without rotating generation metadata when origin/main has not moved past what is already running", () => {
+  it("update.sh finishes without rotating generation metadata when origin/main has not moved past what is already running, but still re-seeds baseline data", () => {
     const guardStart = update.indexOf('if [ "$target_deploy_sha" = "$pre_deploy_sha" ]; then');
     expect(guardStart).toBeGreaterThan(-1);
     const guardEnd = update.indexOf('\n\n  log_info "[5/14]', guardStart);
@@ -489,11 +496,20 @@ fi
 
     const rotationStart = update.indexOf('CANDIDATE_METADATA="$ZEDBOT_DEPLOYMENT_DIR/candidate-');
     expect(rotationStart).toBeGreaterThan(guardStart);
+    // Regression: an operator can change ADMIN_TELEGRAM_IDS (or pick up any
+    // other missing idempotent seed-registry default) with no new source
+    // commit to deploy. The no-op guard must still re-run seed.js - the
+    // `zedbot restart` it points operators at for a drift repair only
+    // recreates containers, it never seeds.
+    expect(guard).toContain("packages/database/dist/seed.js");
 
     const run = (targetSha: string, preSha: string) =>
       spawnSync(
         "bash",
-        ["-c", `target_deploy_sha='${targetSha}'; pre_deploy_sha='${preSha}'; log_success(){ printf 'SUCCESS:%s\\n' "$*"; }; log_info(){ printf 'INFO:%s\\n' "$*"; }; ${guard}\necho REACHED_STEP_5`],
+        [
+          "-c",
+          `target_deploy_sha='${targetSha}'; pre_deploy_sha='${preSha}'; target_tree='${"c".repeat(40)}'; SOURCE_SNAPSHOT='/snapshot'; log_success(){ printf 'SUCCESS:%s\\n' "$*"; }; log_info(){ printf 'INFO:%s\\n' "$*"; }; log_error(){ printf 'ERROR:%s\\n' "$*"; }; require_source_integrity(){ :; }; run_compose(){ printf 'RUN_COMPOSE:%s\\n' "$*"; }; ${guard}\necho REACHED_STEP_5`,
+        ],
         { encoding: "utf8" },
       );
 
@@ -501,22 +517,56 @@ fi
     const noop = run(sha, sha);
     expect(noop.status).toBe(0);
     expect(noop.stdout).toContain("SUCCESS:Already up to date");
+    expect(noop.stdout).toContain("RUN_COMPOSE:run --rm --no-deps api node packages/database/dist/seed.js");
     expect(noop.stdout).not.toContain("REACHED_STEP_5");
 
     const changed = run(sha, "b".repeat(40));
     expect(changed.status).toBe(0);
     expect(changed.stdout).toContain("REACHED_STEP_5");
     expect(changed.stdout).not.toContain("SUCCESS:Already up to date");
+    expect(changed.stdout).not.toContain("RUN_COMPOSE:");
   });
 
   it("update_owned_cleanup restores the reference only when recreation was never attempted", () => {
     const body = update.slice(update.indexOf("update_owned_cleanup() {"), update.indexOf("\n# Finds the newest database backup"));
     const trace = path.join(os.tmpdir(), `zedbot-cleanup-trace-${process.pid}-${Date.now()}`);
-    const harness = (recreationAttempted: 0 | 1, restoreId: string) => `APPLICATION_RECREATION_ATTEMPTED=${recreationAttempted}; DEPLOYMENT_REFERENCE_RESTORE_ID='${restoreId}'; log_error(){ :; }; restore_deployment_reference(){ echo "restore:$1" >> '${trace}'; return 0; }; cleanup_source_snapshot(){ :; }; ${body}\nupdate_owned_cleanup`;
+    const harness = (recreationAttempted: 0 | 1, restoreId: string) => `ZEDBOT_OPERATION_INTERRUPTED=0; APPLICATION_RECREATION_ATTEMPTED=${recreationAttempted}; DEPLOYMENT_REFERENCE_RESTORE_ID='${restoreId}'; CANDIDATE_METADATA=''; ZEDBOT_CURRENT_DEPLOYMENT_METADATA=''; log_error(){ :; }; restore_deployment_reference(){ echo "restore:$1" >> '${trace}'; return 0; }; cleanup_source_snapshot(){ :; }; ${body}\nupdate_owned_cleanup`;
     spawnSync("bash", ["-c", harness(0, `sha256:${"5".repeat(64)}`)], { encoding: "utf8" });
     expect(readFileSync(trace, "utf8")).toContain(`restore:sha256:${"5".repeat(64)}`);
     rmSync(trace, { force: true });
     spawnSync("bash", ["-c", harness(1, `sha256:${"5".repeat(64)}`)], { encoding: "utf8" });
+    expect(existsSync(trace)).toBe(false);
+  });
+
+  // Regression: operation_signal_handler (common.sh) handles a SIGINT/
+  // SIGTERM/SIGHUP entirely on its own and exits straight to the EXIT trap;
+  // it never runs on_update_error (whose ERR trap is explicitly removed
+  // before this cleanup runs, and a signal-driven `exit` does not trigger
+  // ERR anyway). A signal landing while recreate_application_services is
+  // partially recreating the api/bot/worker services previously left the
+  // host on a mix of old/new-image containers, with current.json still
+  // naming the old generation and NO failed.json recorded anywhere -
+  // exactly the evidence on_update_error publishes for an ordinary post-
+  // recreation error, just missing for this one exit path.
+  it("update_owned_cleanup publishes failed-generation evidence on a signal-driven exit after recreation, but never on the ordinary ERR-trap path", () => {
+    const body = update.slice(update.indexOf("update_owned_cleanup() {"), update.indexOf("\n# Finds the newest database backup"));
+    const trace = path.join(os.tmpdir(), `zedbot-signal-cleanup-trace-${process.pid}-${Date.now()}`);
+    const harness = (interrupted: 0 | 1, recreationAttempted: 0 | 1) =>
+      `ZEDBOT_OPERATION_INTERRUPTED=${interrupted}; APPLICATION_RECREATION_ATTEMPTED=${recreationAttempted}; DEPLOYMENT_REFERENCE_RESTORE_ID=''; CANDIDATE_METADATA='/candidate.json'; ZEDBOT_CURRENT_DEPLOYMENT_METADATA='/current.json'; log_error(){ :; }; restore_deployment_reference(){ :; }; cleanup_source_snapshot(){ :; }; set_rollback_state(){ echo "rollback-state:$1" >> '${trace}'; }; publish_failed_generation(){ echo "publish-failed:$1:$2" >> '${trace}'; }; ${body}\nupdate_owned_cleanup`;
+
+    // Interrupted AND recreation attempted: must publish.
+    spawnSync("bash", ["-c", harness(1, 1)], { encoding: "utf8" });
+    expect(readFileSync(trace, "utf8")).toContain("rollback-state:failed-after-recreation");
+    expect(readFileSync(trace, "utf8")).toContain("publish-failed:/candidate.json:/current.json");
+    rmSync(trace, { force: true });
+
+    // Ordinary (non-signal) exit: on_update_error already covers this
+    // itself before update_owned_cleanup ever runs - must NOT double-publish.
+    spawnSync("bash", ["-c", harness(0, 1)], { encoding: "utf8" });
+    expect(existsSync(trace)).toBe(false);
+
+    // Interrupted, but recreation never attempted: nothing to fail-record.
+    spawnSync("bash", ["-c", harness(1, 0)], { encoding: "utf8" });
     expect(existsSync(trace)).toBe(false);
   });
 

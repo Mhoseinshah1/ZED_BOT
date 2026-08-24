@@ -190,9 +190,15 @@ perform_rollback() {
   # same runtime inputs the current worker expects, so doing either swap
   # first would make this check run against code (or a contract) that has no
   # way to know the rollback is even safe, unconditionally blocking it. The
-  # persistent checkout's own docker-compose.yml (still ZEDBOT_CANONICAL_COMPOSE_FILE's
-  # value here) is the current generation's contract, matching the invariant
-  # sync_deployment_checkout maintains after every successful update.
+  # persistent checkout's own docker-compose.yml (ZEDBOT_CANONICAL_COMPOSE_FILE's
+  # default here) matches the current generation's contract ONLY as long as
+  # sync_deployment_checkout has kept it fast-forwarded - a best-effort step
+  # that logs a warning and continues on failure, not one that aborts the
+  # update. Explicitly bind to current.json's own checksum-verified Compose
+  # evidence rather than trusting that default, so this check still runs
+  # under the CURRENT generation's real contract even when the checkout has
+  # fallen behind.
+  bind_current_generation_compose_contract || return 1
   validate_compatibility
   confirm_operation_state retained-image-validated compatibility-confirmed
   configure_rollback_compose_contract
