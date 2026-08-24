@@ -260,7 +260,14 @@ main() {
     log_error "Current migration state is not healthy; refusing to retain this application as known-good."
     exit 1
   fi
-  baseline_csv="$(run_compose exec -T worker sh -c 'find packages/database/prisma/migrations -mindepth 2 -maxdepth 2 -name migration.sql -printf "%h\n" | sed "s#.*/##" | sort | paste -sd, -')"
+  # -print (POSIX), not -printf: this runs inside the worker container, whose
+  # busybox find (node:22-alpine) has no -printf and errors out on it
+  # ("find: unrecognized: -printf"), silently emptying the pipeline instead
+  # of failing loudly - always closing this gate. -print's full path
+  # (.../migrations/<dir>/migration.sql) needs an extra strip of the
+  # trailing filename before the parent-directory-name strip -printf's %h
+  # did in one step.
+  baseline_csv="$(run_compose exec -T worker sh -c 'find packages/database/prisma/migrations -mindepth 2 -maxdepth 2 -name migration.sql -print | sed -e "s#/migration\.sql\$##" -e "s#.*/##" | sort | paste -sd, -')"
   [ -n "$baseline_csv" ] || { log_error "No complete baseline migrations found."; exit 1; }
 
   log_info "[4/14] Fetching canonical origin/main and verifying unchanged local main ..."

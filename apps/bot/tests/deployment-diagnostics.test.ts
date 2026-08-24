@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -584,6 +584,34 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     expect(migrate).toContain('export GIT_SHA="${GIT_SHA:-unknown}"');
     expect(migrate).toContain('run_compose_with_deployment_sha "$GIT_SHA" build');
     expect(migrate).not.toMatch(/^\s*run_compose build\s*$/m);
+  });
+
+  // Regression: the worker's own container runs busybox find (node:22-alpine),
+  // which has no -printf ("find: unrecognized: -printf") and errors out on
+  // it - silently emptying the baseline-migrations pipeline instead of
+  // failing loudly, since neither `sh -c` inside the container nor the
+  // capturing subshell has pipefail. update.sh step 3 always hit "No
+  // complete baseline migrations found." as a result. -print is the POSIX-
+  // portable action both GNU find (used by common.sh's own equivalent HOST-
+  // side call, which is correctly left as -printf) and busybox find support.
+  it("baseline migration lookup inside the worker container is POSIX find, not GNU -printf", () => {
+    const update = readFileSync(path.join(scriptsDir, "update.sh"), "utf8");
+    const line = update.split("\n").find((l) => l.includes("No complete baseline migrations found") === false && l.includes("baseline_csv=") && l.includes("run_compose exec"));
+    expect(line, "baseline_csv assignment line not found").toBeTruthy();
+    expect(line).not.toContain("-printf");
+    expect(line).toContain("-print");
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-baseline-find-"));
+    const migrationsDir = path.join(dir, "packages/database/prisma/migrations");
+    mkdirSync(path.join(migrationsDir, "20260101000000_init"), { recursive: true });
+    writeFileSync(path.join(migrationsDir, "20260101000000_init/migration.sql"), "");
+    mkdirSync(path.join(migrationsDir, "20260102000000_second"), { recursive: true });
+    writeFileSync(path.join(migrationsDir, "20260102000000_second/migration.sql"), "");
+    const inner = line!.match(/sh -c '([^']*)'/)?.[1];
+    expect(inner, "could not extract the inner sh -c pipeline").toBeTruthy();
+    const result = spawnSync("sh", ["-c", inner!], { cwd: dir, encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("20260101000000_init,20260102000000_second");
   });
 
   it("runs the complete workspace test under sudo with one trusted nested-pnpm PATH and an exact environment allowlist", () => {
