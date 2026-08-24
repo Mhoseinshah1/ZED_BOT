@@ -207,8 +207,8 @@ describe("bounded polling and flow suppression", () => {
     it("rejects a heartbeat published before the recreation boundary", () => expect(probe(iso(999_970), 1_000_000).status).not.toBe(0));
     it("rejects a heartbeat published in the same second as the boundary", () => expect(probe(iso(1_000_000), 1_000_000).status).not.toBe(0));
     it("accepts a heartbeat published after the recreation boundary", () => expect(probe(iso(1_000_005), 1_000_000).status).toBe(0));
-    it.each([["", "absent"], ["(nil)", "nil"], ["not-a-timestamp", "garbage"], ["1787565600", "bare epoch, no ISO shape"]])
-      ("rejects %s (%s)", (value) => expect(probe(value, 1_000_000).status).not.toBe(0));
+    it.each([["", "absent"], ["(nil)", "nil"], ["not-a-timestamp", "garbage"], ["1787565600", "bare epoch, no ISO shape"]])(
+      "rejects %s (%s)", (value) => expect(probe(value, 1_000_000).status).not.toBe(0));
     it("rejects a missing or malformed boundary argument", () => {
       expect(probe(iso(2_000_000), "").status).not.toBe(0);
       expect(probe(iso(2_000_000), "abc").status).not.toBe(0);
