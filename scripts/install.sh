@@ -268,11 +268,19 @@ install_compose() {
     log_info "Docker Compose plugin already installed: $(docker compose version --short 2>/dev/null || echo 'unknown version')"
     return 0
   fi
+  # A standalone v2 binary alone is NOT sufficient to skip installing the
+  # plugin: every canonical deployment script (scripts/lib/common.sh,
+  # sourced by bootstrap-deployment.sh, update.sh, rollback.sh, zedbot.sh,
+  # ...) fixes COMPOSE_CMD to the "docker --context default compose"
+  # plugin form unconditionally, with no fallback to the standalone
+  # binary. Accepting standalone-only here used to let installation
+  # proceed past this point only to fail permanently the moment
+  # bootstrap-deployment.sh sourced common.sh and validated that fixed
+  # form. Install the plugin regardless, so every later script's
+  # assumption actually holds.
   if docker_compose_binary_is_v2; then
-    log_info "Found standalone Docker Compose v2 binary: $(docker-compose version --short 2>/dev/null || echo 'unknown version')"
-    return 0
-  fi
-  if has_command docker-compose; then
+    log_info "Found standalone Docker Compose v2 binary: $(docker-compose version --short 2>/dev/null || echo 'unknown version'); installing the plugin too, since it is required by the rest of ZED_BOT's tooling."
+  elif has_command docker-compose; then
     log_warn "Found a legacy docker-compose v1 binary - it cannot run this project; installing the v2 plugin."
   fi
   log_info "Installing the Docker Compose plugin ..."
@@ -293,7 +301,11 @@ detect_compose_command() {
     return 0
   fi
   if docker compose version >/dev/null 2>&1; then
-    COMPOSE_CMD=(docker compose)
+    # --context default matches scripts/lib/common.sh's own fixed
+    # COMPOSE_CMD exactly: explicit even under env -i, since the docker CLI
+    # can also select a non-default context from ~/.docker/config.json,
+    # which clearing the environment alone does not override.
+    COMPOSE_CMD=(docker --context default compose)
   elif docker_compose_binary_is_v2; then
     COMPOSE_CMD=(docker-compose)
   else
@@ -554,7 +566,7 @@ start_dependencies() {
   detect_compose_command
   log_info "Starting first-install dependencies without recreating application services ..."
   /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C COMPOSE_DISABLE_ENV_FILE=1 \
-    docker --context default compose --project-directory "$APP_DIR" -f "$APP_DIR/docker-compose.yml" \
+    "${COMPOSE_CMD[@]}" --project-directory "$APP_DIR" -f "$APP_DIR/docker-compose.yml" \
     --project-name zedbot --env-file "$ENV_FILE" up -d --no-deps --no-build postgres redis
   log_success "Dependencies started; canonical readiness validation follows."
 }

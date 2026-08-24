@@ -294,6 +294,63 @@ esac
     const result = spawnSync("bash", ["-c", script], { encoding: "utf8", env: { ...process.env, POSTGRES_PASSWORD: "" } });
     expect(result.status, result.stderr).toBe(0);
   });
+  // Regression: a standalone `docker-compose` v2 binary alone used to be
+  // accepted as sufficient, skipping plugin installation entirely - but
+  // scripts/lib/common.sh (sourced by every later script: bootstrap-
+  // deployment.sh, update.sh, rollback.sh, zedbot.sh) fixes COMPOSE_CMD to
+  // the "docker --context default compose" plugin form unconditionally,
+  // with no fallback. Installation used to proceed past this point only to
+  // fail permanently the moment bootstrap-deployment.sh sourced common.sh.
+  it("install_compose installs the plugin even when a standalone v2 binary is already present", () => {
+    const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    const body = text.slice(text.indexOf("docker_compose_binary_is_v2() {"), text.indexOf("\nCOMPOSE_CMD=()"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-install-compose-"));
+    const marker = path.join(dir, "plugin-installed"); const trace = path.join(dir, "apt-trace");
+    const script = `
+has_command(){ [ "$1" = docker-compose ]; }
+docker(){ if [ "$1 $2" = "compose version" ]; then [ -f '${marker}' ] && return 0 || return 1; fi; }
+docker-compose(){ printf 'v2.29.0\\n'; }
+apt_get(){ printf '%s\\n' "$*" >> '${trace}'; touch '${marker}'; }
+log_info(){ :; }; log_warn(){ printf 'WARN:%s\\n' "$1" >> '${dir}/warnings'; }; log_success(){ :; }; log_error(){ :; }
+${body}
+install_compose`;
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(trace, "utf8")).toContain("docker-compose-plugin");
+    expect(existsSync(path.join(dir, "warnings"))).toBe(false);
+  });
+  it("install_compose still warns and installs the plugin for a genuine legacy v1 binary", () => {
+    const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    const body = text.slice(text.indexOf("docker_compose_binary_is_v2() {"), text.indexOf("\nCOMPOSE_CMD=()"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-install-compose-v1-"));
+    const marker = path.join(dir, "plugin-installed"); const trace = path.join(dir, "apt-trace");
+    const script = `
+has_command(){ [ "$1" = docker-compose ]; }
+docker(){ if [ "$1 $2" = "compose version" ]; then [ -f '${marker}' ] && return 0 || return 1; fi; }
+docker-compose(){ printf 'docker-compose version 1.29.2, build unknown\\n'; }
+apt_get(){ printf '%s\\n' "$*" >> '${trace}'; touch '${marker}'; }
+log_info(){ :; }; log_warn(){ printf 'WARN:%s\\n' "$1" >> '${dir}/warnings'; }; log_success(){ :; }; log_error(){ :; }
+${body}
+install_compose`;
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(trace, "utf8")).toContain("docker-compose-plugin");
+    expect(readFileSync(path.join(dir, "warnings"), "utf8")).toContain("legacy docker-compose v1");
+  });
+  it("start_dependencies invokes the actual detected Compose command, not a hardcoded plugin form", () => {
+    // start_dependencies runs its Compose call through `env -i PATH=<fixed
+    // system dirs>`, which always execs a real PATH executable and cannot
+    // see functions defined in the calling shell - so unlike the other
+    // COMPOSE_CMD call sites in this file, this specific invocation cannot
+    // safely be exercised behaviorally without writing into real system
+    // PATH directories a parallel test run could race with. The static
+    // check is the direct, sufficient proof of the fix: the hardcoded
+    // plugin-only literal is gone, replaced by the detected command.
+    const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    const body = text.slice(text.indexOf("start_dependencies() {"), text.indexOf("\n# PostgreSQL only reads POSTGRES_PASSWORD"));
+    expect(body).not.toContain("docker --context default compose");
+    expect(body).toContain('"${COMPOSE_CMD[@]}"');
+  });
   it("update and rollback invoke the authoritative classifier after locking", () => { for (const file of ["scripts/update.sh", "scripts/rollback.sh"]) { const text = readFileSync(path.join(root, file), "utf8"); expect(text).toContain("classify_installation observe"); expect(text.indexOf("acquire_deployment_lock")).toBeLessThan(text.indexOf("classify_installation observe")); } });
   it("retry rejects changed bootstrap-bound source identity", () => { const dir = fixture(); const result = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; test "$(jq -r .sourceSha "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = '${"f".repeat(40)}'`, true); expect(result.status).not.toBe(0); });
   it("temporary files, image tags and containers cannot create rollback eligibility", () => { const dir = fixture(); write(path.join(dir, ".image-tag"), "zedbot-app:latest"); expect(shell(dir, "classify_installation first-install").status).not.toBe(0); expect(existsSync(path.join(dir, "previous.json"))).toBe(false); });
