@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -310,6 +310,89 @@ describe("deployment shell safety", () => {
     expect(rollback).not.toMatch(/pg_restore|psql|migrate\.sh|prisma migrate|\bseed\b/);
     expect(rollback.indexOf('validate_running_application "$pre"')).toBeLessThan(rollback.indexOf("Application rollback completed"));
     expect(rollback).toContain("Post-rollback application health validation failed");
+  });
+
+  // Regression: build_verified_source_snapshot retags zedbot-app:latest to
+  // the candidate the moment the build succeeds - long before compatibility
+  // validation, migrations, or recreation. A failure anywhere in that window
+  // used to leave the tag on the unvalidated candidate while the old
+  // containers kept running: `zedbot restart`/`start` force-recreate
+  // straight from that tag, so an unrelated restart could start new code
+  // before its compatibility gate or migrations ever succeeded.
+  function mockDocker(bin: string, stateDir: string) {
+    mkdirSync(bin, { recursive: true }); mkdirSync(stateDir, { recursive: true });
+    writeFileSync(path.join(bin, "docker"), `#!/usr/bin/env bash
+state='${stateDir}'
+# The real invocation is "docker --context default image inspect|tag ...";
+# shift the fixed prefix off before pattern-matching the subcommand.
+[ "$1" = "--context" ] && shift 2
+if [ "$1 $2" = "image inspect" ]; then
+  ref="\${@: -1}"; file="$state/$(printf '%s' "$ref" | tr '/:' '__')"
+  [ -f "$file" ] && cat "$file" || exit 1
+elif [ "$1 $2" = "image tag" ]; then
+  printf '%s' "$3" > "$state/$(printf '%s' "$4" | tr '/:' '__')"
+fi
+`, { mode: 0o755 });
+  }
+  function restore(bin: string, imageId: string) {
+    return spawnSync("bash", ["-c", `. '${path.join(scripts, "lib/common.sh")}'; _ZEDBOT_FIXED_DOCKER_PATH='${bin}:${process.env.PATH}'; restore_deployment_reference '${imageId}'`], { encoding: "utf8" });
+  }
+
+  it("restore_deployment_reference retags latest back onto the known-good image", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-restore-ref-")); const bin = path.join(dir, "bin"); const state = path.join(dir, "state");
+    const goodId = `sha256:${"1".repeat(64)}`; const candidateId = `sha256:${"2".repeat(64)}`;
+    mockDocker(bin, state);
+    writeFileSync(path.join(state, `${goodId.replace(":", "_")}`), goodId);
+    writeFileSync(path.join(state, "zedbot-app_latest"), candidateId);
+    const result = restore(bin, goodId);
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(path.join(state, "zedbot-app_latest"), "utf8")).toBe(goodId);
+  });
+
+  it("restore_deployment_reference is a no-op when latest already matches the target", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-restore-ref-noop-")); const bin = path.join(dir, "bin"); const state = path.join(dir, "state");
+    const goodId = `sha256:${"3".repeat(64)}`;
+    mockDocker(bin, state);
+    writeFileSync(path.join(state, `${goodId.replace(":", "_")}`), goodId);
+    writeFileSync(path.join(state, "zedbot-app_latest"), goodId);
+    expect(restore(bin, goodId).status).toBe(0);
+  });
+
+  it("restore_deployment_reference fails when the restore target no longer exists", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-restore-ref-missing-")); const bin = path.join(dir, "bin"); const state = path.join(dir, "state");
+    mockDocker(bin, state);
+    expect(restore(bin, `sha256:${"4".repeat(64)}`).status).not.toBe(0);
+  });
+
+  it("restore_deployment_reference rejects a malformed image ID without invoking docker", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-restore-ref-malformed-")); const bin = path.join(dir, "bin"); const state = path.join(dir, "state");
+    mockDocker(bin, state);
+    expect(restore(bin, "not-an-image-id").status).not.toBe(0);
+  });
+
+  it("update.sh arms the restore before the build and disarms once recreation starts", () => {
+    const restoreArm = update.indexOf('DEPLOYMENT_REFERENCE_RESTORE_ID="$pre_deploy_image_id"');
+    const buildCall = update.indexOf('build_verified_source_snapshot "$target_deploy_sha"');
+    expect(restoreArm).toBeGreaterThan(-1);
+    expect(buildCall).toBeGreaterThan(-1);
+    expect(restoreArm).toBeLessThan(buildCall);
+    const disarm = update.indexOf('DEPLOYMENT_REFERENCE_RESTORE_ID=""', buildCall);
+    const recreateCall = update.indexOf("recreate_application_services", buildCall);
+    expect(disarm).toBeGreaterThan(buildCall);
+    expect(disarm).toBeLessThan(recreateCall);
+    expect(update).toContain("restore_deployment_reference");
+    expect(commonShell).toContain("restore_deployment_reference() {");
+  });
+
+  it("update_owned_cleanup restores the reference only when recreation was never attempted", () => {
+    const body = update.slice(update.indexOf("update_owned_cleanup() {"), update.indexOf("\n# Finds the newest database backup"));
+    const trace = path.join(os.tmpdir(), `zedbot-cleanup-trace-${process.pid}-${Date.now()}`);
+    const harness = (recreationAttempted: 0 | 1, restoreId: string) => `APPLICATION_RECREATION_ATTEMPTED=${recreationAttempted}; DEPLOYMENT_REFERENCE_RESTORE_ID='${restoreId}'; log_error(){ :; }; restore_deployment_reference(){ echo "restore:$1" >> '${trace}'; return 0; }; cleanup_source_snapshot(){ :; }; ${body}\nupdate_owned_cleanup`;
+    spawnSync("bash", ["-c", harness(0, `sha256:${"5".repeat(64)}`)], { encoding: "utf8" });
+    expect(readFileSync(trace, "utf8")).toContain(`restore:sha256:${"5".repeat(64)}`);
+    rmSync(trace, { force: true });
+    spawnSync("bash", ["-c", harness(1, `sha256:${"5".repeat(64)}`)], { encoding: "utf8" });
+    expect(existsSync(trace)).toBe(false);
   });
 
   // Regression: the interactive confirmation prompt used to run AFTER

@@ -27,6 +27,12 @@ SOURCE_SNAPSHOT=""
 SOURCE_SHA=""
 SOURCE_TREE=""
 CANDIDATE_METADATA=""
+# Set once the candidate build has retagged zedbot-app:latest, cleared once
+# recreation actually starts. See update_owned_cleanup: if the update fails
+# anywhere in between, the tag is put back on the image the running
+# containers actually use, so `zedbot restart`/`start` can never
+# force-recreate from an unvalidated candidate.
+DEPLOYMENT_REFERENCE_RESTORE_ID=""
 
 set_rollback_state() {
   local state="$1"
@@ -52,7 +58,28 @@ on_update_error() {
 trap on_update_error ERR
 
 update_owned_cleanup() {
-  cleanup_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE"
+  local rc=0
+  # zedbot-app:latest moves to the candidate the instant the build succeeds
+  # (build_verified_source_snapshot), well before compatibility validation,
+  # migrations, or recreation - but nothing committed to that candidate until
+  # recreation actually starts. Any failure in that window must put the tag
+  # back on the image the running containers actually use: `zedbot restart`/
+  # `start` force-recreate straight from this tag, so leaving it on an
+  # unvalidated candidate would let an unrelated restart start new code
+  # before its compatibility gate or migrations ever succeeded. Once
+  # recreation has been attempted, the running containers themselves may
+  # already be on the new image (partially or fully), so restoring here
+  # would fight - not help - and that window belongs to `zedbot rollback`.
+  if [ "$APPLICATION_RECREATION_ATTEMPTED" -eq 0 ] && [ -n "$DEPLOYMENT_REFERENCE_RESTORE_ID" ]; then
+    restore_deployment_reference "$DEPLOYMENT_REFERENCE_RESTORE_ID" || {
+      log_error "Could not restore zedbot-app:latest to the running application image."
+      log_error "Do NOT run 'zedbot restart' until this is fixed: docker image tag ${DEPLOYMENT_REFERENCE_RESTORE_ID} zedbot-app:latest"
+      rc=1
+    }
+    DEPLOYMENT_REFERENCE_RESTORE_ID=""
+  fi
+  cleanup_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE" || rc=1
+  return "$rc"
 }
 
 # Finds the newest database backup file (any supported format) in the host
@@ -345,6 +372,11 @@ main() {
   validate_compose_application_images || { log_error "Compose identity changed before build."; exit 1; }
   GIT_SHA="$target_deploy_sha"
   export GIT_SHA
+  # Armed before the build call below, not after: the build itself is what
+  # moves zedbot-app:latest to the candidate, so arming afterwards would
+  # leave a window uncovered. Cleared once recreation actually starts
+  # (below) - see update_owned_cleanup.
+  DEPLOYMENT_REFERENCE_RESTORE_ID="$pre_deploy_image_id"
   # Docker consumes the already verified snapshot directory itself. No archive
   # is regenerated from the mutable deployment checkout after verification.
   build_verified_source_snapshot "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source verification or image build failed."; exit 1; }
@@ -390,6 +422,7 @@ main() {
   validate_dependencies_healthy
   validate_compose_application_images
   APPLICATION_RECREATION_ATTEMPTED=1
+  DEPLOYMENT_REFERENCE_RESTORE_ID=""
   recreate_application_services
   verify_application_recreation_set "$target_image_id"
   record_bot_recreation_boundary "$target_image_id" "$target_deploy_sha"

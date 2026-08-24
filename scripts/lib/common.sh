@@ -2033,6 +2033,29 @@ retag_validated_previous_reference() {
   [ "$(run_clean_docker image inspect -f '{{.Id}}' zedbot-app:latest 2>/dev/null)" = "$target_id" ] || { log_error "Rollback deployment reference retag was not confirmed."; return 1; }
 }
 
+# Restores the canonical deployment reference (zedbot-app:latest) to an image
+# proven to still exist. Idempotent: a no-op if the tag already resolves to
+# it. Deliberately NOT routed through run_clean_docker/run_operation_child:
+# this undoes THIS operation's own mutation on the way out, the same category
+# of work as cleanup_source_snapshot's worktree removal, so it must still run
+# after a signal - where operation_assert_active (run_operation_child's first
+# check) would refuse it as new work.
+restore_deployment_reference() {
+  local image_id="$1" current
+  local -a docker=(/usr/bin/env -i PATH="$_ZEDBOT_FIXED_DOCKER_PATH" LC_ALL=C COMPOSE_DISABLE_ENV_FILE=1 docker --context default)
+  valid_image_id "$image_id" || { log_error "Deployment reference restore target is malformed."; return 1; }
+  [ "$("${docker[@]}" image inspect -f '{{.Id}}' "$image_id" 2>/dev/null)" = "$image_id" ] || {
+    log_error "Deployment reference restore target no longer exists."; return 1;
+  }
+  current="$("${docker[@]}" image inspect -f '{{.Id}}' "$ZEDBOT_EXPECTED_APPLICATION_IMAGE" 2>/dev/null || true)"
+  [ "$current" = "$image_id" ] && return 0
+  "${docker[@]}" image tag "$image_id" "$ZEDBOT_EXPECTED_APPLICATION_IMAGE" || return 1
+  [ "$("${docker[@]}" image inspect -f '{{.Id}}' "$ZEDBOT_EXPECTED_APPLICATION_IMAGE" 2>/dev/null)" = "$image_id" ] || {
+    log_error "Deployment reference restore was not confirmed."; return 1;
+  }
+  log_warn "Restored ${ZEDBOT_EXPECTED_APPLICATION_IMAGE} to the running application image; the unvalidated candidate stays under its own immutable generation tag."
+}
+
 # --- Interaction -------------------------------------------------------------
 # confirm "<question>" [y|n]
 # Returns 0 for yes, 1 for no. The second argument is the default answer,
