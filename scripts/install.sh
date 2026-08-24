@@ -529,6 +529,21 @@ validate_first_install_intent() {
   [ "$classification" = genuine-first-install ] || { log_error "Installer cannot replace installation class ${classification}."; return 1; }
 }
 
+# Runs validate_first_install_intent BEFORE this installer touches anything
+# that already-running old containers depend on (the checkout git-pull
+# fast-forwards, .env, the installed CLI). classify_installation only reads
+# the canonical deployment-state directory - independent of $APP_DIR's
+# content - so an EXISTING checkout's own (not-yet-mutated) common.sh can
+# answer this safely. A rerun against an already-canonical install is
+# rejected here, before clone_or_update_repo/create_env_file/install_cli
+# leave new checkout/.env/CLI files sitting beside old running containers
+# with nothing having deployed or resynchronized them. A genuinely fresh
+# $APP_DIR has no common.sh yet - nothing to protect until it exists.
+guard_first_install_intent_before_mutation() {
+  [ -f "${APP_DIR}/scripts/lib/common.sh" ] || return 0
+  validate_first_install_intent
+}
+
 start_dependencies() {
   detect_compose_command
   log_info "Starting first-install dependencies without recreating application services ..."
@@ -696,6 +711,7 @@ main() {
   install_docker
   install_compose
   create_directories
+  guard_first_install_intent_before_mutation
   clone_or_update_repo
   create_env_file
   install_cli

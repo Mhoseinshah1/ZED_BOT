@@ -88,6 +88,39 @@ describe("area 10 failure boundaries and preserved policies", () => {
   it("cleanup never targets canonical or legacy evidence", () => { const text = readFileSync(common, "utf8"); expect(text).not.toMatch(/operation_register_artifact.*(?:current\.json|legacy-install-v1\.json)/); });
   it("keeps the exact application-only recreation set", () => { const text = readFileSync(common, "utf8"); expect(text).toContain("--force-recreate api bot worker"); expect(text.match(/--force-recreate api bot worker/)?.[0]).not.toMatch(/postgres|redis/); });
   it("the installer starts dependencies separately and delegates application bootstrap", () => { const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8"); expect(text).toContain("up -d --no-deps --no-build postgres redis"); expect(text).toContain('bash "${APP_DIR}/scripts/bootstrap-deployment.sh"'); expect(text).not.toContain("up -d --build --remove-orphans"); });
+  // Regression: validate_first_install_intent used to run only after
+  // clone_or_update_repo (git fetch + `pull --ff-only`, a real mutation of
+  // an existing checkout), create_env_file, and install_cli had already
+  // executed. A rerun against an already-canonical install was rejected
+  // only then - leaving a fast-forwarded checkout, a possibly-replaced
+  // .env, and a refreshed CLI sitting beside the still-running OLD
+  // containers, none of it deployed or resynchronized. Guard before any of
+  // that mutation using the EXISTING (not-yet-overwritten) checkout's own
+  // common.sh - classify_installation only reads the canonical
+  // deployment-state directory, independent of $APP_DIR's content, so this
+  // is safe even before clone_or_update_repo runs.
+  it("guards installer rerun intent before the checkout, .env, or CLI can be mutated", () => {
+    const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    expect(text).toContain("guard_first_install_intent_before_mutation()");
+    expect(text).toContain('[ -f "${APP_DIR}/scripts/lib/common.sh" ] || return 0');
+    const main = text.slice(text.indexOf("\nmain() {"));
+    expect(main.indexOf("guard_first_install_intent_before_mutation")).toBeGreaterThan(-1);
+    expect(main.indexOf("guard_first_install_intent_before_mutation")).toBeLessThan(main.indexOf("clone_or_update_repo"));
+    expect(main.indexOf("guard_first_install_intent_before_mutation")).toBeLessThan(main.indexOf("create_env_file"));
+    expect(main.indexOf("guard_first_install_intent_before_mutation")).toBeLessThan(main.indexOf("install_cli"));
+  });
+  it("the pre-mutation guard is a no-op with no existing checkout, and delegates otherwise", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-install-guard-"));
+    const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    const body = text.slice(text.indexOf("validate_first_install_intent() {"), text.indexOf("\nmain() {"));
+    const fresh = spawnSync("bash", ["-c", `APP_DIR='${dir}/app'; ${body}\nguard_first_install_intent_before_mutation`], { encoding: "utf8" });
+    expect(fresh.status, fresh.stderr).toBe(0);
+    mkdirSync(path.join(dir, "app/scripts/lib"), { recursive: true });
+    writeFileSync(path.join(dir, "app/scripts/lib/common.sh"), "");
+    const delegates = spawnSync("bash", ["-c", `APP_DIR='${dir}/app'; ${body}\nvalidate_first_install_intent(){ echo called > '${dir}/called'; return 1; }\nguard_first_install_intent_before_mutation`], { encoding: "utf8" });
+    expect(delegates.status).not.toBe(0);
+    expect(existsSync(path.join(dir, "called"))).toBe(true);
+  });
   it("update and rollback invoke the authoritative classifier after locking", () => { for (const file of ["scripts/update.sh", "scripts/rollback.sh"]) { const text = readFileSync(path.join(root, file), "utf8"); expect(text).toContain("classify_installation observe"); expect(text.indexOf("acquire_deployment_lock")).toBeLessThan(text.indexOf("classify_installation observe")); } });
   it("retry rejects changed bootstrap-bound source identity", () => { const dir = fixture(); const result = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; test "$(jq -r .sourceSha "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = '${"f".repeat(40)}'`, true); expect(result.status).not.toBe(0); });
   it("temporary files, image tags and containers cannot create rollback eligibility", () => { const dir = fixture(); write(path.join(dir, ".image-tag"), "zedbot-app:latest"); expect(shell(dir, "classify_installation first-install").status).not.toBe(0); expect(existsSync(path.join(dir, "previous.json"))).toBe(false); });
