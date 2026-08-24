@@ -1293,7 +1293,7 @@ describe("support notification startup wiring", () => {
       return i;
     };
     const start = at("startSupportNotificationLoop(bot.api)");
-    expect(at("const bot = createBot(botToken)"), "Api first").toBeLessThan(start);
+    expect(at("const bot = createBot(botToken, getTelegramApiRoot())"), "Api first").toBeLessThan(start);
     expect(at('process.on("SIGTERM"'), "shutdown armed first").toBeLessThan(start);
     expect(at("await connectDatabase()"), "database attempted first").toBeLessThan(start);
   });
