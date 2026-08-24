@@ -1295,7 +1295,7 @@ describe("support notification startup wiring", () => {
     const start = at("startSupportNotificationLoop(bot.api)");
     expect(at("const bot = createBot(botToken, getTelegramApiRoot())"), "Api first").toBeLessThan(start);
     expect(at('process.on("SIGTERM"'), "shutdown armed first").toBeLessThan(start);
-    expect(at("await connectDatabase()"), "database attempted first").toBeLessThan(start);
+    expect(at("await connectDatabaseWithRetry()"), "database attempted first").toBeLessThan(start);
   });
 
   it("S6-3: the loop latches, ticks immediately and never holds the process open", async () => {
