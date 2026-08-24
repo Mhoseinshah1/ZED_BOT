@@ -1946,7 +1946,7 @@ execute_validated_rollback_transition() {
   verify_application_recreation_set "$target_id" || return 1
   record_bot_recreation_boundary "$target_id" "$target_sha" || return 1
   metadata_transition_hook rollback-recreated || return 1
-  confirm_operation_state compatibility-confirmed application-recreated || return 1
+  confirm_operation_state deployment-reference-retagged application-recreated || return 1
   validate_running_application "$target_sha" >/dev/null || return 1
   metadata_transition_hook rollback-health-confirmed || return 1
   confirm_operation_state application-recreated health-confirmed || return 1

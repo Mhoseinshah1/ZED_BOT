@@ -172,10 +172,37 @@ describe("four-role generation lifecycle", () => {
     expect(shell(f, "recover_metadata_transition").status).toBe(0); expect(generation(f.current)).toBe(genA); expect(existsSync(f.previous)).toBe(false);
   });
 
-  it.each(["rollback-retagged", "rollback-recreated", "rollback-health-confirmed"])("an interruption after %s preserves metadata for deterministic retry", (phase) => {
+  it.each(["rollback-recreated", "rollback-health-confirmed"])("an interruption after %s preserves metadata for deterministic retry", (phase) => {
     const f = fixture(); write(f.previous, metadata(genA, "previous")); const current = readFileSync(f.current, "utf8"); const previous = readFileSync(f.previous, "utf8");
     const mocks = `validate_generation_owned_evidence(){ return 0; }; validate_retained_generation_image(){ return 0; }; run_clean_docker(){ return 0; }; recreate_application_services(){ return 0; }; validate_running_application(){ return 0; }; metadata_transition_hook(){ [ "$1" != '${phase}' ]; }; execute_validated_rollback_transition '${f.previous}'`;
     expect(shell(f, mocks).status).not.toBe(0); expect(readFileSync(f.current, "utf8")).toBe(current); expect(readFileSync(f.previous, "utf8")).toBe(previous);
+  });
+
+  // Regression: execute_validated_rollback_transition's own
+  // confirm_operation_state call for the application-recreated stage used
+  // to name the WRONG predecessor (compatibility-confirmed, a leftover from
+  // before the rollback stage order was corrected to check compatibility
+  // before retagging) instead of deployment-reference-retagged - the actual
+  // stage perform_rollback confirms immediately before calling this
+  // function. confirm_operation_state's own successor arithmetic
+  // (next_n == expected_n+1) made that combination impossible to satisfy,
+  // so EVERY real rollback would have failed at this exact step regardless
+  // of the operation-state's true stage. The interruption tests above never
+  // caught this: they call execute_validated_rollback_transition without
+  // ever initializing operation-state.json at all, so they failed for an
+  // unrelated reason (no operation state) before ever reaching this line -
+  // this test is the only one that drives operation-state to the real
+  // pre-call stage and lets metadata_transition_hook succeed throughout.
+  it("runs execute_validated_rollback_transition through to a full successful promotion", () => {
+    const f = fixture(); write(f.previous, metadata(genA, "previous"));
+    const mocks = `validate_generation_owned_evidence(){ return 0; }; validate_retained_generation_image(){ return 0; }; recreate_application_services(){ return 0; }; verify_application_recreation_set(){ return 0; }; record_bot_recreation_boundary(){ return 0; }; validate_running_application(){ return 0; }; metadata_transition_hook(){ return 0; };
+      initialize_operation_state rollback '${genA}';
+      for pair in 'previous-selected rollback-evidence-validated' 'rollback-evidence-validated retained-image-validated' 'retained-image-validated compatibility-confirmed' 'compatibility-confirmed deployment-reference-retagged'; do set -- $pair; advance_operation_state "$1" "$2"; done;
+      execute_validated_rollback_transition '${f.previous}'`;
+    const result = shell(f, mocks);
+    expect(result.status, result.stderr).toBe(0);
+    expect(generation(f.current)).toBe(genA);
+    expect(existsSync(f.previous)).toBe(false);
   });
 
   it("fails closed for missing bootstrap current and legacy metadata", () => {
