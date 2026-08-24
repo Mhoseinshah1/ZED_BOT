@@ -191,10 +191,23 @@ describe("deployment shell safety", () => {
     expect(prepare(pair.app).status).not.toBe(0);
   });
 
-  it("rejects a checkout behind fetched origin/main", () => {
+  it("fast-forwards identity for a checkout behind fetched origin/main", () => {
     const pair = repositoryPair();
     writeFileSync(path.join(pair.seed, "version"), "remote\n"); git(pair.seed, "commit", "-am", "remote"); git(pair.seed, "push");
-    expect(prepare(pair.app).status).not.toBe(0);
+    const result = prepare(pair.app);
+    expect(result.status, result.stderr).toBe(0);
+    const [sha, , snapshot] = result.stdout.trim().split(" ");
+    // snapshot must reflect the NEW remote commit, not the stale local HEAD.
+    expect(git(snapshot, "rev-parse", "HEAD")).toBe(sha);
+    expect(readFileSync(path.join(snapshot, "version"), "utf8")).toBe("remote\n");
+    // the local checkout itself is never mutated: it stays behind.
+    expect(git(pair.app, "rev-parse", "HEAD")).not.toBe(sha);
+  });
+
+  it("still accepts a checkout already exactly at the fetched origin/main (no regression)", () => {
+    const pair = repositoryPair();
+    const result = prepare(pair.app);
+    expect(result.status, result.stderr).toBe(0);
   });
 
   it("rejects divergence from fetched origin/main", () => {

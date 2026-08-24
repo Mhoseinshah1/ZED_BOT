@@ -1975,7 +1975,13 @@ canonical_origin_identity() {
 # deliberately excluded: node_modules, dist, coverage and similar ignored
 # dependencies/build output cannot enter the commit-derived snapshot. Every
 # staged, tracked, or non-ignored untracked path is a build-context overlay and
-# is rejected.
+# is rejected. Local main is allowed to be BEHIND the fetched target (this
+# function never fast-forwards it); the snapshot worktree this feeds into is
+# always built directly from the fetched SHA, never from HEAD, so a
+# stale-but-clean local main does not affect what actually gets built. Local
+# main being ahead of or diverged from the fetched target is still rejected -
+# that is the property this function actually protects against unauthorized
+# local commits.
 verify_deployment_checkout() {
   local expected_sha="$1" expected_tree="$2" origin branch head remote tree status
   origin="$(git -C "$ZEDBOT_APP_DIR" config --get remote.origin.url 2>/dev/null)" || return 1
@@ -1986,17 +1992,21 @@ verify_deployment_checkout() {
   [ "$branch" = main ] || { log_error "Deployment checkout branch must be main."; return 1; }
   head="$(git -C "$ZEDBOT_APP_DIR" rev-parse --verify HEAD 2>/dev/null)" || return 1
   remote="$(git -C "$ZEDBOT_APP_DIR" rev-parse --verify refs/remotes/origin/main 2>/dev/null)" || return 1
-  [ "$head" = "$expected_sha" ] && [ "$remote" = "$expected_sha" ] || {
-    log_error "Local main must exactly equal the fetched origin/main; the updater does not fast-forward the checkout."; return 1;
+  [ "$remote" = "$expected_sha" ] || { log_error "Fetched origin/main does not match the expected target SHA."; return 1; }
+  git -C "$ZEDBOT_APP_DIR" merge-base --is-ancestor "$head" "$expected_sha" || {
+    log_error "Local main has diverged from or is ahead of origin/main; refusing to build a snapshot."; return 1;
   }
-  tree="$(git -C "$ZEDBOT_APP_DIR" rev-parse --verify 'HEAD^{tree}' 2>/dev/null)" || return 1
-  [ "$tree" = "$expected_tree" ] || { log_error "Deployment checkout tree identity changed."; return 1; }
+  if [ "$head" = "$expected_sha" ]; then
+    tree="$(git -C "$ZEDBOT_APP_DIR" rev-parse --verify 'HEAD^{tree}' 2>/dev/null)" || return 1
+    [ "$tree" = "$expected_tree" ] || { log_error "Deployment checkout tree identity changed."; return 1; }
+  fi
   status="$(git -C "$ZEDBOT_APP_DIR" status --porcelain=v1 --untracked-files=all 2>/dev/null)" || return 1
   [ -z "$status" ] || { log_error "Deployment checkout contains staged, tracked, or non-ignored untracked build overlays."; return 1; }
 }
 
 # Fetches but never fast-forwards or otherwise mutates the deployment checkout.
-# The local main checkout must already be the exact fetched origin/main commit.
+# The local main checkout may lag behind the fetched origin/main; the returned
+# snapshot is built directly from the fetched SHA regardless.
 prepare_exact_origin_main() (
   local target origin snapshot tree
   snapshot=""

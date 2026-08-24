@@ -270,10 +270,10 @@ main() {
   baseline_csv="$(run_compose exec -T worker sh -c 'find packages/database/prisma/migrations -mindepth 2 -maxdepth 2 -name migration.sql -print | sed -e "s#/migration\.sql\$##" -e "s#.*/##" | sort | paste -sd, -')"
   [ -n "$baseline_csv" ] || { log_error "No complete baseline migrations found."; exit 1; }
 
-  log_info "[4/14] Fetching canonical origin/main and verifying unchanged local main ..."
+  log_info "[4/14] Fetching canonical origin/main and verifying local main is not ahead of or diverged from it ..."
   local target_deploy_sha target_tree snapshot_result
   snapshot_result="$(prepare_exact_origin_main)" || {
-    log_error "Fetching and verifying the unchanged local main against canonical origin/main failed. The updater does not fast-forward the checkout."
+    log_error "Fetching origin/main or verifying the local checkout against it failed."
     exit 1
   }
   read -r target_deploy_sha target_tree SOURCE_SNAPSHOT <<< "$snapshot_result"
