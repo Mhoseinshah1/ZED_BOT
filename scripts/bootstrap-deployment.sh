@@ -52,6 +52,12 @@ main() {
   build_verified_source_snapshot "$target" "$tree" "$SOURCE_SNAPSHOT" || return 1
   image_id="$(run_clean_docker image inspect -f '{{.Id}}' zedbot-app:latest)"
   valid_image_id "$image_id" || return 1
+  # The candidate metadata below records immutableImageTag as
+  # "zedbot-app:generation-<generation>" - the first update's rollback later
+  # depends on that exact tag resolving to this image (see
+  # validate_retained_generation_image), just as update.sh retains its own
+  # target generation. Create it now so that dependency actually holds.
+  retain_known_good_image "$image_id" "zedbot-app:generation-${generation}" || return 1
 
   evidence="$ZEDBOT_DEPLOYMENT_DIR/evidence-${generation}"
   persist_migration_declaration_evidence "$SOURCE_SNAPSHOT" "$evidence" || return 1
