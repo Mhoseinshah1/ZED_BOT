@@ -89,10 +89,23 @@ describe("area 6 canonical state paths, metadata and locks", () => {
     expect(shell(dir, `validate_operation_state '${state}'`).status).not.toBe(0);
   });
 
-  it("rejects cross-operation metadata identity", () => {
+  // Regression: this used to unconditionally reject a same-generation,
+  // different-kind reinitialization ("cross-operation metadata identity").
+  // But a fresh operation always proves exclusive deployment-lock ownership
+  // before reaching this check, which means no other process can still be
+  // running whatever operation-state.json currently records - its owner
+  // already exited. A non-promoted leftover is therefore provably abandoned
+  // regardless of kind, not evidence of a genuine conflict, so it is now
+  // cleared and the newly requested operation starts fresh instead of being
+  // permanently rejected. See "clears an abandoned...operation state" below
+  // for the general (non-cross-kind) case this generalizes.
+  it("clears an abandoned differently-kinded operation state instead of permanently rejecting it", () => {
     const dir = fixture();
+    const state = path.join(dir, "operation-state.json");
     const result = shell(dir, `acquire_deployment_lock; initialize_operation_state update '${generation}'; initialize_operation_state rollback '${generation}'`);
-    expect(result.status).not.toBe(0);
+    expect(result.status, result.stderr).toBe(0);
+    const written = JSON.parse(readFileSync(state, "utf8"));
+    expect(written.kind).toBe("rollback"); expect(written.generation).toBe(generation); expect(written.stage).toBe("previous-selected");
   });
 
   it("pre-created temporary names cannot be substituted or reused", () => {

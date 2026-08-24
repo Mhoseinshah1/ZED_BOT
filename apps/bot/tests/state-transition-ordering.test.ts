@@ -38,6 +38,46 @@ describe("confirmed deployment state ordering", () => {
     expect(stage(f)).toBe("promoted"); expect(readFileSync(f.trace, "utf8").trim().split("\n")).toEqual(rollbackStages.slice(1));
   });
 
+  // Regression: a leftover, non-promoted operation-state.json for a
+  // DIFFERENT generation used to permanently reject every later
+  // install/update/rollback attempt, even a routine retry after a transient
+  // failure - update.sh always mints a fresh timestamp-based generation, so
+  // it could never match the abandoned one, and there was no recovery
+  // command. The retry always proves exclusive deployment-lock ownership
+  // before reaching this check, which means the abandoned marker's owner has
+  // already exited (the lock is only released on exit) - so it is provably
+  // abandoned, not concurrent, and safe to clear.
+  it("clears an abandoned different-generation non-promoted state instead of permanently rejecting it", () => {
+    const f = fixture(); const genB = "20260809T120005Z-bbbbbbbbbbbb";
+    expect(shell(f, "initialize_operation_state update '20260809T120000Z-aaaaaaaaaaaa'; advance_operation_state current-validated current-image-retained; advance_operation_state current-image-retained candidate-metadata-prepared").status).toBe(0);
+    expect(stage(f)).toBe("candidate-metadata-prepared");
+    const retry = shell(f, `initialize_operation_state update '${genB}'`);
+    expect(retry.status, retry.stderr).toBe(0);
+    const written = JSON.parse(readFileSync(f.state, "utf8"));
+    expect(written.generation).toBe(genB); expect(written.stage).toBe("current-validated");
+  });
+
+  it("a retried update can then run its full sequence to promoted after the abandoned state is cleared", () => {
+    const f = fixture(); expect(shell(f, flow("update", updateStages.slice(0, 5), f.trace)).status).toBe(0);
+    const genB = "20260809T130000Z-cccccccccccc";
+    const result = shell(f, flow("update", updateStages, f.trace).replace(generation, genB));
+    expect(result.status, result.stderr).toBe(0); expect(stage(f)).toBe("promoted");
+  });
+
+  it("still treats a matching generation as a safe no-op, not a reset", () => {
+    const f = fixture(); expect(shell(f, flow("update", updateStages.slice(0, 5), f.trace)).status).toBe(0);
+    expect(stage(f)).toBe(updateStages[4]);
+    expect(shell(f, `initialize_operation_state update '${generation}'`).status).toBe(0);
+    expect(stage(f)).toBe(updateStages[4]);
+  });
+
+  it("clears an abandoned state even across a different kind (a stuck rollback no longer blocks a later install/update)", () => {
+    const f = fixture(); expect(shell(f, flow("rollback", rollbackStages.slice(0, 4), f.trace)).status).toBe(0);
+    const genB = "20260809T140000Z-dddddddddddd";
+    expect(shell(f, `initialize_operation_state update '${genB}'`).status).toBe(0);
+    expect(JSON.parse(readFileSync(f.state, "utf8")).kind).toBe("update");
+  });
+
   // Regression: operation-state.json is a live in-flight marker, not a
   // permanent record. Leaving it behind with stage "promoted" forever after
   // every completed operation made rollback-status permanently report

@@ -1408,12 +1408,30 @@ validate_operation_state() {
 }
 
 initialize_operation_state() {
-  local kind="$1" generation="$2" first tmp
+  local kind="$1" generation="$2" first tmp old_kind old_generation old_stage
   case "$kind" in install) first="bootstrap-initialized" ;; update) first="current-validated" ;; rollback) first="previous-selected" ;; *) return 1;; esac
+  require_deployment_lock || return 1
   if [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; then
     validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 1
     if [ "$(/usr/bin/jq -r '.kind+":"+.generation' "$ZEDBOT_OPERATION_STATE")" = "$kind:$generation" ]; then return 0; fi
-    [ "$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE")" = promoted ] || { log_error "Another incomplete deployment operation requires recovery."; return 1; }
+    old_stage="$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE")"
+    if [ "$old_stage" != promoted ]; then
+      # This process already holds the exclusive canonical deployment lock
+      # (require_deployment_lock above proved it; acquire_deployment_lock is
+      # a non-blocking flock that fails loudly if any other process holds
+      # it). No other process can therefore still be running the operation
+      # recorded here for a DIFFERENT kind/generation - its owner already
+      # exited (operation_cleanup's EXIT trap always releases the lock) and
+      # left this marker behind deliberately unfinished, e.g. after a
+      # transient build/compatibility/migration/readiness failure. It is
+      # provably abandoned, not concurrent: safe to clear so the newly
+      # requested operation (a fresh install/update/rollback attempt, always
+      # a new timestamp-based generation) can start rather than being
+      # permanently rejected.
+      old_kind="$(/usr/bin/jq -r '.kind' "$ZEDBOT_OPERATION_STATE")"; old_generation="$(/usr/bin/jq -r '.generation' "$ZEDBOT_OPERATION_STATE")"
+      log_warn "Clearing an abandoned ${old_kind} operation state (generation ${old_generation}, stage ${old_stage}) left by a previous failed attempt."
+      remove_canonical_state_file "$ZEDBOT_OPERATION_STATE" || return 1
+    fi
   fi
   operation_assert_active || return 1
   tmp="$(operation_mktemp "$ZEDBOT_DEPLOYMENT_DIR/.operation-init.XXXXXXXX")" || return 1
