@@ -46,6 +46,12 @@ async function main(): Promise<void> {
       failed: [...state.currentlyFailed, ...state.rolledBackNotReapplied],
       databaseOnly: state.missingFile,
       incomplete: state.incompleteOnDisk,
+      appliedChecksums: Object.fromEntries(
+        state.entries
+          .filter((entry): entry is typeof entry & { currentChecksum: string } =>
+            entry.state === "APPLIED" && entry.currentChecksum !== null)
+          .map((entry) => [entry.migrationName, entry.currentChecksum]),
+      ),
     };
     const decision = mode === "update"
       ? evaluateUpdateCompatibility(baseline, snapshot, manifest)

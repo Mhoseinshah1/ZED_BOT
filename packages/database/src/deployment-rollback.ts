@@ -4,6 +4,10 @@ import {
   type MigrationDeclaration as CompatibleMigrationDeclaration,
   type MigrationDeclarationManifest as RollbackCompatibilityManifest,
 } from "./migration-declarations.js";
+import {
+  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ALLOWLIST,
+  REFERRAL_AFFILIATE_MIGRATION_NAME,
+} from "./migration-checksum.js";
 
 export const ROLLBACK_COMPATIBILITY_FORMAT_VERSION = MIGRATION_DECLARATION_FORMAT_VERSION;
 export type { CompatibleMigrationDeclaration, RollbackCompatibilityManifest };
@@ -15,7 +19,20 @@ export interface MigrationSnapshot {
   failed: string[];
   databaseOnly: string[];
   incomplete: string[];
+  /** Recorded `_prisma_migrations.checksum` for each currently-APPLIED migration, by name. */
+  appliedChecksums: Record<string, string>;
 }
+
+// A declared backward-compatible migration's manifest checksum is normally the ONE
+// acceptable value - it must equal exactly what the database recorded when the
+// migration was applied, or a name match alone (with different actual SQL behind it)
+// could be misread as a known-safe migration. The referral affiliate migration is the
+// sole documented exception: it shipped in two logical SQL forms across two byte
+// encodings (see migration-checksum.ts), so a database that applied any of those four
+// EMPIRICALLY VERIFIED historical variants is still genuinely compatible.
+const HISTORICAL_CHECKSUM_ALLOWLIST: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  [REFERRAL_AFFILIATE_MIGRATION_NAME, new Set(Object.values(REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ALLOWLIST))],
+]);
 
 export interface CompatibilityDecision {
   ok: boolean;
@@ -51,6 +68,13 @@ export function evaluateUpdateCompatibility(
   if (unknown !== undefined) return { ok: false, newlyPending: [], unsafe: [], blocker: `unknown:${unknown}` };
   const absent = manifest.backwardCompatibleMigrations.find(({ name }) => !target.shipped.includes(name));
   if (absent !== undefined) return { ok: false, newlyPending: [], unsafe: [], blocker: `declared-not-shipped:${absent.name}` };
+  for (const declaration of manifest.backwardCompatibleMigrations) {
+    if (!target.applied.includes(declaration.name)) continue;
+    const recorded = target.appliedChecksums[declaration.name];
+    if (recorded === undefined) return { ok: false, newlyPending: [], unsafe: [], blocker: `checksum-missing:${declaration.name}` };
+    const accepted = HISTORICAL_CHECKSUM_ALLOWLIST.get(declaration.name) ?? new Set([declaration.sqlSha256]);
+    if (!accepted.has(recorded)) return { ok: false, newlyPending: [], unsafe: [], blocker: `checksum-mismatch:${declaration.name}` };
+  }
   if (baseline.some((name) => !target.applied.includes(name))) return { ok: false, newlyPending: [], unsafe: [], blocker: "baseline-not-applied" };
   const newlyPending = uniqueSorted(target.pending.filter((name) => !baseline.includes(name)));
   const unexpectedPending = target.pending.filter((name) => baseline.includes(name));

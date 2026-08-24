@@ -214,7 +214,7 @@ describe("strict format-2 migration declarations", () => {
     ["unknown", { shipped: [nameA, nameB], applied: [nameA, nameB] }],
   ])("update and rollback both fail closed for %s state", (_label, patch) => {
     const manifest = { formatVersion: 2 as const, backwardCompatibleMigrations: [{ name: nameA, sqlSha256: "a".repeat(64) }] };
-    const state: MigrationSnapshot = { shipped: [nameA], applied: [nameA], pending: [], failed: [], databaseOnly: [], incomplete: [], ...patch };
+    const state: MigrationSnapshot = { shipped: [nameA], applied: [nameA], pending: [], failed: [], databaseOnly: [], incomplete: [], appliedChecksums: {}, ...patch };
     expect(evaluateUpdateCompatibility([nameA], state, manifest).ok).toBe(false);
     expect(evaluateRollbackCompatibility([nameA], state, manifest).ok).toBe(false);
   });

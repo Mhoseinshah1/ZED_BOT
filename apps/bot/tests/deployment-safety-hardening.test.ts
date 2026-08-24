@@ -12,14 +12,24 @@ import {
   parseRollbackCompatibilityManifest,
   type MigrationSnapshot,
 } from "../../../packages/database/src/deployment-rollback.js";
+import {
+  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ALLOWLIST,
+  REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_CRLF,
+  REFERRAL_AFFILIATE_MIGRATION_NAME,
+} from "../../../packages/database/src/migration-checksum.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const scripts = path.join(root, "scripts");
 const migration = (n: number) => `20260808${String(n).padStart(6, "0")}_migration_${n}`;
-const healthy = (shipped: string[], applied: string[], pending: string[] = []): MigrationSnapshot => ({
+// Every applied migration defaults to the SAME placeholder checksum manifest() declares
+// below, so tests that are not about checksums at all stay unaffected by the checksum
+// comparison; tests that ARE about checksums pass an explicit override.
+const PLACEHOLDER_CHECKSUM = "a".repeat(64);
+const healthy = (shipped: string[], applied: string[], pending: string[] = [], appliedChecksums?: Record<string, string>): MigrationSnapshot => ({
   shipped, applied, pending, failed: [], databaseOnly: [], incomplete: [],
+  appliedChecksums: appliedChecksums ?? Object.fromEntries(applied.map((name) => [name, PLACEHOLDER_CHECKSUM])),
 });
-const manifest = (names: string[]) => ({ formatVersion: 2 as const, backwardCompatibleMigrations: names.map((name) => ({ name, sqlSha256: "a".repeat(64) })) });
+const manifest = (names: string[]) => ({ formatVersion: 2 as const, backwardCompatibleMigrations: names.map((name) => ({ name, sqlSha256: PLACEHOLDER_CHECKSUM })) });
 
 describe("typed rollback migration compatibility", () => {
   it("permits a deployment with no new migration", () => {
@@ -50,6 +60,45 @@ describe("typed rollback migration compatibility", () => {
   it("rejects malformed manifests", () => {
     expect(parseRollbackCompatibilityManifest({ formatVersion: 2, backwardCompatibleMigrations: [{ name: "bad", sqlSha256: "a".repeat(64) }] })).toBeNull();
     expect(parseRollbackCompatibilityManifest({ formatVersion: 1, backwardCompatibleMigrations: [] })).toBeNull();
+  });
+
+  it("blocks an applied migration whose recorded checksum does not match its declaration", () => {
+    // A name match alone (shipped + applied) previously satisfied compatibility even if
+    // the bytes actually applied to the database were not the declared, verified ones -
+    // e.g. a tampered or corrupted migration file applied under a trusted name.
+    const base = [migration(1)];
+    const mismatched = healthy(base, base, [], { [base[0]]: "b".repeat(64) });
+    expect(evaluateUpdateCompatibility(base, mismatched, manifest(base))).toMatchObject({ ok: false, blocker: `checksum-mismatch:${base[0]}` });
+  });
+
+  it("blocks an applied migration with no recorded checksum", () => {
+    const base = [migration(1)];
+    const missing = healthy(base, base, [], {});
+    expect(evaluateUpdateCompatibility(base, missing, manifest(base))).toMatchObject({ ok: false, blocker: `checksum-missing:${base[0]}` });
+  });
+
+  it("does not require a checksum for a declared migration that has not been applied yet", () => {
+    const base = [migration(1)]; const added = migration(2);
+    const snapshot = healthy([...base, added], base, [added]);
+    expect(evaluateUpdateCompatibility(base, snapshot, manifest([...base, added])).ok).toBe(true);
+  });
+
+  it("accepts any empirically verified historical byte-variant checksum for the referral affiliate migration", () => {
+    // This migration shipped in two logical SQL forms across two byte encodings, so a
+    // database that applied any of the four verified historical variants (not just the
+    // one the manifest currently declares, which matches today's on-disk file) is still
+    // genuinely compatible - see migration-checksum.ts.
+    const name = REFERRAL_AFFILIATE_MIGRATION_NAME;
+    const referralManifest = { formatVersion: 2 as const, backwardCompatibleMigrations: [{ name, sqlSha256: REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ALLOWLIST.ORIGINAL_LF }] };
+    const snapshot = healthy([name], [name], [], { [name]: REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ORIGINAL_CRLF });
+    expect(evaluateUpdateCompatibility([name], snapshot, referralManifest).ok).toBe(true);
+  });
+
+  it("still rejects a checksum for the referral affiliate migration outside the empirically verified allowlist", () => {
+    const name = REFERRAL_AFFILIATE_MIGRATION_NAME;
+    const referralManifest = { formatVersion: 2 as const, backwardCompatibleMigrations: [{ name, sqlSha256: REFERRAL_AFFILIATE_MIGRATION_CHECKSUM_ALLOWLIST.ORIGINAL_LF }] };
+    const snapshot = healthy([name], [name], [], { [name]: "c".repeat(64) });
+    expect(evaluateUpdateCompatibility([name], snapshot, referralManifest)).toMatchObject({ ok: false, blocker: `checksum-mismatch:${name}` });
   });
 });
 
