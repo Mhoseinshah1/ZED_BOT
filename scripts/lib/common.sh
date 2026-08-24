@@ -1741,6 +1741,32 @@ publish_failed_generation() {
   local rc=$?; rm -f "$tmp"; return "$rc"
 }
 
+# Resolves failed.json's state to "rolled-back" once a rollback has durably
+# promoted the matching generation to current.json. Best-effort: the
+# promotion this is called after has already succeeded, so a failure here
+# must not be reported as a failed rollback (same rationale as
+# finalize_promoted_operation_state). Identity-checked: only clears
+# failed.json when its own rollbackTargetGeneration matches the generation
+# just promoted, so an unrelated or stale failed.json is left untouched for
+# operator resolution rather than silently cleared.
+resolve_failed_generation_after_rollback() {
+  local promoted_generation="$1" state target tmp
+  { [ -e "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ]; } || return 0
+  validate_generation_metadata_core "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" failed || return 1
+  state="$(/usr/bin/jq -r '.state' "$ZEDBOT_FAILED_DEPLOYMENT_METADATA")" || return 1
+  case "$state" in
+    rolled-back) return 0 ;;
+    failed-after-recreation | rollback-failed) ;;
+    *) return 1 ;;
+  esac
+  target="$(/usr/bin/jq -r '.rollbackTargetGeneration' "$ZEDBOT_FAILED_DEPLOYMENT_METADATA")" || return 1
+  [ "$target" = "$promoted_generation" ] || return 0
+  operation_assert_active || return 1
+  tmp="$(operation_mktemp "$ZEDBOT_DEPLOYMENT_DIR/.failed-resolution.XXXXXXXX")" || return 1
+  /usr/bin/jq '.state="rolled-back"' "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" > "$tmp" && atomic_write_metadata "$tmp" "$ZEDBOT_FAILED_DEPLOYMENT_METADATA"
+  local rc=$?; rm -f "$tmp"; return "$rc"
+}
+
 metadata_transition_hook() { return 0; }
 
 write_lifecycle_role() {
@@ -1804,6 +1830,7 @@ recover_metadata_transition() {
     current_generation="$(/usr/bin/jq -r '.generation' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" 2>/dev/null || true)"
     if [ ! -e "$ZEDBOT_ROLLBACK_METADATA" ] && [ "$current_generation" = "$target_generation" ]; then
       validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || return 1
+      resolve_failed_generation_after_rollback "$target_generation" || log_warn "Could not mark the recovered failed generation as rolled-back; rerun 'zedbot doctor' or resolve failed.json manually."
       remove_canonical_state_file "$ZEDBOT_METADATA_TRANSITION"; return 0
     fi
     validate_generation_metadata_core "$ZEDBOT_ROLLBACK_METADATA" previous || return 1
@@ -1811,6 +1838,10 @@ recover_metadata_transition() {
     write_lifecycle_role "$ZEDBOT_ROLLBACK_METADATA" current "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || return 1
     metadata_transition_hook rollback-current-written || return 1
     remove_canonical_state_file "$ZEDBOT_ROLLBACK_METADATA" || return 1
+    # Rollback has now durably promoted the target generation - resolving the
+    # matching failed.json (if any) here, not before, so a failure here can
+    # never be reported as a failed rollback.
+    resolve_failed_generation_after_rollback "$target_generation" || log_warn "Could not mark the recovered failed generation as rolled-back; rerun 'zedbot doctor' or resolve failed.json manually."
   fi
   advance_metadata_transition current-written || return 1
   remove_canonical_state_file "$ZEDBOT_METADATA_TRANSITION"

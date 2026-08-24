@@ -130,6 +130,42 @@ describe("four-role generation lifecycle", () => {
     expect(generation(f.current)).toBe(genA); expect(existsSync(f.previous)).toBe(false); expect(generation(f.failed)).toBe(genB);
   });
 
+  // Regression: a successful rollback promoted the previous generation but
+  // never resolved the matching failed.json from failed-after-recreation/
+  // rollback-failed to rolled-back, so assert_no_unresolved_failed_generation
+  // (the exact gate the next update runs) permanently refused every later
+  // update even though the rollback that just fixed things succeeded.
+  it("a successful rollback resolves the matching failed generation so the next update is not blocked", () => {
+    const f = fixture();
+    write(f.previous, metadata(genA, "previous")); write(f.failed, metadata(genB, "failed")); // rollbackTargetGeneration defaults to genA
+    expect(shell(f, "assert_no_unresolved_failed_generation").status).not.toBe(0); // blocked before rollback
+    expect(shell(f, "promote_successful_rollback").status).toBe(0);
+    expect(generation(f.current)).toBe(genA);
+    expect(existsSync(f.previous)).toBe(false);
+    const failed = JSON.parse(readFileSync(f.failed, "utf8"));
+    expect(failed.generation).toBe(genB); // diagnostic identity preserved
+    expect(failed.state).toBe("rolled-back"); // now resolved
+    expect(shell(f, "assert_no_unresolved_failed_generation").status).toBe(0); // update no longer blocked
+  });
+
+  it("leaves an unrelated failed generation (different rollbackTargetGeneration) untouched by a successful rollback", () => {
+    const f = fixture();
+    write(f.previous, metadata(genA, "previous"));
+    write(f.failed, metadata(genB, "failed", { rollbackTargetGeneration: "20260807T120000Z-777777777777" }));
+    expect(shell(f, "promote_successful_rollback").status).toBe(0);
+    expect(generation(f.current)).toBe(genA);
+    expect(JSON.parse(readFileSync(f.failed, "utf8")).state).toBe("failed-after-recreation");
+  });
+
+  it("recovers an interrupted rollback promotion and still resolves the matching failed generation", () => {
+    const f = fixture();
+    write(f.previous, metadata(genA, "previous")); write(f.failed, metadata(genB, "failed"));
+    expect(shell(f, `metadata_transition_hook(){ [ "$1" != rollback-current-written ]; }; promote_successful_rollback`).status).not.toBe(0);
+    expect(shell(f, "recover_metadata_transition").status).toBe(0);
+    expect(generation(f.current)).toBe(genA); expect(existsSync(f.previous)).toBe(false);
+    expect(JSON.parse(readFileSync(f.failed, "utf8")).state).toBe("rolled-back");
+  });
+
   it("recovers an interrupted rollback promotion deterministically", () => {
     const f = fixture(); write(f.previous, metadata(genA, "previous"));
     expect(shell(f, `metadata_transition_hook(){ [ "$1" != rollback-current-written ]; }; promote_successful_rollback`).status).not.toBe(0);
