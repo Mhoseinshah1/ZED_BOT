@@ -423,8 +423,17 @@ case "$CMD" in
     require_root
     app_cd
     detect_compose_command
+    install_operation_traps
+    acquire_deployment_lock
     # `compose restart` never re-reads .env; recreating the containers does.
     run_compose up -d --force-recreate --remove-orphans
+    if record_bot_recreation_boundary_after_restart; then restart_boundary_rc=0; else restart_boundary_rc=$?; fi
+    case "$restart_boundary_rc" in
+      0) ;;
+      2) log_warn "No validated deployment yet; skipped refreshing the bot recreation boundary (expected before the first 'zedbot update' or install completes)." ;;
+      *) log_error "Could not refresh bot-recreation.json after restart - services were restarted, but the next 'zedbot update' real-bot readiness preflight may now fail. Investigate (zedbot doctor / zedbot rollback-status) before running 'zedbot update'."
+         exit 1 ;;
+    esac
     log_success "All services restarted."
     ;;
   start)

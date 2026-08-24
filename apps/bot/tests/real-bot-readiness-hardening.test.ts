@@ -118,6 +118,99 @@ describe("bounded real Bot polling and state suppression", () => {
     const result = shell(body); expect(result.status, result.stderr).toBe(0); expect(JSON.parse(readFileSync(boundary, "utf8"))).toMatchObject({ operation: `update:${generation}`, containerId: "bot-container", imageId });
   });
   it("rejects recreation boundary recording without the lock or correct predecessor", () => { const result = shell(`require_deployment_lock(){ return 1; }; record_bot_recreation_boundary '${imageId}' '${sha}'`); expect(result.status).not.toBe(0); });
+
+  // Regression: `zedbot restart` force-recreates every container, including
+  // bot, entirely outside any tracked install/update/rollback operation -
+  // record_bot_recreation_boundary requires exactly that kind of operation
+  // to be active, so it could never be called from restart directly. The
+  // recreated bot container's id then permanently mismatched
+  // bot-recreation.json's stale one, failing every later real-bot readiness
+  // check (collect_real_bot_readiness_evidence) until an operator
+  // manually repaired the file - silently breaking the documented
+  // "add TELEGRAM_BOT_TOKEN, then run zedbot restart" first-install flow.
+  describe("bot recreation boundary refresh after a bare restart", () => {
+    const currentMetadata = (overrides: Record<string, unknown> = {}) => ({
+      formatVersion: 2, installationKind: null, lifecycleRole: "current", generation,
+      sourceTree: "c".repeat(40), preDeploySha: "a".repeat(40), preDeployImageId: `sha256:${"1".repeat(64)}`,
+      targetDeploySha: sha, targetImageId: imageId,
+      retainedImageTag: `zedbot-app:rollback-${generation}`, immutableImageTag: `zedbot-app:generation-${generation}`,
+      failedTargetTag: `zedbot-app:failed-${generation}`, capturedAt: "2026-08-10T12:00:00Z", preDeployMigrations: [],
+      declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: "/state/evidence-x", composeEvidencePath: "/state/evidence-x/docker-compose.yml",
+      composeEvidenceSha256: "d".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "e".repeat(64), compatibilityDeclarations: [],
+      recreationAttempted: true, healthConfirmed: true, state: "known-good", ...overrides,
+    });
+    const dockerStub = `run_compose(){ [ "$1" = ps ] && echo bot-container; }; run_clean_docker(){ jq -cn --arg image '${imageId}' --arg sha '${sha}' '[{Id:"bot-container",Image:$image,RestartCount:0,Config:{Image:"zedbot-app:latest",Env:[("GIT_SHA="+$sha)],Labels:{"com.docker.compose.project":"zedbot","com.docker.compose.service":"bot"}},State:{Status:"running"}}]'; }`;
+
+    it("writes a valid restart-kind boundary sourced from current.json", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-restart-boundary-"));
+      writeFileSync(path.join(dir, "current.json"), JSON.stringify(currentMetadata()));
+      chmodSync(path.join(dir, "current.json"), 0o600);
+      const result = shell(`set_deployment_state_paths '${dir}'; acquire_deployment_lock; ${dockerStub}; record_bot_recreation_boundary_after_restart`);
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(path.join(dir, "bot-recreation.json"), "utf8"))).toMatchObject({ operation: `restart:${generation}`, generation, containerId: "bot-container", imageId });
+    });
+
+    it("returns 2 (soft-skip) and writes nothing when current.json does not exist yet", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-restart-no-current-"));
+      // common.sh runs under `set -Eeuo pipefail`: a bare failing statement
+      // would abort the script under errexit before a trailing `echo` could
+      // run, so the nonzero return must be consumed inside a conditional.
+      const result = shell(`set_deployment_state_paths '${dir}'; acquire_deployment_lock; ${dockerStub}; if record_bot_recreation_boundary_after_restart; then rc=0; else rc=$?; fi; echo "rc=$rc"`);
+      expect(result.stdout).toContain("rc=2");
+      expect(() => readFileSync(path.join(dir, "bot-recreation.json"))).toThrow();
+    });
+
+    it("fails (not 2) when the recreated bot container does not match current.json's expected image or generation", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-restart-mismatch-"));
+      writeFileSync(path.join(dir, "current.json"), JSON.stringify(currentMetadata()));
+      chmodSync(path.join(dir, "current.json"), 0o600);
+      const wrongShaStub = `run_compose(){ [ "$1" = ps ] && echo bot-container; }; run_clean_docker(){ jq -cn --arg image '${imageId}' --arg sha '${"f".repeat(40)}' '[{Id:"bot-container",Image:$image,RestartCount:0,Config:{Image:"zedbot-app:latest",Env:[("GIT_SHA="+$sha)],Labels:{"com.docker.compose.project":"zedbot","com.docker.compose.service":"bot"}},State:{Status:"running"}}]'; }`;
+      const result = shell(`set_deployment_state_paths '${dir}'; acquire_deployment_lock; ${wrongShaStub}; if record_bot_recreation_boundary_after_restart; then rc=0; else rc=$?; fi; echo "rc=$rc"`);
+      expect(result.stdout).not.toContain("rc=2");
+      expect(result.stdout).not.toContain("rc=0");
+    });
+
+    it("requires the deployment lock", () => {
+      const result = shell(`require_deployment_lock(){ return 1; }; record_bot_recreation_boundary_after_restart`);
+      expect(result.status).not.toBe(0);
+    });
+
+    it("validate_bot_recreation_boundary accepts a restart-kind operation and still rejects an unknown kind", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-boundary-schema-"));
+      const file = path.join(dir, "bot-recreation.json");
+      const base = { formatVersion: 1, generation, containerId: "bot-container", imageId, imageRef: "zedbot-app:latest", project: "zedbot", service: "bot", recreatedAt: 100 };
+      writeFileSync(file, JSON.stringify({ ...base, operation: `restart:${generation}` }));
+      chmodSync(file, 0o600);
+      expect(shell(`set_deployment_state_paths '${dir}'; validate_bot_recreation_boundary`).status).toBe(0);
+      writeFileSync(file, JSON.stringify({ ...base, operation: `deploy:${generation}` }));
+      chmodSync(file, 0o600);
+      expect(shell(`set_deployment_state_paths '${dir}'; validate_bot_recreation_boundary`).status).not.toBe(0);
+    });
+
+    it("zedbot.sh's restart command locks, recreates, then refreshes the recreation boundary before reporting success", () => {
+      const zedbot = readFileSync(path.join(root, "scripts/zedbot.sh"), "utf8");
+      const start = zedbot.indexOf("restart)");
+      // Not the first ";;" after start - the nested case (restart_boundary_rc)
+      // inside this branch has its own arms terminated by ";;" well before
+      // this branch itself ends. Bound on the next top-level case label.
+      const end = zedbot.indexOf("\n  start)", start);
+      const body = zedbot.slice(start, end);
+      const lockIndex = body.indexOf("acquire_deployment_lock");
+      const recreateIndex = body.indexOf("run_compose up -d --force-recreate");
+      const boundaryIndex = body.indexOf("record_bot_recreation_boundary_after_restart");
+      const successIndex = body.indexOf("log_success");
+      expect(lockIndex).toBeGreaterThan(-1);
+      expect(recreateIndex).toBeGreaterThan(-1);
+      expect(boundaryIndex).toBeGreaterThan(-1);
+      expect(successIndex).toBeGreaterThan(-1);
+      expect(lockIndex).toBeLessThan(recreateIndex);
+      expect(recreateIndex).toBeLessThan(boundaryIndex);
+      expect(boundaryIndex).toBeLessThan(successIndex);
+    });
+  });
+
   function poll(sequence: unknown[], timeout = 9, cancel = false) {
     const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-real-bot-poll-")); const queue = path.join(dir, "queue"); const clock = path.join(dir, "clock"); const calls = path.join(dir, "calls");
     writeFileSync(queue, sequence.map((item) => JSON.stringify(item)).join("\n") + "\n"); writeFileSync(clock, "100");

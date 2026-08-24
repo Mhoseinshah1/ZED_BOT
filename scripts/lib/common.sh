@@ -1344,7 +1344,7 @@ validate_bot_recreation_boundary() {
   validate_state_regular_file "$file" || return 1
   /usr/bin/jq -e '
     type=="object" and keys==["containerId","formatVersion","generation","imageId","imageRef","operation","project","recreatedAt","service"] and
-    .formatVersion==1 and (.operation|type=="string" and test("^(install|update|rollback):[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$")) and
+    .formatVersion==1 and (.operation|type=="string" and test("^(install|update|rollback|restart):[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$")) and
     (.generation|type=="string" and test("^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$")) and
     (.containerId|type=="string" and length>0) and (.imageId|type=="string" and test("^sha256:[a-f0-9]{64}$")) and
     .imageRef=="zedbot-app:latest" and .project=="zedbot" and .service=="bot" and
@@ -1352,13 +1352,18 @@ validate_bot_recreation_boundary() {
   ' "$file" >/dev/null 2>&1
 }
 
-record_bot_recreation_boundary() {
-  local expected_image_id="$1" expected_sha="$2" kind generation stage operation ids cid inspection actual_image actual_generation tmp
+# Shared write path for bot-recreation.json: verifies the CURRENT compose
+# "bot" state (exactly one container, canonical zedbot/bot compose identity,
+# running the expected image + GIT_SHA) and atomically records it. Callers
+# establish what "expected" means and must already hold the deployment lock.
+record_bot_recreation_boundary_core() {
+  local operation="$1" generation="$2" expected_image_id="$3" expected_sha="$4"
+  local ids cid inspection actual_image actual_generation tmp
   require_deployment_lock || return 1
-  validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 1
-  kind="$(/usr/bin/jq -r '.kind' "$ZEDBOT_OPERATION_STATE")"; generation="$(/usr/bin/jq -r '.generation' "$ZEDBOT_OPERATION_STATE")"; stage="$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE")"
-  case "$kind:$stage" in install:migrations-confirmed|update:migrations-confirmed|rollback:deployment-reference-retagged) ;; *) log_error "Bot recreation boundary has an invalid operation predecessor."; return 1;; esac
-  operation="$kind:$generation"
+  [[ "$operation" =~ ^(install|update|rollback|restart):[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$ ]] || return 1
+  [[ "$generation" =~ ^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$ ]] || return 1
+  valid_image_id "$expected_image_id" || return 1
+  valid_git_sha "$expected_sha" || return 1
   ids="$(run_compose ps --all -q bot)" || return 1
   [ "$(printf '%s\n' "$ids" | /usr/bin/sed '/^$/d' | /usr/bin/wc -l)" -eq 1 ] || return 1
   cid="$(printf '%s\n' "$ids" | /usr/bin/sed '/^$/d')"
@@ -1377,6 +1382,46 @@ record_bot_recreation_boundary() {
   atomic_write_metadata "$tmp" "$ZEDBOT_BOT_RECREATION_BOUNDARY" || { rm -f "$tmp"; return 1; }
   rm -f "$tmp"
   validate_bot_recreation_boundary
+}
+
+record_bot_recreation_boundary() {
+  local expected_image_id="$1" expected_sha="$2" kind generation stage operation
+  require_deployment_lock || return 1
+  validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 1
+  kind="$(/usr/bin/jq -r '.kind' "$ZEDBOT_OPERATION_STATE")"; generation="$(/usr/bin/jq -r '.generation' "$ZEDBOT_OPERATION_STATE")"; stage="$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE")"
+  case "$kind:$stage" in install:migrations-confirmed|update:migrations-confirmed|rollback:deployment-reference-retagged) ;; *) log_error "Bot recreation boundary has an invalid operation predecessor."; return 1;; esac
+  operation="$kind:$generation"
+  record_bot_recreation_boundary_core "$operation" "$generation" "$expected_image_id" "$expected_sha"
+}
+
+# Called only by `zedbot restart` (scripts/zedbot.sh), AFTER
+# `run_compose up -d --force-recreate --remove-orphans` has already
+# recreated every service including bot, outside any tracked
+# install/update/rollback operation. record_bot_recreation_boundary needs an
+# active operation-state to know the expected image/generation; a bare
+# restart has none - it never changes what generation is deployed, only
+# which container instance is running it - so current.json (the currently
+# promoted deployment) is the source of truth instead. The caller must
+# already hold the deployment lock.
+#
+# Returns 0 (boundary written and validated), 2 (no validated current.json
+# yet - a genuine pre-first-install restart; nothing to refresh, not a
+# restart failure), or 1 (current.json is unsafe/invalid, or the
+# just-recreated bot container does not actually match what current.json
+# says is deployed - the caller should fail so this gets investigated
+# before the next update).
+record_bot_recreation_boundary_after_restart() {
+  local generation expected_image_id expected_sha operation
+  require_deployment_lock || return 1
+  if [ ! -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ] && [ ! -L "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ]; then
+    return 2
+  fi
+  validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || return 1
+  generation="$(/usr/bin/jq -r '.generation' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")"
+  expected_image_id="$(/usr/bin/jq -r '.targetImageId' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")"
+  expected_sha="$(/usr/bin/jq -r '.targetDeploySha' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")"
+  operation="restart:${generation}"
+  record_bot_recreation_boundary_core "$operation" "$generation" "$expected_image_id" "$expected_sha"
 }
 
 collect_real_bot_readiness_evidence() {
