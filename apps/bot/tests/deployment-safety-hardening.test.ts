@@ -459,6 +459,62 @@ fi
     expect(perform.indexOf("Rollback cancelled; nothing was changed")).toBeLessThan(perform.indexOf("retag_validated_previous_reference"));
   });
 
+  // Regression: validate_compatibility deliberately runs the CURRENT (about-
+  // to-be-rolled-back-from) worker's rollback-compatibility CLI, because only
+  // that image's manifest knows about the newest migration's own backward-
+  // compatibility declaration. configure_rollback_compose_contract rebinds
+  // run_compose to the PREVIOUS generation's docker-compose.yml - if that
+  // switch happened first, the compatibility check would run under the
+  // wrong generation's command/environment/mounts even though it still used
+  // the current image, and could be wrongly rejected or inspect the wrong
+  // runtime inputs.
+  it("checks compatibility under the current generation's Compose contract, before switching to the previous one", () => {
+    const perform = rollback.slice(rollback.indexOf("perform_rollback() {"), rollback.indexOf("\nmain() {"));
+    const compatibilityIndex = perform.indexOf("validate_compatibility");
+    const contractSwitchIndex = perform.indexOf("configure_rollback_compose_contract");
+    expect(compatibilityIndex).toBeGreaterThan(-1);
+    expect(contractSwitchIndex).toBeGreaterThan(-1);
+    expect(compatibilityIndex).toBeLessThan(contractSwitchIndex);
+  });
+
+  // Regression: an interruption or state-write failure after
+  // retag_validated_previous_reference retags zedbot-app:latest to the
+  // previous image, but before recreate_application_services actually runs,
+  // used to leave that mismatch in place forever - a later `zedbot restart`
+  // would force-recreate straight from the tag, deploying the previous
+  // application without ever completing rollback readiness or metadata
+  // promotion. Mirrors update.sh's own DEPLOYMENT_REFERENCE_RESTORE_ID gate.
+  it("rollback.sh arms the restore before the retag and disarms once recreation starts", () => {
+    const perform = rollback.slice(rollback.indexOf("perform_rollback() {"), rollback.indexOf("\nmain() {"));
+    const restoreArm = perform.indexOf('DEPLOYMENT_REFERENCE_RESTORE_ID="$target_running_id"');
+    const retagCall = perform.indexOf("retag_validated_previous_reference");
+    expect(restoreArm).toBeGreaterThan(-1);
+    expect(retagCall).toBeGreaterThan(-1);
+    expect(restoreArm).toBeLessThan(retagCall);
+    const disarm = perform.indexOf('DEPLOYMENT_REFERENCE_RESTORE_ID=""', retagCall);
+    const recreateCall = perform.indexOf("execute_validated_rollback_transition", retagCall);
+    expect(disarm).toBeGreaterThan(retagCall);
+    expect(disarm).toBeLessThan(recreateCall);
+    expect(rollback).toContain("restore_deployment_reference");
+    expect(rollback).toContain("install_operation_traps rollback_owned_cleanup");
+  });
+
+  it("rollback_owned_cleanup restores the reference only when recreation was never attempted", () => {
+    const body = rollback.slice(rollback.indexOf("rollback_owned_cleanup() {"), rollback.indexOf("\nmetadata_field()"));
+    const trace = path.join(os.tmpdir(), `zedbot-rollback-cleanup-trace-${process.pid}-${Date.now()}`);
+    const harness = (recreationAttempted: 0 | 1, restoreId: string) => `APPLICATION_RECREATION_ATTEMPTED=${recreationAttempted}; DEPLOYMENT_REFERENCE_RESTORE_ID='${restoreId}'; log_error(){ :; }; restore_deployment_reference(){ echo "restore:$1" >> '${trace}'; return 0; }; ${body}\nrollback_owned_cleanup`;
+    spawnSync("bash", ["-c", harness(0, `sha256:${"6".repeat(64)}`)], { encoding: "utf8" });
+    expect(readFileSync(trace, "utf8")).toContain(`restore:sha256:${"6".repeat(64)}`);
+    rmSync(trace, { force: true });
+    spawnSync("bash", ["-c", harness(1, `sha256:${"6".repeat(64)}`)], { encoding: "utf8" });
+    expect(existsSync(trace)).toBe(false);
+    rmSync(trace, { force: true });
+    // Also a no-op when nothing is armed (every service was already on the
+    // previous image before this attempt started).
+    spawnSync("bash", ["-c", harness(0, "")], { encoding: "utf8" });
+    expect(existsSync(trace)).toBe(false);
+  });
+
   it("metadata writes atomically at mode 600 without secret-shaped fields", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-metadata-test-"));
     const source = path.join(dir, "source.json"); const output = path.join(dir, "previous.json");

@@ -7,6 +7,30 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # shellcheck source=lib/common.sh
 . "${SCRIPT_DIR}/lib/common.sh"
 
+APPLICATION_RECREATION_ATTEMPTED=0
+# Set once zedbot-app:latest is retagged to the previous image, cleared once
+# recreation actually starts. See rollback_owned_cleanup: an interruption or
+# state-write failure in this window would otherwise leave the running
+# containers on the current image while zedbot-app:latest points at the
+# previous one - a later `zedbot restart` would then force-recreate straight
+# from that tag, deploying the previous application without ever completing
+# rollback readiness or metadata promotion. Mirrors
+# update.sh's own DEPLOYMENT_REFERENCE_RESTORE_ID.
+DEPLOYMENT_REFERENCE_RESTORE_ID=""
+
+rollback_owned_cleanup() {
+  local rc=0
+  if [ "$APPLICATION_RECREATION_ATTEMPTED" -eq 0 ] && [ -n "$DEPLOYMENT_REFERENCE_RESTORE_ID" ]; then
+    restore_deployment_reference "$DEPLOYMENT_REFERENCE_RESTORE_ID" || {
+      log_error "Could not restore zedbot-app:latest to the running application image."
+      log_error "Do NOT run 'zedbot restart' until this is fixed: docker image tag ${DEPLOYMENT_REFERENCE_RESTORE_ID} zedbot-app:latest"
+      rc=1
+    }
+    DEPLOYMENT_REFERENCE_RESTORE_ID=""
+  fi
+  return "$rc"
+}
+
 metadata_field() { jq -er "$1" "$ZEDBOT_ROLLBACK_METADATA"; }
 
 validate_metadata() {
@@ -120,19 +144,26 @@ perform_rollback() {
   validate_metadata
   validate_generation_owned_evidence "$ZEDBOT_ROLLBACK_METADATA"
   confirm_operation_state previous-selected rollback-evidence-validated
-  configure_rollback_compose_contract
   validate_retained_image
   confirm_operation_state rollback-evidence-validated retained-image-validated
   # Compatibility MUST be checked before zedbot-app:latest is retagged to the
-  # previous image below. This check runs the CURRENT (about-to-be-rolled-
-  # back-from) worker CLI, because only that image's code and manifest know
-  # about the newest migration's own backward-compatibility declaration - a
-  # migration added by the very deployment being rolled back past. The
-  # previous image predates that migration entirely, so retagging first
-  # would make this check run against code that has no way to know the
-  # rollback is even safe, unconditionally blocking it.
+  # previous image below, and before the Compose contract switches to the
+  # previous generation's evidence just below: this check runs the CURRENT
+  # (about-to-be-rolled-back-from) worker CLI under the CURRENT generation's
+  # own Compose contract (command, environment, mounts), because only that
+  # image's code and manifest know about the newest migration's own backward-
+  # compatibility declaration - a migration added by the very deployment
+  # being rolled back past. The previous image predates that migration
+  # entirely, and the previous Compose contract may not even describe the
+  # same runtime inputs the current worker expects, so doing either swap
+  # first would make this check run against code (or a contract) that has no
+  # way to know the rollback is even safe, unconditionally blocking it. The
+  # persistent checkout's own docker-compose.yml (still ZEDBOT_CANONICAL_COMPOSE_FILE's
+  # value here) is the current generation's contract, matching the invariant
+  # sync_deployment_checkout maintains after every successful update.
   validate_compatibility
   confirm_operation_state retained-image-validated compatibility-confirmed
+  configure_rollback_compose_contract
   validate_compose_application_images
   validate_dependencies_healthy
   pre="$(metadata_field '.targetDeploySha')"
@@ -170,10 +201,18 @@ perform_rollback() {
     return 1
   fi
 
+  # Armed before the retag below, not after: the retag itself is what moves
+  # zedbot-app:latest off the currently running image. Empty when every
+  # service is already on the previous image (a prior attempt got this far
+  # before being interrupted) - there is nothing to restore to in that case.
+  # Cleared once recreation actually starts - see rollback_owned_cleanup.
+  DEPLOYMENT_REFERENCE_RESTORE_ID="$target_running_id"
   retag_validated_previous_reference "$ZEDBOT_ROLLBACK_METADATA"
   metadata_transition_hook rollback-retagged
   confirm_operation_state compatibility-confirmed deployment-reference-retagged
 
+  APPLICATION_RECREATION_ATTEMPTED=1
+  DEPLOYMENT_REFERENCE_RESTORE_ID=""
   # Only previous.json supplies rollback material. failed.json is diagnostic.
   if ! execute_validated_rollback_transition "$ZEDBOT_ROLLBACK_METADATA"; then
     log_error "Post-rollback application health validation failed. Both image identities and diagnostics were preserved."
@@ -212,6 +251,6 @@ main() {
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-  [ "${1:-}" = status ] || install_operation_traps
+  [ "${1:-}" = status ] || install_operation_traps rollback_owned_cleanup
   main "$@"
 fi
