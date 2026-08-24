@@ -113,6 +113,17 @@ describe("four-role generation lifecycle", () => {
     expect(generation(f.current)).toBe(genA); expect(existsSync(f.previous)).toBe(false);
   });
 
+  it("rotates a first-install current to a still-valid previous, and survives a rollback attempt after a second update", () => {
+    const f = fixture();
+    write(f.current, metadata(genA, "current", { installationKind: "first-install", preDeploySha: null, preDeployImageId: null, retainedImageTag: null, preDeployMigrations: [] }));
+    expect(shell(f, `promote_healthy_candidate '${f.candidate}'`).status).toBe(0);
+    expect(shell(f, `validate_generation_metadata_core '${f.previous}' previous`).status).toBe(0);
+    expect(JSON.parse(readFileSync(f.previous, "utf8")).installationKind).toBe("first-install");
+    // A rollback attempt right after the second update must not be rejected.
+    expect(shell(f, "promote_successful_rollback").status).toBe(0);
+    expect(generation(f.current)).toBe(genA);
+  });
+
   it("rollback always promotes previous to current, preserves failed diagnostics, and never makes failed previous", () => {
     const f = fixture(); write(f.previous, metadata(genA, "previous")); write(f.failed, metadata(genB, "failed"));
     expect(shell(f, "promote_successful_rollback").status).toBe(0);

@@ -784,20 +784,26 @@ classify_installation() {
     validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || return 1
     validate_generation_owned_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || return 1
     validate_existing_installation_auxiliary || return 1
+    # bootstrap.json/legacy-install-v1.json are permanent, immutable
+    # provenance records written once at promotion and never updated
+    # afterward, while current.json's generation advances on every later
+    # update. Their generation is matched against the candidate/legacy
+    # record they promote ONCE, at promotion time (publish_first_install_
+    # current, convert_supported_legacy_installation) - not perpetually
+    # here, or every classify_installation call after the second update
+    # would reject an otherwise healthy installation.
     if [ -e "$ZEDBOT_INSTALLATION_BOOTSTRAP" ] || [ -L "$ZEDBOT_INSTALLATION_BOOTSTRAP" ]; then
       validate_installation_bootstrap || return 1
-      [ "$(/usr/bin/jq -r .phase "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = promoted ] &&
-        [ "$(/usr/bin/jq -r .generation "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = "$(/usr/bin/jq -r .generation "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")" ] || {
-          log_error "Canonical metadata conflicts with incomplete bootstrap identity."; return 1;
-        }
+      [ "$(/usr/bin/jq -r .phase "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = promoted ] || {
+        log_error "Canonical metadata conflicts with incomplete bootstrap identity."; return 1;
+      }
     fi
     if [ -e "$ZEDBOT_LEGACY_INSTALLATION" ] || [ -L "$ZEDBOT_LEGACY_INSTALLATION" ]; then
       validate_supported_legacy_installation || return 1
       validate_installation_bootstrap || return 1
-      [ "$(/usr/bin/jq -r '.kind+":"+.phase' "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = legacy-upgrade:promoted ] &&
-        [ "$(/usr/bin/jq -r .generation "$ZEDBOT_LEGACY_INSTALLATION")" = "$(/usr/bin/jq -r .generation "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")" ] || {
-          log_error "Canonical and legacy installation evidence coexist without a completed matching conversion."; return 1;
-        }
+      [ "$(/usr/bin/jq -r '.kind+":"+.phase' "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = legacy-upgrade:promoted ] || {
+        log_error "Canonical and legacy installation evidence coexist without a completed matching conversion."; return 1;
+      }
     fi
     printf '%s\n' existing-canonical; return 0
   fi
@@ -848,6 +854,12 @@ convert_supported_legacy_installation() {
   operation_assert_active || return 1; require_deployment_lock || return 1
   [ ! -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ] && [ ! -L "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ] || return 1
   validate_supported_legacy_installation || return 1
+  validate_installation_bootstrap || return 1
+  # Provenance is proven once, here, at conversion time: the legacy record
+  # being promoted must be the one this bootstrap identity refers to.
+  # classify_installation only re-checks the bootstrap record's own phase
+  # afterward, since its generation is never updated on later updates.
+  [ "$(/usr/bin/jq -r '.generation' "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = "$(/usr/bin/jq -r '.generation' "$ZEDBOT_LEGACY_INSTALLATION")" ] || return 1
   before="$(/usr/bin/sha256sum "$ZEDBOT_LEGACY_INSTALLATION" | /usr/bin/awk '{print $1}')" || return 1
   write_lifecycle_role "$ZEDBOT_LEGACY_INSTALLATION" current "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || return 1
   after="$(/usr/bin/sha256sum "$ZEDBOT_LEGACY_INSTALLATION" | /usr/bin/awk '{print $1}')" || return 1
@@ -867,6 +879,11 @@ publish_first_install_current() {
   [ ! -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ] && [ ! -e "$ZEDBOT_ROLLBACK_METADATA" ] || return 1
   validate_generation_metadata_core "$candidate" candidate || return 1
   [ "$(/usr/bin/jq -r '.state+":"+(.healthConfirmed|tostring)' "$candidate")" = healthy-candidate:true ] || return 1
+  # Provenance is proven once, here, at promotion time: the candidate being
+  # published must be the one this bootstrap identity refers to.
+  # classify_installation only re-checks the bootstrap record's own phase
+  # afterward, since its generation is never updated on later updates.
+  [ "$(/usr/bin/jq -r '.generation' "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = "$(/usr/bin/jq -r '.generation' "$candidate")" ] || return 1
   write_lifecycle_role "$candidate" current "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || return 1
   validate_generation_owned_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || return 1
   remove_canonical_state_file "$candidate" || return 1
@@ -1470,7 +1487,7 @@ validate_generation_metadata_core() {
     (.targetDeploySha|type=="string" and test("^[a-f0-9]{40}$")) and
     (if .installationKind == "first-install" then
        .preDeploySha == null and .preDeployImageId == null and .retainedImageTag == null and .preDeployMigrations == [] and
-       (.lifecycleRole|IN("candidate","current"))
+       (.lifecycleRole|IN("candidate","current","previous"))
      else
        .installationKind == null and
        (.preDeploySha|type=="string" and test("^[a-f0-9]{40}$")) and

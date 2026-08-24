@@ -67,10 +67,84 @@ chmod 600 '${candidate}'; publish_first_install_current '${candidate}'; classify
     // rollback-status (it treats the file's mere presence as an incomplete
     // operation, regardless of content).
     expect(existsSync(candidate)).toBe(false); });
+  // Regression: bootstrap.json is a permanent provenance record written once
+  // at promotion and never updated again, while current.json's generation
+  // advances on every later update. classify_installation used to require
+  // them to stay equal forever, which rejected an otherwise healthy
+  // installation as soon as a second generation was promoted. Provenance is
+  // now proven once, at promotion time (publish_first_install_current), not
+  // perpetually here.
+  it("stays existing-canonical through a second update after first-install, past the bootstrap generation check", () => {
+    const dir = fixture(); const candidate1 = path.join(dir, `candidate-${generation}.json`);
+    const first = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; advance_installation_bootstrap initialized canonical-published; advance_installation_bootstrap canonical-published health-confirmed; cat > '${candidate1}' <<'JSON'
+${JSON.stringify(metadata("candidate"))}
+JSON
+chmod 600 '${candidate1}'; publish_first_install_current '${candidate1}'`, true);
+    expect(first.status, first.stderr).toBe(0);
+    // The second candidate is only written now, mirroring a real second
+    // update: candidate1.json is already gone and current.json already
+    // published by the time this file exists.
+    const genB = "20260814T120000Z-cccccccccccc";
+    const candidate2 = path.join(dir, `candidate-${genB}.json`);
+    write(candidate2, {
+      formatVersion: 2, lifecycleRole: "candidate", generation: genB, sourceTree: tree,
+      preDeploySha: sha, preDeployImageId: `sha256:${"1".repeat(64)}`, targetDeploySha: sha, targetImageId: `sha256:${"2".repeat(64)}`,
+      retainedImageTag: `zedbot-app:rollback-${genB}`, immutableImageTag: `zedbot-app:generation-${genB}`, failedTargetTag: `zedbot-app:failed-${genB}`,
+      capturedAt: "2026-08-14T12:00:00Z", preDeployMigrations: [], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: `/state/evidence-${genB}`, composeEvidencePath: `/state/evidence-${genB}/docker-compose.yml`,
+      composeEvidenceSha256: "c".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "d".repeat(64), compatibilityDeclarations: [], recreationAttempted: true, healthConfirmed: true, state: "healthy-candidate",
+    });
+    const result = shell(dir, `promote_healthy_candidate '${candidate2}'; classify_installation observe`, true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("existing-canonical");
+  });
   it("converts supported legacy evidence atomically and preserves it", () => { const dir = fixture(); const legacy = path.join(dir, "legacy-install-v1.json"); write(legacy, metadata()); const before = readFileSync(legacy, "utf8"); const result = shell(dir, `begin_installation_bootstrap legacy-upgrade '${generation}' '${sha}' '${tree}' '${operation}'; convert_supported_legacy_installation; classify_installation observe`, true); expect(result.status, result.stderr).toBe(0); expect(result.stdout.trim()).toBe("existing-canonical"); expect(readFileSync(legacy, "utf8")).toBe(before); expect(existsSync(path.join(dir, "previous.json"))).toBe(false); });
+  // Regression: legacy-install-v1.json is likewise a permanent record whose
+  // generation is never updated - the same generation-drift bug independently
+  // affects converted legacy installations even once first-install's own
+  // previous.json can validate again.
+  it("stays existing-canonical through an update after legacy conversion, past the legacy generation check", () => {
+    const dir = fixture(); const legacy = path.join(dir, "legacy-install-v1.json"); write(legacy, metadata());
+    const first = shell(dir, `begin_installation_bootstrap legacy-upgrade '${generation}' '${sha}' '${tree}' '${operation}'; convert_supported_legacy_installation`, true);
+    expect(first.status, first.stderr).toBe(0);
+    // The update candidate is only written now, mirroring a real update
+    // that happens after conversion has already published current.json.
+    const genB = "20260814T120000Z-dddddddddddd";
+    const candidate = path.join(dir, `candidate-${genB}.json`);
+    write(candidate, {
+      formatVersion: 2, lifecycleRole: "candidate", generation: genB, sourceTree: tree,
+      preDeploySha: sha, preDeployImageId: `sha256:${"2".repeat(64)}`, targetDeploySha: sha, targetImageId: `sha256:${"3".repeat(64)}`,
+      retainedImageTag: `zedbot-app:rollback-${genB}`, immutableImageTag: `zedbot-app:generation-${genB}`, failedTargetTag: `zedbot-app:failed-${genB}`,
+      capturedAt: "2026-08-14T12:00:00Z", preDeployMigrations: [], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: `/state/evidence-${genB}`, composeEvidencePath: `/state/evidence-${genB}/docker-compose.yml`,
+      composeEvidenceSha256: "c".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "d".repeat(64), compatibilityDeclarations: [], recreationAttempted: true, healthConfirmed: true, state: "healthy-candidate",
+    });
+    const result = shell(dir, `promote_healthy_candidate '${candidate}'; classify_installation observe`, true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("existing-canonical");
+  });
   it("requires the operation lock before bootstrap, conversion, or publication", () => { const dir = fixture(); write(path.join(dir, "legacy-install-v1.json"), metadata()); expect(shell(dir, `begin_installation_bootstrap legacy-upgrade '${generation}' '${sha}' '${tree}' '${operation}'`).status).not.toBe(0); expect(shell(dir, "convert_supported_legacy_installation").status).not.toBe(0); expect(existsSync(path.join(dir, "current.json"))).toBe(false); });
   it("repeated conversion is rejected as canonical instead of generating another identity", () => { const dir = fixture(); write(path.join(dir, "legacy-install-v1.json"), metadata()); const first = shell(dir, `begin_installation_bootstrap legacy-upgrade '${generation}' '${sha}' '${tree}' '${operation}'; convert_supported_legacy_installation`, true); expect(first.status, first.stderr).toBe(0); expect(shell(dir, "convert_supported_legacy_installation", true).status).not.toBe(0); });
   it("failed atomic publication suppresses later work", () => { const dir = fixture(); const later = path.join(dir, "later"); const result = shell(dir, `atomic_write_metadata(){ return 1; }; begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}' && echo unsafe > '${later}'`, true); expect(result.status).not.toBe(0); expect(existsSync(later)).toBe(false); });
+  it("rejects publishing a candidate whose generation does not match the promoted bootstrap identity", () => {
+    const dir = fixture();
+    const bootstrap = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; advance_installation_bootstrap initialized canonical-published; advance_installation_bootstrap canonical-published health-confirmed`, true);
+    expect(bootstrap.status, bootstrap.stderr).toBe(0);
+    const mismatched = path.join(dir, "candidate-mismatched.json");
+    write(mismatched, { ...metadata("candidate"), generation: "20260814T120000Z-eeeeeeeeeeee" });
+    const result = shell(dir, `publish_first_install_current '${mismatched}'`, true);
+    expect(result.status).not.toBe(0);
+    expect(existsSync(path.join(dir, "current.json"))).toBe(false);
+  });
+  it("rejects converting legacy evidence whose generation does not match the bootstrap identity", () => {
+    const dir = fixture(); const legacy = path.join(dir, "legacy-install-v1.json");
+    write(legacy, metadata());
+    const result = shell(dir, `begin_installation_bootstrap legacy-upgrade '20260814T120000Z-ffffffffffff' '${sha}' '${tree}' '${operation}'; convert_supported_legacy_installation`, true);
+    expect(result.status).not.toBe(0);
+    expect(existsSync(path.join(dir, "current.json"))).toBe(false);
+  });
   it("changed legacy evidence before conversion fails closed", () => { const dir = fixture(); const legacy = path.join(dir, "legacy-install-v1.json"); write(legacy, metadata()); const result = shell(dir, `begin_installation_bootstrap legacy-upgrade '${generation}' '${sha}' '${tree}' '${operation}'; echo broken > '${legacy}'; convert_supported_legacy_installation`, true); expect(result.status).not.toBe(0); expect(existsSync(path.join(dir, "current.json"))).toBe(false); });
   it("an interrupted bootstrap cannot advance or publish", () => { const dir = fixture(); const result = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; ZEDBOT_OPERATION_INTERRUPTED=1; advance_installation_bootstrap initialized canonical-published`, true); expect(result.status).not.toBe(0); expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("initialized"); });
   it("stale temporary metadata is preserved and never reused", () => { const dir = fixture(); const stale = path.join(dir, ".bootstrap.AAAAAAAA"); write(stale, "forensic"); expect(shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'`, true).status).not.toBe(0); expect(readFileSync(stale, "utf8")).toBe("forensic"); });
