@@ -170,20 +170,67 @@ run_operation_child() {
     # on an unopened fd exits 0 with no output) - the "2>/dev/null" here was
     # unnecessary defense, but as a bare `exec` (no command operand) it
     # doesn't just suppress this one close: it rebinds fd 2 to /dev/null for
-    # the rest of the subshell, so the actual child launched by `exec setsid`
-    # below inherits a dead stderr too. That silently discarded every
-    # diagnostic a caller tried to capture from a child's stderr (e.g.
-    # backup-db.sh's pg_restore failure detail) regardless of what the
-    # caller redirected fd 2 to before calling in.
+    # the rest of the subshell, so the actual child launched below inherits
+    # a dead stderr too. That silently discarded every diagnostic a caller
+    # tried to capture from a child's stderr (e.g. backup-db.sh's
+    # pg_restore failure detail) regardless of what the caller redirected
+    # fd 2 to before calling in.
     exec 9>&-
     exec 0<&8 8<&-
-    exec setsid -- "$@"
+    # setsid's own new session/process group is what lets terminate_owned_
+    # child kill exactly this child's tree (kill -TERM -- "-$pid") without
+    # also signalling this script's own process group - but that isolation
+    # is only ever exercised by operation_cleanup/operation_signal_handler,
+    # which install_operation_traps is the sole installer of (ZEDBOT_
+    # OPERATION_REGISTRY is non-empty for exactly as long as those traps are
+    # active). A caller that never calls install_operation_traps - `zedbot
+    # logs -f`, `zedbot shell`, backup.sh, backup-db.sh, doctor.sh - has no
+    # trap to relay a signal to this detached child, so setsid'ing it there
+    # would silently orphan it on Ctrl-C (SIGINT hits the terminal's
+    # foreground process group only, which the new session is no longer
+    # part of): the parent script would exit while a detached `docker
+    # compose logs -f` or `pg_dump` kept running. Without traps installed,
+    # skip setsid entirely so this child stays in the SAME process group as
+    # the script - the terminal's own SIGINT/SIGTERM then reaches it
+    # directly, exactly as if it had been run at the prompt with no wrapper
+    # at all.
+    if [ -n "$ZEDBOT_OPERATION_REGISTRY" ]; then
+      exec setsid -- "$@"
+    else
+      exec "$@"
+    fi
   ) &
   ZEDBOT_OPERATION_ACTIVE_CHILD_PID=$!
   exec 8<&-
   ZEDBOT_OPERATION_ACTIVE_CHILD_START="$(operation_process_start "$ZEDBOT_OPERATION_ACTIVE_CHILD_PID")" || {
-    log_error "run_operation_child: could not read the start time of PID ${ZEDBOT_OPERATION_ACTIVE_CHILD_PID} (command: $*) - /proc/<pid>/stat was unavailable, so the child may have already exited."
-    terminate_owned_child; return 1;
+    # A fast child (`/bin/true`, a quick `docker inspect`, the Compose-
+    # version preflight) can fully exit and be reaped by bash's own
+    # SIGCHLD-driven job-table bookkeeping before this /proc/<pid>/stat
+    # sample ever runs - reproducible directly in a tight loop
+    # (`run_operation_child /bin/true`). That alone is not a failure: bash
+    # still remembers this exact pid's real exit status in its own
+    # internal job table even after the kernel-level process/zombie is
+    # gone, so `wait` below still retrieves it correctly. Only `wait`
+    # itself failing to recognize the pid at all - bash's distinct "pid is
+    # not a child of this shell" (exit 127) - means ownership genuinely
+    # cannot be confirmed (a stale/reused pid this shell never actually
+    # spawned), and that still fails closed exactly as before:
+    # ZEDBOT_OPERATION_ACTIVE_CHILD_START is left empty in every path here,
+    # so operation_child_is_owned (used by terminate_owned_child's
+    # process-group kill) can never mistake a coincidentally-reused pid for
+    # this shell's own child.
+    local pid="$ZEDBOT_OPERATION_ACTIVE_CHILD_PID"
+    if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
+    ZEDBOT_OPERATION_ACTIVE_CHILD_PID=""
+    if [ "$rc" -eq 127 ]; then
+      log_error "run_operation_child: could not read the start time of PID ${pid} (command: $*) - /proc/<pid>/stat was unavailable and the pid is not a tracked child of this shell either, so its ownership cannot be confirmed."
+      return 1
+    fi
+    if [ "$ZEDBOT_OPERATION_INTERRUPTED" -ne 0 ]; then
+      log_error "run_operation_child: a signal was received while waiting on '$*' (child exit ${rc})."
+      return "${ZEDBOT_OPERATION_SIGNAL_STATUS:-1}"
+    fi
+    return "$rc"
   }
   if wait "$ZEDBOT_OPERATION_ACTIVE_CHILD_PID"; then rc=0; else rc=$?; fi
   ZEDBOT_OPERATION_ACTIVE_CHILD_PID=""
@@ -1797,22 +1844,37 @@ collect_real_bot_readiness_evidence() {
 }
 
 # Returns 0 ready, 1 retryable startup, or 2 terminal/invalid.
+#
+# restartCount is checked as a DELTA against baseline_restart (the bot
+# container's own count as first observed by THIS specific readiness wait),
+# not required to equal zero outright - mirrors evaluate_readiness_evidence's
+# identical rationale (see its own comment): a container can legitimately
+# crash-loop once (e.g. waiting on a dependency) before becoming healthy, or
+# carry a restart from well before this wait began (an old OOM kill, a host
+# reboot), and none of that should permanently mark an otherwise-healthy,
+# identity-checked bot terminal with no operator recourse short of force-
+# recreating the container. An INCREASE during this wait - the same
+# container restarting again while we watch - is still exactly what should
+# fail closed. baseline_restart defaults to unset/null (no known baseline:
+# via `// .bot.restartCount`, the comparison trivially passes on the very
+# first observation of this wait).
 evaluate_real_bot_readiness_evidence() {
-  local evidence="$1" attempt="$2" started="$3" now="$4" expected_image="$5" expected_sha="$6" generation
+  local evidence="$1" attempt="$2" started="$3" now="$4" expected_image="$5" expected_sha="$6" baseline_restart="${7:-}" generation
   # See collect_real_bot_readiness_evidence: match on the attempt's generation
   # segment, not a reconstructed "<kind>:<generation>" operation string - the
   # "preflight:<generation>:current-validated" sentinel used outside any
   # active operation has no real kind to compare against the boundary's
   # install/update/rollback .operation field.
   generation="${attempt#*:}"; generation="${generation%%:*}"
-  printf '%s' "$evidence" | /usr/bin/jq -e --arg attempt "$attempt" --arg generation "$generation" --argjson started "$started" --argjson now "$now" --arg image "$expected_image" --arg sha "$expected_sha" '
+  printf '%s' "$evidence" | /usr/bin/jq -e --arg attempt "$attempt" --arg generation "$generation" --argjson started "$started" --argjson now "$now" --arg image "$expected_image" --arg sha "$expected_sha" --argjson baseline "${baseline_restart:-null}" '
     . as $root | type=="object" and keys==["attempt","bot","boundary","formatVersion","kind","observedAt"] and .formatVersion==1 and .kind=="real-bot" and
     .attempt==$attempt and (.observedAt|type=="number") and .observedAt >= $started and .observedAt <= $now and ($now-.observedAt)<=5 and
     (.boundary|type=="object" and keys==["containerId","formatVersion","generation","imageId","imageRef","operation","project","recreatedAt","service"] and
       .formatVersion==1 and .generation==$generation and .imageId==$image and .imageRef=="zedbot-app:latest" and .project=="zedbot" and .service=="bot") and
     (.bot|type=="object" and keys==["containerId","generation","imageId","imageRef","marker","project","restartCount","service","status"] and
       .service=="bot" and .project=="zedbot" and .containerId==$root.boundary.containerId and .imageId==$image and .imageId==$root.boundary.imageId and
-      .imageRef=="zedbot-app:latest" and .generation==$sha and (.restartCount|type=="number" and .==0) and (.status|type=="string"))
+      .imageRef=="zedbot-app:latest" and .generation==$sha and
+      (.restartCount|type=="number" and . >= 0) and (.restartCount <= ($baseline // .restartCount)) and (.status|type=="string"))
   ' >/dev/null 2>&1 || return 2
   if printf '%s' "$evidence" | /usr/bin/jq -e --arg sha "$expected_sha" --argjson now "$now" '
     .bot.status=="running" and (.bot.marker|type=="object") and
@@ -1822,12 +1884,12 @@ evaluate_real_bot_readiness_evidence() {
     (.bot.marker.processStartedAt|type=="number") and (.bot.marker.readyAt|type=="number") and .bot.marker.processStartedAt<=.bot.marker.readyAt and .bot.marker.readyAt<=($now*1000+5000) and
     (.bot.marker.components=={application:true,handlers:true,localLoops:true,shutdownHandlers:true})
   ' >/dev/null; then return 0; fi
-  if printf '%s' "$evidence" | /usr/bin/jq -e '.bot.status=="running" and .bot.restartCount==0 and .bot.marker=={formatVersion:1,state:"starting"}' >/dev/null; then return 1; fi
+  if printf '%s' "$evidence" | /usr/bin/jq -e --argjson baseline "${baseline_restart:-null}" '.bot.status=="running" and (.bot.restartCount <= ($baseline // .bot.restartCount)) and .bot.marker=={formatVersion:1,state:"starting"}' >/dev/null; then return 1; fi
   return 2
 }
 
 wait_for_real_bot_readiness() {
-  local attempt="$1" expected_image="$2" expected_sha="$3" timeout="${4:-90}" interval="${5:-3}" started now evidence rc previous_identity="" identity
+  local attempt="$1" expected_image="$2" expected_sha="$3" timeout="${4:-90}" interval="${5:-3}" started now evidence rc previous_identity="" identity baseline_restart=""
   [[ "$timeout" =~ ^[1-9][0-9]*$ && "$interval" =~ ^[1-9][0-9]*$ ]] || return 1
   require_deployment_lock || return 1
   started="$(readiness_now)" || return 1
@@ -1839,7 +1901,12 @@ wait_for_real_bot_readiness() {
     identity="$(printf '%s' "$evidence" | /usr/bin/jq -er '.bot.containerId+":"+.bot.imageId')" || return 1
     [ -z "$previous_identity" ] || [ "$identity" = "$previous_identity" ] || { log_error "Real Bot identity changed during readiness polling."; return 1; }
     previous_identity="$identity"
-    if evaluate_real_bot_readiness_evidence "$evidence" "$attempt" "$started" "$now" "$expected_image" "$expected_sha"; then rc=0; else rc=$?; fi
+    # Baseline is the bot container's restartCount as first observed THIS
+    # wait - a nonzero count from before this call ever started must not, by
+    # itself, fail readiness (see evaluate_real_bot_readiness_evidence's own
+    # comment); only a further increase during this specific wait should.
+    [ -n "$baseline_restart" ] || baseline_restart="$(printf '%s' "$evidence" | /usr/bin/jq -c '.bot.restartCount')" || return 1
+    if evaluate_real_bot_readiness_evidence "$evidence" "$attempt" "$started" "$now" "$expected_image" "$expected_sha" "$baseline_restart"; then rc=0; else rc=$?; fi
     case "$rc" in 0) return 0;; 2) log_error "Real Bot readiness is terminal, malformed, stale, incomplete, or identity-mismatched."; return 1;; esac
     [ $((now + interval)) -le $((started + timeout)) ] || { log_error "Real Bot readiness timed out."; return 1; }
     readiness_pause "$interval" || { log_error "Real Bot readiness was cancelled or interrupted."; return 1; }

@@ -26,9 +26,10 @@ function evidence(overrides: Partial<{ attempt: string; observedAt: number; mark
     bot: { service: overrides.service ?? "bot", project: overrides.project ?? "zedbot", containerId: cid, imageId: overrides.imageId ?? imageId, imageRef: "zedbot-app:latest", generation: overrides.generation ?? sha, status: overrides.status ?? "running", restartCount: overrides.restartCount ?? 0, marker: overrides.marker ?? marker() } };
 }
 function shell(body: string) { return spawnSync("bash", ["-c", `. '${common}'; ${body}`], { encoding: "utf8" }); }
-function evaluate(value: unknown, started = 100, now = 100) {
+function evaluate(value: unknown, started = 100, now = 100, baselineRestart?: number) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-real-bot-eval-")); const file = path.join(dir, "evidence.json"); writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value));
-  return shell(`evaluate_real_bot_readiness_evidence "$(< '${file}')" '${attempt}' '${started}' '${now}' '${imageId}' '${sha}'`);
+  const baseline = baselineRestart === undefined ? "" : `'${baselineRestart}'`;
+  return shell(`evaluate_real_bot_readiness_evidence "$(< '${file}')" '${attempt}' '${started}' '${now}' '${imageId}' '${sha}' ${baseline}`);
 }
 
 describe("Bot-owned readiness marker", () => {
@@ -128,7 +129,6 @@ describe("real Bot structured evidence", () => {
     ["incomplete initialization", (e: Evidence) => { (e.bot.marker as Marker).components.handlers = false; }],
     ["startup failed", (e: Evidence) => { e.bot.status = "exited"; }],
     ["terminal failure", (e: Evidence) => { e.bot.status = "dead"; }],
-    ["restart", (e: Evidence) => { e.bot.restartCount = 1; }],
     ["missing marker field", (e: Evidence) => { delete (e.bot.marker as Partial<Marker>).readyAt; }],
     ["wrong marker field type", (e: Evidence) => { (e.bot.marker as Marker).processId = "42" as unknown as number; }],
     ["unknown readiness state", (e: Evidence) => { (e.bot.marker as Marker).state = "unknown"; }],
@@ -146,6 +146,24 @@ describe("real Bot structured evidence", () => {
     ["duplicate/ambiguous identity", (e: Evidence) => { (e as unknown as Record<string, unknown>).bots = [e.bot]; }],
   ])("rejects %s", (_name, mutate) => { const value = evidence(); mutate(value); expect(evaluate(value).status).toBe(2); });
   it("treats only the exact starting marker as retryable", () => expect(evaluate(evidence({ marker: { formatVersion: 1, state: "starting" } })).status).toBe(1));
+  // Regression: the bot container can legitimately crash-loop once (e.g.
+  // waiting on a dependency) before becoming healthy, or carry a restart
+  // from well before this readiness wait began (an old OOM kill, a host
+  // reboot) - neither should, by itself, mark otherwise-healthy,
+  // identity-checked evidence terminal forever, with no operator recourse
+  // short of force-recreating the container. restartCount is checked as a
+  // delta against baseline_restart (the count as first observed by THIS
+  // wait), not required to equal zero outright - mirrors
+  // evaluate_readiness_evidence's identical baseline-delta fix.
+  it("a nonzero restartCount with no known baseline (first observation of a wait) is not rejected", () => {
+    expect(evaluate(evidence({ restartCount: 3 })).status).toBe(0);
+  });
+  it("a restartCount at or below its baseline is accepted", () => {
+    expect(evaluate(evidence({ restartCount: 2 }), 100, 100, 2).status).toBe(0);
+  });
+  it("a restartCount that increased beyond its baseline during this wait is rejected", () => {
+    expect(evaluate(evidence({ restartCount: 3 }), 100, 100, 2).status).toBe(2);
+  });
   // Regression: current_readiness_attempt()'s fallback outside any active
   // operation returns the "preflight:<generation>:current-validated"
   // sentinel (no real kind exists yet to report), but the boundary's own
@@ -421,6 +439,20 @@ describe("bounded real Bot polling and state suppression", () => {
   it("starting until timeout fails without busy-looping", () => { const result = poll([starting(), starting(), starting(), starting()]); expect(result.result.status).not.toBe(0); expect(result.calls).toBe(4); });
   it("cancellation fails and stops after one poll", () => { const result = poll([starting(), evidence()], 9, true); expect(result.result.status).not.toBe(0); expect(result.calls).toBe(1); });
   it("terminal failure stops further polling", () => { const result = poll([evidence({ status: "exited" }), evidence()]); expect(result.result.status).not.toBe(0); expect(result.calls).toBe(1); });
+  // A restartCount that's already nonzero on the very FIRST poll of a wait
+  // becomes the baseline (accepted, not rejected) - but that SAME container
+  // increasing further on a LATER poll of that same wait is an active
+  // restart happening right now and must still fail closed.
+  it("tolerates a restartCount already nonzero on the first poll of a wait", () => {
+    const result = poll([evidence({ restartCount: 2 })]);
+    expect(result.result.status).toBe(0); expect(result.calls).toBe(1);
+  });
+  it("still fails closed when restartCount increases during the wait", () => {
+    const first = () => evidence({ restartCount: 2, marker: { formatVersion: 1, state: "starting" } });
+    const second = () => evidence({ restartCount: 3 });
+    const result = poll([first(), second()]);
+    expect(result.result.status).not.toBe(0); expect(result.calls).toBe(2);
+  });
   it("identity change during polling fails closed", () => { const second = evidence({ containerId: "replacement", boundaryContainerId: "replacement" }); const result = poll([starting(), second]); expect(result.result.status).not.toBe(0); expect(result.calls).toBe(2); });
   it("failing inspection status rejects valid-looking later evidence", () => { const result = shell(`require_deployment_lock(){ return 0; }; readiness_now(){ echo 100; }; collect_real_bot_readiness_evidence(){ printf '%s' '${JSON.stringify(evidence())}'; return 1; }; wait_for_real_bot_readiness '${attempt}' '${imageId}' '${sha}' 9 3`); expect(result.status).not.toBe(0); });
   it("successful inspection with invalid content fails closed", () => { const result = shell(`require_deployment_lock(){ return 0; }; readiness_now(){ echo 100; }; collect_real_bot_readiness_evidence(){ echo '{'; }; wait_for_real_bot_readiness '${attempt}' '${imageId}' '${sha}' 9 3`); expect(result.status).not.toBe(0); });

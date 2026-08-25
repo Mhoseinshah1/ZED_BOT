@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1679,5 +1679,116 @@ fi
     expect(env).toContain("1..10000");
     expect(env).toContain("default 90");
     expect(docs).toContain("no image rebuild is required");
+  });
+});
+
+// Regression: run_operation_child unconditionally setsid'd every child into
+// its own new session/process group. That isolation is essential for the
+// TRAPPED path (install_operation_traps' operation_signal_handler /
+// operation_cleanup explicitly relay a caught signal to the child via
+// terminate_owned_child's `kill -TERM -- "-$pid"`, which must target only
+// the child's own group), but callers that never call
+// install_operation_traps - `zedbot logs -f`, `zedbot shell`, backup.sh,
+// backup-db.sh, doctor.sh - install no such trap, so nothing ever relays a
+// signal to that detached child. A real terminal delivers SIGINT/SIGTERM to
+// its whole foreground process group at once; once setsid moved the child
+// into a different session, the child stopped being a member of that group
+// and Ctrl-C only killed the waiting wrapper script, leaving the child
+// (e.g. `docker compose logs -f`, or an in-progress pg_dump) running as an
+// orphan. run_operation_child now only isolates the child into a new
+// session when ZEDBOT_OPERATION_REGISTRY is non-empty, i.e. exactly when
+// install_operation_traps has actually been called for this process.
+describe("run_operation_child session isolation is scoped to trapped callers", () => {
+  // Verifies actual liveness (not just PID existence, which a zombie can
+  // still satisfy after its parent exits): the child continuously appends
+  // to a counter file, so "still incrementing well after the group signal"
+  // proves it is genuinely still running, not merely un-reaped.
+  async function groupSignalHarness(installTraps: boolean) {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-child-pgroup-"));
+    const ready = path.join(dir, "ready");
+    const counter = path.join(dir, "counter");
+    const childScript = path.join(dir, "child.sh");
+    // A real script file, not an inline `bash -c "<string with $i>"` -
+    // run_operation_child's argument would otherwise be re-parsed (and its
+    // "$i"/"$((...))" expanded) by the OUTER wrapper bash that constructs
+    // it, since that whole wrapper command line is itself one bash -c
+    // string built by this test.
+    writeFileSync(childScript, `#!/usr/bin/env bash\necho ready > '${ready}'\ni=0\nwhile :; do\n  i=$((i+1))\n  echo "$i" > '${counter}'\n  sleep 0.1\ndone\n`);
+    chmodSync(childScript, 0o700);
+    const trapSetup = installTraps ? "install_operation_traps;" : "";
+    const proc = spawn(
+      "bash",
+      ["-c", `. '${path.join(scripts, "lib/common.sh")}'; ${trapSetup} run_operation_child bash '${childScript}'`],
+      { stdio: "ignore", detached: true },
+    );
+    const pid = proc.pid;
+    expect(pid).toBeDefined();
+    for (let i = 0; i < 300 && !existsSync(ready); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(existsSync(ready)).toBe(true);
+    const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+    // Simulate a terminal delivering Ctrl-C: the signal is sent to the
+    // WHOLE foreground process group, not just the wrapper's own pid.
+    // detached:true makes `pid` the process group leader, so -pid is
+    // exactly that group.
+    process.kill(-(pid as number), "SIGTERM");
+    await exited;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const before = readFileSync(counter, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const after = readFileSync(counter, "utf8");
+    const stillRunning = before !== after;
+    if (stillRunning) {
+      // Best-effort cleanup: an orphaned survivor must not leak into later
+      // test runs or leave a stray sleep loop behind.
+      try { execFileSync("pkill", ["-9", "-f", counter]); } catch { /* best effort */ }
+    }
+    return stillRunning;
+  }
+
+  it("an untrapped caller's child is reachable by the terminal's own process-group signal, not left orphaned", async () => {
+    expect(await groupSignalHarness(false)).toBe(false);
+  });
+
+  it("a trapped caller's child is still torn down (session isolation unaffected there)", async () => {
+    expect(await groupSignalHarness(true)).toBe(false);
+  });
+});
+
+// Regression: a fast child (`/bin/true`, a quick `docker inspect`, the
+// Compose-version preflight) can fully exit and be reaped by bash's own
+// SIGCHLD-driven job-table bookkeeping before run_operation_child ever gets
+// to sample its /proc/<pid>/stat - reproduced directly by running
+// `run_operation_child /bin/true` in a tight loop (failed intermittently,
+// roughly every 100-500 iterations, confirmed against the pre-fix code
+// below too). The wrapper used to treat that missing /proc sample as an
+// outright failure, discarding the child's real (successful) exit status.
+// Since run_clean_docker and every Compose invocation in the codebase go
+// through this wrapper, that could nondeterministically abort an otherwise
+// valid update, rollback, backup, or doctor run. `wait` on the pid still
+// returns bash's own cached exit status in that case; only `wait` itself
+// failing with its distinct "pid is not a child of this shell" status
+// (127) means ownership genuinely cannot be confirmed (a stale/reused
+// pid), which must still fail closed exactly as before.
+describe("run_operation_child recovers from a vanished /proc start-time sample", () => {
+  const commonPath = path.join(scripts, "lib/common.sh");
+  // operation_process_start is stubbed to always fail, deterministically
+  // forcing the exact recovery path a real race only hits intermittently -
+  // the real child processes below are genuine, unstubbed forks.
+  it("does not fail a successful child whose /proc start-time could not be sampled", () => {
+    const result = spawnSync("bash", ["-c", `. '${commonPath}'; operation_process_start(){ return 1; }; run_operation_child /bin/true`], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+  });
+  it("still reports that same child's real failure, not a false success", () => {
+    const result = spawnSync("bash", ["-c", `. '${commonPath}'; operation_process_start(){ return 1; }; run_operation_child /bin/false`], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+  });
+  it("still fails closed when the pid cannot be confirmed as an owned child at all, not merely already reaped", () => {
+    // wait() is additionally stubbed to bash's own documented behavior for
+    // a pid it never spawned - exit 127, "pid is not a child of this
+    // shell" - simulating genuine ownership loss (a stale/reused pid),
+    // distinct from the merely-already-reaped case above.
+    const result = spawnSync("bash", ["-c", `. '${commonPath}'; operation_process_start(){ return 1; }; wait(){ return 127; }; run_operation_child /bin/true`], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("ownership cannot be confirmed");
   });
 });
