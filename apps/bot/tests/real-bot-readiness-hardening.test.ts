@@ -68,6 +68,30 @@ describe("Bot-owned readiness marker", () => {
     expect(text).not.toContain("bot-readiness-generation-unavailable");
     expect(text).toContain("completeBotStartupReadinessIfKnownGeneration");
   });
+  // Regression (P2, PR #155 review of src/index.ts:223 - "Publish local
+  // readiness before Telegram initialization"): grammY's bot.start()
+  // performs its own Telegram-dependent setup (getMe, webhook deletion)
+  // BEFORE its onStart callback ever runs. Publishing readiness from inside
+  // onStart meant a Telegram outage - unrelated to whether this process's
+  // own database/consumers/handlers/local loops came up correctly - left
+  // the readiness marker unpublished forever, so the Docker healthcheck and
+  // validate_running_application timed out and classified an otherwise
+  // healthy deployment as failed.
+  it("publishes readiness before bot.start() is called, not from inside its onStart callback", () => {
+    const text = readFileSync(path.join(root, "apps/bot/src/index.ts"), "utf8");
+    // Anchored to the real call site (`pollingPromise = bot.start(`), not
+    // "bot.start(" alone - earlier comments in this file mention bot.start()
+    // in prose.
+    const readinessCall = text.indexOf("completeBotStartupReadinessIfKnownGeneration(");
+    const startCall = text.indexOf("pollingPromise = bot.start(");
+    expect(readinessCall).toBeGreaterThan(-1);
+    expect(startCall).toBeGreaterThan(-1);
+    expect(readinessCall).toBeLessThan(startCall);
+    // And it must not be nested inside the onStart callback itself, e.g.
+    // reappearing again between onStart's own definition and bot.start(.
+    const onStartIndex = text.indexOf("onStart:", readinessCall);
+    expect(onStartIndex).toBeGreaterThan(startCall);
+  });
   it("rejects a symlinked marker destination", async () => { const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")); const target = path.join(dir, "target"); const file = path.join(dir, "ready.json"); writeFileSync(target, "safe"); symlinkSync(target, file); await expect(publishBotReadiness(sha, file)).rejects.toThrow("symlinked"); expect(readFileSync(target, "utf8")).toBe("safe"); });
   it("rejects unsafe marker permissions", async () => { const file = path.join(mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")), "ready.json"); writeFileSync(file, "{}", { mode: 0o644 }); chmodSync(file, 0o644); await expect(readBotReadiness(file)).rejects.toThrow("unsafe"); });
   it("removes only a regular marker and refuses a symlink", async () => { const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")); const target = path.join(dir, "target"); const file = path.join(dir, "ready.json"); writeFileSync(target, "safe"); symlinkSync(target, file); await expect(removeBotReadiness(file)).rejects.toThrow("unsafe"); expect(readFileSync(target, "utf8")).toBe("safe"); });

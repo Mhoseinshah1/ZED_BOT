@@ -217,10 +217,21 @@ async function run(botToken: string): Promise<void> {
   // stop the ones after it.
   supportNotificationLoop = startSupportNotificationLoop(bot.api);
 
+  // Published HERE, before bot.start() rather than inside its onStart
+  // callback: grammY's start() performs its own Telegram-dependent setup
+  // (getMe, webhook deletion) BEFORE onStart ever runs, so when Telegram is
+  // unreachable that callback never fires at all - even though the
+  // database, consumers, handlers and every local loop above already
+  // finished successfully. The Docker healthcheck and validate_running_
+  // application only care that THIS process's own local initialization is
+  // complete, not that Telegram's API happened to answer at this exact
+  // moment; gating the marker on onStart made an external Telegram outage
+  // indistinguishable from a genuinely broken deployment.
+  const generation = runningGitSha();
+  await completeBotStartupReadinessIfKnownGeneration({ databaseInitialized, generation });
+
   pollingPromise = bot.start({
-    onStart: async (botInfo) => {
-      const generation = runningGitSha();
-      await completeBotStartupReadinessIfKnownGeneration({ databaseInitialized, generation });
+    onStart: (botInfo) => {
       // Deployment identity in the boot line: "unknown" = image built
       // without the GIT_SHA build arg (e.g. local dev).
       logger.info(`ZED_BOT bot service started (long polling) as @${botInfo.username}`, {
