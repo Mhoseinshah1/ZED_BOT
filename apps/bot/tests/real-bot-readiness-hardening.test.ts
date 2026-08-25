@@ -209,6 +209,69 @@ describe("bounded real Bot polling and state suppression", () => {
       expect(recreateIndex).toBeLessThan(boundaryIndex);
       expect(boundaryIndex).toBeLessThan(successIndex);
     });
+
+    // Regression: a failed update that reached application recreation
+    // deliberately leaves zedbot-app:latest on the (possibly broken)
+    // candidate image - current.json still names the previous known-good
+    // generation, and failed.json records the unresolved failure (see
+    // update_owned_cleanup's own comment: restoring the tag there would
+    // fight, not help, an in-progress recreation). Neither restart nor
+    // start checked for this before force-recreating/starting from
+    // whatever zedbot-app:latest currently is, so either command could
+    // redeploy a known-failed candidate across every service.
+    it("zedbot.sh's restart and start commands both refuse while a failed generation is unresolved", () => {
+      const zedbot = readFileSync(path.join(root, "scripts/zedbot.sh"), "utf8");
+      const restartStart = zedbot.indexOf("restart)");
+      const restartEnd = zedbot.indexOf("\n  start)", restartStart);
+      const restartBody = zedbot.slice(restartStart, restartEnd);
+      const restartLock = restartBody.indexOf("acquire_deployment_lock");
+      const restartAssert = restartBody.indexOf("assert_no_unresolved_failed_generation");
+      // Anchored from restartAssert onward: the guard's own explanatory
+      // comment, just above the real call, mentions
+      // bind_current_generation_compose_contract in prose first.
+      const restartBind = restartBody.indexOf("bind_current_generation_compose_contract", restartAssert);
+      const restartRecreate = restartBody.indexOf("run_compose up -d --force-recreate");
+      expect(restartAssert).toBeGreaterThan(restartLock);
+      expect(restartAssert).toBeLessThan(restartBind);
+      expect(restartBind).toBeLessThan(restartRecreate);
+
+      const startStart = zedbot.indexOf("\n  start)");
+      const startEnd = zedbot.indexOf("\n  stop)", startStart);
+      const startBody = zedbot.slice(startStart, startEnd);
+      const startLock = startBody.indexOf("acquire_deployment_lock");
+      const startAssert = startBody.indexOf("assert_no_unresolved_failed_generation");
+      const startBind = startBody.indexOf("bind_current_generation_compose_contract");
+      const startUp = startBody.indexOf("run_compose up -d\n");
+      expect(startAssert).toBeGreaterThan(startLock);
+      expect(startAssert).toBeLessThan(startBind);
+      expect(startBind).toBeLessThan(startUp);
+    });
+
+    // Regression: `up -d` (start) can create or replace the bot container
+    // too - e.g. it did not exist yet, or stopped containers were pruned
+    // before this run - assigning it a new container ID while bot-
+    // recreation.json keeps pointing at the old (now-removed) one. The
+    // next update's real-bot readiness preflight
+    // (collect_real_bot_readiness_evidence) then fails because it requires
+    // the live ID to equal the recorded one. start now refreshes the
+    // boundary exactly like restart already does.
+    it("zedbot.sh's start command also locks, starts, then refreshes the recreation boundary before reporting success", () => {
+      const zedbot = readFileSync(path.join(root, "scripts/zedbot.sh"), "utf8");
+      const start = zedbot.indexOf("\n  start)");
+      const end = zedbot.indexOf("\n  stop)", start);
+      const body = zedbot.slice(start, end);
+      const lockIndex = body.indexOf("acquire_deployment_lock");
+      const upIndex = body.indexOf("run_compose up -d\n");
+      const boundaryIndex = body.indexOf("record_bot_recreation_boundary_after_restart");
+      const successIndex = body.indexOf("log_success");
+      expect(lockIndex).toBeGreaterThan(-1);
+      expect(upIndex).toBeGreaterThan(-1);
+      expect(boundaryIndex).toBeGreaterThan(-1);
+      expect(successIndex).toBeGreaterThan(-1);
+      expect(lockIndex).toBeLessThan(upIndex);
+      expect(upIndex).toBeLessThan(boundaryIndex);
+      expect(boundaryIndex).toBeLessThan(successIndex);
+    });
   });
 
   function poll(sequence: unknown[], timeout = 9, cancel = false) {

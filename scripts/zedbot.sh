@@ -427,6 +427,17 @@ case "$CMD" in
     detect_compose_command
     install_operation_traps
     acquire_deployment_lock
+    # A failed update that reached application recreation deliberately
+    # leaves zedbot-app:latest on the (possibly broken) candidate image -
+    # current.json still names the previous known-good generation, and
+    # failed.json records the unresolved failure (see update_owned_cleanup's
+    # own comment: restoring the tag there would fight, not help, an
+    # in-progress recreation). bind_current_generation_compose_contract only
+    # validates the Compose FILE identity, not which image zedbot-app:latest
+    # actually is - force-recreating here would happily redeploy that failed
+    # candidate across every service. Refuse until the failure is resolved
+    # (zedbot rollback, or operator remediation) instead.
+    assert_no_unresolved_failed_generation || exit 1
     bind_current_generation_compose_contract || exit 1
     # `compose restart` never re-reads .env; recreating the containers does.
     run_compose up -d --force-recreate --remove-orphans
@@ -449,8 +460,28 @@ case "$CMD" in
     # could recreate services from that unvalidated candidate concurrently.
     install_operation_traps
     acquire_deployment_lock
+    # See restart's own comment: a failed update that reached application
+    # recreation leaves zedbot-app:latest on the (possibly broken)
+    # candidate image, with the failure recorded but unresolved. `up -d`
+    # can still create or replace containers (e.g. none exist yet, or
+    # Compose decides config changed) from that same tag.
+    assert_no_unresolved_failed_generation || exit 1
     bind_current_generation_compose_contract || exit 1
     run_compose up -d
+    # Mirrors restart's own refresh: `up -d` can create or replace the bot
+    # container too (e.g. it did not exist yet, or stopped containers were
+    # pruned before this run), assigning it a new container ID while bot-
+    # recreation.json keeps pointing at the old (now-removed) one. Without
+    # this, the next update's real-bot readiness preflight
+    # (collect_real_bot_readiness_evidence) fails because it requires the
+    # live ID to equal the recorded one.
+    if record_bot_recreation_boundary_after_restart; then start_boundary_rc=0; else start_boundary_rc=$?; fi
+    case "$start_boundary_rc" in
+      0) ;;
+      2) log_warn "No validated deployment yet; skipped refreshing the bot recreation boundary (expected before the first 'zedbot update' or install completes)." ;;
+      *) log_error "Could not refresh bot-recreation.json after start - services were started, but the next 'zedbot update' real-bot readiness preflight may now fail. Investigate (zedbot doctor / zedbot rollback-status) before running 'zedbot update'."
+         exit 1 ;;
+    esac
     log_success "All services started."
     ;;
   stop)
