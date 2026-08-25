@@ -344,8 +344,14 @@ describe("deployment shell safety", () => {
 
     const run = (token: string | undefined) => {
       const trace = path.join(os.tmpdir(), `zedbot-token-gate-trace-${process.pid}-${Date.now()}-${Math.random()}`);
-      const command = `${token !== undefined ? `TELEGRAM_BOT_TOKEN='${token}'; ` : ""}log_error(){ :; }; log_warn(){ :; }; validate_running_application(){ printf '%s\\n' "$#:$*" >> '${trace}'; printf 'sha imageid\\n'; }; ${guard}`;
-      const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+      // "no token at all" must mean genuinely unset, not "whatever this
+      // process happened to inherit" - explicitly unset it (in addition to
+      // omitting it from the spawned env below) so the case is deterministic
+      // regardless of the ambient environment (e.g. a CI runner that has
+      // TELEGRAM_BOT_TOKEN set for an unrelated job/step).
+      const command = `unset TELEGRAM_BOT_TOKEN; ${token !== undefined ? `TELEGRAM_BOT_TOKEN='${token}'; ` : ""}log_error(){ :; }; log_warn(){ :; }; validate_running_application(){ printf '%s\\n' "$#:$*" >> '${trace}'; printf 'sha imageid\\n'; }; ${guard}`;
+      const { TELEGRAM_BOT_TOKEN: _unused, ...envWithoutToken } = process.env;
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8", env: envWithoutToken });
       return { result, trace: existsSync(trace) ? readFileSync(trace, "utf8").trim() : "" };
     };
 
