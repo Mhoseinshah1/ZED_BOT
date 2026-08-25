@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -573,12 +573,90 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     expect(script).toContain("deploy_status()");
   });
 
-  it("update.sh and migrate.sh bake the repo HEAD as the GIT_SHA build identity", () => {
-    for (const name of ["update.sh", "migrate.sh"]) {
-      const script = readFileSync(path.join(scriptsDir, name), "utf8");
-      expect(script, name).toContain('GIT_SHA="$(repo_head_sha)"');
-      expect(script, name).toContain('export GIT_SHA="${GIT_SHA:-unknown}"');
-    }
+  it("update pins fetched target SHA while legacy self-heal pins repository HEAD", () => {
+    const update = readFileSync(path.join(scriptsDir, "update.sh"), "utf8");
+    expect(update).toContain('snapshot_result="$(prepare_exact_origin_main)"');
+    expect(update).toContain('read -r target_deploy_sha target_tree SOURCE_SNAPSHOT <<< "$snapshot_result"');
+    expect(update).toContain('GIT_SHA="$target_deploy_sha"');
+    expect(update).toContain("export GIT_SHA");
+    const migrate = readFileSync(path.join(scriptsDir, "migrate.sh"), "utf8");
+    expect(migrate).toContain('GIT_SHA="$(repo_head_sha)"');
+    expect(migrate).toContain('export GIT_SHA="${GIT_SHA:-unknown}"');
+    expect(migrate).toContain('run_compose_with_deployment_sha "$GIT_SHA" build');
+    expect(migrate).not.toMatch(/^\s*run_compose build\s*$/m);
+  });
+
+  // Regression: the worker's own container runs busybox find (node:22-alpine),
+  // which has no -printf ("find: unrecognized: -printf") and errors out on
+  // it - silently emptying the baseline-migrations pipeline instead of
+  // failing loudly, since neither `sh -c` inside the container nor the
+  // capturing subshell has pipefail. update.sh step 3 always hit "No
+  // complete baseline migrations found." as a result. -print is the POSIX-
+  // portable action both GNU find (used by common.sh's own equivalent HOST-
+  // side call, which is correctly left as -printf) and busybox find support.
+  it("baseline migration lookup inside the worker container is POSIX find, not GNU -printf", () => {
+    const update = readFileSync(path.join(scriptsDir, "update.sh"), "utf8");
+    const line = update.split("\n").find((l) => l.includes("No complete baseline migrations found") === false && l.includes("baseline_csv=") && l.includes("run_compose exec"));
+    expect(line, "baseline_csv assignment line not found").toBeTruthy();
+    expect(line).not.toContain("-printf");
+    expect(line).toContain("-print");
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-baseline-find-"));
+    const migrationsDir = path.join(dir, "packages/database/prisma/migrations");
+    mkdirSync(path.join(migrationsDir, "20260101000000_init"), { recursive: true });
+    writeFileSync(path.join(migrationsDir, "20260101000000_init/migration.sql"), "");
+    mkdirSync(path.join(migrationsDir, "20260102000000_second"), { recursive: true });
+    writeFileSync(path.join(migrationsDir, "20260102000000_second/migration.sql"), "");
+    const inner = line!.match(/sh -c '([^']*)'/)?.[1];
+    expect(inner, "could not extract the inner sh -c pipeline").toBeTruthy();
+    const result = spawnSync("sh", ["-c", inner!], { cwd: dir, encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("20260101000000_init,20260102000000_second");
+  });
+
+  it("runs the complete workspace test under sudo with one trusted nested-pnpm PATH and an exact environment allowlist", () => {
+    const workflow = readFileSync(path.join(repoRoot, ".github/workflows/ci.yml"), "utf8");
+    const rootPackage = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: { test: string } };
+    expect(rootPackage.scripts.test).toBe("pnpm -r --if-present run test");
+    expect(workflow).toContain("ci_tool_fail()");
+    expect(workflow).toContain('[ -L "$pnpm_command" ] || ci_tool_fail PNPM_SHIM_NOT_SYMLINK');
+    expect(workflow).toContain("[ \"$shim_target\" = '../lib/node_modules/corepack/dist/pnpm.js' ]");
+    expect(workflow).toContain('[ "$payload_path" = "$payload" ] || ci_tool_fail PNPM_PAYLOAD_LOCATION_UNEXPECTED');
+    expect(workflow).toContain('[ -f "$payload_path" ] && [ ! -L "$payload_path" ] && [ -r "$payload_path" ]');
+    expect(workflow).not.toContain('[ -x "$payload_path" ]');
+    expect(workflow).toContain('[ -f "$node_command" ] && [ ! -L "$node_command" ] && [ -x "$node_command" ]');
+    expect(workflow).toContain("trusted_owner_and_mode");
+    // tool_root and the corepack/dist directories beneath it are freshly
+    // created on the runner (io.mkdirP / corepack's own pnpm-version
+    // materialization) at a runner-controlled umask, not the trusted-tree's
+    // shipped mode - confirmed mode-777 on GitHub's hosted runner for both.
+    // Only owner:group are checked for them; the mode is unconditionally
+    // hardened to 0755 and that hardening is then confirmed, rather than
+    // compared against an assumed pre-existing mode.
+    expect(workflow).toContain("harden_owner_and_mode()");
+    expect(workflow).toContain('harden_owner_and_mode "$tool_root" 755');
+    expect(workflow).toContain('harden_owner_and_mode "$tool_root/lib/node_modules/corepack" 755');
+    expect(workflow).toContain('harden_owner_and_mode "$tool_root/lib/node_modules/corepack/dist" 755');
+    expect(workflow).toContain('[ "$owner:$group" != "$runner_uid:$runner_gid" ]');
+    expect(workflow).toContain("ci_tool_fail HARDEN_LAYOUT_UNEXPECTED");
+    expect(workflow).toContain('sudo /usr/bin/chmod "$mode" -- "$artifact"');
+    expect(workflow).toContain('"$inode:$runner_uid:$runner_gid:$mode"');
+    expect(workflow).toContain("HARDEN_CONFIRM_FAILED");
+    expect(workflow).toContain("MODE_WRITABLE");
+    expect(workflow).toContain("OWNER_UNTRUSTED");
+    expect(workflow).toContain("TRUSTED_PARENT_SUBSTITUTED");
+    for (const reason of [
+      "NODE_MISSING", "PNPM_MISSING", "COMMAND_PATH_NOT_ABSOLUTE", "TOOL_ROOT_UNTRUSTED",
+      "NODE_INVALID", "NODE_SUBSTITUTED", "PNPM_SHIM_NOT_SYMLINK", "PNPM_SHIM_OWNER_UNTRUSTED",
+      "PNPM_SHIM_TARGET_UNEXPECTED", "PNPM_PAYLOAD_MISSING", "PNPM_PAYLOAD_LOCATION_UNEXPECTED",
+      "PNPM_PAYLOAD_INVALID", "OWNER_UNTRUSTED", "MODE_WRITABLE", "HARDEN_LAYOUT_UNEXPECTED",
+    ]) expect(workflow).toContain(`ci_tool_fail ${reason}`);
+    expect(workflow).toContain("sudo --preserve-env=CI,NODE_ENV,APP_NAME,APP_DOMAIN,APP_BASE_URL,API_PORT,LOG_LEVEL,TELEGRAM_BOT_TOKEN,ADMIN_TELEGRAM_IDS,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,DATABASE_URL,REDIS_HOST,REDIS_PORT,REDIS_PASSWORD,REDIS_URL \\");
+    expect(workflow).toContain('PATH="${node_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"');
+    expect(workflow).toContain('"$pnpm_command" test');
+    expect(workflow).not.toContain('"$payload_path" test');
+    expect(workflow).not.toMatch(/pnpm_command.*test.*(?:--filter|--exclude|--skip)/);
+    expect(workflow).not.toContain("--preserve-env ");
   });
 
   it("no print-like line ever expands a secret variable directly", () => {
@@ -612,6 +690,17 @@ describe("legacy-upgrade deploy scripts stay secret-free (static)", () => {
     expect(script).toContain('scan_one "POSTGRES_PASSWORD"');
     expect(script).toContain('scan_one "REDIS_PASSWORD"');
     expect(script).toContain('scan_one "TELEGRAM_BOT_TOKEN"');
+    expect(script).toContain("api container GIT_SHA");
+    expect(script).toContain("worker container GIT_SHA");
+    expect(script).toContain("bot container GIT_SHA");
+    expect(script).toContain("command not found");
+    expect(script).toContain("legacy updater swallowed a migration/readiness failure");
+    expect(script).toContain("legacy updater reported success without canonical current evidence");
+    expect(script).toContain("update completed successfully");
+    expect(script).toContain("start_telegram_api_mock");
+    expect(script).toContain("TELEGRAM_API_ROOT='http://%s:%s'");
+    expect(script).toContain('kill "$TELEGRAM_MOCK_PID"');
+    expect(script).not.toContain("api.telegram.org");
   });
 });
 

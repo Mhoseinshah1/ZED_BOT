@@ -40,7 +40,7 @@ bash -n scripts/backup-db.sh
 ## zedbot CLI commands
 
 `help`, `status`, `ps` (alias), `logs [service]`, `restart`, `start`,
-`stop`, `update`, `deploy-status`, `backup`, `health`, `doctor`,
+`stop`, `update`, `deploy-status`, `rollback-status`, `rollback [--yes]`, `backup`, `health`, `doctor`,
 `shell [service]`, `env-check`, `restore-help` — plus, from later phases, the Phase 37 HTTPS
 commands (`nginx`, `ssl`, `renew-cert`, `https-status`) and the Phase 38
 hardening commands (`firewall`, `security`; run `zedbot security` after
@@ -166,7 +166,7 @@ compose, leave empty in `.env`; it does **not** relocate host backups),
   (CLI-only, not recommended): `ZEDBOT_SKIP_PREUPDATE_BACKUP=1 zedbot
   update`. `update.sh` also auto-repairs the backup-dir permissions before
   the gate.
-- **`zedbot update` is now an 11-step self-healing flow** (legacy-upgrade
+- **`zedbot update` is now a 14-step fail-closed, self-healing flow** (legacy-upgrade
   phase): safety archive → verified pre-update backup → pull → append-only
   `.env` migration → installed-CLI refresh (a refresh failure aborts) →
   image build with the `GIT_SHA` deployment identity → migrations
@@ -175,6 +175,11 @@ compose, leave empty in `.env`; it does **not** relocate host backups),
   through the running worker; failure keeps the app running but exits
   non-zero) → doctor. Step list, smoke categories and recovery commands:
   [legacy-upgrade.md](legacy-upgrade.md).
+- **Application rollback:** `zedbot rollback-status` validates the retained
+  candidate; `zedbot rollback [--yes]` restores only API/Bot/Worker with
+  `--no-deps --no-build`. Update and rollback share a deployment lock.
+  PostgreSQL, Redis and database data are never rolled back. See
+  [deployment-rollback.md](deployment-rollback.md).
 - **`zedbot deploy-status`** — read-only report of repository/image/
   container version alignment (repo HEAD vs installed CLI vs each
   container's baked `GIT_SHA`) plus the database migration status via the

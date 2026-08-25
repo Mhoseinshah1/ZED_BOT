@@ -42,6 +42,25 @@ export {
   type MigrationDeploymentEntry,
 } from "./migration-deployment.js";
 export {
+  ROLLBACK_COMPATIBILITY_FORMAT_VERSION,
+  evaluateRollbackCompatibility,
+  evaluateUpdateCompatibility,
+  parseRollbackCompatibilityManifest,
+  type CompatibilityDecision,
+  type MigrationSnapshot,
+  type RollbackCompatibilityManifest,
+} from "./deployment-rollback.js";
+export {
+  MIGRATION_DECLARATION_FORMAT_VERSION,
+  MIGRATION_DECLARATION_SOURCE_CATEGORY,
+  parseMigrationDeclarationManifest,
+  validateMigrationDeclarationPair,
+  type MigrationDeclaration,
+  type MigrationDeclarationManifest,
+  type MigrationDeclarationValidation,
+  type ValidatedMigrationDeclarationPair,
+} from "./migration-declarations.js";
+export {
   resolveMigrationsDir,
   checkReferralSchemaPostconditions,
   verifyReferralOrderIdUniqueIndex,

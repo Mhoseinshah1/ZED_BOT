@@ -16,12 +16,19 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# Captured before sourcing common.sh: its reset_compose_fixed_identity()
+# unconditionally pins ZEDBOT_ENV_FILE to the canonical production path (an
+# anti-path-substitution guard for the MUTATING deployment scripts), which
+# would otherwise silently discard the caller's override below - this
+# READ-ONLY audit is the one place that deliberately still supports pointing
+# itself at another file for testing.
+TEST_ENV_FILE_OVERRIDE="${ZEDBOT_ENV_FILE:-}"
 # shellcheck source=lib/common.sh
 . "${SCRIPT_DIR}/lib/common.sh"
 set +e # collect results; never abort mid-audit
 
 COMPOSE_FILE="${ZEDBOT_COMPOSE_FILE:-${ZEDBOT_APP_DIR}/docker-compose.yml}"
-ENV_FILE="$ZEDBOT_ENV_FILE"
+ENV_FILE="${TEST_ENV_FILE_OVERRIDE:-$ZEDBOT_ENV_FILE}"
 
 SERIOUS_FAILURES=0
 

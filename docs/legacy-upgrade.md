@@ -4,7 +4,7 @@ Installations that predate PR #92 (the persistent-backup layout) could run
 `zedbot update` and still end up serving **old code**: old containers, an
 old installed CLI and an old `.env`. This document covers the production
 problem, the self-heal that converges such installations automatically, the
-current 11-step updater, the post-deploy smoke test, the baked deployment
+current 14-step updater, the post-deploy smoke test, the baked deployment
 identity (`GIT_SHA`), the `zedbot deploy-status` report and the CI job that
 proves the whole path end to end.
 
@@ -61,20 +61,17 @@ ff-only pull is refused, the old updater logs a warning and "completes"
 without fetching anything, and no new code ever reaches the machine.
 
 The pull runs entirely inside already-shipped old code, so nothing this
-repository ships can fix it retroactively. A pre-PR92 host therefore
-needs exactly one manual command before its first `zedbot update`:
+repository ships can fix it retroactively. A pre-PR92 host therefore requires
+an operator to repair its checkout to an exact clean canonical `main` before
+using the current updater. The updater does not change `core.fileMode`,
+fast-forward, reset, or otherwise repair a checkout. Mode-only tracked changes
+are reported as tracked build-context overlays, just like content changes;
+inspect and reconcile them against canonical `origin/main`, then retry.
 
-```bash
-git -C /opt/zedbot/app config core.fileMode false && zedbot update
-```
-
-`core.fileMode false` tells git to ignore mode bits in this repository —
-script modes on this appliance are the installer's job, not git's. With
-the mode noise gone the old updater's pull fast-forwards normally and the
-self-heal chain takes over. The command is needed **once, ever**: the new
-updater and installer set the flag automatically, all script modes are
-now committed as 755, and the CI legacy-upgrade job exercises exactly
-this documented path.
+Ignored checkout-only dependencies and build output (for example
+`node_modules/`, `dist/`, and `coverage/`) are acceptable: Git excludes them
+from status and they are never copied into the commit-derived snapshot. Staged
+changes, tracked changes, and every non-ignored untracked path are rejected.
 
 ## Trigger conditions
 
@@ -126,23 +123,26 @@ In order (`legacy_self_heal` in `scripts/migrate.sh`, helpers in
    written into the database Settings via the worker's `record-deploy` CLI
    (best effort — a bookkeeping failure never aborts the deploy).
 
-## The current update flow (11 steps)
+## The current update flow (14 steps)
 
 `scripts/update.sh` (via the refreshed `zedbot update`):
 
 | Step | Action |
 | --- | --- |
-| 1/11 | Safety archive (`.env` + database, `scripts/backup.sh`) |
-| 2/11 | Pre-update database backup **created and verified** (the update gate — any doubt aborts with the running installation untouched; escape hatch `ZEDBOT_SKIP_PREUPDATE_BACKUP=1`) |
-| 3/11 | `git fetch` + `git pull --ff-only` (a non-fast-forwardable checkout warns and continues on the current code) |
-| 4/11 | `migrate_legacy_env` (append-only) + re-load `.env` + `ensure_backup_dir_permissions` |
-| 5/11 | `refresh_cli` — a refresh failure **aborts the update** (a stale installed CLI driving new code is exactly the bug class this updater prevents) |
-| 6/11 | `compose build` with `GIT_SHA="$(repo_head_sha)"` exported (deployment identity) |
-| 7/11 | `scripts/migrate.sh` — Prisma migrations + seed **before** the new app containers run (old code on a newer schema beats new code on an older schema); its legacy self-heal no-ops here because steps 4–5 already converged env + CLI |
-| 8/11 | `compose up -d --force-recreate --remove-orphans` |
-| 9/11 | `record_deployed_sha` (worker `record-deploy` CLI → Settings) |
-| 10/11 | Post-deploy smoke test (below) |
-| 11/11 | `scripts/doctor.sh` health checks |
+| 1/14 | Safety archive (`.env` + database, `scripts/backup.sh`) |
+| 2/14 | Pre-update database backup **created and verified** (the update gate — any doubt aborts with the running installation untouched; escape hatch `ZEDBOT_SKIP_PREUPDATE_BACKUP=1`) |
+| 3/14 | Validate running API/Bot/Worker image/SHA, API health and Worker heartbeat before changing the checkout |
+| 4/14 | Fetch canonical `origin/main`; require unchanged local `main` to equal it exactly; capture commit/tree and create a verified temporary snapshot without mutating the checkout |
+| 5/14 | `migrate_legacy_env` (append-only) + re-load `.env` + `ensure_backup_dir_permissions` |
+| 6/14 | `refresh_cli` — a refresh failure aborts |
+| 7/14 | Retain the verified pre-deploy image and write atomic `prepared` metadata |
+| 8/14 | Revalidate checkout and reconstructed snapshot tree, then build directly from that snapshot with the exact fetched target SHA |
+| 9/14 | Typed fail-closed migration rollback-compatibility preflight |
+| 10/14 | `scripts/migrate.sh` — Prisma migrations + seed |
+| 11/14 | Revalidate checkout and snapshot again, then recreate only API/Bot/Worker |
+| 12/14 | `record_deployed_sha` |
+| 13/14 | Post-deploy smoke test (below) |
+| 14/14 | `scripts/doctor.sh` plus strict application SHA/health validation |
 
 Any failure trips the ERR trap, which prints recovery steps (`zedbot
 logs` / `zedbot doctor`, retry with `zedbot update`, manual restore via
@@ -150,7 +150,7 @@ logs` / `zedbot doctor`, retry with `zedbot update`, manual restore via
 
 ## Post-deploy smoke test
 
-Step 10 runs `apps/worker/dist/cli/deploy-smoke.js` in a **one-off** worker
+Step 13 runs `apps/worker/dist/cli/deploy-smoke.js` in a **one-off** worker
 container while the freshly recreated real worker is running, then adds two
 bot-side checks from the host. The CLI prints one line of secret-free JSON:
 `{ok, failureCategory, filename, operationId, steps}`.
@@ -319,3 +319,83 @@ bash /opt/zedbot/app/scripts/update.sh
   legacy-upgrade test actively scans for leaks).
 - A failed post-deploy smoke **never rolls back or stops** the running
   application; it only fails the update command loudly.
+# Deployment identity transition
+
+A fresh installation must be created by the current installer; it has baked
+`GIT_SHA`, worker heartbeat, Bot readiness, and generation metadata from its
+first successful deployment. An older installation which lacks any of those
+facts is a **legacy upgrade**, not a known-good rollback source. The updater
+stops before retaining or replacing an image and reports which identity or
+readiness fact is missing.
+
+The operator must first make the existing `api`, `bot`, and `worker` run the
+same image built from the canonical `main` commit, then verify `zedbot doctor`,
+the worker heartbeat, Bot readiness, and migration status. Run `zedbot update`
+again only after those checks pass. If the old image has no full `GIT_SHA`, it
+cannot be invented from `latest`; rebuild/recreate the three application
+services from a manually verified canonical commit. Do not restore or modify
+the database merely to establish deployment identity. Missing/failed/database-
+only migrations require manual reconciliation; there is no override. The first
+successful current update creates rollback generation metadata. Until then,
+`zedbot rollback-status` correctly reports rollback as unavailable.
+
+Legacy rollback metadata that predates format-2 exact migration evidence cannot
+be treated as known-good. The updater does not invent SQL checksums from a
+mutable checkout. A successful current-generation deployment must first record
+the exact immutable-snapshot manifest bytes, canonical declaration set, and its
+generation-bound evidence pair; until then rollback remains blocked with a
+missing or invalid migration-evidence diagnostic.
+
+Current deployments also require the fixed Compose identity
+`/opt/zedbot/app` / `docker-compose.yml` / project `zedbot` / explicit
+`/opt/zedbot/app/.env`. Legacy `ZEDBOT_COMPOSE_CONTEXT`, `ZEDBOT_ENV_FILE`,
+profile, alternate Compose-file, Docker-context, or image overrides are not
+carried forward. The operator must remove such redirection and establish the
+canonical paths; the updater will not infer or silently migrate them.
+
+## Canonical installation classification
+
+Deployment identity no longer comes from `.env` freshness, the installed CLI,
+container or tag presence, timestamps, or the absence of one metadata file.
+Under the canonical operation lock, `classify_installation` selects exactly one
+of: an existing canonical installation, an explicitly requested genuine first
+install with no state evidence, the single supported legacy-v1 layout, or a
+validated interrupted bootstrap. Everything else is ambiguous and fails closed
+without deleting evidence.
+
+The only supported legacy identity layout is
+`/opt/zedbot/deployments/legacy-install-v1.json`: a root-owned mode-600, strict
+format-2 `current` generation record with complete immutable image, source-tree,
+Compose, migration declaration, and generation-owned evidence. This narrow
+allowlist is safe to convert because it already proves a health-confirmed
+known-good generation. Pre-identity installations, legacy format/version
+records, partial metadata, or deployments lacking reachable exact evidence are
+unsupported and require explicit operator reconciliation; values are never
+invented from mutable tags or containers.
+
+First-install and legacy conversion use `bootstrap.json`, whose strict schema
+binds a new UUID operation, generation, full source commit/tree, kind, and exact
+phase. Publication uses the same fresh temporary file, validation, fsync,
+atomic rename, directory fsync, and re-read policy as other canonical metadata.
+The phases are `initialized`, `canonical-published`, `health-confirmed`, and
+`promoted`; no phase may be skipped. A first install writes `current.json` only
+from a health-confirmed candidate and never creates `previous.json`. Therefore
+rollback is unavailable until a later successful update rotates a real current
+generation into previous.
+
+The current installer first proves this explicit empty-state classification,
+starts only PostgreSQL and Redis as initial dependencies, and delegates the
+application lifecycle to `scripts/bootstrap-deployment.sh`. That locked flow
+uses the verified immutable snapshot, validates exact migration and Compose
+evidence, builds the application image, runs migrations, recreates exactly
+`api bot worker`, then requires Generic Application and Real Bot readiness
+before publishing current metadata. Re-running the installer against canonical,
+legacy, partial, or ambiguous state stops before dependency/application work.
+
+Legacy conversion preserves `legacy-install-v1.json` as forensic evidence and
+is considered canonical only when a promoted matching bootstrap record and the
+converted current generation agree. Repeated conversion is rejected as an
+already canonical installation. Interrupted retries acquire a new lock,
+reclassify canonical truth, and revalidate source, Compose, migration,
+dependency, Generic Application, and Real Bot evidence. Area-11 rollback-status
+behavior is not implemented by this policy.

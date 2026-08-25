@@ -842,11 +842,19 @@ header into a combined policy nobody wrote.
 | `MINIAPP_PUBLIC_URL` | Public https URL, normally `https://<APP_DOMAIN>/miniapp`. **Empty disables the Mini App** — the bot hides its entry button. |
 | `MINIAPP_ALLOWED_ORIGINS` | Extra origins allowed to POST to auth/logout. Only for multi-hostname deployments. |
 | `MINIAPP_AUTH_RATE_LIMIT` | Auth attempts per minute per client (default 5). |
+| `MINIAPP_COMMERCE_RATE_LIMIT` | Commerce mutations per minute per authenticated user: whole numbers only, default 30, clamped to 1..10000; empty/malformed values use 30. The per-client ceiling is three times this value (default 90). An `.env` edit requires recreating `api`; no image rebuild is required. |
 | `MINIAPP_INITDATA_MAX_AGE_SECONDS` | How old a signed Telegram payload may be at sign-in. Default 300, **clamped to 30..3600** — it is the replay window on a bearer credential. |
 | `MINIAPP_SESSION_TTL_SECONDS` | Session cookie lifetime. Default 900, **clamped to 60..3600**. One value drives the token expiry, the cookie `Max-Age` and what the client is told, so the three cannot disagree. |
 | `API_TRUSTED_PROXIES` | Which forwarding hops may be believed (§4.3). Default `loopback, linklocal, uniquelocal`; `none` trusts nothing. |
 | `MINIAPP_DIST_DIR` | Overrides where the API looks for the built bundle. |
 | `VITE_BOT_USERNAME` | Public bot handle compiled into the bundle for its "open the bot" link. Build-time. |
+
+After changing `MINIAPP_COMMERCE_RATE_LIMIT` in `.env`, apply it without an
+image rebuild by recreating only the API:
+
+```bash
+docker compose up -d --no-deps --no-build --force-recreate api
+```
 
 `APP_SECRET` must be set: without it the session cannot be signed, and the code
 throws rather than falling back to an unkeyed token.

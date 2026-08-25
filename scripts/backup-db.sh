@@ -219,8 +219,11 @@ create_dump_backup() {
   # re-opened by path; the archive reads as empty: "did not find magic
   # string").
   log_info "Verifying the dump (pg_restore --list) ..."
-  if ! run_compose exec -T postgres pg_restore --list < "$partial" > /dev/null; then
-    log_error "Backup verification FAILED (pg_restore cannot read the archive) - removing the partial file."
+  local restore_output="" restore_rc=0
+  restore_output="$(run_compose exec -T postgres pg_restore --list < "$partial" 2>&1 >/dev/null)" || restore_rc=$?
+  if [ "$restore_rc" -ne 0 ]; then
+    log_error "Backup verification FAILED (pg_restore cannot read the archive, exit ${restore_rc}) - removing the partial file."
+    [ -z "$restore_output" ] || printf '%s\n' "$restore_output" >&2
     exit 1
   fi
   local verified="true"
@@ -278,6 +281,7 @@ main() {
   app_cd
   load_env_if_exists
   detect_compose_command
+  bind_current_generation_compose_contract || exit 1
 
   # Host directory; the containers see it as ${CONTAINER_BACKUP_DIR}.
   local backup_dir="$ZEDBOT_BACKUP_DIR"

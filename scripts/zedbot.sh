@@ -28,6 +28,8 @@ Commands:
   stop                    Stop all services
   update                  Update ZED_BOT to the latest version (creates + verifies a backup first)
   deploy-status           Show repository/image/container version alignment and migration status
+  rollback-status         Validate and show the retained application rollback candidate
+  rollback [--yes]        Restore API/Bot/Worker to the retained image (never restores the database)
   backup [create]         Create a verified database backup (zedbot-db-<stamp>.dump[.enc] + manifest)
   backup list             List all backups (name, size, date, type, verified)
   backup verify <file>    Verify a backup by file name, path or timestamp id
@@ -404,49 +406,157 @@ repair_backups() {
   fi
 }
 
+# Rejects restart/start whenever a PRIOR `zedbot rollback` attempt reached
+# application recreation but never completed. Mirrors assert_no_unresolved_
+# failed_generation's own role for a failed UPDATE, but that check cannot see
+# this: publish_failed_generation (failed.json) is only ever written by
+# update.sh's own error handling, never by rollback.sh, so a rollback that
+# fails after its own retag+recreate leaves no failed.json at all - yet the
+# exact same danger applies. rollback.sh's perform_rollback retags
+# zedbot-app:latest to the rollback target BEFORE recreating (deployment-
+# reference-retagged), and only promotes current.json to that target at the
+# very end, once recreation and the post-recreation health check both
+# succeed (execute_validated_rollback_transition, further staged through
+# application-recreated/health-confirmed/promotion-prepared/promoted). A
+# failure anywhere in that window - recreation itself, the health check, or
+# the final metadata promotion - leaves zedbot-app:latest already retagged
+# while current.json still names the OLDER, pre-rollback generation, and
+# operation-state.json (kind "rollback") stuck at whichever of those stages
+# it last confirmed, never reaching "promoted". bind_current_generation_
+# compose_contract only validates the Compose FILE identity, not which image
+# zedbot-app:latest actually is - force-recreating here would deploy
+# whatever that retag left behind across every service, on top of metadata
+# that no longer describes it, without ever running the health/compatibility
+# checks a real `zedbot rollback` retry would.
+#
+# operation-state.json is the durable record of exactly this: this process
+# already holds the exclusive deployment lock by the time this runs (same as
+# assert_no_unresolved_failed_generation's own precondition), so no other
+# process can still be running the rollback this describes - any non-
+# "promoted" stage found here is provably abandoned, not concurrent. A
+# stage of "promoted" (or no rollback marker at all) means no rollback is
+# incomplete, so this is a no-op in every other case, including the ordinary
+# case where no rollback has ever run.
+assert_no_incomplete_rollback_attempt() {
+  { [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; } || return 0
+  validate_operation_state "$ZEDBOT_OPERATION_STATE" || {
+    log_error "Operation state is present but invalid or unsafe; resolve it (zedbot doctor) before restart/start can safely force-recreate."
+    return 1
+  }
+  [ "$(/usr/bin/jq -r '.kind' "$ZEDBOT_OPERATION_STATE")" = rollback ] || return 0
+  [ "$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE")" != promoted ] || return 0
+  log_error "A previous 'zedbot rollback' attempt did not complete (application recreation may already have started); zedbot-app:latest and current.json may now disagree. Refusing to restart/start until this is resolved: run 'zedbot rollback' again, or resolve manually (see 'zedbot doctor')."
+  return 1
+}
+
 case "$CMD" in
   status | ps)
     require_root
     app_cd
     detect_compose_command
+    bind_current_generation_compose_contract --soft
     run_compose ps
     ;;
   logs)
     require_root
     app_cd
     detect_compose_command
+    bind_current_generation_compose_contract --soft
     run_compose logs --tail=200 -f "$@"
     ;;
   restart)
     require_root
     app_cd
     detect_compose_command
+    install_operation_traps
+    acquire_deployment_lock
+    # A failed update that reached application recreation deliberately
+    # leaves zedbot-app:latest on the (possibly broken) candidate image -
+    # current.json still names the previous known-good generation, and
+    # failed.json records the unresolved failure (see update_owned_cleanup's
+    # own comment: restoring the tag there would fight, not help, an
+    # in-progress recreation). bind_current_generation_compose_contract only
+    # validates the Compose FILE identity, not which image zedbot-app:latest
+    # actually is - force-recreating here would happily redeploy that failed
+    # candidate across every service. Refuse until the failure is resolved
+    # (zedbot rollback, or operator remediation) instead.
+    assert_no_unresolved_failed_generation || exit 1
+    # See assert_no_incomplete_rollback_attempt's own comment: a failed
+    # UPDATE and a failed ROLLBACK leave two different, non-overlapping
+    # kinds of evidence behind, so both checks are required here.
+    assert_no_incomplete_rollback_attempt || exit 1
+    bind_current_generation_compose_contract || exit 1
     # `compose restart` never re-reads .env; recreating the containers does.
     run_compose up -d --force-recreate --remove-orphans
+    if record_bot_recreation_boundary_after_restart; then restart_boundary_rc=0; else restart_boundary_rc=$?; fi
+    case "$restart_boundary_rc" in
+      0) ;;
+      2) log_warn "No validated deployment yet; skipped refreshing the bot recreation boundary (expected before the first 'zedbot update' or install completes)." ;;
+      *) log_error "Could not refresh bot-recreation.json after restart - services were restarted, but the next 'zedbot update' real-bot readiness preflight may now fail. Investigate (zedbot doctor / zedbot rollback-status) before running 'zedbot update'."
+         exit 1 ;;
+    esac
     log_success "All services restarted."
     ;;
   start)
     require_root
     app_cd
     detect_compose_command
+    # Participates in the same deployment lock as update/rollback/restart:
+    # once a candidate build retags zedbot-app:latest (before its own
+    # compatibility validation or migrations have run), an unlocked `start`
+    # could recreate services from that unvalidated candidate concurrently.
+    install_operation_traps
+    acquire_deployment_lock
+    # See restart's own comment: a failed update that reached application
+    # recreation leaves zedbot-app:latest on the (possibly broken)
+    # candidate image, with the failure recorded but unresolved. `up -d`
+    # can still create or replace containers (e.g. none exist yet, or
+    # Compose decides config changed) from that same tag.
+    assert_no_unresolved_failed_generation || exit 1
+    assert_no_incomplete_rollback_attempt || exit 1
+    bind_current_generation_compose_contract || exit 1
     run_compose up -d
+    # Mirrors restart's own refresh: `up -d` can create or replace the bot
+    # container too (e.g. it did not exist yet, or stopped containers were
+    # pruned before this run), assigning it a new container ID while bot-
+    # recreation.json keeps pointing at the old (now-removed) one. Without
+    # this, the next update's real-bot readiness preflight
+    # (collect_real_bot_readiness_evidence) fails because it requires the
+    # live ID to equal the recorded one.
+    if record_bot_recreation_boundary_after_restart; then start_boundary_rc=0; else start_boundary_rc=$?; fi
+    case "$start_boundary_rc" in
+      0) ;;
+      2) log_warn "No validated deployment yet; skipped refreshing the bot recreation boundary (expected before the first 'zedbot update' or install completes)." ;;
+      *) log_error "Could not refresh bot-recreation.json after start - services were started, but the next 'zedbot update' real-bot readiness preflight may now fail. Investigate (zedbot doctor / zedbot rollback-status) before running 'zedbot update'."
+         exit 1 ;;
+    esac
     log_success "All services started."
     ;;
   stop)
     require_root
     app_cd
     detect_compose_command
+    install_operation_traps
+    acquire_deployment_lock
+    bind_current_generation_compose_contract || exit 1
     run_compose stop
     log_success "All services stopped."
     ;;
   update)
     exec bash "${SCRIPTS_DIR}/update.sh" "$@"
     ;;
+  rollback-status)
+    exec bash "${SCRIPTS_DIR}/rollback.sh" status "$@"
+    ;;
+  rollback)
+    exec bash "${SCRIPTS_DIR}/rollback.sh" rollback "$@"
+    ;;
   deploy-status)
     require_root
     app_cd
     detect_compose_command
     load_env_if_exists
+    bind_current_generation_compose_contract --soft
     deploy_status
     ;;
   backup)
@@ -466,6 +576,7 @@ case "$CMD" in
         app_cd
         detect_compose_command
         load_env_if_exists
+        bind_current_generation_compose_contract --soft
         backup_verify "${1:-}"
         ;;
       *)
@@ -482,6 +593,7 @@ case "$CMD" in
         app_cd
         detect_compose_command
         load_env_if_exists
+        bind_current_generation_compose_contract --soft
         repair_backups
         ;;
       *)
@@ -495,6 +607,7 @@ case "$CMD" in
     app_cd
     detect_compose_command
     load_env_if_exists
+    bind_current_generation_compose_contract --soft
     health_summary
     ;;
   doctor)
@@ -504,6 +617,7 @@ case "$CMD" in
     require_root
     app_cd
     detect_compose_command
+    bind_current_generation_compose_contract --soft
     SERVICE="${1:-bot}"
     run_compose exec "$SERVICE" bash 2>/dev/null || run_compose exec "$SERVICE" sh
     ;;

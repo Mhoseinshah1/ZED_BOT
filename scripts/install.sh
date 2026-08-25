@@ -14,7 +14,15 @@
 # data and backups are preserved unless you explicitly choose otherwise.
 #
 # Optional environment overrides (useful for automation/testing):
-#   ZEDBOT_BRANCH                 git branch to install (default: main)
+#   ZEDBOT_BRANCH                 must be "main" (the default) or unset - every
+#                                  canonical deployment script (bootstrap-
+#                                  deployment.sh, update.sh, migrate.sh, via
+#                                  prepare_exact_origin_main) hardcodes branch
+#                                  "main" as the one supported deploy branch.
+#                                  Setting this to anything else is rejected
+#                                  before any mutation. Combine with
+#                                  ZEDBOT_REPO_URL to point at a fork/mirror
+#                                  whose default branch is also named "main".
 #   ZEDBOT_NONINTERACTIVE=1       never prompt; use defaults / the vars below
 #   ZEDBOT_TELEGRAM_BOT_TOKEN     preseed TELEGRAM_BOT_TOKEN
 #   ZEDBOT_ADMIN_TELEGRAM_IDS     preseed ADMIN_TELEGRAM_IDS
@@ -77,6 +85,24 @@ has_command() { command -v "$1" >/dev/null 2>&1; }
 require_root() {
   if [ "$(id -u)" -ne 0 ]; then
     log_error "The ZED_BOT installer must be run as root. Try again with sudo."
+    exit 1
+  fi
+}
+
+# Every canonical deployment script this installer eventually hands off to
+# (bootstrap-deployment.sh, and later update.sh/migrate.sh) fetches and
+# requires branch "main" via prepare_exact_origin_main/verify_deployment_
+# checkout in scripts/lib/common.sh - "main" is a deliberate, deeply-relied-
+# upon invariant, not a default that those scripts merely happen to use. A
+# non-main ZEDBOT_BRANCH would still clone, configure .env, install the CLI
+# and start dependencies successfully, only to fail bootstrap deterministically
+# afterward, leaving a half-mutated server. Reject it here, before
+# clone_or_update_repo (or anything else) touches the server.
+require_main_branch_override() {
+  if [ "$REPO_BRANCH" != main ]; then
+    log_error "ZEDBOT_BRANCH='${REPO_BRANCH}' is not supported: only branch 'main' can be installed."
+    log_error "Every canonical deployment script (bootstrap-deployment.sh, update.sh, migrate.sh) hardcodes 'main' as the one supported deploy branch."
+    log_error "Unset ZEDBOT_BRANCH (or set it to 'main') and re-run the installer. To install from a fork/mirror instead, set ZEDBOT_REPO_URL and keep its default branch named 'main'."
     exit 1
   fi
 }
@@ -268,11 +294,19 @@ install_compose() {
     log_info "Docker Compose plugin already installed: $(docker compose version --short 2>/dev/null || echo 'unknown version')"
     return 0
   fi
+  # A standalone v2 binary alone is NOT sufficient to skip installing the
+  # plugin: every canonical deployment script (scripts/lib/common.sh,
+  # sourced by bootstrap-deployment.sh, update.sh, rollback.sh, zedbot.sh,
+  # ...) fixes COMPOSE_CMD to the "docker --context default compose"
+  # plugin form unconditionally, with no fallback to the standalone
+  # binary. Accepting standalone-only here used to let installation
+  # proceed past this point only to fail permanently the moment
+  # bootstrap-deployment.sh sourced common.sh and validated that fixed
+  # form. Install the plugin regardless, so every later script's
+  # assumption actually holds.
   if docker_compose_binary_is_v2; then
-    log_info "Found standalone Docker Compose v2 binary: $(docker-compose version --short 2>/dev/null || echo 'unknown version')"
-    return 0
-  fi
-  if has_command docker-compose; then
+    log_info "Found standalone Docker Compose v2 binary: $(docker-compose version --short 2>/dev/null || echo 'unknown version'); installing the plugin too, since it is required by the rest of ZED_BOT's tooling."
+  elif has_command docker-compose; then
     log_warn "Found a legacy docker-compose v1 binary - it cannot run this project; installing the v2 plugin."
   fi
   log_info "Installing the Docker Compose plugin ..."
@@ -293,7 +327,11 @@ detect_compose_command() {
     return 0
   fi
   if docker compose version >/dev/null 2>&1; then
-    COMPOSE_CMD=(docker compose)
+    # --context default matches scripts/lib/common.sh's own fixed
+    # COMPOSE_CMD exactly: explicit even under env -i, since the docker CLI
+    # can also select a non-default context from ~/.docker/config.json,
+    # which clearing the environment alone does not override.
+    COMPOSE_CMD=(docker --context default compose)
   elif docker_compose_binary_is_v2; then
     COMPOSE_CMD=(docker-compose)
   else
@@ -520,15 +558,43 @@ install_cli() {
   log_success "zedbot CLI installed."
 }
 
-start_services() {
+validate_first_install_intent() {
+  local classification
+  classification="$(bash -c ". '${APP_DIR}/scripts/lib/common.sh'; set_deployment_state_paths '${ZEDBOT_BASE_DIR}/deployments'; classify_installation first-install")" || {
+    log_error "Existing, partial, legacy, or ambiguous deployment state forbids first-install mutation. Use zedbot update or the documented legacy reconciliation path."
+    return 1
+  }
+  case "$classification" in
+    genuine-first-install) ;;
+    recoverable-bootstrap)
+      log_warn "A previous first install did not complete. This run discards that incomplete attempt and installs from scratch."
+      log_warn "No canonical installation exists yet, so nothing known-good is at risk." ;;
+    *) log_error "Installer cannot replace installation class ${classification}."; return 1 ;;
+  esac
+}
+
+# Runs validate_first_install_intent BEFORE this installer touches anything
+# that already-running old containers depend on (the checkout git-pull
+# fast-forwards, .env, the installed CLI). classify_installation only reads
+# the canonical deployment-state directory - independent of $APP_DIR's
+# content - so an EXISTING checkout's own (not-yet-mutated) common.sh can
+# answer this safely. A rerun against an already-canonical install is
+# rejected here, before clone_or_update_repo/create_env_file/install_cli
+# leave new checkout/.env/CLI files sitting beside old running containers
+# with nothing having deployed or resynchronized them. A genuinely fresh
+# $APP_DIR has no common.sh yet - nothing to protect until it exists.
+guard_first_install_intent_before_mutation() {
+  [ -f "${APP_DIR}/scripts/lib/common.sh" ] || return 0
+  validate_first_install_intent
+}
+
+start_dependencies() {
   detect_compose_command
-  # Bake the deployment identity into the images: docker-compose.yml forwards
-  # GIT_SHA as a build arg and the Dockerfile stores it in its last layers.
-  GIT_SHA="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
-  export GIT_SHA
-  log_info "Building and starting services (the first build may take a few minutes) ..."
-  ( cd "$APP_DIR" && "${COMPOSE_CMD[@]}" up -d --build --remove-orphans )
-  log_success "Services started."
+  log_info "Starting first-install dependencies without recreating application services ..."
+  /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C COMPOSE_DISABLE_ENV_FILE=1 \
+    "${COMPOSE_CMD[@]}" --project-directory "$APP_DIR" -f "$APP_DIR/docker-compose.yml" \
+    --project-name zedbot --env-file "$ENV_FILE" up -d --no-deps --no-build postgres redis
+  log_success "Dependencies started; canonical readiness validation follows."
 }
 
 # PostgreSQL only reads POSTGRES_PASSWORD when the data directory is first
@@ -684,22 +750,29 @@ main() {
   echo
   log_info "ZED_BOT installer starting ..."
   require_root
+  require_main_branch_override
   require_ubuntu
   install_base_packages
   install_docker
   install_compose
   create_directories
+  guard_first_install_intent_before_mutation
   clone_or_update_repo
   create_env_file
   install_cli
-  start_services
+  validate_first_install_intent
+  start_dependencies
+  # PostgreSQL only reads POSTGRES_PASSWORD when its data directory is first
+  # initialized; a rerun that reuses an existing data directory (e.g. after
+  # an install was interrupted before any deployment-state metadata was
+  # written, so this still classifies as a genuine first install) but
+  # replaces .env with a freshly generated password would otherwise connect
+  # with a password Postgres never adopted. Runs after dependencies are up
+  # (needs a live container to exec into) and before bootstrap takes the
+  # deployment lock and starts writing state, so a failure here leaves
+  # nothing partial behind.
   sync_postgres_password
-  run_migrations_if_available
-  record_deployed_sha
-  if [ -x "${APP_DIR}/scripts/doctor.sh" ]; then
-    log_info "Running post-install health checks ..."
-    bash "${APP_DIR}/scripts/doctor.sh" || log_warn "Doctor reported problems. Run 'zedbot doctor' for details."
-  fi
+  bash "${APP_DIR}/scripts/bootstrap-deployment.sh"
   setup_https_if_requested
   setup_firewall_if_requested
   print_summary

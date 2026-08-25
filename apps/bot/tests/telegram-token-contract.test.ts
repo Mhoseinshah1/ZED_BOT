@@ -6,7 +6,7 @@ import {
 } from "@zedbot/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getBotToken } from "../src/config/env.js";
+import { getBotToken, getTelegramApiRoot } from "../src/config/env.js";
 // The worker's runtime accessor (built dist) — proves the WORKER resolves through
 // the SAME shared contract as the bot.
 import { botToken as workerBotToken, botTokenResolution } from "../../worker/dist/config.js";
@@ -171,5 +171,29 @@ describe("runtime accessors — bot AND worker share the resolver", () => {
       expect(s).not.toContain("canonical");
       expect(s).not.toContain("legacy");
     }
+  });
+});
+
+describe("bounded Telegram Bot API root", () => {
+  it("accepts an explicit HTTP(S) origin without leaking configuration", () => {
+    expect(getTelegramApiRoot({ TELEGRAM_API_ROOT: " http://172.18.0.1:18081 " })).toBe(
+      "http://172.18.0.1:18081",
+    );
+    expect(getTelegramApiRoot({ TELEGRAM_API_ROOT: "https://api.telegram.org/" })).toBe(
+      "https://api.telegram.org",
+    );
+    expect(getTelegramApiRoot({})).toBeUndefined();
+  });
+
+  it.each([
+    "ftp://127.0.0.1",
+    "http://user:password@127.0.0.1",
+    "http://127.0.0.1/path",
+    "http://127.0.0.1/?query=value",
+    "not-a-url",
+  ])("rejects malformed or over-broad API roots without echoing them: %s", (value) => {
+    expect(() => getTelegramApiRoot({ TELEGRAM_API_ROOT: value })).toThrow(
+      "TELEGRAM_API_ROOT is invalid",
+    );
   });
 });

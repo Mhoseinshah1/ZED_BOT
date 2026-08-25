@@ -193,8 +193,8 @@ import { safeAnswerCallback } from "./utils/safe-reply.js";
  *     ├─ admin composer                (admin auth guard)
  *     └─ user composer                 (user access guard)
  */
-export function createBot(token: string): Bot<BotContext> {
-  const bot = new Bot<BotContext>(token);
+export function createBot(token: string, apiRoot?: string): Bot<BotContext> {
+  const bot = new Bot<BotContext>(token, apiRoot === undefined ? undefined : { client: { apiRoot } });
 
   registerErrorHandler(bot);
 

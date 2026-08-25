@@ -100,6 +100,83 @@ check_any_container_running() {
     compose_service_running postgres || compose_service_running redis
 }
 
+# True only when the lock file EXISTS but is not what acquire_deployment_lock
+# itself would accept (a root-owned, mode-0600, non-symlink regular file) -
+# mirrors its own substitution/tamper check (common.sh's acquire_deployment_lock)
+# exactly. A lock in this state can never be safely probed for held/free
+# status by flock alone: acquire_deployment_lock would refuse it outright
+# ("Deployment lock was substituted or has unsafe attributes"), permanently
+# blocking every future update, rollback, or restart - regardless of what a
+# naive open+flock probe would report. Absence is fine, not unsafe.
+deployment_lock_is_unsafe() {
+  { [ -e "$ZEDBOT_DEPLOYMENT_LOCK" ] || [ -L "$ZEDBOT_DEPLOYMENT_LOCK" ]; } || return 1
+  [ -f "$ZEDBOT_DEPLOYMENT_LOCK" ] && [ ! -L "$ZEDBOT_DEPLOYMENT_LOCK" ] &&
+    [ "$(stat -Lc %u:%a "$ZEDBOT_DEPLOYMENT_LOCK" 2>/dev/null)" = "0:600" ] && return 1
+  return 0
+}
+
+# True only while no process currently holds the deployment lock: a
+# non-blocking trial acquisition that releases immediately. Never creates the
+# lock file itself, so a first-install with no lock file yet is "free" too.
+# Callers must check deployment_lock_is_unsafe first - this function assumes
+# the lock file (if present) already passed that check, and its own
+# open-failure fallback exists only as defense against a TOCTOU race, not as
+# the primary safety validation.
+deployment_lock_is_free() {
+  [ -e "$ZEDBOT_DEPLOYMENT_LOCK" ] || return 0
+  exec 8<"$ZEDBOT_DEPLOYMENT_LOCK" 2>/dev/null || return 0
+  if /usr/bin/flock -n 8; then
+    /usr/bin/flock -u 8
+    exec 8<&-
+    return 0
+  fi
+  exec 8<&-
+  return 1
+}
+
+# Purely observational deployment-state consistency check. It neither acquires
+# the operation lock nor repairs, recovers, promotes, converts, or removes any
+# evidence (the free/held probe above is a released trial lock, not the real
+# one). Empty first-install state and a completed canonical installation are
+# valid; every partial, conflicting, failed, or unfinished transition fails -
+# UNLESS the deployment lock is currently held, in which case a non-promoted
+# stage or a live metadata-transition file is the expected shape of the very
+# update/rollback that is running right now (e.g. update.sh's own "[14/14]
+# Running health checks" step invokes this doctor.sh instance from inside its
+# own locked, still-in-progress operation), not evidence of an abandoned one.
+check_deployment_state_consistency() {
+  local classification stage lock_held=0
+  reset_deployment_state_fixed_identity
+  validate_deployment_path_contract || return 1
+
+  if [ ! -e "$ZEDBOT_DEPLOYMENT_DIR" ] && [ ! -L "$ZEDBOT_DEPLOYMENT_DIR" ]; then
+    return 0
+  fi
+  [ -d "$ZEDBOT_DEPLOYMENT_DIR" ] && [ ! -L "$ZEDBOT_DEPLOYMENT_DIR" ] || return 1
+
+  classification="$(classify_installation first-install)" || return 1
+  case "$classification" in
+    genuine-first-install) return 0 ;;
+    existing-canonical) ;;
+    *) return 1 ;;
+  esac
+
+  deployment_lock_is_unsafe && return 1
+  deployment_lock_is_free || lock_held=1
+
+  if [ -e "$ZEDBOT_METADATA_TRANSITION" ] || [ -L "$ZEDBOT_METADATA_TRANSITION" ]; then
+    [ "$lock_held" -eq 1 ] || return 1
+  fi
+  if [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; then
+    validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 1
+    stage="$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE")" || return 1
+    [ "$stage" = promoted ] || [ "$lock_held" -eq 1 ] || return 1
+  fi
+  if [ -e "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ]; then
+    assert_no_unresolved_failed_generation || return 1
+  fi
+}
+
 check_postgres_reachable() {
   # -h 127.0.0.1 probes TCP (what the apps use), not just the unix socket.
   run_compose exec -T postgres pg_isready -h 127.0.0.1 -U "${POSTGRES_USER:-zedbot}" -d "${POSTGRES_DB:-zedbot}"
@@ -199,6 +276,7 @@ report_version_row() {
 main() {
   require_root
   load_env_if_exists
+  bind_current_generation_compose_contract --soft
 
   FIX_MODE=0
   local arg
@@ -225,6 +303,7 @@ main() {
   core_check "Docker Compose available" check_compose_available
   core_check "App directory exists (${ZEDBOT_APP_DIR})" test -d "$ZEDBOT_APP_DIR"
   core_check "docker-compose.yml exists" test -f "${ZEDBOT_APP_DIR}/docker-compose.yml"
+  core_check "Canonical deployment state is complete and consistent" check_deployment_state_consistency
   optional_check ".env exists" "run the installer to create it" test -f "$ZEDBOT_ENV_FILE"
   # Telegram token readiness — presence + conflict only, never the value. The bot
   # and worker share TELEGRAM_BOT_TOKEN (BOT_TOKEN is a legacy fallback); a
@@ -287,9 +366,23 @@ main() {
       skip_check "API health endpoint responds" "api container not running"
     fi
 
-    # Deployment identity: running containers vs repository HEAD.
+    # Deployment identity: running containers vs the currently PROMOTED
+    # generation - not blindly the persistent checkout's repository HEAD.
+    # After a rollback, the checkout intentionally stays on the newer commit
+    # (checkouts only ever fast-forward - see bind_current_generation_
+    # compose_contract's own comment) while current.json and the containers
+    # correctly describe the OLDER, rolled-back-to generation. Comparing
+    # against repo_head_sha() there would warn on every healthy rolled-back
+    # deployment and point the operator at "zedbot update", which would
+    # simply redeploy the version they just rolled back from. Fall back to
+    # repo_head_sha() only when no valid current.json exists yet (a fresh
+    # checkout with no canonical deployment state to compare against).
     local head_sha
-    head_sha="$(repo_head_sha)"
+    if validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current >/dev/null 2>&1; then
+      head_sha="$(/usr/bin/jq -r '.targetDeploySha' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")"
+    else
+      head_sha="$(repo_head_sha)"
+    fi
     report_version_row bot "$head_sha"
     report_version_row worker "$head_sha"
   fi

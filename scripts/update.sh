@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ZED_BOT updater (self-healing):
-#   safety archive -> database backup + verification gate -> pull
-#   -> migrate legacy .env -> refresh installed CLI -> build (with identity)
-#   -> migrate DB -> force-recreate -> record deploy -> post-deploy smoke
-#   -> doctor
+#   safety archive -> database backup + verification gate -> validate running app
+#   -> fail-closed fetch + exact local-main verification (no checkout mutation)
+#   -> migrate legacy .env -> build (with identity) -> migrate DB
+#   -> force-recreate -> record deploy -> post-deploy smoke -> doctor
+#   -> promote, then fast-forward the deployment checkout and refresh the
+#      installed CLI together as one unit (never before promotion)
 #
 # The update ABORTS before touching any code when the pre-update database
 # backup cannot be created AND verified - the running installation is left
@@ -20,15 +22,103 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # shellcheck source=lib/common.sh
 . "${SCRIPT_DIR}/lib/common.sh"
 
+DEPLOYMENT_METADATA_ACTIVE=0
+APPLICATION_RECREATION_ATTEMPTED=0
+SOURCE_SNAPSHOT=""
+SOURCE_SHA=""
+SOURCE_TREE=""
+CANDIDATE_METADATA=""
+# Set once the candidate build has retagged zedbot-app:latest, cleared once
+# recreation actually starts. See update_owned_cleanup: if the update fails
+# anywhere in between, the tag is put back on the image the running
+# containers actually use, so `zedbot restart`/`start` can never
+# force-recreate from an unvalidated candidate.
+DEPLOYMENT_REFERENCE_RESTORE_ID=""
+
+set_rollback_state() {
+  local state="$1"
+  [ "$DEPLOYMENT_METADATA_ACTIVE" -eq 1 ] || return 0
+  rewrite_generation_state "$CANDIDATE_METADATA" "$state"
+}
+
 on_update_error() {
+  local rc=$?
+  trap - ERR
+  if [ "$APPLICATION_RECREATION_ATTEMPTED" -eq 1 ]; then
+    set_rollback_state "failed-after-recreation" || true
+    publish_failed_generation "$CANDIDATE_METADATA" "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || true
+  fi
   log_error "ZED_BOT update FAILED. Your data and .env were NOT deleted."
   log_error "Recovery steps:"
   log_error "  1. Inspect what went wrong:   zedbot logs        (or: zedbot doctor)"
   log_error "  2. Retry the update:          zedbot update"
   log_error "  3. If the app is broken, restore the pre-update backup MANUALLY:"
   log_error "       zedbot restore-help      (prints the manual restore steps)"
+  exit "$rc"
 }
 trap on_update_error ERR
+
+update_owned_cleanup() {
+  local rc=0
+  # A SIGINT/SIGTERM/SIGHUP during the update is handled entirely by
+  # operation_signal_handler (common.sh), which never runs on_update_error
+  # (the ERR trap is explicitly removed before this cleanup ever runs, and a
+  # signal-driven `exit` does not trigger ERR anyway) - it goes straight to
+  # this function via the EXIT trap. Without the check below, a signal that
+  # lands while recreate_application_services is partially recreating the
+  # api/bot/worker services would leave the host on a mix of old- and new-
+  # image containers with current.json still naming the old generation, but
+  # no failed.json and no failed-after-recreation state recorded anywhere -
+  # exactly the evidence on_update_error publishes for an ordinary post-
+  # recreation error, just missing for this one exit path. Mirrors
+  # on_update_error's own two calls; gated on ZEDBOT_OPERATION_INTERRUPTED so
+  # it never double-publishes on the ordinary ERR-trap path (which already
+  # does this itself before this function ever runs) or on a clean exit.
+  #
+  # set_rollback_state (-> rewrite_generation_state) and
+  # publish_failed_generation both gate on operation_assert_active, which
+  # unconditionally refuses further work once ZEDBOT_OPERATION_INTERRUPTED
+  # is set - exactly the condition this branch only runs under, so both
+  # calls previously failed every single time, silently, via the `|| true`
+  # meant only to make each step best-effort. This one narrow write -
+  # durably recording that recreation was interrupted mid-flight - is
+  # precisely the kind of terminal, best-effort forensic record cleanup is
+  # supposed to be allowed to make; it is not new forward progress on the
+  # interrupted operation. Clear the flag only for these two calls and
+  # restore it immediately after: signal traps are already disabled by the
+  # time operation_exit_handler reaches this function (trap '' INT TERM
+  # HUP, set before operation_cleanup is ever called), so nothing else can
+  # observe or act on the flag mid-window, and operation_exit_handler's own
+  # later check (right after this function returns, to pick the correct
+  # final exit status) still sees the operation as interrupted.
+  if [ "$ZEDBOT_OPERATION_INTERRUPTED" -eq 1 ] && [ "$APPLICATION_RECREATION_ATTEMPTED" -eq 1 ]; then
+    ZEDBOT_OPERATION_INTERRUPTED=0
+    set_rollback_state "failed-after-recreation" || true
+    publish_failed_generation "$CANDIDATE_METADATA" "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || true
+    ZEDBOT_OPERATION_INTERRUPTED=1
+  fi
+  # zedbot-app:latest moves to the candidate the instant the build succeeds
+  # (build_verified_source_snapshot), well before compatibility validation,
+  # migrations, or recreation - but nothing committed to that candidate until
+  # recreation actually starts. Any failure in that window must put the tag
+  # back on the image the running containers actually use: `zedbot restart`/
+  # `start` force-recreate straight from this tag, so leaving it on an
+  # unvalidated candidate would let an unrelated restart start new code
+  # before its compatibility gate or migrations ever succeeded. Once
+  # recreation has been attempted, the running containers themselves may
+  # already be on the new image (partially or fully), so restoring here
+  # would fight - not help - and that window belongs to `zedbot rollback`.
+  if [ "$APPLICATION_RECREATION_ATTEMPTED" -eq 0 ] && [ -n "$DEPLOYMENT_REFERENCE_RESTORE_ID" ]; then
+    restore_deployment_reference "$DEPLOYMENT_REFERENCE_RESTORE_ID" || {
+      log_error "Could not restore zedbot-app:latest to the running application image."
+      log_error "Do NOT run 'zedbot restart' until this is fixed: docker image tag ${DEPLOYMENT_REFERENCE_RESTORE_ID} zedbot-app:latest"
+      rc=1
+    }
+    DEPLOYMENT_REFERENCE_RESTORE_ID=""
+  fi
+  cleanup_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE" || rc=1
+  return "$rc"
+}
 
 # Finds the newest database backup file (any supported format) in the host
 # backup directory. Prints its path; prints nothing when none exists.
@@ -81,7 +171,7 @@ pre_update_database_backup() {
   # directory must be owned by the container runtime user with mode 750.
   ensure_backup_dir_permissions
 
-  if ! bash "${SCRIPT_DIR}/backup-db.sh"; then
+  if ! run_operation_child bash "${SCRIPT_DIR}/backup-db.sh"; then
     log_error "Pre-update database backup FAILED - ABORTING the update."
     log_error "The running installation was not modified."
     log_error "Fix the backup problem ('zedbot doctor', 'zedbot logs postgres') and retry,"
@@ -181,86 +271,505 @@ post_deploy_smoke() {
   log_error "  zedbot repair backups     (fix backup mount ownership/permissions)"
   log_error "  zedbot logs worker        (inspect the worker)"
   log_error "  zedbot update             (retry once fixed)"
-  exit 1
+  return 1
+}
+
+# Recovers one narrow, provably-safe leftover: a PRIOR update's
+# operation-state.json parked at "promotion-prepared" (or "promoted" but
+# never removed) because the process crashed between recover_metadata_
+# transition durably committing the promotion (current.json already
+# rewritten to the new generation, the consumed candidate and transition.json
+# both already deleted - see that function's own comment) and this script's
+# very next line actually recording that fact (advance_operation_state
+# promotion-prepared promoted / finalize_promoted_operation_state). Only
+# reachable from the no-op path below: a normal update always mints a brand
+# new generation, so initialize_operation_state's own self-heal already
+# clears a marker like this for free the moment step 6 runs; the no-op path
+# never reaches step 6, so nothing else ever clears it - `zedbot doctor` /
+# `zedbot rollback-status` would otherwise report an incomplete operation
+# forever, despite a fully successful, already-promoted deployment.
+# Identity-checked, not merely stage-checked: only ever acts when the marker
+# is kind "update" AND already names the EXACT generation current.json is
+# currently running. current.json only ever advances to a new generation
+# from inside recover_metadata_transition, which itself only runs after
+# operation-state.json has already reached "promotion-prepared" - so a
+# generation match here can only mean "already fully promoted," never a
+# live or genuinely-failed operation; a different kind, a different
+# generation, or an earlier stage is left completely alone. Best-effort
+# throughout (mirrors finalize_promoted_operation_state's own contract):
+# this is bookkeeping cleanup on a deployment that was already fully
+# successful before this run even started, and must never turn that
+# success into a reported failure.
+finalize_stale_promoted_operation_state() {
+  { [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; } || return 0
+  validate_operation_state "$ZEDBOT_OPERATION_STATE" >/dev/null 2>&1 || return 0
+  [ "$(jq -r '.kind' "$ZEDBOT_OPERATION_STATE" 2>/dev/null)" = update ] || return 0
+  [ "$(jq -r '.generation' "$ZEDBOT_OPERATION_STATE" 2>/dev/null)" = "$(jq -r '.generation' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" 2>/dev/null)" ] || return 0
+  case "$(jq -r '.stage' "$ZEDBOT_OPERATION_STATE" 2>/dev/null)" in
+    promotion-prepared) confirm_operation_state promotion-prepared promoted || return 0 ;;
+    promoted) ;;
+    *) return 0 ;;
+  esac
+  finalize_promoted_operation_state
+}
+
+# Clears any OTHER candidate-<gen>.json (and its evidence-<gen>/ directory)
+# abandoned by a PRIOR update attempt that failed before application
+# recreation ever started - state still "prepared", recreationAttempted
+# still false. Such a candidate has no failed.json (on_update_error /
+# update_owned_cleanup only ever publish one once recreation was actually
+# attempted), so assert_no_unresolved_failed_generation never sees it, and
+# initialize_operation_state's own self-heal only ever clears the
+# operation-state.json marker - never the candidate metadata file itself. A
+# retry just mints a brand new generation/candidate, leaving the old one
+# behind forever: rollback-status treats ANY candidate-*.json file's mere
+# presence as an unresolved operation regardless of its content, so this
+# silently and permanently blocks `zedbot rollback-status` after every
+# early-failing retry, and the leftover evidence-<gen>/ directory
+# accumulates disk usage without bound. Safe here only: the deployment lock
+# (acquire_deployment_lock, held for this whole script) rules out a
+# concurrent writer, $CANDIDATE_METADATA (this run's own new, not-yet-created
+# generation) is always excluded, and the state=="prepared" filter rules out
+# anything a running, already-failed, or already-resolved operation could
+# still depend on - a candidate that ever reached "application-recreated"
+# is never touched here; that belongs to failed.json / `zedbot rollback`.
+# Never removes anything but a candidate-*.json file and its own
+# evidence-<gen>/ directory - never current.json/previous.json/failed.json/
+# legacy-install-v1.json/bootstrap.json. Best-effort: this is disk/bookkeeping
+# hygiene for a PAST attempt, and must never fail the update in progress.
+cleanup_abandoned_prepared_candidates() {
+  local entry other_generation
+  shopt -s nullglob
+  for entry in "$ZEDBOT_DEPLOYMENT_DIR"/candidate-*.json; do
+    [ "$entry" != "$CANDIDATE_METADATA" ] || continue
+    validate_generation_metadata_core "$entry" candidate >/dev/null 2>&1 || continue
+    [ "$(jq -r '.state' "$entry" 2>/dev/null)" = prepared ] || continue
+    other_generation="$(jq -r '.generation' "$entry" 2>/dev/null)"
+    [[ "$other_generation" =~ ^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$ ]] || continue
+    log_warn "Clearing an abandoned prepared candidate left by a previous failed update attempt (generation ${other_generation}); it never reached application recreation."
+    remove_canonical_state_file "$entry" ||
+      log_warn "Could not clear the abandoned candidate metadata (${entry##*/}); rerun 'zedbot doctor' if 'zedbot rollback-status' later reports an incomplete operation."
+    if [ -e "$ZEDBOT_DEPLOYMENT_DIR/evidence-${other_generation}" ] || [ -L "$ZEDBOT_DEPLOYMENT_DIR/evidence-${other_generation}" ]; then
+      remove_generation_evidence_directory "$ZEDBOT_DEPLOYMENT_DIR/evidence-${other_generation}" ||
+        log_warn "Could not clear abandoned migration evidence for generation ${other_generation}."
+    fi
+  done
+  shopt -u nullglob
+}
+
+# Best-effort housekeeping only, called after a successful promotion. Every
+# update permanently tags the candidate zedbot-app:generation-<gen> and
+# retains the prior image zedbot-app:rollback-<gen> (retain_known_good_image,
+# step 6/7 above), and a failed-and-published generation is separately
+# tagged zedbot-app:failed-<gen> (retain_failed_target_image, common.sh) -
+# tagged images are not eligible for ordinary Docker pruning, so on a
+# long-lived installation these accumulate unbounded. Removes only tags for
+# generations no longer referenced by current.json, previous.json, or an
+# UNRESOLVED failed.json (state != rolled-back) - deliberately the union of
+# every image-tag field on each (immutableImageTag, retainedImageTag,
+# failedTargetTag), not just the one this generation is "known for", so a
+# tag that plays a supporting role for another generation's metadata is
+# never mistakenly pruned. `docker image rm <tag>` only ever removes that
+# one reference; if any other tag (including zedbot-app:latest itself, or a
+# still-kept generation/rollback/failed tag on the SAME underlying image)
+# still names the image, its layers are left in place - so untagging here
+# can never delete an image another live tag still depends on. Failure
+# anywhere in this function is logged and swallowed by its caller - it must
+# never turn an update that has already fully and successfully promoted
+# into a reported failure.
+prune_stale_generation_image_tags() {
+  local file tag state kept k
+  local -a keep=() present=()
+  file="$ZEDBOT_CURRENT_DEPLOYMENT_METADATA"
+  if { [ -e "$file" ] || [ -L "$file" ]; } && validate_generation_metadata_core "$file" current >/dev/null 2>&1; then
+    while IFS= read -r tag; do [ -z "$tag" ] || keep+=("$tag"); done < <(
+      jq -r '[.immutableImageTag,.retainedImageTag,.failedTargetTag][]|select(.!=null)' "$file" 2>/dev/null
+    )
+  fi
+  file="$ZEDBOT_ROLLBACK_METADATA"
+  if { [ -e "$file" ] || [ -L "$file" ]; } && validate_generation_metadata_core "$file" previous >/dev/null 2>&1; then
+    while IFS= read -r tag; do [ -z "$tag" ] || keep+=("$tag"); done < <(
+      jq -r '[.immutableImageTag,.retainedImageTag,.failedTargetTag][]|select(.!=null)' "$file" 2>/dev/null
+    )
+  fi
+  file="$ZEDBOT_FAILED_DEPLOYMENT_METADATA"
+  if { [ -e "$file" ] || [ -L "$file" ]; } && validate_generation_metadata_core "$file" failed >/dev/null 2>&1; then
+    state="$(jq -r '.state' "$file" 2>/dev/null)"
+    if [ "$state" != rolled-back ]; then
+      while IFS= read -r tag; do [ -z "$tag" ] || keep+=("$tag"); done < <(
+        jq -r '[.immutableImageTag,.retainedImageTag,.failedTargetTag][]|select(.!=null)' "$file" 2>/dev/null
+      )
+    fi
+  fi
+
+  while IFS= read -r tag; do [ -z "$tag" ] || present+=("$tag"); done < <(
+    run_clean_docker image ls --format '{{.Repository}}:{{.Tag}}' zedbot-app 2>/dev/null |
+      grep -E '^zedbot-app:(generation|rollback|failed)-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$'
+  )
+
+  for tag in "${present[@]}"; do
+    kept=0
+    for k in "${keep[@]}"; do
+      [ "$tag" = "$k" ] || continue
+      kept=1
+      break
+    done
+    [ "$kept" -eq 0 ] || continue
+    log_info "Pruning a stale generation image tag no longer referenced by current, previous, or an unresolved failed generation: ${tag}"
+    run_clean_docker image rm -- "$tag" >/dev/null 2>&1 ||
+      log_warn "Could not prune stale image tag ${tag}; safe to remove manually later: docker image rm ${tag}"
+  done
+  return 0
 }
 
 main() {
   require_root
+  reset_deployment_state_fixed_identity
   app_cd
   load_env_if_exists
+  reset_deployment_state_fixed_identity
+  reset_compose_fixed_identity
+  # shellcheck disable=SC2034  # re-pinned after load_env_if_exists could have
+  # sourced a hostile .env; read by run_compose() etc. in the sourced common.sh.
+  ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
   detect_compose_command
+  acquire_deployment_lock
+  # A crash between a first install's own publish_first_install_current
+  # current.json write and its final bootstrap.json promotion leaves a
+  # healthy, fully-published installation whose bootstrap identity never
+  # advanced - see recover_first_install_promotion's own comment in
+  # lib/common.sh for why finishing that one write is safe. A no-op for
+  # every other state, including every update after the very first one.
+  recover_first_install_promotion || exit 1
+  # Same recovery, for the OTHER bootstrap kind: a crash between publish_
+  # validated_legacy_self_heal's own current.json write and its final
+  # bootstrap.json promotion leaves an identical stuck-incomplete-identity
+  # situation - see recover_legacy_upgrade_promotion's own comment in
+  # lib/common.sh. Also a no-op for every other state.
+  recover_legacy_upgrade_promotion || exit 1
+  local installation_class
+  installation_class="$(classify_installation observe)" || {
+    log_error "Installation identity is ambiguous or unsupported; preserve the evidence and follow docs/legacy-upgrade.md."
+    exit 1
+  }
+  [ "$installation_class" = existing-canonical ] || {
+    log_error "Update requires an existing canonical installation; found ${installation_class}."
+    [ "$installation_class" != recoverable-bootstrap ] ||
+      log_error "A previous first install never completed. Re-run the installer to discard the incomplete attempt and install from scratch."
+    exit 1
+  }
+  recover_metadata_transition
+  validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || {
+    log_error "Current generation metadata is absent, legacy, or incomplete; bootstrap/reconciliation is required."
+    exit 1
+  }
+  validate_generation_owned_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || exit 1
+  assert_no_unresolved_failed_generation
+  validate_compose_application_images
+  validate_dependencies_healthy
 
   log_info "Starting ZED_BOT update ..."
 
-  log_info "[1/11] Creating a safety archive (.env + database) before updating ..."
-  bash "${SCRIPT_DIR}/backup.sh"
+  log_info "[1/13] Creating a safety archive (.env + database) before updating ..."
+  run_operation_child bash "${SCRIPT_DIR}/backup.sh"
 
-  log_info "[2/11] Creating and verifying a database backup (update gate) ..."
+  log_info "[2/13] Creating and verifying a database backup (update gate) ..."
   pre_update_database_backup
 
-  log_info "[3/11] Pulling the latest code ..."
-  # --add appends duplicates on every run; only add when missing.
-  if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ZEDBOT_APP_DIR"; then
-    git config --global --add safe.directory "$ZEDBOT_APP_DIR" >/dev/null 2>&1 || true
+  log_info "[3/13] Capturing the healthy running application rollback candidate ..."
+  local identity pre_deploy_sha pre_deploy_image_id baseline_csv migration_json
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    identity="$(validate_running_application)" || {
+      log_error "The current application is not healthy and cannot be retained as known-good."
+      exit 1
+    }
+  else
+    # bootstrap-deployment.sh explicitly allows installing with an empty
+    # TELEGRAM_BOT_TOKEN ("can be added later"). apps/bot/src/index.ts never
+    # calls run() without a token, so it never publishes the real-bot
+    # readiness marker require_bot_readiness=1 would otherwise wait for -
+    # only generic application readiness (containers running, healthy, on
+    # the right image) is achievable here. Without this, a supported,
+    # intentionally-tokenless install could never be updated - not even for
+    # a security fix - until an operator configures the token and restarts.
+    # Matches bootstrap-deployment.sh's own identical gate exactly.
+    log_warn "TELEGRAM_BOT_TOKEN is not configured; validating the running application without bot-specific readiness."
+    identity="$(validate_running_application "" 0)" || {
+      log_error "The current application is not healthy and cannot be retained as known-good."
+      exit 1
+    }
   fi
-  # Script modes on this appliance are the installer's job, not git's: the
-  # pre-PR92 installer chmod +x'ed scripts that were committed 644, which
-  # made every legacy tree permanently "dirty" and silently blocked ff-only
-  # pulls (the update then "succeeded" without ever fetching new code).
-  # Ignoring mode bits removes that whole failure class.
-  git config core.fileMode false
-  git fetch --all --prune
-  if ! git pull --ff-only; then
-    log_warn "Could not fast-forward the repository (local modifications?). Continuing with the current code."
+  read -r pre_deploy_sha pre_deploy_image_id <<< "$identity"
+  migration_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/migration-status.js | tail -n 1)"
+  if [ "$(printf '%s' "$migration_json" | jq -r '.ok == true and .upToDate == true and .failedCount == 0')" != "true" ]; then
+    log_error "Current migration state is not healthy; refusing to retain this application as known-good."
+    exit 1
+  fi
+  # -print (POSIX), not -printf: this runs inside the worker container, whose
+  # busybox find (node:22-alpine) has no -printf and errors out on it
+  # ("find: unrecognized: -printf"), silently emptying the pipeline instead
+  # of failing loudly - always closing this gate. -print's full path
+  # (.../migrations/<dir>/migration.sql) needs an extra strip of the
+  # trailing filename before the parent-directory-name strip -printf's %h
+  # did in one step.
+  baseline_csv="$(run_compose exec -T worker sh -c 'find packages/database/prisma/migrations -mindepth 2 -maxdepth 2 -name migration.sql -print | sed -e "s#/migration\.sql\$##" -e "s#.*/##" | sort | paste -sd, -')"
+  [ -n "$baseline_csv" ] || { log_error "No complete baseline migrations found."; exit 1; }
+
+  log_info "[4/13] Fetching canonical origin/main and verifying local main is not ahead of or diverged from it ..."
+  local target_deploy_sha target_tree snapshot_result
+  snapshot_result="$(prepare_exact_origin_main)" || {
+    log_error "Fetching origin/main or verifying the local checkout against it failed."
+    exit 1
+  }
+  read -r target_deploy_sha target_tree SOURCE_SNAPSHOT <<< "$snapshot_result"
+  verify_source_snapshot "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Immutable source snapshot verification failed."; exit 1; }
+  register_source_snapshot "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Could not register ownership of the source snapshot."; exit 1; }
+  SOURCE_SHA="$target_deploy_sha"
+  SOURCE_TREE="$target_tree"
+  set_update_compose_contract "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Immutable source Compose contract is invalid."; exit 1; }
+  validate_compose_application_images || { log_error "Immutable source Compose application images are invalid."; exit 1; }
+
+  # origin/main has not moved past what is already running: there is no new
+  # code to build, recreate, or promote. Bailing out here - before a
+  # candidate generation is ever created - is what keeps this a true no-op.
+  # Continuing on into step 7 would still retag the running image under a
+  # brand-new generation and unconditionally rotate current.json into
+  # previous.json (promote_healthy_candidate -> write_lifecycle_role), which
+  # would overwrite the real previous release's rollback evidence with a
+  # duplicate of the generation that is already running - making that real
+  # prior release permanently unreachable via `zedbot rollback` even though
+  # nothing was actually deployed. A drift repair with no new code belongs
+  # to `zedbot restart`, not `zedbot update`.
+  #
+  # The idempotent baseline seed still runs, though: an operator can change
+  # ADMIN_TELEGRAM_IDS (or pick up any other missing seed-registry default)
+  # without a new source commit to deploy, and `zedbot restart` - the tool
+  # this message points at for a no-op drift repair - only recreates
+  # containers, it never seeds. Nothing else from the pipeline is needed:
+  # there are no new migrations to apply when the source itself is unchanged.
+  if [ "$target_deploy_sha" = "$pre_deploy_sha" ]; then
+    # No new source commit does not mean the DATABASE hasn't drifted
+    # underneath it: the migration-status check above (step 3) only compares
+    # shipped migration NAMES against finished rows - it is not
+    # checksum-aware and does not detect an applied database-only migration
+    # or a shipped migration whose manifest-declared checksum has since
+    # changed. Run the exact same strict, checksum-aware validation the
+    # normal path runs at steps 6 and 8 (validate_migration_declaration_pair,
+    # then the compatibility CLI) BEFORE ever committing to the no-op exit -
+    # fail closed exactly like that path does. A no-op update must not
+    # silently succeed over a compromised/drifted database.
+    require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before no-op migration validation."; exit 1; }
+    validate_migration_declaration_pair "$SOURCE_SNAPSHOT" || { log_error "Immutable source migration declaration validation failed."; exit 1; }
+    local noop_compatibility_json
+    noop_compatibility_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/rollback-compatibility.js update "$baseline_csv")" || {
+      log_error "Migration compatibility check failed: $(printf '%s' "$noop_compatibility_json" | jq -r '.blocker // "unavailable"' 2>/dev/null || echo unavailable)"
+      exit 1
+    }
+    [ "$(printf '%s' "$noop_compatibility_json" | jq -r '.manifestSha256')" = "$MIGRATION_MANIFEST_SHA256" ] \
+      || { log_error "Compatibility manifest checksum changed during deployment."; exit 1; }
+
+    log_success "Already up to date at ${target_deploy_sha:0:10} - no new commits on origin/main to deploy."
+    log_info "Re-running idempotent baseline seeding (OWNER admins from ADMIN_TELEGRAM_IDS, default settings) in case configuration changed since the last deploy ..."
+    require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before seeding."; exit 1; }
+    run_compose run --rm --no-deps api node packages/database/dist/seed.js
+    # See finalize_stale_promoted_operation_state's own comment: a crash
+    # between a PRIOR update's promotion durably committing and this
+    # script's own next line recording that fact can leave operation-state.json
+    # parked forever on an already fully successful deployment. The no-op
+    # path never reaches initialize_operation_state (the self-heal that
+    # would otherwise clear it for free on the next real update), so clear
+    # or finish it here instead - identity-checked, best-effort.
+    finalize_stale_promoted_operation_state
+    log_info "Rollback history was left untouched; no build, recreation, or promotion was needed."
+    exit 0
   fi
 
-  log_info "[4/11] Migrating the .env to the current layout (append-only) ..."
+  log_info "[5/13] Migrating the .env to the current layout (append-only) ..."
+  require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before post-fetch mutation."; exit 1; }
   migrate_legacy_env
   # Re-load so freshly appended keys (ZEDBOT_BACKUP_DIR & co) take effect.
   load_env_if_exists
+  reset_deployment_state_fixed_identity
+  reset_compose_fixed_identity
+  set_update_compose_contract "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Compose identity changed while reloading runtime environment."; exit 1; }
+  validate_compose_application_images || { log_error "Compose identity changed while reloading runtime environment."; exit 1; }
   ensure_backup_dir_permissions
 
-  log_info "[5/11] Refreshing the installed zedbot CLI ..."
-  # Failure to refresh the CLI must fail the update: a stale installed CLI
-  # driving new code is exactly the class of bug this updater prevents.
-  if ! refresh_cli; then
-    log_error "Could not refresh ${ZEDBOT_CLI_PATH} from the updated repository - ABORTING the update."
-    log_error "Fix the problem (disk full? read-only /usr/local/bin?) and retry: zedbot update"
-    exit 1
-  fi
+  log_info "[6/13] Retaining the verified previous application image and metadata ..."
+  local rollback_tag compatibility_sha compatibility_declarations metadata_tmp generation failed_tag target_image_id migration_evidence_dir compose_evidence_sha
+  generation="$(date -u +%Y%m%dT%H%M%SZ)-${target_deploy_sha:0:12}"
+  CANDIDATE_METADATA="$ZEDBOT_DEPLOYMENT_DIR/candidate-${generation}.json"
+  cleanup_abandoned_prepared_candidates
+  initialize_operation_state update "$generation"
+  rollback_tag="zedbot-app:rollback-${generation}"
+  validate_migration_declaration_pair "$SOURCE_SNAPSHOT" || { log_error "Immutable source migration declaration validation failed."; exit 1; }
+  compatibility_sha="$MIGRATION_MANIFEST_SHA256"
+  compatibility_declarations="$MIGRATION_DECLARATIONS_JSON"
+  migration_evidence_dir="$ZEDBOT_DEPLOYMENT_DIR/evidence-${generation}"
+  persist_migration_declaration_evidence "$SOURCE_SNAPSHOT" "$migration_evidence_dir" || {
+    log_error "Could not persist exact generation migration evidence."; exit 1;
+  }
+  compose_evidence_sha="$(sha256sum "$migration_evidence_dir/docker-compose.yml" | awk '{print $1}')"
+  require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before image retention."; exit 1; }
+  validate_compose_application_images || { log_error "Compose identity changed before image retention."; exit 1; }
+  retain_known_good_image "$pre_deploy_image_id" "$rollback_tag"
+  advance_operation_state current-validated current-image-retained
+  metadata_tmp="$(operation_mktemp "${ZEDBOT_DEPLOYMENT_DIR}/metadata.XXXXXX")"
+  jq -n \
+    --arg preDeploySha "$pre_deploy_sha" --arg preDeployImageId "$pre_deploy_image_id" \
+    --arg targetDeploySha "$target_deploy_sha" --arg retainedImageTag "$rollback_tag" \
+    --arg capturedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg baseline "$baseline_csv" \
+    --arg compatibilityManifestSha256 "$compatibility_sha" \
+    --argjson compatibilityDeclarations "$compatibility_declarations" \
+    --arg generation "$generation" --arg targetTree "$target_tree" --arg migrationEvidencePath "$migration_evidence_dir" \
+    --arg composeEvidenceSha256 "$compose_evidence_sha" \
+    '{formatVersion:2,lifecycleRole:"candidate",generation:$generation,sourceTree:$targetTree,preDeploySha:$preDeploySha,preDeployImageId:$preDeployImageId,targetDeploySha:$targetDeploySha,retainedImageTag:$retainedImageTag,capturedAt:$capturedAt,preDeployMigrations:($baseline|split(",")),declarationFormatVersion:2,declarationSourceCategory:"generation-evidence",migrationEvidencePath:$migrationEvidencePath,composeEvidencePath:($migrationEvidencePath+"/docker-compose.yml"),composeEvidenceSha256:$composeEvidenceSha256,composeProjectName:"zedbot",composeApplicationImage:"zedbot-app:latest",compatibilityManifestSha256:$compatibilityManifestSha256,compatibilityDeclarations:$compatibilityDeclarations,recreationAttempted:false,healthConfirmed:false,state:"prepared"}' > "$metadata_tmp"
+  atomic_write_metadata "$metadata_tmp" "$CANDIDATE_METADATA"
+  rm -f "$metadata_tmp"
+  validate_generation_metadata_core "$CANDIDATE_METADATA" candidate
+  advance_operation_state current-image-retained candidate-metadata-prepared
+  DEPLOYMENT_METADATA_ACTIVE=1
 
-  log_info "[6/11] Building updated images (with deployment identity) ..."
+  log_info "[7/13] Revalidating source and building updated images ..."
   # GIT_SHA travels into the image as its LAST layers (see Dockerfile), so
   # identity-only rebuilds stay cheap.
-  GIT_SHA="$(repo_head_sha)"
-  export GIT_SHA="${GIT_SHA:-unknown}"
-  run_compose build
+  verify_source_snapshot "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Source snapshot changed before build."; exit 1; }
+  validate_compose_application_images || { log_error "Compose identity changed before build."; exit 1; }
+  GIT_SHA="$target_deploy_sha"
+  export GIT_SHA
+  # Armed before the build call below, not after: the build itself is what
+  # moves zedbot-app:latest to the candidate, so arming afterwards would
+  # leave a window uncovered. Cleared once recreation actually starts
+  # (below) - see update_owned_cleanup.
+  DEPLOYMENT_REFERENCE_RESTORE_ID="$pre_deploy_image_id"
+  # Docker consumes the already verified snapshot directory itself. No archive
+  # is regenerated from the mutable deployment checkout after verification.
+  build_verified_source_snapshot "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source verification or image build failed."; exit 1; }
+  target_image_id="$(run_clean_docker image inspect -f '{{.Id}}' zedbot-app:latest)"; valid_image_id "$target_image_id" || exit 1
+  advance_operation_state candidate-metadata-prepared candidate-image-built
+  failed_tag="zedbot-app:failed-${generation}"
+  retain_known_good_image "$target_image_id" "zedbot-app:generation-${generation}"
+  metadata_tmp="$(operation_mktemp "${ZEDBOT_DEPLOYMENT_DIR}/.candidate-image.XXXXXXXX")"
+  jq --arg targetImageId "$target_image_id" --arg failedTargetTag "$failed_tag" --arg immutableImageTag "zedbot-app:generation-${generation}" '.targetImageId=$targetImageId|.failedTargetTag=$failedTargetTag|.immutableImageTag=$immutableImageTag' "$CANDIDATE_METADATA" > "$metadata_tmp"
+  atomic_write_metadata "$metadata_tmp" "$CANDIDATE_METADATA"
+  rm -f "$metadata_tmp"
+  validate_generation_metadata_core "$CANDIDATE_METADATA" candidate
+  advance_operation_state candidate-image-built deployment-reference-tagged
 
-  log_info "[7/11] Applying database migrations (before the new app containers run) ..."
+  log_info "[8/13] Validating rollback compatibility of pending migrations ..."
+  local compatibility_json
+  require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before compatibility validation."; exit 1; }
+  validate_compose_application_images || { log_error "Compose identity changed before compatibility validation."; exit 1; }
+  compatibility_json="$(run_compose run --rm --no-deps worker node apps/worker/dist/cli/rollback-compatibility.js update "$baseline_csv")" || {
+    log_error "Migration compatibility check failed: $(printf '%s' "$compatibility_json" | jq -r '.blocker // "unavailable"' 2>/dev/null || echo unavailable)"
+    exit 1
+  }
+  [ "$(printf '%s' "$compatibility_json" | jq -r '.manifestSha256')" = "$compatibility_sha" ] \
+    || { log_error "Compatibility manifest checksum changed during deployment."; exit 1; }
+  advance_operation_state deployment-reference-tagged compatibility-confirmed
+
+  log_info "[9/13] Applying database migrations (before the new app containers run) ..."
   # `compose run` inside migrate.sh starts postgres/redis itself. The app
   # services still run the OLD code at this point - the safe direction (old
-  # code on a newer schema beats new code on an older schema). migrate.sh's
-  # legacy self-heal no-ops here: steps 4-5 already converged env + CLI.
-  bash "${SCRIPT_DIR}/migrate.sh"
+  # code on a newer schema beats new code on an older schema). This step
+  # does not call migrate.sh itself (it is this script's own direct
+  # replacement for that path), so its legacy_self_heal gate never runs
+  # here; step 5 has already converged .env. The installed CLI has NOT
+  # converged yet at this point - that now waits until promotion has fully
+  # succeeded, alongside the checkout sync (see the end of main()).
+  require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before migration."; exit 1; }
+  validate_compose_application_images || { log_error "Compose identity changed before migration."; exit 1; }
+  run_compose run --rm --no-deps api node packages/database/dist/referral-migration-preflight.js
+  run_compose run --rm --no-deps api sh -c 'cd packages/database && node_modules/.bin/prisma migrate deploy'
+  # Idempotent baseline data (OWNER admins from ADMIN_TELEGRAM_IDS, default
+  # settings, log topics, message templates, button texts) - migrate.sh
+  # (the legacy path this direct-migration step replaced) always ran this
+  # after every migration, install or update. Without it, a release that
+  # ships new seed-registry entries, or a changed ADMIN_TELEGRAM_IDS, is
+  # promoted successfully by `zedbot update` without ever creating the
+  # required rows - see the identical fix in bootstrap-deployment.sh for
+  # the first-install path.
+  run_compose run --rm --no-deps api node packages/database/dist/seed.js
+  advance_operation_state compatibility-confirmed migrations-confirmed
 
-  log_info "[8/11] Recreating all services with the new images ..."
+  log_info "[10/13] Revalidating source and recreating services ..."
   # --force-recreate is THE fix for the stale-container symptom observed in
   # production: a plain `up -d` can leave the previous containers (previous
   # image, previous mounts, previous env) running after a rebuild.
-  run_compose up -d --force-recreate --remove-orphans
+  require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source or deployment checkout identity changed before service recreation."; exit 1; }
+  validate_dependencies_healthy
+  validate_compose_application_images
+  APPLICATION_RECREATION_ATTEMPTED=1
+  DEPLOYMENT_REFERENCE_RESTORE_ID=""
+  recreate_application_services
+  verify_application_recreation_set "$target_image_id"
+  record_bot_recreation_boundary "$target_image_id" "$target_deploy_sha"
+  set_rollback_state "application-recreated"
+  advance_operation_state migrations-confirmed application-recreated
 
-  log_info "[9/11] Recording the deployed version ..."
-  record_deployed_sha
+  log_info "[11/13] Recording the deployed version ..."
+  # Must be explicit: prepare_exact_origin_main no longer requires the local
+  # checkout to already equal the fetched target (it may legitimately lag
+  # behind), so record_deployed_sha's no-argument repo_head_sha() fallback
+  # would record the stale local HEAD instead of what was actually built and
+  # deployed - a normal update where origin/main had advanced would then
+  # report a version mismatch against the running image forever after.
+  record_deployed_sha "$target_deploy_sha"
 
-  log_info "[10/11] Running the post-deploy smoke test ..."
+  log_info "[12/13] Running the post-deploy smoke test ..."
   post_deploy_smoke
 
-  log_info "[11/11] Running health checks ..."
-  if bash "${SCRIPT_DIR}/doctor.sh"; then
+  log_info "[13/13] Running health checks ..."
+  if run_operation_child bash "${SCRIPT_DIR}/doctor.sh"; then
+    validate_running_application "$target_deploy_sha" >/dev/null
+    set_rollback_state "healthy-candidate"
+    advance_operation_state application-recreated health-confirmed
+    begin_metadata_transition update "$CANDIDATE_METADATA"
+    advance_operation_state health-confirmed promotion-prepared
+    recover_metadata_transition
+    advance_operation_state promotion-prepared promoted
+    finalize_promoted_operation_state
+    # Only now, with the update fully verified successful, sync the
+    # persistent checkout's tooling to what was actually deployed - see
+    # sync_deployment_checkout's own comment for why this must not run any
+    # earlier (a failed update should leave known-working recovery scripts
+    # in place, not ones from a release that just failed to deploy).
+    #
+    # The installed CLI (ZEDBOT_CLI_PATH) is refreshed here too, and only
+    # AFTER the checkout sync has itself succeeded - never independently of
+    # it, and never any earlier in this function. zedbot.sh hardcodes
+    # ZEDBOT_APP_DIR as the source of the lib/common.sh it sources at
+    # runtime (never its own installed location), so the one combination
+    # that can actually break recovery commands with "command not found" is
+    # a NEW installed CLI paired with the OLD checkout's common.sh - e.g. a
+    # freshly added helper the old library does not define yet. Installing
+    # the new CLI before the checkout advances (the previous behavior, at
+    # old step 6 of 14) opened exactly that window for the entire rest of
+    # the update, and left it open indefinitely on any later failure. The
+    # reverse pairing - the OLD CLI left in place against a NEW checkout,
+    # which is what happens below if refresh_cli itself fails after a
+    # successful sync - stays safe: common.sh only ever gains helpers
+    # across releases, it does not remove ones an older zedbot.sh still
+    # calls, and cli_is_stale/`zedbot doctor --fix` already exist as the
+    # established, self-healing way to catch up a merely-stale CLI. So on
+    # any failure below, the CLI and the checkout are left as ONE
+    # consistent, fully-functional pair - the currently-running release's,
+    # never a mix - exactly mirroring how DEPLOYMENT_REFERENCE_RESTORE_ID
+    # keeps zedbot-app:latest and the running containers as one consistent
+    # pair earlier in this same function.
+    if sync_deployment_checkout "$target_deploy_sha"; then
+      refresh_cli || log_warn "Could not refresh the installed zedbot CLI (${ZEDBOT_CLI_PATH}); it still matches the previous release and every recovery command (zedbot restart/doctor/rollback) remains fully functional. Run 'zedbot doctor --fix' (or 'zedbot doctor') to retry."
+    else
+      log_warn "Could not fast-forward the deployment checkout to ${target_deploy_sha:0:10}; the installed CLI was left unchanged to match it, so every recovery command (zedbot restart/doctor/rollback) remains fully functional against the release actually running. Run 'zedbot doctor --fix' or manually: git -C \"\$ZEDBOT_APP_DIR\" pull --ff-only."
+    fi
     log_success "ZED_BOT update completed successfully."
+    prune_stale_generation_image_tags ||
+      log_warn "Stale generation image tag pruning encountered a problem; this does not affect the update that just completed. Safe to retry later (e.g. on the next 'zedbot update'), or manually: docker image ls 'zedbot-app'."
   else
-    log_warn "Update finished, but the doctor reported problems. Run 'zedbot doctor' for details."
+    log_error "Update health checks failed; deployment was not marked successful."
+    return 1
   fi
 }
 
+install_operation_traps update_owned_cleanup
 main "$@"

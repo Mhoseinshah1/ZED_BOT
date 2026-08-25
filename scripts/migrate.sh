@@ -16,6 +16,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # shellcheck source=lib/common.sh
 . "${SCRIPT_DIR}/lib/common.sh"
 
+SOURCE_SNAPSHOT=""
+SOURCE_SHA=""
+SOURCE_TREE=""
+migrate_owned_cleanup() {
+  cleanup_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE"
+}
+
 # =============================================================================
 # LEGACY SELF-HEAL - THE hook the PRE-PR92 updater executes on new code.
 #
@@ -32,11 +39,24 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # calling this script) never do the work twice.
 # =============================================================================
 legacy_self_heal() {
-  if ! legacy_install_detected; then
+  # legacy_install_detected alone is not retry-safe: this function's own
+  # early steps (migrate_legacy_env, refresh_cli) fix the exact env/CLI
+  # staleness that function checks, so an interruption AFTER those steps but
+  # BEFORE publish_validated_legacy_self_heal durably publishes current.json
+  # makes a rerun's legacy_install_detected return false and skip this whole
+  # function - even though legacy-install-v1.json is still unconverted.
+  # publish_validated_legacy_self_heal's own classify_installation guard is
+  # already retry-safe by generation identity; this outer gate only needs to
+  # keep REACHING it. Detect that "conversion evidence exists but was never
+  # published" state directly and independently of env/CLI staleness.
+  local legacy_unconverted=1
+  { [ -e "$ZEDBOT_LEGACY_INSTALLATION" ] || [ -L "$ZEDBOT_LEGACY_INSTALLATION" ]; } &&
+    ! { [ -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ]; } || legacy_unconverted=0
+  if ! legacy_install_detected && [ "$legacy_unconverted" -eq 0 ]; then
     return 0
   fi
 
-  local cli_refresh_failed=0
+  local cli_refresh_failed=0 snapshot_result
 
   log_warn "=================================================================="
   log_warn "Legacy installation detected - finishing the upgrade"
@@ -68,7 +88,7 @@ legacy_self_heal() {
   GIT_SHA="$(repo_head_sha)"
   export GIT_SHA="${GIT_SHA:-unknown}"
   log_info "Rebuilding images with deployment identity (GIT_SHA=${GIT_SHA}) ..."
-  run_compose build
+  run_compose_with_deployment_sha "$GIT_SHA" build
 
   # --force-recreate is the actual fix for the observed production symptom:
   # the legacy updater's plain `up -d` left the OLD containers (old image,
@@ -76,7 +96,18 @@ legacy_self_heal() {
   log_info "Recreating all containers with the new images and .env ..."
   run_compose up -d --force-recreate --remove-orphans
 
-  record_deployed_sha
+  # main() already acquired the deployment lock for the whole script;
+  # acquiring it again here would fail closed ("this process already owns
+  # the deployment lock"). Still re-derive deployment-state paths, since
+  # migrate_legacy_env above may have appended keys the resolution depends on.
+  reset_deployment_state_fixed_identity
+  snapshot_result="$(prepare_exact_origin_main)" || return 1
+  read -r SOURCE_SHA SOURCE_TREE SOURCE_SNAPSHOT <<< "$snapshot_result"
+  register_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE" || return 1
+  publish_validated_legacy_self_heal "$SOURCE_SHA" "$SOURCE_TREE" "$SOURCE_SNAPSHOT" || return 1
+  record_deployed_sha "$SOURCE_SHA"
+  cleanup_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE" || return 1
+  release_deployment_lock || return 1
 
   if [ "$cli_refresh_failed" -ne 0 ]; then
     log_error "Legacy self-heal finished WITH ERRORS (CLI refresh failed). Re-run: zedbot update"
@@ -87,8 +118,34 @@ legacy_self_heal() {
 
 main() {
   require_root
+  reset_deployment_state_fixed_identity
   app_cd
+  load_env_if_exists
+  reset_deployment_state_fixed_identity
+  reset_compose_fixed_identity
+  # shellcheck disable=SC2034  # re-pinned after load_env_if_exists could have
+  # sourced a hostile .env; read by run_compose() etc. in the sourced common.sh.
+  ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
   detect_compose_command
+  # This file is also runnable standalone (see the header comment), not just
+  # as install.sh/update.sh's own internal migration step - a schema
+  # mutation that races an in-progress update/rollback (which holds this
+  # SAME lock throughout) could apply new migrations after that operation
+  # already captured its pre-deploy migration baseline or compatibility
+  # snapshot, invalidating a decision it already made. Held for the whole
+  # script; legacy_self_heal below no longer acquires it a second time.
+  acquire_deployment_lock
+
+  # This file is also the standalone recovery entry point an operator runs
+  # by hand (see the header comment), so it needs the same self-healing as
+  # update.sh/bootstrap-deployment.sh/rollback.sh: a crash between either
+  # publish_first_install_current's or publish_validated_legacy_self_heal's
+  # own current.json write and its final bootstrap.json promotion leaves a
+  # healthy, fully-published installation whose bootstrap identity never
+  # advanced - see each function's own comment in lib/common.sh for why
+  # finishing that one write is safe. Both are no-ops for every other state.
+  recover_first_install_promotion || exit 1
+  recover_legacy_upgrade_promotion || exit 1
 
   # PREFLIGHT (runs BEFORE migrate deploy): on a legacy database that predates the
   # one-commission-per-order unique index and accumulated duplicate orderId rows,
@@ -116,4 +173,5 @@ main() {
   legacy_self_heal
 }
 
+install_operation_traps migrate_owned_cleanup
 main "$@"

@@ -1,9 +1,11 @@
-import { connectDatabase, disconnectDatabase } from "@zedbot/database";
+import { disconnectDatabase } from "@zedbot/database";
 import { errorMessage } from "@zedbot/shared";
 
 import { createBot } from "./app.js";
-import { getBotToken } from "./config/env.js";
+import { getBotToken, getTelegramApiRoot } from "./config/env.js";
+import { connectDatabaseWithRetry } from "./core/database-startup.js";
 import { logger } from "./core/logger.js";
+import { completeBotStartupReadinessIfKnownGeneration, removeBotReadiness } from "./core/readiness-marker.js";
 import { runShutdownSequence } from "./core/shutdown.js";
 import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
 import { startMiniAppCommerceConsumer } from "./services/miniapp-commerce-consumer.js";
@@ -35,7 +37,8 @@ if (token === null) {
   // tight crash loop while the operator fixes the configuration.
   setTimeout(() => process.exit(1), 60_000);
 } else {
-  run(token).catch((err: unknown) => {
+  run(token).catch(async (err: unknown) => {
+    await removeBotReadiness().catch(() => undefined);
     // start() rejects for non-retryable failures, e.g. 401 from an invalid
     // token. Network errors are retried internally by grammY and never land
     // here. Exit slowly to keep the restart loop calm.
@@ -45,7 +48,9 @@ if (token === null) {
 }
 
 async function run(botToken: string): Promise<void> {
-  const bot = createBot(botToken);
+  await removeBotReadiness();
+  const bot = createBot(botToken, getTelegramApiRoot());
+  let databaseInitialized = false;
 
   // Wallet auto-renewal EXECUTE consumer (Phase 1): the bot's only BullMQ
   // consumer. It runs the wallet charge + in-place renewal for attempts the
@@ -74,58 +79,88 @@ async function run(botToken: string): Promise<void> {
   // Assigned after startup below; declared here so the shutdown closure can
   // stop it. Null only in the window before startup reaches the start call.
   let supportNotificationLoop: SupportNotificationLoopController | null = null;
+  // Assigned once bot.start() is called below. bot.stop() only flips
+  // polling off and aborts the in-flight getUpdates call - it does not wait
+  // for a handler already running against the current batch of updates to
+  // finish. Only the promise bot.start() returned settles once that drain
+  // completes, so shutdown must hold onto it and await it after stop().
+  let pollingPromise: Promise<void> | null = null;
+  // A second SIGTERM/SIGINT (or SIGINT racing a just-received SIGTERM) must
+  // not start a second concurrent runShutdownSequence: that would double-run
+  // drainSupportNotifications and disconnectDatabase while the first pass is
+  // still mid-sequence, exactly the interleaving the ordered-sequence
+  // contract exists to prevent. One in-flight shutdown, always the same one.
+  let shuttingDown: Promise<void> | null = null;
 
-  const shutdown = async (signal: string): Promise<void> => {
-    logger.info(`received ${signal}, stopping bot`);
-    // The order — and the fact that each step FINISHES before the next starts
-    // — is the contract, so it lives in runShutdownSequence where a test can
-    // execute it rather than read it. Stopping the notification loop is not
-    // enough on its own: a sweep already running holds claims in SENDING, and
-    // disconnecting underneath it strands them until the next process's stale
-    // sweep. So ticks are stopped, then drained, and only then does anything
-    // else tear down.
-    await runShutdownSequence(
-      {
-        stopSupportNotificationTicks: () => supportNotificationLoop?.stop(),
-        drainSupportNotifications: async () => {
-          await supportNotificationLoop?.drain();
+  const shutdown = (signal: string): Promise<void> => {
+    if (shuttingDown !== null) {
+      return shuttingDown;
+    }
+    shuttingDown = (async () => {
+      await removeBotReadiness().catch(() => undefined);
+      logger.info(`received ${signal}, stopping bot`);
+      // The order — and the fact that each step FINISHES before the next starts
+      // — is the contract, so it lives in runShutdownSequence where a test can
+      // execute it rather than read it. Stopping the notification loop is not
+      // enough on its own: a sweep already running holds claims in SENDING, and
+      // disconnecting underneath it strands them until the next process's stale
+      // sweep. So ticks are stopped, then drained, and only then does anything
+      // else tear down.
+      await runShutdownSequence(
+        {
+          stopSupportNotificationTicks: () => supportNotificationLoop?.stop(),
+          drainSupportNotifications: async () => {
+            await supportNotificationLoop?.drain();
+          },
+          writeStoppingLog: () =>
+            writeSystemLog({
+              level: "INFO",
+              eventType: OPS_EVENTS.BOT_STOPPED,
+              message: "bot service stopping",
+              metadata: { signal },
+              topicKey: "SYSTEM",
+            }),
+          stopBot: async () => {
+            await bot.stop();
+            if (pollingPromise !== null) {
+              await pollingPromise;
+            }
+          },
+          stopConsumers: async () => {
+            if (autoRenewalConsumer !== null) {
+              await autoRenewalConsumer.stop();
+            }
+            if (miniAppCommerceConsumer !== null) {
+              await miniAppCommerceConsumer.stop();
+            }
+            if (starsSubscriptionConsumer !== null) {
+              await starsSubscriptionConsumer.stop();
+            }
+            if (referralExecuteConsumer !== null) {
+              await referralExecuteConsumer.stop();
+            }
+          },
+          disconnectDatabase: () => disconnectDatabase(),
         },
-        writeStoppingLog: () =>
-          writeSystemLog({
-            level: "INFO",
-            eventType: OPS_EVENTS.BOT_STOPPED,
-            message: "bot service stopping",
-            metadata: { signal },
-            topicKey: "SYSTEM",
-          }),
-        stopBot: () => bot.stop(),
-        stopConsumers: async () => {
-          if (autoRenewalConsumer !== null) {
-            await autoRenewalConsumer.stop();
-          }
-          if (miniAppCommerceConsumer !== null) {
-            await miniAppCommerceConsumer.stop();
-          }
-          if (starsSubscriptionConsumer !== null) {
-            await starsSubscriptionConsumer.stop();
-          }
-          if (referralExecuteConsumer !== null) {
-            await referralExecuteConsumer.stop();
-          }
+        (step, err) => {
+          logger.warn("error during shutdown", { step, error: errorMessage(err) });
         },
-        disconnectDatabase: () => disconnectDatabase(),
-      },
-      (step, err) => {
-        logger.warn("error during shutdown", { step, error: errorMessage(err) });
-      },
-    );
-    process.exit(0);
+      );
+      process.exit(0);
+    })();
+    return shuttingDown;
   };
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
 
-  try {
-    await connectDatabase();
+  // See connectDatabaseWithRetry's own comment for why a bounded retry here
+  // matters: without it, a single failed attempt eventually reaches
+  // completeBotStartupReadiness's hard throw below, which the outer catch
+  // (bottom of this file) treats as non-retryable and exits the whole
+  // process after a 30s cooldown - a full container restart cycle for a
+  // condition a few seconds of patience would have resolved.
+  databaseInitialized = await connectDatabaseWithRetry();
+  if (databaseInitialized) {
     logger.info("database connection established");
     // Ops log (SYSTEM topic): fire-and-forget, never blocks startup.
     void writeSystemLog({
@@ -134,8 +169,6 @@ async function run(botToken: string): Promise<void> {
       message: "bot service started",
       topicKey: "SYSTEM",
     });
-  } catch (err) {
-    logger.warn("database not reachable at startup, continuing", { error: errorMessage(err) });
   }
 
   // Crash recovery: resolve orders stuck in PROVISIONING and broadcasts
@@ -184,13 +217,27 @@ async function run(botToken: string): Promise<void> {
   // stop the ones after it.
   supportNotificationLoop = startSupportNotificationLoop(bot.api);
 
-  await bot.start({
+  // Published HERE, before bot.start() rather than inside its onStart
+  // callback: grammY's start() performs its own Telegram-dependent setup
+  // (getMe, webhook deletion) BEFORE onStart ever runs, so when Telegram is
+  // unreachable that callback never fires at all - even though the
+  // database, consumers, handlers and every local loop above already
+  // finished successfully. The Docker healthcheck and validate_running_
+  // application only care that THIS process's own local initialization is
+  // complete, not that Telegram's API happened to answer at this exact
+  // moment; gating the marker on onStart made an external Telegram outage
+  // indistinguishable from a genuinely broken deployment.
+  const generation = runningGitSha();
+  await completeBotStartupReadinessIfKnownGeneration({ databaseInitialized, generation });
+
+  pollingPromise = bot.start({
     onStart: (botInfo) => {
       // Deployment identity in the boot line: "unknown" = image built
       // without the GIT_SHA build arg (e.g. local dev).
       logger.info(`ZED_BOT bot service started (long polling) as @${botInfo.username}`, {
-        gitSha: runningGitSha() ?? "unknown",
+        gitSha: generation ?? "unknown",
       });
     },
   });
+  await pollingPromise;
 }

@@ -389,7 +389,7 @@ describe("shutdown drains notification work before disconnecting", () => {
     expect(entry, "imported").toMatch(
       /import\s*\{[^}]*runShutdownSequence[^}]*\}\s*from\s*"\.\/core\/shutdown\.js"/s,
     );
-    const shutdownStart = entry.indexOf("const shutdown = async");
+    const shutdownStart = entry.indexOf("const shutdown = (");
     expect(shutdownStart, "shutdown handler present").toBeGreaterThan(-1);
     const body = entry.slice(shutdownStart);
     expect(body, "the sequence is what shutdown runs").toContain("await runShutdownSequence(");
@@ -397,5 +397,35 @@ describe("shutdown drains notification work before disconnecting", () => {
     expect(body).toContain("supportNotificationLoop?.stop()");
     expect(body).toContain("supportNotificationLoop?.drain()");
     expect(body).toContain("disconnectDatabase()");
+  });
+
+  it("S8-17: shutdown is idempotent and stopBot awaits the drained polling loop", () => {
+    // Regression: a second SIGTERM/SIGINT (or one racing the other) must
+    // reuse the same in-flight shutdown, not start a second
+    // runShutdownSequence concurrently with the first - the ordered-sequence
+    // guarantee above means nothing if two sequences interleave. Separately,
+    // bot.stop() only flips polling off and aborts the pending getUpdates
+    // call; it does not wait for a handler already running against the
+    // current batch of updates to finish. Only the promise bot.start()
+    // returned settles once that drain completes, so stopBot must hold onto
+    // and await it - otherwise disconnectDatabase() can run underneath a
+    // still-executing handler.
+    const raw = readFileSync(path.join(import.meta.dirname, "..", "src", "index.ts"), "utf8");
+    const entry = raw
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n")
+      .map((line) => line.replace(/(^|\s)\/\/.*$/, "$1"))
+      .join("\n");
+    const shutdownStart = entry.indexOf("const shutdown = (");
+    expect(shutdownStart, "shutdown handler present").toBeGreaterThan(-1);
+    const guardBody = entry.slice(0, shutdownStart);
+    expect(guardBody, "re-entrancy guard declared before shutdown").toMatch(/let\s+shuttingDown:\s*Promise<void>\s*\|\s*null\s*=\s*null/);
+    const body = entry.slice(shutdownStart);
+    expect(body, "shutdown returns the existing in-flight run instead of starting a second one").toMatch(/if\s*\(\s*shuttingDown\s*!==\s*null\s*\)\s*\{\s*return\s+shuttingDown;/);
+    const stopBotStart = body.indexOf("stopBot:");
+    expect(stopBotStart, "stopBot step present").toBeGreaterThan(-1);
+    const stopBotBody = body.slice(stopBotStart, body.indexOf("stopConsumers:"));
+    expect(stopBotBody, "stopBot awaits bot.stop()").toMatch(/await\s+bot\.stop\(\)/);
+    expect(stopBotBody, "stopBot awaits the polling promise so an in-flight handler finishes before teardown continues").toMatch(/await\s+pollingPromise/);
   });
 });
