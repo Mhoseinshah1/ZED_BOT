@@ -1006,6 +1006,52 @@ publish_first_install_current() {
   advance_installation_bootstrap health-confirmed promoted
 }
 
+# publish_first_install_current's own tail is: write_lifecycle_role (durably
+# publishes current.json) -> validate_generation_owned_evidence -> remove_
+# canonical_state_file (deletes the now-absorbed candidate) -> advance_
+# installation_bootstrap health-confirmed promoted. A process death anywhere
+# in that window (crash, OOM-kill, host reboot, SIGKILL) leaves current.json
+# durably published - possibly with the candidate file still lingering too -
+# while bootstrap.json stays stuck at health-confirmed forever.
+# classify_installation's existing-canonical branch then rejects the
+# installation on every later run ("Canonical metadata conflicts with
+# incomplete bootstrap identity"), and reset_abandoned_first_install_
+# bootstrap can never help: it only fires when current.json is ABSENT, which
+# is no longer true here.
+#
+# This is a fundamentally different situation from the one reset_abandoned_
+# first_install_bootstrap resets past: nothing here is abandoned or
+# ambiguous. current.json already IS the fully-published, schema-valid,
+# evidence-verified generation this bootstrap identity was minted for - the
+# only thing that failed to happen is the last bookkeeping write. Finish it
+# instead of discarding anything; current.json itself is never deleted,
+# moved, or rewritten by this function.
+#
+# Every check below is a precondition on the ONE specific, provably-safe,
+# identity-matched shape this can recover. Any mismatch - a different
+# generation, a missing/invalid/unevidenced current.json, any other bootstrap
+# kind or phase - makes this a documented no-op (return 0), leaving classify_
+# installation's own existing checks to keep failing exactly as closed as
+# before. Same require_deployment_lock discipline as reset_abandoned_first_
+# install_bootstrap, its closest sibling: this must only ever run for a
+# process that can prove the prior attempt is no longer live.
+recover_first_install_promotion() {
+  local candidate
+  require_deployment_lock || return 1
+  { [ -e "$ZEDBOT_INSTALLATION_BOOTSTRAP" ] || [ -L "$ZEDBOT_INSTALLATION_BOOTSTRAP" ]; } || return 0
+  validate_installation_bootstrap || return 0
+  [ "$(/usr/bin/jq -r '.kind+":"+.phase' "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = first-install:health-confirmed ] || return 0
+  { [ -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ]; } || return 0
+  validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || return 0
+  validate_generation_owned_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || return 0
+  [ "$(/usr/bin/jq -r .generation "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = "$(/usr/bin/jq -r .generation "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")" ] || return 0
+  candidate="$ZEDBOT_DEPLOYMENT_DIR/candidate-$(/usr/bin/jq -r .generation "$ZEDBOT_INSTALLATION_BOOTSTRAP").json"
+  if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+    remove_canonical_state_file "$candidate" || return 1
+  fi
+  advance_installation_bootstrap health-confirmed promoted
+}
+
 remove_canonical_state_file() {
   local file="$1" before
   require_deployment_lock || return 1

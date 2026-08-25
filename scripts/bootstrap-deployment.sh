@@ -30,7 +30,20 @@ main() {
   # classifying - see reset_abandoned_first_install_bootstrap's own comment
   # for why this is safe.
   reset_abandoned_first_install_bootstrap || return 1
-  [ "$(classify_installation first-install)" = genuine-first-install ] || { log_error "First-install bootstrap requires an empty canonical state identity."; return 1; }
+  # A crash between publish_first_install_current's own current.json write
+  # and its final bootstrap.json promotion (further down this file) leaves a
+  # healthy, fully-published installation whose bootstrap identity never
+  # advanced - see recover_first_install_promotion's own comment in
+  # lib/common.sh for why finishing that one write is safe. A no-op for
+  # every other state, including a genuine first install.
+  recover_first_install_promotion || return 1
+  case "$(classify_installation first-install)" in
+    genuine-first-install) ;;
+    existing-canonical)
+      log_success "First installation was already completed by a previous run; nothing further to do."
+      return 0 ;;
+    *) log_error "First-install bootstrap requires an empty canonical state identity."; return 1 ;;
+  esac
 
   snapshot_result="$(prepare_exact_origin_main)" || return 1
   read -r target tree SOURCE_SNAPSHOT <<< "$snapshot_result"

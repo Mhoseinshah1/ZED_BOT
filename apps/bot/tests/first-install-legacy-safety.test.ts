@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -56,8 +56,8 @@ describe("area 10 locked atomic bootstrap and conversion", () => {
     expect(body.indexOf("convert_supported_legacy_installation")).toBeGreaterThan(readiness);
   });
 
-  it("executes the complete first-install orchestrator through mandatory mocked gates", () => { const dir = fixture(); const snapshot = fixture(); const trace = path.join(dir, "trace"); const body = `. '${bootstrapScript}'; set_deployment_state_paths '${dir}'; require_root(){ :; }; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; app_cd(){ :; }; load_env_if_exists(){ :; }; reset_compose_fixed_identity(){ :; }; detect_compose_command(){ :; }; acquire_deployment_lock(){ ZEDBOT_DEPLOYMENT_LOCK_HELD=1; }; reset_abandoned_first_install_bootstrap(){ echo reset-check >> '${trace}'; }; classify_installation(){ echo genuine-first-install; }; prepare_exact_origin_main(){ echo '${sha} ${tree} ${snapshot}'; }; verify_source_snapshot(){ :; }; register_source_snapshot(){ :; }; set_update_compose_contract(){ :; }; validate_compose_application_images(){ echo compose >> '${trace}'; }; validate_migration_declaration_pair(){ MIGRATION_MANIFEST_SHA256='${"d".repeat(64)}'; MIGRATION_DECLARATIONS_JSON='[]'; echo declarations >> '${trace}'; }; begin_installation_bootstrap(){ echo bootstrap >> '${trace}'; }; initialize_operation_state(){ echo state-init >> '${trace}'; }; validate_dependencies_healthy(){ echo dependencies >> '${trace}'; }; advance_operation_state(){ echo "state:$1:$2" >> '${trace}'; }; require_source_integrity(){ echo source >> '${trace}'; }; build_verified_source_snapshot(){ echo build >> '${trace}'; }; run_clean_docker(){ echo 'sha256:${"2".repeat(64)}'; }; persist_migration_declaration_evidence(){ mkdir -p "$2"; cp '${path.join(root, "docker-compose.yml")}' "$2/docker-compose.yml"; }; operation_mktemp(){ mktemp "$1"; }; atomic_write_metadata(){ cp "$1" "$2"; chmod 600 "$2"; }; validate_generation_metadata_core(){ :; }; validate_generation_owned_evidence(){ :; }; advance_installation_bootstrap(){ echo "bootstrap:$1:$2" >> '${trace}'; }; run_compose(){ echo "compose-cmd:$*" >> '${trace}'; }; recreate_application_services(){ echo recreate >> '${trace}'; }; verify_application_recreation_set(){ echo recreate-verified >> '${trace}'; }; record_bot_recreation_boundary(){ echo bot-boundary >> '${trace}'; }; rewrite_generation_state(){ echo "candidate:$2" >> '${trace}'; }; validate_running_application(){ echo generic-and-bot-ready >> '${trace}'; }; publish_first_install_current(){ echo publish-current >> '${trace}'; }; record_deployed_sha(){ echo record-sha >> '${trace}'; }; retain_known_good_image(){ echo "retain:$2" >> '${trace}'; }; log_success(){ :; }; main; cat '${trace}'`;
-    const result = spawnSync("bash", ["-c", body], { encoding: "utf8" }); expect(result.status, result.stderr).toBe(0); const traceText = result.stdout; for (const gate of ["reset-check", "compose", "declarations", "bootstrap", "dependencies", "build", "compose-cmd:run --rm --no-deps api", "compose-cmd:run --rm --no-deps api node packages/database/dist/seed.js", "recreate", "recreate-verified", "bot-boundary", "generic-and-bot-ready", "publish-current"]) expect(traceText).toContain(gate); expect(traceText.indexOf("reset-check")).toBeLessThan(traceText.indexOf("bootstrap")); expect(traceText.indexOf("recreate")).toBeLessThan(traceText.indexOf("generic-and-bot-ready")); expect(traceText.indexOf("generic-and-bot-ready")).toBeLessThan(traceText.indexOf("publish-current"));
+  it("executes the complete first-install orchestrator through mandatory mocked gates", () => { const dir = fixture(); const snapshot = fixture(); const trace = path.join(dir, "trace"); const body = `. '${bootstrapScript}'; set_deployment_state_paths '${dir}'; require_root(){ :; }; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; app_cd(){ :; }; load_env_if_exists(){ :; }; reset_compose_fixed_identity(){ :; }; detect_compose_command(){ :; }; acquire_deployment_lock(){ ZEDBOT_DEPLOYMENT_LOCK_HELD=1; }; reset_abandoned_first_install_bootstrap(){ echo reset-check >> '${trace}'; }; recover_first_install_promotion(){ echo recover-check >> '${trace}'; }; classify_installation(){ echo genuine-first-install; }; prepare_exact_origin_main(){ echo '${sha} ${tree} ${snapshot}'; }; verify_source_snapshot(){ :; }; register_source_snapshot(){ :; }; set_update_compose_contract(){ :; }; validate_compose_application_images(){ echo compose >> '${trace}'; }; validate_migration_declaration_pair(){ MIGRATION_MANIFEST_SHA256='${"d".repeat(64)}'; MIGRATION_DECLARATIONS_JSON='[]'; echo declarations >> '${trace}'; }; begin_installation_bootstrap(){ echo bootstrap >> '${trace}'; }; initialize_operation_state(){ echo state-init >> '${trace}'; }; validate_dependencies_healthy(){ echo dependencies >> '${trace}'; }; advance_operation_state(){ echo "state:$1:$2" >> '${trace}'; }; require_source_integrity(){ echo source >> '${trace}'; }; build_verified_source_snapshot(){ echo build >> '${trace}'; }; run_clean_docker(){ echo 'sha256:${"2".repeat(64)}'; }; persist_migration_declaration_evidence(){ mkdir -p "$2"; cp '${path.join(root, "docker-compose.yml")}' "$2/docker-compose.yml"; }; operation_mktemp(){ mktemp "$1"; }; atomic_write_metadata(){ cp "$1" "$2"; chmod 600 "$2"; }; validate_generation_metadata_core(){ :; }; validate_generation_owned_evidence(){ :; }; advance_installation_bootstrap(){ echo "bootstrap:$1:$2" >> '${trace}'; }; run_compose(){ echo "compose-cmd:$*" >> '${trace}'; }; recreate_application_services(){ echo recreate >> '${trace}'; }; verify_application_recreation_set(){ echo recreate-verified >> '${trace}'; }; record_bot_recreation_boundary(){ echo bot-boundary >> '${trace}'; }; rewrite_generation_state(){ echo "candidate:$2" >> '${trace}'; }; validate_running_application(){ echo generic-and-bot-ready >> '${trace}'; }; publish_first_install_current(){ echo publish-current >> '${trace}'; }; record_deployed_sha(){ echo record-sha >> '${trace}'; }; retain_known_good_image(){ echo "retain:$2" >> '${trace}'; }; log_success(){ :; }; main; cat '${trace}'`;
+    const result = spawnSync("bash", ["-c", body], { encoding: "utf8" }); expect(result.status, result.stderr).toBe(0); const traceText = result.stdout; for (const gate of ["reset-check", "recover-check", "compose", "declarations", "bootstrap", "dependencies", "build", "compose-cmd:run --rm --no-deps api", "compose-cmd:run --rm --no-deps api node packages/database/dist/seed.js", "recreate", "recreate-verified", "bot-boundary", "generic-and-bot-ready", "publish-current"]) expect(traceText).toContain(gate); expect(traceText.indexOf("reset-check")).toBeLessThan(traceText.indexOf("recover-check")); expect(traceText.indexOf("recover-check")).toBeLessThan(traceText.indexOf("bootstrap")); expect(traceText.indexOf("recreate")).toBeLessThan(traceText.indexOf("generic-and-bot-ready")); expect(traceText.indexOf("generic-and-bot-ready")).toBeLessThan(traceText.indexOf("publish-current"));
     // Regression: the candidate metadata records immutableImageTag as
     // "zedbot-app:generation-<generation>" but nothing ever created that tag
     // for a first install, so the first later update's rollback rejected the
@@ -483,12 +483,128 @@ describe("area 10 interrupted first-install resume and reset", () => {
     expect(text).toContain("Re-run the installer to discard the incomplete attempt");
   });
 
-  it("bootstrap-deployment.sh resets an abandoned bootstrap before classifying", () => {
+  it("bootstrap-deployment.sh resets an abandoned bootstrap and recovers a stuck promotion before classifying", () => {
     const text = readFileSync(bootstrapScript, "utf8");
     const resetIndex = text.indexOf("reset_abandoned_first_install_bootstrap");
+    const recoverIndex = text.indexOf("recover_first_install_promotion");
+    const classifyIndex = text.indexOf('case "$(classify_installation first-install)" in');
     expect(resetIndex).toBeGreaterThan(-1);
+    expect(recoverIndex).toBeGreaterThan(-1);
+    expect(classifyIndex).toBeGreaterThan(-1);
     expect(resetIndex).toBeGreaterThan(text.indexOf("acquire_deployment_lock"));
-    expect(resetIndex).toBeLessThan(text.indexOf('[ "$(classify_installation first-install)"'));
+    expect(resetIndex).toBeLessThan(recoverIndex);
+    expect(recoverIndex).toBeLessThan(classifyIndex);
+  });
+});
+
+// Regression (P1, PR #155 review of lib/common.sh:1006 - "Make first-install
+// publication recoverable"): publish_first_install_current's own tail is
+// write current.json -> remove the absorbed candidate -> advance_
+// installation_bootstrap health-confirmed promoted. A crash anywhere in that
+// window leaves a fully-published, schema-valid current.json while
+// bootstrap.json stays stuck at health-confirmed forever - classify_
+// installation then reports existing-canonical with an incomplete bootstrap
+// identity ("Canonical metadata conflicts with incomplete bootstrap
+// identity") on every later run, and reset_abandoned_first_install_bootstrap
+// can never help: it only fires when current.json is ABSENT (classify_
+// installation first-install = recoverable-bootstrap), which is no longer
+// true once current.json is durably published. recover_first_install_
+// promotion finishes the one bookkeeping write that failed to happen,
+// without ever touching current.json itself.
+describe("area 10 first-install promotion recovery", () => {
+  const publish = (dir: string, candidate: string) =>
+    shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; advance_installation_bootstrap initialized canonical-published; advance_installation_bootstrap canonical-published health-confirmed; cat > '${candidate}' <<'JSON'
+${JSON.stringify(metadata("candidate"))}
+JSON
+chmod 600 '${candidate}'`, true);
+
+  it("is a no-op with no bootstrap.json at all", () => {
+    const dir = fixture();
+    const result = shell(dir, "recover_first_install_promotion; classify_installation first-install", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("genuine-first-install");
+  });
+
+  it("is a no-op while the bootstrap phase has not yet reached health-confirmed", () => {
+    const dir = fixture();
+    const setup = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; advance_installation_bootstrap initialized canonical-published`, true);
+    expect(setup.status, setup.stderr).toBe(0);
+    const result = shell(dir, "recover_first_install_promotion", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("canonical-published");
+  });
+
+  it("is a no-op at health-confirmed when current.json was never written (the crash happened before that write - reset_abandoned_first_install_bootstrap's own job, not this one)", () => {
+    const dir = fixture();
+    const setup = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; advance_installation_bootstrap initialized canonical-published; advance_installation_bootstrap canonical-published health-confirmed`, true);
+    expect(setup.status, setup.stderr).toBe(0);
+    const result = shell(dir, "recover_first_install_promotion", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("health-confirmed");
+    expect(existsSync(path.join(dir, "current.json"))).toBe(false);
+  });
+
+  it("is a no-op when current.json belongs to a different generation than the stuck bootstrap identity", () => {
+    const dir = fixture();
+    const setup = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; advance_installation_bootstrap initialized canonical-published; advance_installation_bootstrap canonical-published health-confirmed`, true);
+    expect(setup.status, setup.stderr).toBe(0);
+    write(path.join(dir, "current.json"), { ...metadata(), generation: "20260814T120000Z-ffffffffffff" });
+    const result = shell(dir, "recover_first_install_promotion", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("health-confirmed");
+  });
+
+  it("requires the deployment lock", () => {
+    const dir = fixture();
+    const setup = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; advance_installation_bootstrap initialized canonical-published; advance_installation_bootstrap canonical-published health-confirmed`, true);
+    expect(setup.status, setup.stderr).toBe(0);
+    write(path.join(dir, "current.json"), metadata());
+    const result = shell(dir, "recover_first_install_promotion");
+    expect(result.status).not.toBe(0);
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("health-confirmed");
+  });
+
+  it("finishes the stuck promotion and removes a lingering absorbed candidate, leaving current.json byte-identical", () => {
+    const dir = fixture();
+    const candidate = path.join(dir, `candidate-${generation}.json`);
+    const setup = publish(dir, candidate);
+    expect(setup.status, setup.stderr).toBe(0);
+    write(path.join(dir, "current.json"), metadata());
+    const before = readFileSync(path.join(dir, "current.json"), "utf8");
+    const result = shell(dir, "recover_first_install_promotion; classify_installation first-install", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("existing-canonical");
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("promoted");
+    expect(readFileSync(path.join(dir, "current.json"), "utf8")).toBe(before);
+    expect(existsSync(candidate)).toBe(false);
+  });
+
+  it("finishes the stuck promotion when the candidate was already removed (the crash happened one step later)", () => {
+    const dir = fixture();
+    const candidate = path.join(dir, `candidate-${generation}.json`);
+    const setup = publish(dir, candidate);
+    expect(setup.status, setup.stderr).toBe(0);
+    // The crash this simulates happened AFTER remove_canonical_state_file
+    // already deleted the absorbed candidate, unlike the sibling test above.
+    unlinkSync(candidate);
+    write(path.join(dir, "current.json"), metadata());
+    const result = shell(dir, "recover_first_install_promotion; classify_installation first-install", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("existing-canonical");
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("promoted");
+  });
+
+  it("bootstrap-deployment.sh treats a recovered promotion as an already-completed installation instead of erroring", () => {
+    const dir = fixture();
+    const candidate = path.join(dir, `candidate-${generation}.json`);
+    const setup = publish(dir, candidate);
+    expect(setup.status, setup.stderr).toBe(0);
+    write(path.join(dir, "current.json"), metadata());
+    const body = `. '${bootstrapScript}'; set_deployment_state_paths '${dir}'; validate_generation_owned_evidence(){ return 0; }; require_root(){ :; }; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; app_cd(){ :; }; load_env_if_exists(){ :; }; reset_compose_fixed_identity(){ :; }; detect_compose_command(){ :; }; log_success(){ printf 'SUCCESS:%s\\n' "$*"; }; main`;
+    const result = spawnSync("bash", ["-c", body], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("SUCCESS:First installation was already completed by a previous run");
+    expect(existsSync(candidate)).toBe(false);
   });
 });
 

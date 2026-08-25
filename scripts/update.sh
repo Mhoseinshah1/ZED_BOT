@@ -3,9 +3,10 @@
 # ZED_BOT updater (self-healing):
 #   safety archive -> database backup + verification gate -> validate running app
 #   -> fail-closed fetch + exact local-main verification (no checkout mutation)
-#   -> migrate legacy .env -> refresh installed CLI -> build (with identity)
-#   -> migrate DB -> force-recreate -> record deploy -> post-deploy smoke
-#   -> doctor
+#   -> migrate legacy .env -> build (with identity) -> migrate DB
+#   -> force-recreate -> record deploy -> post-deploy smoke -> doctor
+#   -> promote, then fast-forward the deployment checkout and refresh the
+#      installed CLI together as one unit (never before promotion)
 #
 # The update ABORTS before touching any code when the pre-update database
 # backup cannot be created AND verified - the running installation is left
@@ -285,6 +286,13 @@ main() {
   ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
   detect_compose_command
   acquire_deployment_lock
+  # A crash between a first install's own publish_first_install_current
+  # current.json write and its final bootstrap.json promotion leaves a
+  # healthy, fully-published installation whose bootstrap identity never
+  # advanced - see recover_first_install_promotion's own comment in
+  # lib/common.sh for why finishing that one write is safe. A no-op for
+  # every other state, including every update after the very first one.
+  recover_first_install_promotion || exit 1
   local installation_class
   installation_class="$(classify_installation observe)" || {
     log_error "Installation identity is ambiguous or unsupported; preserve the evidence and follow docs/legacy-upgrade.md."
@@ -308,13 +316,13 @@ main() {
 
   log_info "Starting ZED_BOT update ..."
 
-  log_info "[1/14] Creating a safety archive (.env + database) before updating ..."
+  log_info "[1/13] Creating a safety archive (.env + database) before updating ..."
   run_operation_child bash "${SCRIPT_DIR}/backup.sh"
 
-  log_info "[2/14] Creating and verifying a database backup (update gate) ..."
+  log_info "[2/13] Creating and verifying a database backup (update gate) ..."
   pre_update_database_backup
 
-  log_info "[3/14] Capturing the healthy running application rollback candidate ..."
+  log_info "[3/13] Capturing the healthy running application rollback candidate ..."
   local identity pre_deploy_sha pre_deploy_image_id baseline_csv migration_json
   identity="$(validate_running_application)" || {
     log_error "The current application is not healthy and cannot be retained as known-good."
@@ -336,7 +344,7 @@ main() {
   baseline_csv="$(run_compose exec -T worker sh -c 'find packages/database/prisma/migrations -mindepth 2 -maxdepth 2 -name migration.sql -print | sed -e "s#/migration\.sql\$##" -e "s#.*/##" | sort | paste -sd, -')"
   [ -n "$baseline_csv" ] || { log_error "No complete baseline migrations found."; exit 1; }
 
-  log_info "[4/14] Fetching canonical origin/main and verifying local main is not ahead of or diverged from it ..."
+  log_info "[4/13] Fetching canonical origin/main and verifying local main is not ahead of or diverged from it ..."
   local target_deploy_sha target_tree snapshot_result
   snapshot_result="$(prepare_exact_origin_main)" || {
     log_error "Fetching origin/main or verifying the local checkout against it failed."
@@ -377,7 +385,7 @@ main() {
     exit 0
   fi
 
-  log_info "[5/14] Migrating the .env to the current layout (append-only) ..."
+  log_info "[5/13] Migrating the .env to the current layout (append-only) ..."
   require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before post-fetch mutation."; exit 1; }
   migrate_legacy_env
   # Re-load so freshly appended keys (ZEDBOT_BACKUP_DIR & co) take effect.
@@ -388,16 +396,7 @@ main() {
   validate_compose_application_images || { log_error "Compose identity changed while reloading runtime environment."; exit 1; }
   ensure_backup_dir_permissions
 
-  log_info "[6/14] Refreshing the installed zedbot CLI ..."
-  # Failure to refresh the CLI must fail the update: a stale installed CLI
-  # driving new code is exactly the class of bug this updater prevents.
-  if ! install -m 0755 "$SOURCE_SNAPSHOT/scripts/zedbot.sh" "$ZEDBOT_CLI_PATH"; then
-    log_error "Could not refresh ${ZEDBOT_CLI_PATH} from the updated repository - ABORTING the update."
-    log_error "Fix the problem (disk full? read-only /usr/local/bin?) and retry: zedbot update"
-    exit 1
-  fi
-
-  log_info "[7/14] Retaining the verified previous application image and metadata ..."
+  log_info "[6/13] Retaining the verified previous application image and metadata ..."
   local rollback_tag compatibility_sha compatibility_declarations metadata_tmp generation failed_tag target_image_id migration_evidence_dir compose_evidence_sha
   generation="$(date -u +%Y%m%dT%H%M%SZ)-${target_deploy_sha:0:12}"
   CANDIDATE_METADATA="$ZEDBOT_DEPLOYMENT_DIR/candidate-${generation}.json"
@@ -431,7 +430,7 @@ main() {
   advance_operation_state current-image-retained candidate-metadata-prepared
   DEPLOYMENT_METADATA_ACTIVE=1
 
-  log_info "[8/14] Revalidating source and building updated images ..."
+  log_info "[7/13] Revalidating source and building updated images ..."
   # GIT_SHA travels into the image as its LAST layers (see Dockerfile), so
   # identity-only rebuilds stay cheap.
   verify_source_snapshot "$SOURCE_SNAPSHOT" "$target_deploy_sha" "$target_tree" || { log_error "Source snapshot changed before build."; exit 1; }
@@ -457,7 +456,7 @@ main() {
   validate_generation_metadata_core "$CANDIDATE_METADATA" candidate
   advance_operation_state candidate-image-built deployment-reference-tagged
 
-  log_info "[9/14] Validating rollback compatibility of pending migrations ..."
+  log_info "[8/13] Validating rollback compatibility of pending migrations ..."
   local compatibility_json
   require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before compatibility validation."; exit 1; }
   validate_compose_application_images || { log_error "Compose identity changed before compatibility validation."; exit 1; }
@@ -469,11 +468,15 @@ main() {
     || { log_error "Compatibility manifest checksum changed during deployment."; exit 1; }
   advance_operation_state deployment-reference-tagged compatibility-confirmed
 
-  log_info "[10/14] Applying database migrations (before the new app containers run) ..."
+  log_info "[9/13] Applying database migrations (before the new app containers run) ..."
   # `compose run` inside migrate.sh starts postgres/redis itself. The app
   # services still run the OLD code at this point - the safe direction (old
-  # code on a newer schema beats new code on an older schema). migrate.sh's
-  # legacy self-heal no-ops here: steps 4-5 already converged env + CLI.
+  # code on a newer schema beats new code on an older schema). This step
+  # does not call migrate.sh itself (it is this script's own direct
+  # replacement for that path), so its legacy_self_heal gate never runs
+  # here; step 5 has already converged .env. The installed CLI has NOT
+  # converged yet at this point - that now waits until promotion has fully
+  # succeeded, alongside the checkout sync (see the end of main()).
   require_source_integrity "$target_deploy_sha" "$target_tree" "$SOURCE_SNAPSHOT" || { log_error "Source identity changed before migration."; exit 1; }
   validate_compose_application_images || { log_error "Compose identity changed before migration."; exit 1; }
   run_compose run --rm --no-deps api node packages/database/dist/referral-migration-preflight.js
@@ -489,7 +492,7 @@ main() {
   run_compose run --rm --no-deps api node packages/database/dist/seed.js
   advance_operation_state compatibility-confirmed migrations-confirmed
 
-  log_info "[11/14] Revalidating source and recreating services ..."
+  log_info "[10/13] Revalidating source and recreating services ..."
   # --force-recreate is THE fix for the stale-container symptom observed in
   # production: a plain `up -d` can leave the previous containers (previous
   # image, previous mounts, previous env) running after a rebuild.
@@ -504,7 +507,7 @@ main() {
   set_rollback_state "application-recreated"
   advance_operation_state migrations-confirmed application-recreated
 
-  log_info "[12/14] Recording the deployed version ..."
+  log_info "[11/13] Recording the deployed version ..."
   # Must be explicit: prepare_exact_origin_main no longer requires the local
   # checkout to already equal the fetched target (it may legitimately lag
   # behind), so record_deployed_sha's no-argument repo_head_sha() fallback
@@ -513,10 +516,10 @@ main() {
   # report a version mismatch against the running image forever after.
   record_deployed_sha "$target_deploy_sha"
 
-  log_info "[13/14] Running the post-deploy smoke test ..."
+  log_info "[12/13] Running the post-deploy smoke test ..."
   post_deploy_smoke
 
-  log_info "[14/14] Running health checks ..."
+  log_info "[13/13] Running health checks ..."
   if run_operation_child bash "${SCRIPT_DIR}/doctor.sh"; then
     validate_running_application "$target_deploy_sha" >/dev/null
     set_rollback_state "healthy-candidate"
@@ -531,7 +534,34 @@ main() {
     # sync_deployment_checkout's own comment for why this must not run any
     # earlier (a failed update should leave known-working recovery scripts
     # in place, not ones from a release that just failed to deploy).
-    sync_deployment_checkout "$target_deploy_sha" || log_warn "Could not fast-forward the deployment checkout to ${target_deploy_sha:0:10}; the installed CLI may run stale scripts until this is resolved manually (git -C \"\$ZEDBOT_APP_DIR\" pull --ff-only)."
+    #
+    # The installed CLI (ZEDBOT_CLI_PATH) is refreshed here too, and only
+    # AFTER the checkout sync has itself succeeded - never independently of
+    # it, and never any earlier in this function. zedbot.sh hardcodes
+    # ZEDBOT_APP_DIR as the source of the lib/common.sh it sources at
+    # runtime (never its own installed location), so the one combination
+    # that can actually break recovery commands with "command not found" is
+    # a NEW installed CLI paired with the OLD checkout's common.sh - e.g. a
+    # freshly added helper the old library does not define yet. Installing
+    # the new CLI before the checkout advances (the previous behavior, at
+    # old step 6 of 14) opened exactly that window for the entire rest of
+    # the update, and left it open indefinitely on any later failure. The
+    # reverse pairing - the OLD CLI left in place against a NEW checkout,
+    # which is what happens below if refresh_cli itself fails after a
+    # successful sync - stays safe: common.sh only ever gains helpers
+    # across releases, it does not remove ones an older zedbot.sh still
+    # calls, and cli_is_stale/`zedbot doctor --fix` already exist as the
+    # established, self-healing way to catch up a merely-stale CLI. So on
+    # any failure below, the CLI and the checkout are left as ONE
+    # consistent, fully-functional pair - the currently-running release's,
+    # never a mix - exactly mirroring how DEPLOYMENT_REFERENCE_RESTORE_ID
+    # keeps zedbot-app:latest and the running containers as one consistent
+    # pair earlier in this same function.
+    if sync_deployment_checkout "$target_deploy_sha"; then
+      refresh_cli || log_warn "Could not refresh the installed zedbot CLI (${ZEDBOT_CLI_PATH}); it still matches the previous release and every recovery command (zedbot restart/doctor/rollback) remains fully functional. Run 'zedbot doctor --fix' (or 'zedbot doctor') to retry."
+    else
+      log_warn "Could not fast-forward the deployment checkout to ${target_deploy_sha:0:10}; the installed CLI was left unchanged to match it, so every recovery command (zedbot restart/doctor/rollback) remains fully functional against the release actually running. Run 'zedbot doctor --fix' or manually: git -C \"\$ZEDBOT_APP_DIR\" pull --ff-only."
+    fi
     log_success "ZED_BOT update completed successfully."
   else
     log_error "Update health checks failed; deployment was not marked successful."
