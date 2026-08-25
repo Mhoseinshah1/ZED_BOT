@@ -119,6 +119,7 @@ describe("typed rollback migration compatibility", () => {
 describe("deployment shell safety", () => {
   const update = readFileSync(path.join(scripts, "update.sh"), "utf8");
   const rollback = readFileSync(path.join(scripts, "rollback.sh"), "utf8");
+  const migrate = readFileSync(path.join(scripts, "migrate.sh"), "utf8");
   const commonShell = readFileSync(path.join(scripts, "lib/common.sh"), "utf8");
 
   it("forwards only a validated deployment SHA through the clean Compose environment", () => {
@@ -761,6 +762,49 @@ fi
     const holder = spawnSync("bash", ["-c", `exec 8>'${dir}/deployment.lock'; chmod 600 '${dir}/deployment.lock'; flock 8; bash -c ". '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; acquire_deployment_lock"`], {
       encoding: "utf8", env: process.env,
     });
+    expect(holder.status).not.toBe(0);
+    expect(holder.stderr).toContain("already running");
+  });
+
+  // Regression: migrate.sh is documented as runnable standalone (see its
+  // own header comment), not just as install.sh/update.sh's internal
+  // migration step, but main() never acquired the deployment lock unless
+  // the legacy_install_detected branch happened to run. A standalone
+  // `bash scripts/migrate.sh` overlapping an in-progress update or
+  // rollback (which holds this same lock throughout) could apply new
+  // migrations after that operation already captured its pre-deploy
+  // migration baseline or compatibility snapshot, invalidating a decision
+  // it already made before application recreation. The lock is now held
+  // for the whole script; legacy_self_heal must not acquire it a second
+  // time (acquire_deployment_lock hard-fails when already held by this
+  // same process).
+  it("migrate.sh main() acquires the deployment lock before the preflight/migration sequence", () => {
+    const mainStart = migrate.indexOf("main() {");
+    const lockIndex = migrate.indexOf("acquire_deployment_lock", mainStart);
+    const preflightIndex = migrate.indexOf("referral-migration-preflight.js", mainStart);
+    expect(lockIndex).toBeGreaterThan(mainStart);
+    expect(preflightIndex).toBeGreaterThan(lockIndex);
+  });
+
+  it("legacy_self_heal no longer acquires the lock a second time", () => {
+    const body = migrate.slice(migrate.indexOf("legacy_self_heal() {"), migrate.indexOf("\nmain() {"));
+    expect(body).not.toMatch(/\n\s*acquire_deployment_lock\n/);
+    // Still re-derives deployment-state paths after migrate_legacy_env.
+    expect(body).toContain("reset_deployment_state_fixed_identity");
+  });
+
+  it("a standalone migrate.sh run fails closed while an update/rollback already holds the lock", () => {
+    const mainOpen = migrate.indexOf("main() {") + "main() {".length;
+    const preamble = migrate.slice(mainOpen, migrate.indexOf("acquire_deployment_lock") + "acquire_deployment_lock".length);
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-migrate-lock-"));
+    const holder = spawnSync(
+      "bash",
+      [
+        "-c",
+        `exec 8>'${dir}/deployment.lock'; chmod 600 '${dir}/deployment.lock'; flock 8; bash -c ". '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; require_root(){ :; }; reset_deployment_state_fixed_identity(){ :; }; app_cd(){ :; }; load_env_if_exists(){ :; }; reset_compose_fixed_identity(){ :; }; detect_compose_command(){ :; }; ${preamble}"`,
+      ],
+      { encoding: "utf8", env: process.env },
+    );
     expect(holder.status).not.toBe(0);
     expect(holder.stderr).toContain("already running");
   });

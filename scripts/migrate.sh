@@ -83,8 +83,11 @@ legacy_self_heal() {
   log_info "Recreating all containers with the new images and .env ..."
   run_compose up -d --force-recreate --remove-orphans
 
+  # main() already acquired the deployment lock for the whole script;
+  # acquiring it again here would fail closed ("this process already owns
+  # the deployment lock"). Still re-derive deployment-state paths, since
+  # migrate_legacy_env above may have appended keys the resolution depends on.
   reset_deployment_state_fixed_identity
-  acquire_deployment_lock
   snapshot_result="$(prepare_exact_origin_main)" || return 1
   read -r SOURCE_SHA SOURCE_TREE SOURCE_SNAPSHOT <<< "$snapshot_result"
   register_source_snapshot "$SOURCE_SNAPSHOT" "$SOURCE_SHA" "$SOURCE_TREE" || return 1
@@ -102,8 +105,23 @@ legacy_self_heal() {
 
 main() {
   require_root
+  reset_deployment_state_fixed_identity
   app_cd
+  load_env_if_exists
+  reset_deployment_state_fixed_identity
+  reset_compose_fixed_identity
+  # shellcheck disable=SC2034  # re-pinned after load_env_if_exists could have
+  # sourced a hostile .env; read by run_compose() etc. in the sourced common.sh.
+  ZEDBOT_CANONICAL_COMPOSE_FILE="$ZEDBOT_CANONICAL_PROJECT_DIR/docker-compose.yml"
   detect_compose_command
+  # This file is also runnable standalone (see the header comment), not just
+  # as install.sh/update.sh's own internal migration step - a schema
+  # mutation that races an in-progress update/rollback (which holds this
+  # SAME lock throughout) could apply new migrations after that operation
+  # already captured its pre-deploy migration baseline or compatibility
+  # snapshot, invalidating a decision it already made. Held for the whole
+  # script; legacy_self_heal below no longer acquires it a second time.
+  acquire_deployment_lock
 
   # PREFLIGHT (runs BEFORE migrate deploy): on a legacy database that predates the
   # one-commission-per-order unique index and accumulated duplicate orderId rows,
