@@ -39,7 +39,20 @@ migrate_owned_cleanup() {
 # calling this script) never do the work twice.
 # =============================================================================
 legacy_self_heal() {
-  if ! legacy_install_detected; then
+  # legacy_install_detected alone is not retry-safe: this function's own
+  # early steps (migrate_legacy_env, refresh_cli) fix the exact env/CLI
+  # staleness that function checks, so an interruption AFTER those steps but
+  # BEFORE publish_validated_legacy_self_heal durably publishes current.json
+  # makes a rerun's legacy_install_detected return false and skip this whole
+  # function - even though legacy-install-v1.json is still unconverted.
+  # publish_validated_legacy_self_heal's own classify_installation guard is
+  # already retry-safe by generation identity; this outer gate only needs to
+  # keep REACHING it. Detect that "conversion evidence exists but was never
+  # published" state directly and independently of env/CLI staleness.
+  local legacy_unconverted=1
+  { [ -e "$ZEDBOT_LEGACY_INSTALLATION" ] || [ -L "$ZEDBOT_LEGACY_INSTALLATION" ]; } &&
+    ! { [ -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ]; } || legacy_unconverted=0
+  if ! legacy_install_detected && [ "$legacy_unconverted" -eq 0 ]; then
     return 0
   fi
 

@@ -1068,6 +1068,41 @@ fi
     expect(body).toContain("reset_deployment_state_fixed_identity");
   });
 
+  // Regression (P1, PR #155 review of migrate.sh:94 - "Keep legacy
+  // conversion retryable until metadata is published"): legacy_self_heal's
+  // own early steps (migrate_legacy_env, refresh_cli) fix the exact env/CLI
+  // staleness legacy_install_detected checks. An interruption AFTER those
+  // steps but BEFORE publish_validated_legacy_self_heal durably publishes
+  // current.json used to make a rerun's legacy_install_detected return
+  // false, silently skipping the whole function - even though
+  // legacy-install-v1.json was still unconverted and no current.json
+  // existed. legacy_self_heal must keep running while that evidence shape
+  // (legacy record present, no current.json yet) persists, independent of
+  // env/CLI staleness.
+  it("legacy_self_heal keeps retrying an unconverted legacy record even after env/CLI staleness is already fixed", () => {
+    const body = migrate.slice(migrate.indexOf("legacy_self_heal() {"), migrate.indexOf("\nmain() {"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-legacy-selfheal-retry-"));
+    const trace = path.join(dir, "trace");
+    writeFileSync(path.join(dir, "legacy-install-v1.json"), "{}");
+    const command = `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; legacy_install_detected(){ return 1; }; migrate_legacy_env(){ :; }; ensure_backup_dir_permissions(){ :; }; refresh_cli(){ :; }; repo_head_sha(){ :; }; run_compose_with_deployment_sha(){ :; }; run_compose(){ :; }; reset_deployment_state_fixed_identity(){ set_deployment_state_paths '${dir}'; }; prepare_exact_origin_main(){ echo 'sha tree snapshot'; }; register_source_snapshot(){ :; }; publish_validated_legacy_self_heal(){ echo publish-called >> '${trace}'; }; record_deployed_sha(){ :; }; cleanup_source_snapshot(){ :; }; release_deployment_lock(){ :; }; ${body}\nlegacy_self_heal`;
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(trace)).toBe(true);
+    expect(readFileSync(trace, "utf8")).toContain("publish-called");
+  });
+
+  it("legacy_self_heal is still a true no-op once conversion has actually published current.json", () => {
+    const body = migrate.slice(migrate.indexOf("legacy_self_heal() {"), migrate.indexOf("\nmain() {"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-legacy-selfheal-done-"));
+    const trace = path.join(dir, "trace");
+    writeFileSync(path.join(dir, "legacy-install-v1.json"), "{}");
+    writeFileSync(path.join(dir, "current.json"), "{}");
+    const command = `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; legacy_install_detected(){ return 1; }; publish_validated_legacy_self_heal(){ echo publish-called >> '${trace}'; }; ${body}\nlegacy_self_heal`;
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(trace)).toBe(false);
+  });
+
   it("a standalone migrate.sh run fails closed while an update/rollback already holds the lock", () => {
     const mainOpen = migrate.indexOf("main() {") + "main() {".length;
     const preamble = migrate.slice(mainOpen, migrate.indexOf("acquire_deployment_lock") + "acquire_deployment_lock".length);
