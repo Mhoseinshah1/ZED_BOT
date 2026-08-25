@@ -940,6 +940,87 @@ fi
     expect(existsSync(trace)).toBe(false);
   });
 
+  // Regression (P1, PR #155 review of rollback.sh:215 - "Permit rollback
+  // when an application container is stopped"): a failed update can leave a
+  // service stopped (Compose removed the old container and the candidate
+  // exited, or creation was interrupted) or entirely absent. `ps` (no
+  // --all) omits stopped/exited containers, so the loop's own unconditional
+  // nonempty check used to reject the rollback before it could recreate
+  // anything - even though the container's real identity (once actually
+  // inspected via --all) was perfectly legitimate. --all is required to see
+  // it, matching record_bot_recreation_boundary_core's own `ps --all -q
+  // bot` (lib/common.sh). A missing service carries no image at all, so it
+  // cannot be the unknown third image this loop actually guards against;
+  // only an available container whose identity is unrecognized is rejected.
+  it("permits rollback when an application container is stopped (visible only via --all) or entirely absent, but still rejects an unrecognized or inconsistent image", () => {
+    const start = rollback.indexOf("for service in api bot worker; do");
+    const end = rollback.indexOf("\n  # Confirmation happens here", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const loop = rollback.slice(start, end);
+    expect(loop).toContain("run_compose ps --all -q");
+
+    const target = "a".repeat(40);
+    const pre = "b".repeat(40);
+    const targetImageId = `sha256:${"1".repeat(64)}`;
+    const preImageId = `sha256:${"2".repeat(64)}`;
+
+    function run(stubs: string) {
+      // metadata_field reads previous.json - its own ".targetImageId" field
+      // records what image THAT generation was deployed as, i.e. the "pre"
+      // image id from the current rollback's point of view.
+      const command = `. '${path.join(scripts, "lib/common.sh")}'; target='${target}'; pre='${pre}'; target_running_id=""; metadata_field(){ printf '%s' '${preImageId}'; }; ${stubs} run_loop(){ local service cid image_id image_sha\n${loop}\n}\nrun_loop && printf 'LOOP_OK:%s\\n' "$target_running_id"`;
+      return spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    }
+
+    // Stubs only answer the exact `ps --all -q <service>` form the fixed
+    // loop must call - a pre-fix `ps -q <service>` (no --all) would match
+    // no case here and get empty output for every service.
+    const stubs = `
+      run_compose(){ case "$*" in
+        "ps --all -q api") printf '%s\\n' cid-api-stopped ;;
+        "ps --all -q bot") : ;;
+        "ps --all -q worker") printf '%s\\n' cid-worker-running ;;
+      esac; }
+      run_clean_docker(){ case "$3:$4" in
+        '{{.Image}}:cid-api-stopped') printf '%s' '${targetImageId}' ;;
+        '{{.Image}}:cid-worker-running') printf '%s' '${preImageId}' ;;
+        *':cid-api-stopped') printf 'GIT_SHA=%s\\n' '${target}' ;;
+        *':cid-worker-running') printf 'GIT_SHA=%s\\n' '${pre}' ;;
+      esac; }
+    `;
+    const ok = run(stubs);
+    expect(ok.status, ok.stderr).toBe(0);
+    expect(ok.stdout.trim()).toBe(`LOOP_OK:${targetImageId}`);
+
+    // Still rejects a container whose available identity is unrecognized.
+    const unknownStubs = `
+      run_compose(){ case "$*" in "ps --all -q api") printf '%s\\n' cid-api ;; *) : ;; esac; }
+      run_clean_docker(){ case "$3" in '{{.Image}}') printf '%s' '${targetImageId}' ;; *) printf 'GIT_SHA=%s\\n' '${"c".repeat(40)}' ;; esac; }
+    `;
+    const unknown = run(unknownStubs);
+    expect(unknown.status).not.toBe(0);
+    expect(unknown.stderr).toContain("api carries an unknown application SHA");
+
+    // Still rejects two target-image containers that disagree on image id.
+    const inconsistentStubs = `
+      run_compose(){ case "$*" in
+        "ps --all -q api") printf '%s\\n' cid-api ;;
+        "ps --all -q bot") printf '%s\\n' cid-bot ;;
+        "ps --all -q worker") : ;;
+      esac; }
+      run_clean_docker(){ case "$3:$4" in
+        '{{.Image}}:cid-api') printf '%s' '${targetImageId}' ;;
+        '{{.Image}}:cid-bot') printf '%s' '${preImageId}' ;;
+        *':cid-api') printf 'GIT_SHA=%s\\n' '${target}' ;;
+        *':cid-bot') printf 'GIT_SHA=%s\\n' '${target}' ;;
+      esac; }
+    `;
+    const inconsistent = run(inconsistentStubs);
+    expect(inconsistent.status).not.toBe(0);
+    expect(inconsistent.stderr).toContain("Target containers use inconsistent images");
+  });
+
   it("metadata writes atomically at mode 600 without secret-shaped fields", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-metadata-test-"));
     const source = path.join(dir, "source.json"); const output = path.join(dir, "previous.json");

@@ -234,10 +234,18 @@ perform_rollback() {
   state="$(metadata_field '.state')"
   [ "$state" != "rolled-back" ] || { log_error "This rollback was already completed; refusing to run it again."; return 1; }
   # A failed Compose recreation may leave a mix of old and target application
-  # containers. Both identities must be known; no third image is accepted.
+  # containers - possibly stopped ones: Compose can remove the old container
+  # and leave the candidate exited, or creation itself can be interrupted.
+  # `ps` (no --all) omits stopped/exited containers entirely, so it alone
+  # cannot tell "stopped" apart from "never existed" - --all is required to
+  # see them, matching record_bot_recreation_boundary_core's own `ps --all
+  # -q bot` above. A service with no container at all (never created, or
+  # fully removed) carries no image and so cannot be the unknown third image
+  # this loop actually guards against; only an available container whose
+  # identity is unrecognized is rejected.
   for service in api bot worker; do
-    cid="$(run_compose ps -q "$service" 2>/dev/null | head -n 1)"
-    [ -n "$cid" ] || { log_error "${service} container identity is unavailable."; return 1; }
+    cid="$(run_compose ps --all -q "$service" 2>/dev/null | head -n 1)"
+    [ -n "$cid" ] || continue
     image_id="$(run_clean_docker inspect -f '{{.Image}}' "$cid" 2>/dev/null)"
     image_sha="$(run_clean_docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" | sed -n 's/^GIT_SHA=//p' | tail -n 1)"
     case "$image_sha" in
