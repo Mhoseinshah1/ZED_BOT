@@ -130,6 +130,22 @@ main() {
   publish_first_install_current "$candidate" || return 1
   advance_operation_state promotion-prepared promoted || return 1
   finalize_promoted_operation_state
+  # Only now, with the first installation fully verified successful, sync the
+  # persistent checkout ($ZEDBOT_APP_DIR) and installed CLI ($ZEDBOT_CLI_PATH)
+  # to what was actually built and deployed above - mirrors update.sh's own
+  # sync_deployment_checkout + refresh_cli pattern at the end of a successful
+  # update. install.sh clones the repository and installs the CLI before ever
+  # invoking this script; if origin/main advanced between that clone and this
+  # script's own prepare_exact_origin_main fetch, the deployed target can be
+  # newer than the checkout/CLI left behind, so every later lifecycle command
+  # (start/restart/doctor/...) would otherwise keep running older scripts and
+  # an older Compose contract against the newer generation. Best-effort, like
+  # update.sh: a failure here must not be reported as a failed installation.
+  if sync_deployment_checkout "$target"; then
+    refresh_cli || log_warn "Could not refresh the installed zedbot CLI (${ZEDBOT_CLI_PATH}); it may still match an older checkout. Run 'zedbot doctor --fix' (or 'zedbot doctor') to retry."
+  else
+    log_warn "Could not fast-forward the deployment checkout to ${target:0:10}; the installed CLI was left unchanged to match it. Run 'zedbot doctor --fix' or manually: git -C \"\$ZEDBOT_APP_DIR\" pull --ff-only."
+  fi
   record_deployed_sha "$target"
   log_success "Canonical first installation completed. Rollback is unavailable until a later update creates previous.json."
 }

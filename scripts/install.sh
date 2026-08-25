@@ -14,7 +14,15 @@
 # data and backups are preserved unless you explicitly choose otherwise.
 #
 # Optional environment overrides (useful for automation/testing):
-#   ZEDBOT_BRANCH                 git branch to install (default: main)
+#   ZEDBOT_BRANCH                 must be "main" (the default) or unset - every
+#                                  canonical deployment script (bootstrap-
+#                                  deployment.sh, update.sh, migrate.sh, via
+#                                  prepare_exact_origin_main) hardcodes branch
+#                                  "main" as the one supported deploy branch.
+#                                  Setting this to anything else is rejected
+#                                  before any mutation. Combine with
+#                                  ZEDBOT_REPO_URL to point at a fork/mirror
+#                                  whose default branch is also named "main".
 #   ZEDBOT_NONINTERACTIVE=1       never prompt; use defaults / the vars below
 #   ZEDBOT_TELEGRAM_BOT_TOKEN     preseed TELEGRAM_BOT_TOKEN
 #   ZEDBOT_ADMIN_TELEGRAM_IDS     preseed ADMIN_TELEGRAM_IDS
@@ -77,6 +85,24 @@ has_command() { command -v "$1" >/dev/null 2>&1; }
 require_root() {
   if [ "$(id -u)" -ne 0 ]; then
     log_error "The ZED_BOT installer must be run as root. Try again with sudo."
+    exit 1
+  fi
+}
+
+# Every canonical deployment script this installer eventually hands off to
+# (bootstrap-deployment.sh, and later update.sh/migrate.sh) fetches and
+# requires branch "main" via prepare_exact_origin_main/verify_deployment_
+# checkout in scripts/lib/common.sh - "main" is a deliberate, deeply-relied-
+# upon invariant, not a default that those scripts merely happen to use. A
+# non-main ZEDBOT_BRANCH would still clone, configure .env, install the CLI
+# and start dependencies successfully, only to fail bootstrap deterministically
+# afterward, leaving a half-mutated server. Reject it here, before
+# clone_or_update_repo (or anything else) touches the server.
+require_main_branch_override() {
+  if [ "$REPO_BRANCH" != main ]; then
+    log_error "ZEDBOT_BRANCH='${REPO_BRANCH}' is not supported: only branch 'main' can be installed."
+    log_error "Every canonical deployment script (bootstrap-deployment.sh, update.sh, migrate.sh) hardcodes 'main' as the one supported deploy branch."
+    log_error "Unset ZEDBOT_BRANCH (or set it to 'main') and re-run the installer. To install from a fork/mirror instead, set ZEDBOT_REPO_URL and keep its default branch named 'main'."
     exit 1
   fi
 }
@@ -724,6 +750,7 @@ main() {
   echo
   log_info "ZED_BOT installer starting ..."
   require_root
+  require_main_branch_override
   require_ubuntu
   install_base_packages
   install_docker

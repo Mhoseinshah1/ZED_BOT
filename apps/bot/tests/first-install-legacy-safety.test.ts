@@ -190,6 +190,27 @@ describe("area 10 failure boundaries and preserved policies", () => {
   it("cleanup never targets canonical or legacy evidence", () => { const text = readFileSync(common, "utf8"); expect(text).not.toMatch(/operation_register_artifact.*(?:current\.json|legacy-install-v1\.json)/); });
   it("keeps the exact application-only recreation set", () => { const text = readFileSync(common, "utf8"); expect(text).toContain("--force-recreate api bot worker"); expect(text.match(/--force-recreate api bot worker/)?.[0]).not.toMatch(/postgres|redis/); });
   it("the installer starts dependencies separately and delegates application bootstrap", () => { const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8"); expect(text).toContain("up -d --no-deps --no-build postgres redis"); expect(text).toContain('bash "${APP_DIR}/scripts/bootstrap-deployment.sh"'); expect(text).not.toContain("up -d --build --remove-orphans"); });
+  // Regression (P2, PR #155 review of bootstrap-deployment.sh:31/:48 - "Honor
+  // or remove the installer branch override"): every canonical deployment
+  // script (bootstrap-deployment.sh, update.sh, migrate.sh, via
+  // prepare_exact_origin_main) hardcodes branch "main". A non-main
+  // ZEDBOT_BRANCH used to clone, configure .env, install the CLI and start
+  // dependencies successfully, only to fail bootstrap deterministically
+  // afterward, leaving a half-mutated server. Reject it before any mutation.
+  it("rejects a non-main ZEDBOT_BRANCH override before any installation mutation, but accepts main (or unset)", () => {
+    const text = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    expect(text).toContain("require_main_branch_override()");
+    const main = text.slice(text.indexOf("\nmain() {"));
+    expect(main.indexOf("require_main_branch_override")).toBeGreaterThan(-1);
+    expect(main.indexOf("require_main_branch_override")).toBeLessThan(main.indexOf("install_base_packages"));
+    const body = text.slice(text.indexOf("require_main_branch_override() {"), text.indexOf("\nrequire_ubuntu() {"));
+    function run(branch: string) {
+      return spawnSync("bash", ["-c", `REPO_BRANCH='${branch}'; log_error(){ :; }; ${body}\nrequire_main_branch_override`], { encoding: "utf8" });
+    }
+    expect(run("main").status).toBe(0);
+    expect(run("develop").status).not.toBe(0);
+    expect(run("").status).not.toBe(0);
+  });
   // Regression: the installer explicitly allows leaving TELEGRAM_BOT_TOKEN
   // empty ("can be added later" - install.sh's own prompt says so), but
   // apps/bot/src/index.ts never calls run() without a token and so never
@@ -202,6 +223,62 @@ describe("area 10 failure boundaries and preserved policies", () => {
     expect(text).toContain('if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then');
     expect(text).toContain('validate_running_application "$target" 0 >/dev/null || return 1');
     expect(text.indexOf("recreate_application_services")).toBeLessThan(text.indexOf('if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then'));
+  });
+  // Regression (P2, PR #155 review of bootstrap-deployment.sh:53 -
+  // "Synchronize the checkout after first-install snapshot deployment"): if
+  // origin/main advances between install.sh's own clone/CLI-install and this
+  // script's later fetch, prepare_exact_origin_main intentionally deploys
+  // the newer snapshot without requiring the checkout to already match it.
+  // Without syncing afterward, every later lifecycle command (start/
+  // restart/doctor/...) would keep running the OLDER checkout's scripts and
+  // Compose contract against the newer, already-promoted generation.
+  // Best-effort, mirroring update.sh's own sync_deployment_checkout +
+  // refresh_cli pattern: never fails the installation itself.
+  it("syncs the persistent checkout and refreshes the CLI only after first-install promotion has fully succeeded", () => {
+    const text = readFileSync(bootstrapScript, "utf8");
+    const promotedIndex = text.indexOf("advance_operation_state promotion-prepared promoted");
+    const syncIndex = text.indexOf("if sync_deployment_checkout");
+    expect(promotedIndex).toBeGreaterThan(-1);
+    expect(syncIndex).toBeGreaterThan(promotedIndex);
+    expect(text.indexOf("refresh_cli", syncIndex)).toBeGreaterThan(syncIndex);
+  });
+  it("a full success fast-forwards the checkout and installs the new CLI content after first-install promotion", () => {
+    const text = readFileSync(bootstrapScript, "utf8");
+    const tailStart = "if sync_deployment_checkout";
+    const tailEnd = "\n  record_deployed_sha";
+    const tail = text.slice(text.indexOf(tailStart), text.indexOf(tailEnd));
+    expect(tail).toContain("refresh_cli");
+
+    const originDir = mkdtempSync(path.join(os.tmpdir(), "zedbot-bootstrap-sync-origin-"));
+    const appDir = mkdtempSync(path.join(os.tmpdir(), "zedbot-bootstrap-sync-app-"));
+    const cliPath = path.join(mkdtempSync(path.join(os.tmpdir(), "zedbot-bootstrap-sync-cli-")), "zedbot");
+    writeFileSync(cliPath, "#!/usr/bin/env bash\necho old-cli\n");
+    const git = (dir: string, ...args: string[]) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+    spawnSync("git", ["init", "--bare", "--initial-branch=main", originDir]);
+    spawnSync("git", ["clone", originDir, appDir]);
+    git(appDir, "config", "user.email", "test@test");
+    git(appDir, "config", "user.name", "test");
+    mkdirSync(path.join(appDir, "scripts"), { recursive: true });
+    writeFileSync(path.join(appDir, "scripts/zedbot.sh"), "#!/usr/bin/env bash\necho old-cli-source\n");
+    git(appDir, "add", "-A");
+    git(appDir, "commit", "-m", "init");
+    git(appDir, "push", "origin", "main");
+    const target = git(appDir, "rev-parse", "HEAD").stdout.trim();
+    // origin/main advances AFTER the app checkout was pinned to `target` -
+    // the exact "install.sh cloned, then origin moved before this fetch" gap.
+    writeFileSync(path.join(appDir, "scripts/zedbot.sh"), "#!/usr/bin/env bash\necho new-cli\n");
+    git(appDir, "add", "-A");
+    git(appDir, "commit", "-m", "new cli");
+    const newer = git(appDir, "rev-parse", "HEAD").stdout.trim();
+    git(appDir, "push", "origin", "main");
+    git(appDir, "reset", "--hard", target);
+
+    const stateDir = mkdtempSync(path.join(os.tmpdir(), "zedbot-bootstrap-sync-state-"));
+    const command = `. '${path.join(root, "scripts/lib/common.sh")}'; set_deployment_state_paths '${stateDir}'; acquire_deployment_lock; ZEDBOT_APP_DIR='${appDir}'; ZEDBOT_CLI_PATH='${cliPath}'; target='${newer}'; log_warn(){ :; }; log_success(){ :; }; record_deployed_sha(){ :; }; ${tail}`;
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(git(appDir, "rev-parse", "HEAD").stdout.trim()).toBe(newer);
+    expect(readFileSync(cliPath, "utf8")).toBe("#!/usr/bin/env bash\necho new-cli\n");
   });
   // Regression: validate_first_install_intent used to run only after
   // clone_or_update_repo (git fetch + `pull --ff-only`, a real mutation of
