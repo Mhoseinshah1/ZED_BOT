@@ -156,6 +156,15 @@ show_status() {
 perform_rollback() {
   local assume_yes="$1" pre target state service cid image_id image_sha target_running_id="" installation_class
   acquire_deployment_lock
+  # A crash between a first install's own publish_first_install_current
+  # current.json write and its final bootstrap.json promotion leaves a
+  # healthy, fully-published installation whose bootstrap identity never
+  # advanced - see recover_first_install_promotion's own comment in
+  # lib/common.sh for why finishing that one write is safe. A no-op for
+  # every other state, including every rollback (rollback is unavailable
+  # until a later update creates previous.json, so this never overlaps with
+  # a genuine rollback candidate).
+  recover_first_install_promotion || return 1
   installation_class="$(classify_installation observe)" || { log_error "Rollback requires unambiguous canonical installation metadata."; return 1; }
   [ "$installation_class" = existing-canonical ] || { log_error "Rollback is unavailable for installation class ${installation_class}."; return 1; }
   ZEDBOT_ROLLBACK_METADATA="$(select_rollback_generation)"
@@ -198,8 +207,24 @@ perform_rollback() {
   # evidence rather than trusting that default, so this check still runs
   # under the CURRENT generation's real contract even when the checkout has
   # fallen behind.
-  bind_current_generation_compose_contract || return 1
-  validate_compatibility
+  #
+  # A RETRY of an attempt that already reached (or passed) compatibility-
+  # confirmed must not re-run this check: retag_validated_previous_reference,
+  # further down, retags zedbot-app:latest to the PREVIOUS image once this
+  # stage is confirmed, so on a retry after that point the worker service
+  # (always image zedbot-app:latest per docker-compose.yml) would run the
+  # PREVIOUS image's CLI and manifest here instead of current's, and this
+  # check would reject every retry - even though compatibility was already
+  # genuinely proven. initialize_operation_state preserves operation-
+  # state.json's stage across a retry of the SAME rollback target (kind and
+  # generation both match), so its stage is the authoritative record of
+  # whether this already happened; confirm_operation_state itself already
+  # tolerates being called again once past its target stage, but only AFTER
+  # the (here, unsafe-to-repeat) validate_compatibility call it follows.
+  if [ "$(operation_stage_number rollback "$(jq -r '.stage' "$ZEDBOT_OPERATION_STATE")")" -lt "$(operation_stage_number rollback compatibility-confirmed)" ]; then
+    bind_current_generation_compose_contract || return 1
+    validate_compatibility
+  fi
   confirm_operation_state retained-image-validated compatibility-confirmed
   configure_rollback_compose_contract
   validate_compose_application_images

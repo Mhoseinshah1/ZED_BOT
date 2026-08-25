@@ -366,9 +366,23 @@ main() {
       skip_check "API health endpoint responds" "api container not running"
     fi
 
-    # Deployment identity: running containers vs repository HEAD.
+    # Deployment identity: running containers vs the currently PROMOTED
+    # generation - not blindly the persistent checkout's repository HEAD.
+    # After a rollback, the checkout intentionally stays on the newer commit
+    # (checkouts only ever fast-forward - see bind_current_generation_
+    # compose_contract's own comment) while current.json and the containers
+    # correctly describe the OLDER, rolled-back-to generation. Comparing
+    # against repo_head_sha() there would warn on every healthy rolled-back
+    # deployment and point the operator at "zedbot update", which would
+    # simply redeploy the version they just rolled back from. Fall back to
+    # repo_head_sha() only when no valid current.json exists yet (a fresh
+    # checkout with no canonical deployment state to compare against).
     local head_sha
-    head_sha="$(repo_head_sha)"
+    if validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current >/dev/null 2>&1; then
+      head_sha="$(/usr/bin/jq -r '.targetDeploySha' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")"
+    else
+      head_sha="$(repo_head_sha)"
+    fi
     report_version_row bot "$head_sha"
     report_version_row worker "$head_sha"
   fi

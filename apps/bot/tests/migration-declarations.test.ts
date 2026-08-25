@@ -380,7 +380,7 @@ describe("strict format-2 migration declarations", () => {
     const evidenceCheck = perform.indexOf("validate_generation_owned_evidence_readonly");
     // The standalone call (its own line, no arguments) - not any mention of
     // the name inside a comment, including this file's own explanatory one.
-    const compatibilityCheck = perform.indexOf("\n  validate_compatibility\n");
+    const compatibilityCheck = perform.indexOf("\n    validate_compatibility\n");
     const contractSwitch = perform.indexOf("\n  configure_rollback_compose_contract\n");
     expect(evidenceCheck).toBeGreaterThan(-1);
     expect(evidenceCheck).toBeLessThan(compatibilityCheck);
@@ -507,6 +507,63 @@ describe("strict format-2 migration declarations", () => {
       expect(bindIndex).toBeLessThan(firstCheck);
     });
 
+    // Regression: after a successful rollback the persistent checkout
+    // intentionally stays on the NEWER commit (checkouts only ever
+    // fast-forward), while current.json and the running containers
+    // correctly describe the OLDER, rolled-back-to generation. Comparing
+    // container GIT_SHA against repo_head_sha() there warned on every
+    // healthy rolled-back deployment and told the operator to run
+    // `zedbot update`, which would simply redeploy the version they just
+    // rolled back from.
+    it("doctor.sh derives the expected version from current.json when canonical deployment state exists", () => {
+      const text = readFileSync(doctor, "utf8");
+      const snippetStart = text.indexOf("local head_sha", text.indexOf("main() {"));
+      const snippetEnd = text.indexOf('report_version_row worker "$head_sha"') + 'report_version_row worker "$head_sha"'.length;
+      expect(snippetStart).toBeGreaterThan(-1);
+      const snippet = text.slice(snippetStart, snippetEnd);
+      expect(snippet).toContain("validate_generation_metadata_core");
+      expect(snippet).toContain(".targetDeploySha");
+
+      // validate_canonical_state_destination requires current.json to sit
+      // directly under $ZEDBOT_DEPLOYMENT_DIR, so the fixture is written
+      // straight into this test's own deployment-state directory rather
+      // than pointed at externally.
+      const rolledBackGeneration = "20260101T000000Z-aaaaaaaaaaaa";
+      const targetDeploySha = "b".repeat(40);
+      const run = (withCurrentJson: boolean) => {
+        const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-doctor-version-"));
+        chmodSync(dir, 0o700);
+        if (withCurrentJson) {
+          const currentPath = path.join(dir, "current.json");
+          writeFileSync(currentPath, JSON.stringify({
+            formatVersion: 2, lifecycleRole: "current", generation: rolledBackGeneration, sourceTree: "a".repeat(40),
+            preDeploySha: "1".repeat(40), preDeployImageId: `sha256:${"2".repeat(64)}`, targetDeploySha,
+            targetImageId: `sha256:${"3".repeat(64)}`, retainedImageTag: `zedbot-app:rollback-${rolledBackGeneration}`,
+            immutableImageTag: `zedbot-app:generation-${rolledBackGeneration}`, failedTargetTag: `zedbot-app:failed-${rolledBackGeneration}`,
+            capturedAt: "2026-01-01T00:00:00Z", preDeployMigrations: [], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+            migrationEvidencePath: `${dir}/evidence-${rolledBackGeneration}`, composeEvidencePath: `${dir}/evidence-${rolledBackGeneration}/docker-compose.yml`,
+            composeEvidenceSha256: "4".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+            compatibilityManifestSha256: "5".repeat(64), compatibilityDeclarations: [],
+            recreationAttempted: true, healthConfirmed: true, state: "known-good",
+          }));
+          chmodSync(currentPath, 0o600);
+        }
+        const command = `. '${common}'; set_deployment_state_paths '${dir}'; repo_head_sha(){ printf '%s' '${"c".repeat(40)}'; }; report_version_row(){ printf '%s:%s\\n' "$1" "$2"; }; run_snippet(){ ${snippet}\n}; run_snippet`;
+        return spawnSync("bash", ["-c", command], { encoding: "utf8" });
+      };
+
+      const withCurrent = run(true);
+      expect(withCurrent.status, withCurrent.stderr).toBe(0);
+      expect(withCurrent.stdout).toContain(`bot:${targetDeploySha}`);
+      expect(withCurrent.stdout).toContain(`worker:${targetDeploySha}`);
+      expect(withCurrent.stdout).not.toContain("c".repeat(40));
+
+      const withoutCurrent = run(false);
+      expect(withoutCurrent.status, withoutCurrent.stderr).toBe(0);
+      expect(withoutCurrent.stdout).toContain(`bot:${"c".repeat(40)}`);
+      expect(withoutCurrent.stdout).toContain(`worker:${"c".repeat(40)}`);
+    });
+
     it("backup.sh binds the compose contract before its own pg_dump call", () => {
       const text = readFileSync(backupScript, "utf8");
       const bindIndex = text.indexOf("bind_current_generation_compose_contract");
@@ -545,7 +602,7 @@ describe("strict format-2 migration declarations", () => {
       const perform = rollbackText.slice(rollbackText.indexOf("perform_rollback() {"), rollbackText.indexOf("\nmain() {"));
       const evidenceCheck = perform.indexOf("validate_generation_owned_evidence_readonly");
       const bindIndex = perform.indexOf("bind_current_generation_compose_contract");
-      const compatibilityCheck = perform.indexOf("\n  validate_compatibility\n");
+      const compatibilityCheck = perform.indexOf("\n    validate_compatibility\n");
       const contractSwitch = perform.indexOf("\n  configure_rollback_compose_contract\n");
       expect(evidenceCheck).toBeGreaterThan(-1);
       expect(bindIndex).toBeGreaterThan(evidenceCheck);

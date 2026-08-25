@@ -363,6 +363,153 @@ describe("deployment shell safety", () => {
     expect(git(pair.app, "rev-parse", "HEAD")).toBe(head);
   });
 
+  // Regression (P1, PR #155 review of scripts/update.sh:394 - "Keep the
+  // installed CLI aligned with its script bundle"): the installed CLI used
+  // to be refreshed at old step 6 of 14 - long before the update had
+  // actually succeeded - while the persistent checkout (whose
+  // lib/common.sh the installed zedbot.sh ALWAYS sources at runtime,
+  // regardless of the installed CLI's own version: zedbot.sh hardcodes
+  // ZEDBOT_APP_DIR, it never resolves its own path via BASH_SOURCE) was
+  // only fast-forwarded at the very end, and only on success. Any failure
+  // after that early refresh - or the final checkout sync itself merely
+  // warning and continuing - left a NEW installed CLI paired with the OLD
+  // checkout's common.sh: exactly the one combination that can
+  // command-not-found on newly added helpers (e.g.
+  // bind_current_generation_compose_contract), precisely when an operator
+  // needs `zedbot restart`/`doctor` most. The fix moves the install to the
+  // very end, nested inside - and gated on - the checkout sync's own
+  // success, so that combination can no longer occur.
+  it("refreshes the installed CLI only at promotion time, nested inside the checkout sync's own success branch (not at the old early step)", () => {
+    // The old early refresh - long before the update had succeeded - is gone.
+    expect(update).not.toMatch(/install -m 0755 "\$SOURCE_SNAPSHOT\/scripts\/zedbot\.sh"/);
+    expect(update).not.toMatch(/Refreshing the installed zedbot CLI/);
+    // No leftover "N/14" step label survives the step-6 removal, and the
+    // renumbered final step is present.
+    expect(update).not.toMatch(/\[\d+\/14\]/);
+    expect(update).toContain('log_info "[13/13] Running health checks');
+
+    // refresh_cli (common.sh's own install+verify helper - reused here
+    // rather than duplicating a raw `install` call) is what performs the
+    // refresh now, and it runs strictly after promotion has committed, and
+    // strictly inside the success branch of the checkout sync call - never
+    // independently of it.
+    expect(update).toContain("refresh_cli");
+    expect(commonShell).toContain("refresh_cli() {");
+    const promotedIndex = update.indexOf("advance_operation_state promotion-prepared promoted");
+    const syncIndex = update.indexOf('if sync_deployment_checkout "$target_deploy_sha"; then');
+    const refreshIndex = update.indexOf("refresh_cli", syncIndex);
+    const elseIndex = update.indexOf("\n    else\n", syncIndex);
+    expect(promotedIndex).toBeGreaterThan(-1);
+    expect(syncIndex).toBeGreaterThan(promotedIndex);
+    expect(refreshIndex).toBeGreaterThan(syncIndex);
+    expect(refreshIndex).toBeLessThan(elseIndex);
+  });
+
+  // Behavioral: the checkout sync and the CLI refresh switch as one unit.
+  // Extracts update.sh's own promotion-tail if/else/fi block (the exact
+  // code proven above to run only after promotion) and runs it for real
+  // against a fabricated git checkout pair and a real file standing in for
+  // $ZEDBOT_CLI_PATH, mirroring this file's own repositoryPair()/prepare()
+  // harness conventions.
+  {
+    const tailStart = 'if sync_deployment_checkout "$target_deploy_sha"; then';
+    const tailEnd = '\n    log_success "ZED_BOT update completed successfully."';
+    const promotionTail = update.slice(update.indexOf(tailStart), update.indexOf(tailEnd));
+
+    const addCommit = (pair: ReturnType<typeof repositoryPair>, relativePath: string, content: string) => {
+      const abs = path.join(pair.seed, relativePath);
+      mkdirSync(path.dirname(abs), { recursive: true });
+      writeFileSync(abs, content);
+      git(pair.seed, "add", relativePath);
+      git(pair.seed, "commit", "-m", `add ${relativePath}`);
+      git(pair.seed, "push");
+    };
+
+    const runPromotionTail = (pair: ReturnType<typeof repositoryPair>, sha: string, cliPath: string) => {
+      const trace = `${cliPath}.trace`;
+      const command = `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${pair.dir}'; acquire_deployment_lock; target_deploy_sha='${sha}'; log_warn(){ printf 'WARN:%s\\n' "$*" >> '${trace}'; }; ${promotionTail}`;
+      const result = spawnSync("bash", ["-c", command], {
+        encoding: "utf8",
+        env: { ...process.env, ZEDBOT_APP_DIR: pair.app, ZEDBOT_CLI_PATH: cliPath },
+      });
+      return { result, trace: existsSync(trace) ? readFileSync(trace, "utf8") : "" };
+    };
+
+    it("a full success fast-forwards the checkout AND installs the new CLI content", () => {
+      const pair = repositoryPair();
+      addCommit(pair, "scripts/zedbot.sh", "#!/usr/bin/env bash\necho new-cli\n");
+      const prepared = prepare(pair.app);
+      expect(prepared.status, prepared.stderr).toBe(0);
+      const [sha] = prepared.stdout.trim().split(" ");
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-cli-promote-ok-"));
+      const cliPath = path.join(dir, "zedbot");
+      writeFileSync(cliPath, "#!/usr/bin/env bash\necho old-cli\n");
+
+      const { result, trace } = runPromotionTail(pair, sha, cliPath);
+      expect(result.status, result.stderr).toBe(0);
+      expect(trace).toBe("");
+      expect(git(pair.app, "rev-parse", "HEAD")).toBe(sha);
+      expect(readFileSync(cliPath, "utf8")).toBe("#!/usr/bin/env bash\necho new-cli\n");
+    });
+
+    it("a checkout-sync failure leaves BOTH the checkout and the installed CLI on the old, consistent pair (byte-identical, untouched)", () => {
+      const pair = repositoryPair();
+      addCommit(pair, "scripts/zedbot.sh", "#!/usr/bin/env bash\necho new-cli\n");
+      const prepared = prepare(pair.app);
+      expect(prepared.status, prepared.stderr).toBe(0);
+      const [sha] = prepared.stdout.trim().split(" ");
+      // Diverge the app checkout locally AFTER the fetch (unexpected
+      // external interference - the one way sync_deployment_checkout's own
+      // comment says a fast-forward can fail) so `git merge --ff-only`
+      // refuses outright, without touching anything.
+      writeFileSync(path.join(pair.app, "local-drift.txt"), "drift\n");
+      git(pair.app, "add", "local-drift.txt");
+      git(pair.app, "commit", "-m", "local drift");
+      const preHead = git(pair.app, "rev-parse", "HEAD");
+      expect(preHead).not.toBe(sha);
+
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-cli-promote-syncfail-"));
+      const cliPath = path.join(dir, "zedbot");
+      const oldContent = "#!/usr/bin/env bash\necho old-cli\n";
+      writeFileSync(cliPath, oldContent);
+
+      const { result, trace } = runPromotionTail(pair, sha, cliPath);
+      // Best-effort: the surrounding if/else never itself fails the update.
+      expect(result.status, result.stderr).toBe(0);
+      expect(trace).toContain("Could not fast-forward the deployment checkout");
+      // The checkout never advanced ...
+      expect(git(pair.app, "rev-parse", "HEAD")).toBe(preHead);
+      // ... and the CLI is left exactly as it was: never installed ahead of
+      // a checkout that did not itself move.
+      expect(readFileSync(cliPath, "utf8")).toBe(oldContent);
+    });
+
+    it("a CLI-refresh failure after a successful checkout sync leaves the OLD CLI byte-identical in place against the NEW checkout (the one safe residual mismatch: common.sh only ever gains helpers)", () => {
+      const pair = repositoryPair();
+      // scripts/zedbot.sh lands as a DIRECTORY in the new commit (a broken
+      // release tree) - refresh_cli's own precondition check on its source
+      // fails deterministically, regardless of privilege level, before it
+      // ever touches the destination.
+      addCommit(pair, "scripts/zedbot.sh/inner", "oops\n");
+      const prepared = prepare(pair.app);
+      expect(prepared.status, prepared.stderr).toBe(0);
+      const [sha] = prepared.stdout.trim().split(" ");
+
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-cli-promote-refreshfail-"));
+      const cliPath = path.join(dir, "zedbot");
+      const oldContent = "#!/usr/bin/env bash\necho old-cli\n";
+      writeFileSync(cliPath, oldContent);
+
+      const { result, trace } = runPromotionTail(pair, sha, cliPath);
+      expect(result.status, result.stderr).toBe(0);
+      expect(trace).toContain("Could not refresh the installed zedbot CLI");
+      // The checkout DID advance - sync itself succeeded ...
+      expect(git(pair.app, "rev-parse", "HEAD")).toBe(sha);
+      // ... but the installed CLI is untouched, byte-identical to before.
+      expect(readFileSync(cliPath, "utf8")).toBe(oldContent);
+    });
+  }
+
   it("rollback targets only application services with mandatory isolation flags", () => {
     expect(rollback).toContain("execute_validated_rollback_transition");
     expect(commonShell).toContain("execute_validated_rollback_transition()");
@@ -491,7 +638,7 @@ fi
   it("update.sh finishes without rotating generation metadata when origin/main has not moved past what is already running, but still re-seeds baseline data", () => {
     const guardStart = update.indexOf('if [ "$target_deploy_sha" = "$pre_deploy_sha" ]; then');
     expect(guardStart).toBeGreaterThan(-1);
-    const guardEnd = update.indexOf('\n\n  log_info "[5/14]', guardStart);
+    const guardEnd = update.indexOf('\n\n  log_info "[5/13]', guardStart);
     expect(guardEnd).toBeGreaterThan(guardStart);
     const guard = update.slice(guardStart, guardEnd);
 
@@ -637,9 +784,12 @@ fi
     const perform = rollback.slice(rollback.indexOf("perform_rollback() {"), rollback.indexOf("\nmain() {"));
     const confirmIndex = perform.indexOf('confirm "Restore application version');
     expect(confirmIndex).toBeGreaterThan(-1);
-    expect(confirmIndex).toBeLessThan(perform.indexOf("retag_validated_previous_reference"));
+    // Anchored from confirmIndex onward: the compatibility-retry guard's own
+    // explanatory comment, above, mentions retag_validated_previous_reference
+    // in prose earlier in the file.
+    expect(confirmIndex).toBeLessThan(perform.indexOf("retag_validated_previous_reference", confirmIndex));
     expect(confirmIndex).toBeLessThan(perform.indexOf("execute_validated_rollback_transition"));
-    expect(perform.indexOf("Rollback cancelled; nothing was changed")).toBeLessThan(perform.indexOf("retag_validated_previous_reference"));
+    expect(perform.indexOf("Rollback cancelled; nothing was changed")).toBeLessThan(perform.indexOf("retag_validated_previous_reference", confirmIndex));
   });
 
   // Regression: operation-state.json has already advanced to
@@ -708,6 +858,47 @@ fi
     expect(compatibilityIndex).toBeLessThan(contractSwitchIndex);
   });
 
+  // Regression: retag_validated_previous_reference (further down) retags
+  // zedbot-app:latest to the PREVIOUS image once compatibility-confirmed is
+  // reached. The worker service always runs image zedbot-app:latest (per
+  // docker-compose.yml), so a RETRY of a rollback attempt that already
+  // passed this stage - e.g. one that failed later, during application
+  // recreation - would run validate_compatibility against the PREVIOUS
+  // image's CLI and manifest instead of current's, and reject every retry
+  // even though compatibility was already genuinely proven the first time.
+  it("skips re-running the compatibility probe on a retry that already confirmed it, but not on a fresh attempt", () => {
+    const perform = rollback.slice(rollback.indexOf("perform_rollback() {"), rollback.indexOf("\nmain() {"));
+    const guardStart = perform.indexOf('if [ "$(operation_stage_number rollback');
+    expect(guardStart).toBeGreaterThan(-1);
+    const guardEnd = perform.indexOf("\n  confirm_operation_state retained-image-validated compatibility-confirmed", guardStart);
+    expect(guardEnd).toBeGreaterThan(guardStart);
+    const guard = perform.slice(guardStart, guardEnd);
+    expect(guard).toContain("bind_current_generation_compose_contract");
+    expect(guard).toContain("validate_compatibility");
+
+    function run(stage: string) {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-rollback-compat-retry-"));
+      chmodSync(dir, 0o700);
+      const generation = "20260101T000000Z-aaaaaaaaaaaa";
+      const operationStatePath = path.join(dir, "operation-state.json");
+      writeFileSync(operationStatePath, JSON.stringify({ formatVersion: 1, kind: "rollback", generation, stage }));
+      chmodSync(operationStatePath, 0o600);
+      const trace = path.join(dir, "trace");
+      const command = `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; bind_current_generation_compose_contract(){ echo bind >> '${trace}'; }; validate_compatibility(){ echo validate >> '${trace}'; }; confirm_operation_state(){ :; }; ${guard}\nconfirm_operation_state retained-image-validated compatibility-confirmed`;
+      spawnSync("bash", ["-c", command], { encoding: "utf8" });
+      return existsSync(trace) ? readFileSync(trace, "utf8") : "";
+    }
+
+    // Fresh attempt, not yet at compatibility-confirmed: must run the probe.
+    expect(run("retained-image-validated")).toContain("validate");
+    // Already at compatibility-confirmed (retag has not necessarily happened
+    // yet, but compatibility was already proven): must skip.
+    expect(run("compatibility-confirmed")).toBe("");
+    // Past it - the exact retry scenario the review describes (retag/
+    // recreation already started, then failed): must skip.
+    expect(run("deployment-reference-retagged")).toBe("");
+  });
+
   // Regression: an interruption or state-write failure after
   // retag_validated_previous_reference retags zedbot-app:latest to the
   // previous image, but before recreate_application_services actually runs,
@@ -718,7 +909,10 @@ fi
   it("rollback.sh arms the restore before the retag and disarms once recreation starts", () => {
     const perform = rollback.slice(rollback.indexOf("perform_rollback() {"), rollback.indexOf("\nmain() {"));
     const restoreArm = perform.indexOf('DEPLOYMENT_REFERENCE_RESTORE_ID="$target_running_id"');
-    const retagCall = perform.indexOf("retag_validated_previous_reference");
+    // Anchored from restoreArm onward: the compatibility-retry guard's own
+    // explanatory comment, above, mentions retag_validated_previous_reference
+    // in prose earlier in the file.
+    const retagCall = perform.indexOf("retag_validated_previous_reference", restoreArm);
     expect(restoreArm).toBeGreaterThan(-1);
     expect(retagCall).toBeGreaterThan(-1);
     expect(restoreArm).toBeLessThan(retagCall);
