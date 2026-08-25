@@ -136,6 +136,17 @@ main() {
   # script; legacy_self_heal below no longer acquires it a second time.
   acquire_deployment_lock
 
+  # This file is also the standalone recovery entry point an operator runs
+  # by hand (see the header comment), so it needs the same self-healing as
+  # update.sh/bootstrap-deployment.sh/rollback.sh: a crash between either
+  # publish_first_install_current's or publish_validated_legacy_self_heal's
+  # own current.json write and its final bootstrap.json promotion leaves a
+  # healthy, fully-published installation whose bootstrap identity never
+  # advanced - see each function's own comment in lib/common.sh for why
+  # finishing that one write is safe. Both are no-ops for every other state.
+  recover_first_install_promotion || exit 1
+  recover_legacy_upgrade_promotion || exit 1
+
   # PREFLIGHT (runs BEFORE migrate deploy): on a legacy database that predates the
   # one-commission-per-order unique index and accumulated duplicate orderId rows,
   # fail loudly with an actionable message here rather than let the index-creating

@@ -322,6 +322,50 @@ describe("deployment shell safety", () => {
     expect(update).toContain("cannot be retained as known-good");
   });
 
+  // Regression: bootstrap-deployment.sh explicitly supports installing with
+  // an empty TELEGRAM_BOT_TOKEN, promoting via
+  // validate_running_application "$target" 0 (require_bot_readiness=0) in
+  // that case - apps/bot/src/index.ts never calls run() without a token, so
+  // it never publishes the bot-specific readiness marker, and generic
+  // application readiness (containers running, healthy, correct image) is
+  // all that is achievable. Every `zedbot update` nevertheless validated the
+  // CURRENT running application as its own rollback candidate with the
+  // default STRICT form (require_bot_readiness=1), so a supported,
+  // intentionally-tokenless install could never be updated - not even for a
+  // security fix - until an operator configured the token and restarted.
+  it("validates the current running application without requiring bot-specific readiness when TELEGRAM_BOT_TOKEN is not configured, matching bootstrap-deployment.sh's own gate", () => {
+    const start = update.indexOf('if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then');
+    expect(start).toBeGreaterThan(-1);
+    const end = update.indexOf('\n  read -r pre_deploy_sha', start);
+    expect(end).toBeGreaterThan(start);
+    const guard = update.slice(start, end);
+    expect(guard).toContain('identity="$(validate_running_application)"');
+    expect(guard).toContain('identity="$(validate_running_application "" 0)"');
+
+    const run = (token: string | undefined) => {
+      const trace = path.join(os.tmpdir(), `zedbot-token-gate-trace-${process.pid}-${Date.now()}-${Math.random()}`);
+      const command = `${token !== undefined ? `TELEGRAM_BOT_TOKEN='${token}'; ` : ""}log_error(){ :; }; log_warn(){ :; }; validate_running_application(){ printf '%s\\n' "$#:$*" >> '${trace}'; printf 'sha imageid\\n'; }; ${guard}`;
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+      return { result, trace: existsSync(trace) ? readFileSync(trace, "utf8").trim() : "" };
+    };
+
+    // Token configured: the default, strict (bot-readiness-required) form.
+    const withToken = run("123456:abcdefILoveYouIWantYou");
+    expect(withToken.result.status, withToken.result.stderr).toBe(0);
+    expect(withToken.trace).toBe("0:");
+
+    // No token at all, and an explicitly empty token (the exact shape
+    // bootstrap-deployment.sh itself accepts and installs with): both take
+    // the relaxed, require_bot_readiness=0 form.
+    const withoutToken = run(undefined);
+    expect(withoutToken.result.status, withoutToken.result.stderr).toBe(0);
+    expect(withoutToken.trace).toBe("2: 0");
+
+    const emptyToken = run("");
+    expect(emptyToken.result.status, emptyToken.result.stderr).toBe(0);
+    expect(emptyToken.trace).toBe("2: 0");
+  });
+
   // Regression: since prepare_exact_origin_main no longer requires the
   // persistent checkout to already equal the fetched target, update.sh's
   // record_deployed_sha call must pass target_deploy_sha explicitly - its
@@ -651,19 +695,24 @@ fi
     // recreates containers, it never seeds.
     expect(guard).toContain("packages/database/dist/seed.js");
 
-    const run = (targetSha: string, preSha: string) =>
+    const NOOP_HASH = "7".repeat(64);
+    const run = (targetSha: string, preSha: string, compat: { ok: boolean; manifestSha256: string } = { ok: true, manifestSha256: NOOP_HASH }) =>
       spawnSync(
         "bash",
         [
           "-c",
-          `target_deploy_sha='${targetSha}'; pre_deploy_sha='${preSha}'; target_tree='${"c".repeat(40)}'; SOURCE_SNAPSHOT='/snapshot'; log_success(){ printf 'SUCCESS:%s\\n' "$*"; }; log_info(){ printf 'INFO:%s\\n' "$*"; }; log_error(){ printf 'ERROR:%s\\n' "$*"; }; require_source_integrity(){ :; }; run_compose(){ printf 'RUN_COMPOSE:%s\\n' "$*"; }; ${guard}\necho REACHED_STEP_5`,
+          `target_deploy_sha='${targetSha}'; pre_deploy_sha='${preSha}'; target_tree='${"c".repeat(40)}'; SOURCE_SNAPSHOT='/snapshot'; baseline_csv='${migration(1)}'; ` +
+            `log_success(){ printf 'SUCCESS:%s\\n' "$*"; }; log_info(){ printf 'INFO:%s\\n' "$*"; }; log_error(){ printf 'ERROR:%s\\n' "$*"; }; log_warn(){ :; }; ` +
+            `require_source_integrity(){ :; }; validate_migration_declaration_pair(){ MIGRATION_MANIFEST_SHA256='${NOOP_HASH}'; }; finalize_stale_promoted_operation_state(){ :; }; ` +
+            `run_compose(){ case "$*" in *rollback-compatibility.js*) printf '{"ok":${compat.ok},"manifestSha256":"${compat.manifestSha256}","blocker":"drift-detected"}'; ${compat.ok ? "return 0" : "return 1"} ;; *) printf 'RUN_COMPOSE:%s\\n' "$*" ;; esac; }; ` +
+            `${guard}\necho REACHED_STEP_5`,
         ],
         { encoding: "utf8" },
       );
 
     const sha = "a".repeat(40);
     const noop = run(sha, sha);
-    expect(noop.status).toBe(0);
+    expect(noop.status, noop.stderr).toBe(0);
     expect(noop.stdout).toContain("SUCCESS:Already up to date");
     expect(noop.stdout).toContain("RUN_COMPOSE:run --rm --no-deps api node packages/database/dist/seed.js");
     expect(noop.stdout).not.toContain("REACHED_STEP_5");
@@ -675,6 +724,64 @@ fi
     expect(changed.stdout).not.toContain("RUN_COMPOSE:");
   });
 
+  // Regression: a no-op update (origin/main already at what current.json
+  // says is running) used to exit successfully right after the plain
+  // migration-status name comparison from step 3 - not checksum-aware, blind
+  // to an applied database-only migration or a shipped migration whose
+  // manifest-declared checksum has since changed. The no-op guard must run
+  // the exact same strict, checksum-aware validation the normal path runs at
+  // steps 6/8 (validate_migration_declaration_pair, then the
+  // rollback-compatibility CLI) and fail closed - exactly like the normal
+  // path does - the instant either one detects drift, never silently
+  // succeeding over a compromised/drifted database just because there was
+  // no new source commit to deploy.
+  it("the no-op path still runs strict, checksum-aware migration validation before exiting, and fails closed on detected drift", () => {
+    const guardStart = update.indexOf('if [ "$target_deploy_sha" = "$pre_deploy_sha" ]; then');
+    const guardEnd = update.indexOf('\n\n  log_info "[5/13]', guardStart);
+    const guard = update.slice(guardStart, guardEnd);
+    expect(guard).toContain("validate_migration_declaration_pair");
+    expect(guard).toContain("rollback-compatibility.js");
+    expect(guard.indexOf("validate_migration_declaration_pair")).toBeLessThan(guard.indexOf('log_success "Already up to date'));
+
+    const HASH = "7".repeat(64);
+    const runNoop = (compat: { ok: boolean; manifestSha256: string }) =>
+      spawnSync(
+        "bash",
+        [
+          "-c",
+          `target_deploy_sha='${"a".repeat(40)}'; pre_deploy_sha='${"a".repeat(40)}'; target_tree='${"c".repeat(40)}'; SOURCE_SNAPSHOT='/snapshot'; baseline_csv='${migration(1)}'; ` +
+            `log_success(){ printf 'SUCCESS:%s\\n' "$*"; }; log_info(){ printf 'INFO:%s\\n' "$*"; }; log_error(){ printf 'ERROR:%s\\n' "$*"; }; log_warn(){ :; }; ` +
+            `require_source_integrity(){ :; }; validate_migration_declaration_pair(){ MIGRATION_MANIFEST_SHA256='${HASH}'; }; finalize_stale_promoted_operation_state(){ :; }; ` +
+            `run_compose(){ case "$*" in *rollback-compatibility.js*) printf '{"ok":${compat.ok},"manifestSha256":"${compat.manifestSha256}","blocker":"drift-detected"}'; ${compat.ok ? "return 0" : "return 1"} ;; *) printf 'RUN_COMPOSE:%s\\n' "$*" ;; esac; }; ` +
+            `${guard}\necho REACHED_STEP_5`,
+        ],
+        { encoding: "utf8" },
+      );
+
+    // The compatibility CLI itself reports incompatible (e.g. an applied
+    // database-only migration): must fail closed before "Already up to
+    // date" is ever declared or seed.js ever runs.
+    const incompatible = runNoop({ ok: false, manifestSha256: HASH });
+    expect(incompatible.status).not.toBe(0);
+    expect(incompatible.stdout).not.toContain("SUCCESS:Already up to date");
+    expect(incompatible.stdout).not.toContain("RUN_COMPOSE:");
+
+    // The compatibility CLI reports ok, but its manifestSha256 does not
+    // match what validate_migration_declaration_pair itself just computed
+    // (source changed mid-flight, or a tampered/edited manifest): must also
+    // fail closed.
+    const mismatched = runNoop({ ok: true, manifestSha256: "9".repeat(64) });
+    expect(mismatched.status).not.toBe(0);
+    expect(mismatched.stdout).not.toContain("SUCCESS:Already up to date");
+    expect(mismatched.stdout).not.toContain("RUN_COMPOSE:");
+
+    // Genuinely compatible and matching: the no-op path still succeeds.
+    const compatible = runNoop({ ok: true, manifestSha256: HASH });
+    expect(compatible.status, compatible.stderr).toBe(0);
+    expect(compatible.stdout).toContain("SUCCESS:Already up to date");
+    expect(compatible.stdout).toContain("RUN_COMPOSE:run --rm --no-deps api node packages/database/dist/seed.js");
+  });
+
   it("update_owned_cleanup restores the reference only when recreation was never attempted", () => {
     const body = update.slice(update.indexOf("update_owned_cleanup() {"), update.indexOf("\n# Finds the newest database backup"));
     const trace = path.join(os.tmpdir(), `zedbot-cleanup-trace-${process.pid}-${Date.now()}`);
@@ -684,6 +791,342 @@ fi
     rmSync(trace, { force: true });
     spawnSync("bash", ["-c", harness(1, `sha256:${"5".repeat(64)}`)], { encoding: "utf8" });
     expect(existsSync(trace)).toBe(false);
+  });
+
+  // Regression: a crash between recover_metadata_transition durably
+  // committing a promotion (current.json already rewritten to the new
+  // generation, the consumed candidate and transition.json both already
+  // deleted - see that function's own comment) and this script's own next
+  // line actually recording that fact (advance_operation_state
+  // promotion-prepared promoted / finalize_promoted_operation_state) leaves
+  // operation-state.json parked forever - a fully successful,
+  // already-promoted deployment that `zedbot doctor` / `zedbot
+  // rollback-status` nonetheless keeps reporting as an incomplete
+  // operation. A normal update always mints a brand new generation, so
+  // initialize_operation_state's own self-heal would clear a marker like
+  // this for free - but the no-op path never reaches that call.
+  it("finalize_stale_promoted_operation_state advances or clears an operation-state marker that already names the currently-promoted generation, but never touches an unrelated one", () => {
+    const body = update.slice(update.indexOf("finalize_stale_promoted_operation_state() {"), update.indexOf("\n\n# Clears any OTHER candidate-"));
+    expect(body).toContain("confirm_operation_state promotion-prepared promoted");
+    expect(body).toContain("finalize_promoted_operation_state");
+
+    const currentGeneration = "20260101T000000Z-aaaaaaaaaaaa";
+    const foreignGeneration = "20260102T000000Z-bbbbbbbbbbbb";
+
+    function setup() {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-finalize-stale-"));
+      chmodSync(dir, 0o700);
+      const write = (file: string, value: unknown) => { writeFileSync(file, JSON.stringify(value)); chmodSync(file, 0o600); };
+      write(path.join(dir, "current.json"), {
+        formatVersion: 2, lifecycleRole: "current", generation: currentGeneration, sourceTree: "a".repeat(40),
+        preDeploySha: "b".repeat(40), preDeployImageId: `sha256:${"1".repeat(64)}`, targetDeploySha: "c".repeat(40),
+        targetImageId: `sha256:${"2".repeat(64)}`, retainedImageTag: `zedbot-app:rollback-${currentGeneration}`,
+        immutableImageTag: `zedbot-app:generation-${currentGeneration}`, failedTargetTag: `zedbot-app:failed-${currentGeneration}`,
+        capturedAt: "2026-01-01T00:00:00Z", preDeployMigrations: [], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+        migrationEvidencePath: `${dir}/evidence-${currentGeneration}`, composeEvidencePath: `${dir}/evidence-${currentGeneration}/docker-compose.yml`,
+        composeEvidenceSha256: "d".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+        compatibilityManifestSha256: "e".repeat(64), compatibilityDeclarations: [],
+        recreationAttempted: true, healthConfirmed: true, state: "known-good",
+      });
+      return { dir, write };
+    }
+
+    function run(dir: string) {
+      const command = `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; acquire_deployment_lock; ${body}\nfinalize_stale_promoted_operation_state; echo "EXIT:$?"`;
+      return spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    }
+
+    // Stuck at "promotion-prepared", same generation as current.json: must
+    // advance to "promoted" and then be removed entirely.
+    {
+      const { dir, write } = setup();
+      const opPath = path.join(dir, "operation-state.json");
+      write(opPath, { formatVersion: 1, kind: "update", generation: currentGeneration, stage: "promotion-prepared" });
+      const result = run(dir);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("EXIT:0");
+      expect(existsSync(opPath)).toBe(false);
+    }
+
+    // Stuck at "promoted" (the advance already happened; only the removal
+    // never ran): must still end up removed.
+    {
+      const { dir, write } = setup();
+      const opPath = path.join(dir, "operation-state.json");
+      write(opPath, { formatVersion: 1, kind: "update", generation: currentGeneration, stage: "promoted" });
+      run(dir);
+      expect(existsSync(opPath)).toBe(false);
+    }
+
+    // A DIFFERENT generation (a genuinely unrelated or still-live marker):
+    // must be left completely untouched.
+    {
+      const { dir, write } = setup();
+      const opPath = path.join(dir, "operation-state.json");
+      const fixture = { formatVersion: 1, kind: "update", generation: foreignGeneration, stage: "promotion-prepared" };
+      write(opPath, fixture);
+      run(dir);
+      expect(existsSync(opPath)).toBe(true);
+      expect(JSON.parse(readFileSync(opPath, "utf8"))).toEqual(fixture);
+    }
+
+    // A DIFFERENT kind (rollback), even naming the same generation: must
+    // also be left completely untouched.
+    {
+      const { dir, write } = setup();
+      const opPath = path.join(dir, "operation-state.json");
+      const fixture = { formatVersion: 1, kind: "rollback", generation: currentGeneration, stage: "promoted" };
+      write(opPath, fixture);
+      run(dir);
+      expect(existsSync(opPath)).toBe(true);
+      expect(JSON.parse(readFileSync(opPath, "utf8"))).toEqual(fixture);
+    }
+
+    // An earlier stage that happens to (implausibly) already name the
+    // current generation: left alone rather than force-advanced.
+    {
+      const { dir, write } = setup();
+      const opPath = path.join(dir, "operation-state.json");
+      const fixture = { formatVersion: 1, kind: "update", generation: currentGeneration, stage: "health-confirmed" };
+      write(opPath, fixture);
+      run(dir);
+      expect(existsSync(opPath)).toBe(true);
+      expect(JSON.parse(readFileSync(opPath, "utf8"))).toEqual(fixture);
+    }
+
+    // No operation-state.json at all: safe no-op.
+    {
+      const { dir } = setup();
+      const result = run(dir);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("EXIT:0");
+    }
+  });
+
+  // Regression: an update that fails after candidate metadata is written but
+  // before application recreation ever starts (state stays "prepared", no
+  // failed.json is ever published - on_update_error/update_owned_cleanup
+  // only publish one once recreation was actually attempted) used to leave
+  // that candidate-<gen>.json (and its evidence-<gen>/ directory) behind
+  // forever: a retry only clears the abandoned operation-state.json marker
+  // (initialize_operation_state's own self-heal) and mints a brand new
+  // generation/candidate, never touching the old one. rollback-status treats
+  // ANY candidate-*.json file's mere presence as an unresolved operation
+  // regardless of content, so this silently and permanently blocked `zedbot
+  // rollback-status` after every early-failing retry.
+  it("cleanup_abandoned_prepared_candidates clears an abandoned prepared candidate and its evidence, but leaves a recreated one, this run's own new candidate, and every other canonical state file alone", () => {
+    const body = update.slice(update.indexOf("cleanup_abandoned_prepared_candidates() {"), update.indexOf("\n\n# Best-effort housekeeping only, called after a successful promotion."));
+    expect(body).toContain("remove_canonical_state_file");
+    expect(body).toContain("remove_generation_evidence_directory");
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-cleanup-candidates-"));
+    chmodSync(dir, 0o700);
+    const write = (file: string, value: unknown) => { writeFileSync(file, JSON.stringify(value)); chmodSync(file, 0o600); };
+    const preparedFixture = (generation: string) => ({
+      formatVersion: 2, lifecycleRole: "candidate", generation, sourceTree: "a".repeat(40),
+      preDeploySha: "b".repeat(40), preDeployImageId: `sha256:${"1".repeat(64)}`, targetDeploySha: "c".repeat(40),
+      retainedImageTag: `zedbot-app:rollback-${generation}`, capturedAt: "2026-01-01T00:00:00Z",
+      preDeployMigrations: [], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: `${dir}/evidence-${generation}`, composeEvidencePath: `${dir}/evidence-${generation}/docker-compose.yml`,
+      composeEvidenceSha256: "d".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "e".repeat(64), compatibilityDeclarations: [],
+      recreationAttempted: false, healthConfirmed: false, state: "prepared",
+    });
+    const recreatedFixture = (generation: string) => ({
+      ...preparedFixture(generation),
+      targetImageId: `sha256:${"2".repeat(64)}`, immutableImageTag: `zedbot-app:generation-${generation}`, failedTargetTag: `zedbot-app:failed-${generation}`,
+      recreationAttempted: true, state: "application-recreated",
+    });
+
+    const abandonedGen = "20260101T000000Z-aaaaaaaaaaaa";
+    const recreatedGen = "20260102T000000Z-bbbbbbbbbbbb";
+    const thisRunGen = "20260103T000000Z-cccccccccccc";
+    const abandonedPath = path.join(dir, `candidate-${abandonedGen}.json`);
+    const recreatedPath = path.join(dir, `candidate-${recreatedGen}.json`);
+    const thisRunPath = path.join(dir, `candidate-${thisRunGen}.json`);
+    write(abandonedPath, preparedFixture(abandonedGen));
+    write(recreatedPath, recreatedFixture(recreatedGen));
+    // This run's own new candidate: cleanup runs BEFORE update.sh itself
+    // ever creates this file, but must never remove it even if (as here,
+    // defensively tested) it already exists at call time.
+    write(thisRunPath, preparedFixture(thisRunGen));
+    mkdirSync(path.join(dir, `evidence-${abandonedGen}`));
+    writeFileSync(path.join(dir, `evidence-${abandonedGen}`, "docker-compose.yml"), "services: {}\n");
+    mkdirSync(path.join(dir, `evidence-${recreatedGen}`));
+    writeFileSync(path.join(dir, `evidence-${recreatedGen}`, "docker-compose.yml"), "services: {}\n");
+
+    // Every other canonical state file: content the function must never
+    // even read, let alone modify - its glob (candidate-*.json) cannot
+    // match any of these names, but this proves it end to end anyway.
+    const untouched: Record<string, string> = {
+      "current.json": "current-placeholder",
+      "previous.json": "previous-placeholder",
+      "failed.json": "failed-placeholder",
+      "legacy-install-v1.json": "legacy-placeholder",
+      "bootstrap.json": "bootstrap-placeholder",
+    };
+    for (const [name, content] of Object.entries(untouched)) {
+      const p = path.join(dir, name);
+      writeFileSync(p, content);
+      chmodSync(p, 0o600);
+    }
+
+    const command = `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; acquire_deployment_lock; CANDIDATE_METADATA='${thisRunPath}'; ${body}\ncleanup_abandoned_prepared_candidates; echo "EXIT:$?"`;
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("EXIT:0");
+
+    expect(existsSync(abandonedPath)).toBe(false);
+    expect(existsSync(path.join(dir, `evidence-${abandonedGen}`))).toBe(false);
+
+    expect(existsSync(recreatedPath)).toBe(true);
+    expect(existsSync(path.join(dir, `evidence-${recreatedGen}`))).toBe(true);
+
+    expect(existsSync(thisRunPath)).toBe(true);
+    expect(JSON.parse(readFileSync(thisRunPath, "utf8"))).toEqual(preparedFixture(thisRunGen));
+
+    for (const [name, content] of Object.entries(untouched)) {
+      expect(readFileSync(path.join(dir, name), "utf8")).toBe(content);
+    }
+  });
+
+  // Regression: every successful update permanently tags the candidate
+  // zedbot-app:generation-<gen> and retains the prior image
+  // zedbot-app:rollback-<gen> - tagged images are not eligible for ordinary
+  // Docker pruning, so on a long-lived installation these accumulate
+  // unbounded. Only a tag no longer referenced by current.json, previous.json,
+  // or an UNRESOLVED failed.json may be pruned.
+  it("prune_stale_generation_image_tags removes only tags no longer referenced by current, previous, or an unresolved failed generation", () => {
+    const body = update.slice(update.indexOf("prune_stale_generation_image_tags() {"), update.indexOf("\n\nmain() {"));
+    expect(body).toContain("run_clean_docker image rm");
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-prune-tags-"));
+    chmodSync(dir, 0o700);
+    const write = (file: string, value: unknown) => { writeFileSync(file, JSON.stringify(value)); chmodSync(file, 0o600); };
+
+    const currentGen = "20260103T000000Z-cccccccccccc";
+    const previousGen = "20260102T000000Z-bbbbbbbbbbbb";
+    const failedGen = "20260104T000000Z-dddddddddddd";
+    const staleGen = "20260101T000000Z-aaaaaaaaaaaa";
+
+    const genFixture = (role: "current" | "previous" | "failed", generation: string, extra: Record<string, unknown> = {}) => ({
+      formatVersion: 2, lifecycleRole: role, generation, sourceTree: "a".repeat(40),
+      preDeploySha: "b".repeat(40), preDeployImageId: `sha256:${"1".repeat(64)}`, targetDeploySha: "c".repeat(40),
+      targetImageId: `sha256:${"2".repeat(64)}`, retainedImageTag: `zedbot-app:rollback-${generation}`,
+      immutableImageTag: `zedbot-app:generation-${generation}`, failedTargetTag: `zedbot-app:failed-${generation}`,
+      capturedAt: "2026-01-01T00:00:00Z", preDeployMigrations: [], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: `${dir}/evidence-${generation}`, composeEvidencePath: `${dir}/evidence-${generation}/docker-compose.yml`,
+      composeEvidenceSha256: "d".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "e".repeat(64), compatibilityDeclarations: [],
+      recreationAttempted: true, healthConfirmed: role !== "failed", state: role === "failed" ? "failed-after-recreation" : "known-good",
+      rollbackTargetGeneration: role === "failed" ? previousGen : undefined,
+      rollbackTargetImageId: role === "failed" ? `sha256:${"9".repeat(64)}` : undefined,
+      ...extra,
+    });
+    const strip = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+
+    write(path.join(dir, "current.json"), strip(genFixture("current", currentGen)));
+    write(path.join(dir, "previous.json"), strip(genFixture("previous", previousGen)));
+    write(path.join(dir, "failed.json"), strip(genFixture("failed", failedGen)));
+
+    const bin = path.join(dir, "bin");
+    const removed = path.join(dir, "removed");
+    mkdirSync(bin);
+    // Fakes exactly the two docker subcommands prune_stale_generation_image_tags
+    // uses: `image ls --format ... zedbot-app` lists every present tag, and
+    // `image rm -- <tag>` records what was actually removed.
+    writeFileSync(
+      path.join(bin, "docker"),
+      `#!/usr/bin/env bash
+[ "$1" = "--context" ] && shift 2
+if [ "$1 $2" = "image ls" ]; then
+  cat <<'TAGS'
+zedbot-app:generation-${currentGen}
+zedbot-app:rollback-${currentGen}
+zedbot-app:generation-${previousGen}
+zedbot-app:rollback-${previousGen}
+zedbot-app:generation-${failedGen}
+zedbot-app:failed-${failedGen}
+zedbot-app:generation-${staleGen}
+zedbot-app:rollback-${staleGen}
+zedbot-app:latest
+TAGS
+elif [ "$1 $2" = "image rm" ]; then
+  printf '%s\\n' "$4" >> '${removed}'
+fi
+`,
+      { mode: 0o755 },
+    );
+
+    const command = `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; acquire_deployment_lock; _ZEDBOT_FIXED_DOCKER_PATH='${bin}:${process.env.PATH}'; ${body}\nprune_stale_generation_image_tags; echo "EXIT:$?"`;
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("EXIT:0");
+
+    const removedTags = existsSync(removed) ? readFileSync(removed, "utf8").trim().split("\n").filter(Boolean) : [];
+    // The stale generation's two tags (current, previous, and failed do not
+    // reference it) are the only ones pruned.
+    expect(removedTags.sort()).toEqual([`zedbot-app:generation-${staleGen}`, `zedbot-app:rollback-${staleGen}`].sort());
+    // Everything current/previous/unresolved-failed still names is kept.
+    for (const gen of [currentGen, previousGen, failedGen]) {
+      expect(removedTags).not.toContain(`zedbot-app:generation-${gen}`);
+    }
+    expect(removedTags).not.toContain("zedbot-app:latest");
+  });
+
+  it("prune_stale_generation_image_tags no longer protects a RESOLVED (rolled-back) failed generation's tags", () => {
+    const body = update.slice(update.indexOf("prune_stale_generation_image_tags() {"), update.indexOf("\n\nmain() {"));
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-prune-tags-resolved-"));
+    chmodSync(dir, 0o700);
+    const write = (file: string, value: unknown) => { writeFileSync(file, JSON.stringify(value)); chmodSync(file, 0o600); };
+
+    const currentGen = "20260103T000000Z-cccccccccccc";
+    const failedGen = "20260104T000000Z-dddddddddddd";
+    const genFixture = (role: "current" | "failed", generation: string) => ({
+      formatVersion: 2, lifecycleRole: role, generation, sourceTree: "a".repeat(40),
+      preDeploySha: "b".repeat(40), preDeployImageId: `sha256:${"1".repeat(64)}`, targetDeploySha: "c".repeat(40),
+      targetImageId: `sha256:${"2".repeat(64)}`, retainedImageTag: `zedbot-app:rollback-${generation}`,
+      immutableImageTag: `zedbot-app:generation-${generation}`, failedTargetTag: `zedbot-app:failed-${generation}`,
+      capturedAt: "2026-01-01T00:00:00Z", preDeployMigrations: [], declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: `${dir}/evidence-${generation}`, composeEvidencePath: `${dir}/evidence-${generation}/docker-compose.yml`,
+      composeEvidenceSha256: "d".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "e".repeat(64), compatibilityDeclarations: [],
+      recreationAttempted: true, healthConfirmed: role !== "failed", state: role === "failed" ? "rolled-back" : "known-good",
+      rollbackTargetGeneration: role === "failed" ? currentGen : undefined,
+      rollbackTargetImageId: role === "failed" ? `sha256:${"9".repeat(64)}` : undefined,
+    });
+    const strip = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+
+    write(path.join(dir, "current.json"), strip(genFixture("current", currentGen)));
+    write(path.join(dir, "failed.json"), strip(genFixture("failed", failedGen)));
+
+    const bin = path.join(dir, "bin");
+    const removed = path.join(dir, "removed");
+    mkdirSync(bin);
+    writeFileSync(
+      path.join(bin, "docker"),
+      `#!/usr/bin/env bash
+[ "$1" = "--context" ] && shift 2
+if [ "$1 $2" = "image ls" ]; then
+  cat <<'TAGS'
+zedbot-app:generation-${currentGen}
+zedbot-app:generation-${failedGen}
+zedbot-app:failed-${failedGen}
+TAGS
+elif [ "$1 $2" = "image rm" ]; then
+  printf '%s\\n' "$4" >> '${removed}'
+fi
+`,
+      { mode: 0o755 },
+    );
+
+    const command = `. '${path.join(scripts, "lib/common.sh")}'; set_deployment_state_paths '${dir}'; acquire_deployment_lock; _ZEDBOT_FIXED_DOCKER_PATH='${bin}:${process.env.PATH}'; ${body}\nprune_stale_generation_image_tags; echo "EXIT:$?"`;
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+
+    const removedTags = existsSync(removed) ? readFileSync(removed, "utf8").trim().split("\n").filter(Boolean) : [];
+    expect(removedTags.sort()).toEqual([`zedbot-app:generation-${failedGen}`, `zedbot-app:failed-${failedGen}`].sort());
   });
 
   // Regression: operation_signal_handler (common.sh) handles a SIGINT/
@@ -1021,6 +1464,77 @@ fi
     expect(inconsistent.stderr).toContain("Target containers use inconsistent images");
   });
 
+  // Regression (P1): "Roll back to the failed update's retained target" -
+  // when an update fails AFTER application recreation begins, current.json
+  // is never touched (it still names the exact generation that was running
+  // right before the failed candidate started recreating), so
+  // select_rollback_generation (lib/common.sh) redirects the rollback
+  // target to current.json's own generation instead of previous.json's -
+  // "pre" and "target" above both become that SAME generation's own sha.
+  // A service may still legitimately be running the FAILED candidate's own
+  // image at that point (exactly the state this recovery exists to clear),
+  // but the loop above used to reject that SHA outright as unrecognized -
+  // it must instead accept it as a KNOWN state, identity-checked against
+  // failed.json's own recorded targetDeploySha/targetImageId specifically,
+  // not any unrecognized third image.
+  it("also permits a container still running the recorded failed candidate's own image during failed-generation recovery", () => {
+    const start = rollback.indexOf("for service in api bot worker; do");
+    const end = rollback.indexOf("\n  # Confirmation happens here", start);
+    const loop = rollback.slice(start, end);
+    expect(loop).toContain("failed_sha");
+
+    // Recovery mode: "pre" and "target" are the same (current's own) sha -
+    // select_rollback_generation synthesizes previous.json from current.json
+    // itself in this case, so metadata_field('.targetImageId') also reports
+    // current's own image id.
+    const target = "a".repeat(40);
+    const pre = target;
+    const targetImageId = `sha256:${"1".repeat(64)}`;
+    const failedSha = "f".repeat(40);
+    const failedImageId = `sha256:${"3".repeat(64)}`;
+
+    function run(recoveryFlag: string, stubs: string) {
+      const command = `. '${path.join(scripts, "lib/common.sh")}'; target='${target}'; pre='${pre}'; target_running_id=""; recovering_failed_generation=${recoveryFlag}; failed_sha=''; failed_image_id=''; metadata_field(){ printf '%s' '${targetImageId}'; }; ${stubs} run_loop(){ local service cid image_id image_sha\n${loop}\n}\nrun_loop && printf 'LOOP_OK:%s\\n' "$target_running_id"`;
+      return spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    }
+
+    const stubs = `
+      run_compose(){ case "$*" in
+        "ps --all -q api") printf '%s\\n' cid-api-failed ;;
+        "ps --all -q bot") printf '%s\\n' cid-bot-target ;;
+        "ps --all -q worker") : ;;
+      esac; }
+      run_clean_docker(){ case "$3:$4" in
+        '{{.Image}}:cid-api-failed') printf '%s' '${failedImageId}' ;;
+        '{{.Image}}:cid-bot-target') printf '%s' '${targetImageId}' ;;
+        *':cid-api-failed') printf 'GIT_SHA=%s\\n' '${failedSha}' ;;
+        *':cid-bot-target') printf 'GIT_SHA=%s\\n' '${target}' ;;
+      esac; }
+    `;
+
+    // recovering_failed_generation=0: the loop must behave exactly as
+    // before and reject the failed candidate's SHA as unrecognized, even
+    // though it happens to be running.
+    const notRecovering = run("0", stubs);
+    expect(notRecovering.status).not.toBe(0);
+    expect(notRecovering.stderr).toContain("api carries an unknown application SHA");
+
+    // recovering_failed_generation=1 with the failed candidate's identity
+    // populated (as perform_rollback itself populates it from failed.json):
+    // must be accepted.
+    const recoveringStubs = `failed_sha='${failedSha}'; failed_image_id='${failedImageId}'; ${stubs}`;
+    const recovering = run("1", recoveringStubs);
+    expect(recovering.status, recovering.stderr).toBe(0);
+    expect(recovering.stdout.trim()).toBe(`LOOP_OK:${targetImageId}`);
+
+    // Still rejects a container whose image id disagrees with the recorded
+    // failed candidate's own targetImageId, even though its SHA matches.
+    const mismatchedStubs = `failed_sha='${failedSha}'; failed_image_id='sha256:${"9".repeat(64)}'; ${stubs}`;
+    const mismatched = run("1", mismatchedStubs);
+    expect(mismatched.status).not.toBe(0);
+    expect(mismatched.stderr).toContain("api carries an unknown application SHA");
+  });
+
   it("metadata writes atomically at mode 600 without secret-shaped fields", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-metadata-test-"));
     const source = path.join(dir, "source.json"); const output = path.join(dir, "previous.json");
@@ -1059,6 +1573,39 @@ fi
     const preflightIndex = migrate.indexOf("referral-migration-preflight.js", mainStart);
     expect(lockIndex).toBeGreaterThan(mainStart);
     expect(preflightIndex).toBeGreaterThan(lockIndex);
+  });
+
+  // Regression: recover_first_install_promotion/recover_legacy_upgrade_
+  // promotion were wired into bootstrap-deployment.sh and rollback.sh, but
+  // not into update.sh's or migrate.sh's own classify_installation-gated
+  // paths - a stuck bootstrap identity of either kind would keep rejecting
+  // `zedbot update` and standalone `bash scripts/migrate.sh` forever, even
+  // though rollback could already recover it. Both recoveries are cheap,
+  // identity-checked no-ops in every other case, so both scripts call both
+  // unconditionally, after the deployment lock and before anything that
+  // depends on installation classification.
+  it("update.sh main() recovers a stuck bootstrap promotion of either kind before classifying the installation", () => {
+    const mainStart = update.indexOf("main() {");
+    const lockIndex = update.indexOf("acquire_deployment_lock", mainStart);
+    const firstInstallIndex = update.indexOf("recover_first_install_promotion", mainStart);
+    const legacyIndex = update.indexOf("recover_legacy_upgrade_promotion", mainStart);
+    const classifyIndex = update.indexOf("classify_installation observe", mainStart);
+    expect(lockIndex).toBeGreaterThan(mainStart);
+    expect(firstInstallIndex).toBeGreaterThan(lockIndex);
+    expect(legacyIndex).toBeGreaterThan(firstInstallIndex);
+    expect(classifyIndex).toBeGreaterThan(legacyIndex);
+  });
+
+  it("migrate.sh main() recovers a stuck bootstrap promotion of either kind after acquiring the lock, before any migration work", () => {
+    const mainStart = migrate.indexOf("main() {");
+    const lockIndex = migrate.indexOf("acquire_deployment_lock", mainStart);
+    const firstInstallIndex = migrate.indexOf("recover_first_install_promotion", mainStart);
+    const legacyIndex = migrate.indexOf("recover_legacy_upgrade_promotion", mainStart);
+    const preflightIndex = migrate.indexOf("referral-migration-preflight.js", mainStart);
+    expect(lockIndex).toBeGreaterThan(mainStart);
+    expect(firstInstallIndex).toBeGreaterThan(lockIndex);
+    expect(legacyIndex).toBeGreaterThan(firstInstallIndex);
+    expect(preflightIndex).toBeGreaterThan(legacyIndex);
   });
 
   it("legacy_self_heal no longer acquires the lock a second time", () => {
