@@ -5,7 +5,7 @@ import { createBot } from "./app.js";
 import { getBotToken, getTelegramApiRoot } from "./config/env.js";
 import { connectDatabaseWithRetry } from "./core/database-startup.js";
 import { logger } from "./core/logger.js";
-import { completeBotStartupReadiness, removeBotReadiness } from "./core/readiness-marker.js";
+import { completeBotStartupReadinessIfKnownGeneration, removeBotReadiness } from "./core/readiness-marker.js";
 import { runShutdownSequence } from "./core/shutdown.js";
 import { startAutoRenewalConsumer } from "./services/auto-renewal-consumer.js";
 import { startMiniAppCommerceConsumer } from "./services/miniapp-commerce-consumer.js";
@@ -220,12 +220,11 @@ async function run(botToken: string): Promise<void> {
   pollingPromise = bot.start({
     onStart: async (botInfo) => {
       const generation = runningGitSha();
-      if (generation === null) throw new Error("bot-readiness-generation-unavailable");
-      await completeBotStartupReadiness({ databaseInitialized, generation });
+      await completeBotStartupReadinessIfKnownGeneration({ databaseInitialized, generation });
       // Deployment identity in the boot line: "unknown" = image built
       // without the GIT_SHA build arg (e.g. local dev).
       logger.info(`ZED_BOT bot service started (long polling) as @${botInfo.username}`, {
-        gitSha: generation,
+        gitSha: generation ?? "unknown",
       });
     },
   });

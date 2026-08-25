@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { validateMarker } from "../src/cli/readiness.js";
-import { completeBotStartupReadiness, linuxProcessStartTicks, publishBotReadiness, readBotReadiness, removeBotReadiness } from "../src/core/readiness-marker.js";
+import { completeBotStartupReadiness, completeBotStartupReadinessIfKnownGeneration, linuxProcessStartTicks, publishBotReadiness, readBotReadiness, removeBotReadiness } from "../src/core/readiness-marker.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const common = path.join(root, "scripts/lib/common.sh");
@@ -37,6 +37,37 @@ describe("Bot-owned readiness marker", () => {
   it("rejects an invalid generation", async () => { const file = path.join(mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")), "ready.json"); await expect(publishBotReadiness("short", file)).rejects.toThrow("generation-invalid"); });
   it("cannot publish readiness before required local database initialization", async () => { const file = path.join(mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")), "ready.json"); await expect(completeBotStartupReadiness({ databaseInitialized: false, generation: sha, markerPath: file })).rejects.toThrow("initialization-incomplete"); expect(() => readFileSync(file)).toThrow(); });
   it("publishes only after the complete startup coordinator confirms initialization", async () => { const file = path.join(mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")), "ready.json"); const value = await completeBotStartupReadiness({ databaseInitialized: true, generation: sha, markerPath: file, now: 125_000 }); expect(value.readyAt).toBe(125_000); await removeBotReadiness(file); });
+  // Regression (P2, PR #155 review of src/index.ts:223 - "Permit
+  // development builds without a deployment SHA"): wait_for_real_bot_
+  // readiness (lib/common.sh) always polls with a validated, full
+  // deployment SHA sourced from current/candidate metadata - never from the
+  // running process's own environment - so a build without GIT_SHA (e.g.
+  // local dev, `pnpm dev:bot`) is never the target of that check. The old
+  // onStart callback threw unconditionally when runningGitSha() returned
+  // null, which index.ts's own outer catch treats as fatal and non-
+  // retryable - crash-looping every dev/unknown-SHA run forever, since
+  // GIT_SHA never becomes defined on a later attempt.
+  it("skips readiness publication entirely for an unknown (null) generation, without requiring database initialization", async () => {
+    const file = path.join(mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")), "ready.json");
+    const skippedNoDb = await completeBotStartupReadinessIfKnownGeneration({ databaseInitialized: false, generation: null, markerPath: file });
+    expect(skippedNoDb).toBeNull();
+    const skippedWithDb = await completeBotStartupReadinessIfKnownGeneration({ databaseInitialized: true, generation: null, markerPath: file });
+    expect(skippedWithDb).toBeNull();
+    expect(() => readFileSync(file)).toThrow();
+  });
+  it("still publishes, and still requires database initialization, once a real generation is known", async () => {
+    const file = path.join(mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")), "ready.json");
+    await expect(completeBotStartupReadinessIfKnownGeneration({ databaseInitialized: false, generation: sha, markerPath: file })).rejects.toThrow("initialization-incomplete");
+    expect(() => readFileSync(file)).toThrow();
+    const value = await completeBotStartupReadinessIfKnownGeneration({ databaseInitialized: true, generation: sha, markerPath: file, now: 125_000 });
+    expect(value?.readyAt).toBe(125_000);
+    await removeBotReadiness(file);
+  });
+  it("index.ts no longer throws bot-readiness-generation-unavailable on a null generation", () => {
+    const text = readFileSync(path.join(root, "apps/bot/src/index.ts"), "utf8");
+    expect(text).not.toContain("bot-readiness-generation-unavailable");
+    expect(text).toContain("completeBotStartupReadinessIfKnownGeneration");
+  });
   it("rejects a symlinked marker destination", async () => { const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")); const target = path.join(dir, "target"); const file = path.join(dir, "ready.json"); writeFileSync(target, "safe"); symlinkSync(target, file); await expect(publishBotReadiness(sha, file)).rejects.toThrow("symlinked"); expect(readFileSync(target, "utf8")).toBe("safe"); });
   it("rejects unsafe marker permissions", async () => { const file = path.join(mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")), "ready.json"); writeFileSync(file, "{}", { mode: 0o644 }); chmodSync(file, 0o644); await expect(readBotReadiness(file)).rejects.toThrow("unsafe"); });
   it("removes only a regular marker and refuses a symlink", async () => { const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-marker-")); const target = path.join(dir, "target"); const file = path.join(dir, "ready.json"); writeFileSync(target, "safe"); symlinkSync(target, file); await expect(removeBotReadiness(file)).rejects.toThrow("unsafe"); expect(readFileSync(target, "utf8")).toBe("safe"); });

@@ -84,6 +84,24 @@ export async function completeBotStartupReadiness(input: {
   return publishBotReadiness(input.generation, input.markerPath, input.now);
 }
 
+// wait_for_real_bot_readiness (lib/common.sh) always polls with a validated,
+// full deployment SHA sourced from current/candidate metadata - never from
+// the running process's own environment - so a build without GIT_SHA (e.g.
+// local dev) is never the target of that check and has no readiness marker
+// to publish for it. Only a build that DOES carry a generation, and whose
+// database never came up, is the fatal condition the marker is meant to
+// catch - so the database-initialization gate above still applies whenever
+// a generation is known.
+export async function completeBotStartupReadinessIfKnownGeneration(input: {
+  databaseInitialized: boolean;
+  generation: string | null;
+  markerPath?: string;
+  now?: number;
+}): Promise<BotReadinessMarker | null> {
+  if (input.generation === null) return null;
+  return completeBotStartupReadiness({ ...input, generation: input.generation });
+}
+
 export async function removeBotReadiness(markerPath = BOT_READINESS_MARKER_PATH): Promise<void> {
   const existing = await lstat(markerPath).catch(() => null);
   if (existing === null) return;
