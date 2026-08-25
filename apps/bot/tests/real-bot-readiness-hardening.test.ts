@@ -327,6 +327,87 @@ describe("bounded real Bot polling and state suppression", () => {
       expect(upIndex).toBeLessThan(boundaryIndex);
       expect(boundaryIndex).toBeLessThan(successIndex);
     });
+
+    // Regression (P1): "Reject restarts after an incomplete rollback" - a
+    // NORMAL rollback that itself fails after retagging zedbot-app:latest
+    // and starting application recreation leaves current.json naming the
+    // OLDER, pre-rollback generation while the tag (and possibly the
+    // containers themselves) are already on the rollback target - a
+    // different, non-overlapping danger from the failed-UPDATE case
+    // assert_no_unresolved_failed_generation guards (rollback.sh never
+    // writes failed.json). Both guards are required in both commands.
+    it("zedbot.sh's restart and start commands both also refuse while a rollback attempt is incomplete, after the failed-generation check", () => {
+      const zedbot = readFileSync(path.join(root, "scripts/zedbot.sh"), "utf8");
+      const restartStart = zedbot.indexOf("restart)");
+      const restartEnd = zedbot.indexOf("\n  start)", restartStart);
+      const restartBody = zedbot.slice(restartStart, restartEnd);
+      const restartFailedAssert = restartBody.indexOf("assert_no_unresolved_failed_generation");
+      const restartRollbackAssert = restartBody.indexOf("assert_no_incomplete_rollback_attempt", restartFailedAssert);
+      const restartBind = restartBody.indexOf("bind_current_generation_compose_contract", restartRollbackAssert);
+      expect(restartFailedAssert).toBeGreaterThan(-1);
+      expect(restartRollbackAssert).toBeGreaterThan(restartFailedAssert);
+      expect(restartRollbackAssert).toBeLessThan(restartBind);
+
+      const startStart = zedbot.indexOf("\n  start)");
+      const startEnd = zedbot.indexOf("\n  stop)", startStart);
+      const startBody = zedbot.slice(startStart, startEnd);
+      const startFailedAssert = startBody.indexOf("assert_no_unresolved_failed_generation");
+      const startRollbackAssert = startBody.indexOf("assert_no_incomplete_rollback_attempt", startFailedAssert);
+      const startBind = startBody.indexOf("bind_current_generation_compose_contract", startRollbackAssert);
+      expect(startFailedAssert).toBeGreaterThan(-1);
+      expect(startRollbackAssert).toBeGreaterThan(startFailedAssert);
+      expect(startRollbackAssert).toBeLessThan(startBind);
+    });
+
+    // Functional coverage of assert_no_incomplete_rollback_attempt itself,
+    // extracted directly from zedbot.sh (it is not defined in common.sh).
+    describe("assert_no_incomplete_rollback_attempt", () => {
+      const zedbot = readFileSync(path.join(root, "scripts/zedbot.sh"), "utf8");
+      const fnStart = zedbot.indexOf("assert_no_incomplete_rollback_attempt() {");
+      const fnEnd = zedbot.indexOf("\n\ncase \"$CMD\" in", fnStart);
+      const fn = zedbot.slice(fnStart, fnEnd);
+
+      function run(operationState: Record<string, unknown> | string | null) {
+        const dir = mkdtempSync(path.join(os.tmpdir(), "zedbot-incomplete-rollback-"));
+        chmodSync(dir, 0o700);
+        const file = path.join(dir, "operation-state.json");
+        if (operationState !== null) {
+          writeFileSync(file, typeof operationState === "string" ? operationState : JSON.stringify(operationState));
+          chmodSync(file, 0o600);
+        }
+        return shell(`set_deployment_state_paths '${dir}'; ${fn}\nassert_no_incomplete_rollback_attempt`);
+      }
+
+      it("passes when no operation state exists at all", () => {
+        const result = run(null);
+        expect(result.status, result.stderr).toBe(0);
+      });
+
+      it.each(["previous-selected", "rollback-evidence-validated", "retained-image-validated", "compatibility-confirmed", "deployment-reference-retagged", "application-recreated", "health-confirmed", "promotion-prepared"])(
+        "refuses while a rollback is stuck at stage %s, naming the remedy",
+        (stage) => {
+          const result = run({ formatVersion: 1, kind: "rollback", generation, stage });
+          expect(result.status).not.toBe(0);
+          expect(result.stderr).toContain("zedbot rollback");
+          expect(result.stderr).toContain("doctor");
+        },
+      );
+
+      it("passes once the rollback reached the promoted stage", () => {
+        const result = run({ formatVersion: 1, kind: "rollback", generation, stage: "promoted" });
+        expect(result.status, result.stderr).toBe(0);
+      });
+
+      it("is not this function's concern for any other operation kind, even if incomplete", () => {
+        const result = run({ formatVersion: 1, kind: "update", generation, stage: "application-recreated" });
+        expect(result.status, result.stderr).toBe(0);
+      });
+
+      it("fails closed on a present but malformed/unsafe operation-state.json", () => {
+        const result = run("not valid json");
+        expect(result.status).not.toBe(0);
+      });
+    });
   });
 
   function poll(sequence: unknown[], timeout = 9, cancel = false) {

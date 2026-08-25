@@ -88,8 +88,11 @@ describe("four-role generation lifecycle", () => {
     expect(readFileSync(f.current, "utf8")).toBe(current); expect(readFileSync(f.previous, "utf8")).toBe(previous);
   });
 
-  it("selects only previous even when valid failed diagnostics exist", () => {
-    const f = fixture(); write(f.previous, metadata(genA, "previous")); write(f.failed, metadata(genB, "failed"));
+  // Failed diagnostics that are already RESOLVED (state rolled-back) must
+  // never redirect anything - this is the "no unresolved failed.json"
+  // baseline the redirect tests below are contrasted against.
+  it("selects only previous when failed diagnostics are already resolved", () => {
+    const f = fixture(); write(f.previous, metadata(genA, "previous")); write(f.failed, metadata(genB, "failed", { state: "rolled-back" }));
     const result = shell(f, "select_rollback_generation"); expect(result.status).toBe(0); expect(result.stdout.trim()).toBe(f.previous);
     expect(JSON.parse(readFileSync(result.stdout.trim(), "utf8")).targetImageId).toBe(`sha256:${"1".repeat(64)}`);
   });
@@ -97,6 +100,62 @@ describe("four-role generation lifecycle", () => {
   it("malformed failed diagnostics fail closed but never become a target", () => {
     const f = fixture(); write(f.previous, metadata(genA, "previous")); write(f.failed, { lifecycleRole: "failed" });
     const result = shell(f, "select_rollback_generation"); expect(result.status).not.toBe(0); expect(result.stdout.trim()).not.toBe(f.failed);
+  });
+
+  // Regression (P1): "Roll back to the failed update's retained target" - an
+  // update that fails AFTER application recreation begins never touches
+  // current.json, so it still names the exact generation that was known-good
+  // right before the failed candidate started recreating. publish_failed_
+  // generation records that SAME generation as failed.json's own
+  // rollbackTargetGeneration - THAT is the correct rollback target while it
+  // remains unresolved, not previous.json's generation (one release further
+  // back, never touched by the failed update either). select_rollback_
+  // generation must redirect to it by synthesizing it into previous.json
+  // under the "previous" role, so every downstream rollback step keeps
+  // working unmodified.
+  it("redirects an unresolved failed candidate's rollback target to current's own generation", () => {
+    const f = fixture(); // f.current defaults to genA; no previous.json exists yet
+    write(f.failed, metadata(genB, "failed")); // rollbackTargetGeneration defaults to genA, matching current
+    expect(existsSync(f.previous)).toBe(false);
+
+    const result = shell(f, "select_rollback_generation");
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe(f.previous);
+    expect(existsSync(f.previous)).toBe(true);
+
+    const synthesized = JSON.parse(readFileSync(f.previous, "utf8"));
+    const current = JSON.parse(readFileSync(f.current, "utf8"));
+    expect(synthesized.lifecycleRole).toBe("previous");
+    expect(synthesized.generation).toBe(current.generation);
+    expect(synthesized.targetImageId).toBe(current.targetImageId);
+    expect(synthesized.targetDeploySha).toBe(current.targetDeploySha);
+  });
+
+  // Regression (P1), end-to-end: the redirect above is only meaningful if
+  // promoting the synthesized target actually resolves the failed
+  // generation afterward, exactly like a normal rollback does - verified
+  // empirically here rather than assumed.
+  it("a promotion following the redirect resolves the failed generation, exactly like a normal rollback", () => {
+    const f = fixture();
+    write(f.failed, metadata(genB, "failed"));
+    expect(shell(f, "select_rollback_generation").status).toBe(0);
+    expect(shell(f, "assert_no_unresolved_failed_generation").status).not.toBe(0); // still blocked before promotion
+
+    expect(shell(f, "promote_successful_rollback").status).toBe(0);
+    expect(generation(f.current)).toBe(genA);
+    expect(existsSync(f.previous)).toBe(false);
+    const failed = JSON.parse(readFileSync(f.failed, "utf8"));
+    expect(failed.generation).toBe(genB); // diagnostic identity preserved
+    expect(failed.state).toBe("rolled-back"); // now resolved
+    expect(shell(f, "assert_no_unresolved_failed_generation").status).toBe(0); // no longer blocked
+  });
+
+  it("fails closed, and writes nothing, when an unresolved failed candidate's rollbackTargetGeneration does not match current's own generation", () => {
+    const f = fixture();
+    write(f.failed, metadata(genB, "failed", { rollbackTargetGeneration: "20260807T120000Z-777777777777" }));
+    const result = shell(f, "select_rollback_generation");
+    expect(result.status).not.toBe(0);
+    expect(existsSync(f.previous)).toBe(false);
   });
 
   it.each(["update-prepared", "update-previous-written", "update-current-written"])("recovers deterministically after interrupted update phase %s", (phase) => {

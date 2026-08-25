@@ -406,6 +406,49 @@ repair_backups() {
   fi
 }
 
+# Rejects restart/start whenever a PRIOR `zedbot rollback` attempt reached
+# application recreation but never completed. Mirrors assert_no_unresolved_
+# failed_generation's own role for a failed UPDATE, but that check cannot see
+# this: publish_failed_generation (failed.json) is only ever written by
+# update.sh's own error handling, never by rollback.sh, so a rollback that
+# fails after its own retag+recreate leaves no failed.json at all - yet the
+# exact same danger applies. rollback.sh's perform_rollback retags
+# zedbot-app:latest to the rollback target BEFORE recreating (deployment-
+# reference-retagged), and only promotes current.json to that target at the
+# very end, once recreation and the post-recreation health check both
+# succeed (execute_validated_rollback_transition, further staged through
+# application-recreated/health-confirmed/promotion-prepared/promoted). A
+# failure anywhere in that window - recreation itself, the health check, or
+# the final metadata promotion - leaves zedbot-app:latest already retagged
+# while current.json still names the OLDER, pre-rollback generation, and
+# operation-state.json (kind "rollback") stuck at whichever of those stages
+# it last confirmed, never reaching "promoted". bind_current_generation_
+# compose_contract only validates the Compose FILE identity, not which image
+# zedbot-app:latest actually is - force-recreating here would deploy
+# whatever that retag left behind across every service, on top of metadata
+# that no longer describes it, without ever running the health/compatibility
+# checks a real `zedbot rollback` retry would.
+#
+# operation-state.json is the durable record of exactly this: this process
+# already holds the exclusive deployment lock by the time this runs (same as
+# assert_no_unresolved_failed_generation's own precondition), so no other
+# process can still be running the rollback this describes - any non-
+# "promoted" stage found here is provably abandoned, not concurrent. A
+# stage of "promoted" (or no rollback marker at all) means no rollback is
+# incomplete, so this is a no-op in every other case, including the ordinary
+# case where no rollback has ever run.
+assert_no_incomplete_rollback_attempt() {
+  { [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; } || return 0
+  validate_operation_state "$ZEDBOT_OPERATION_STATE" || {
+    log_error "Operation state is present but invalid or unsafe; resolve it (zedbot doctor) before restart/start can safely force-recreate."
+    return 1
+  }
+  [ "$(/usr/bin/jq -r '.kind' "$ZEDBOT_OPERATION_STATE")" = rollback ] || return 0
+  [ "$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE")" != promoted ] || return 0
+  log_error "A previous 'zedbot rollback' attempt did not complete (application recreation may already have started); zedbot-app:latest and current.json may now disagree. Refusing to restart/start until this is resolved: run 'zedbot rollback' again, or resolve manually (see 'zedbot doctor')."
+  return 1
+}
+
 case "$CMD" in
   status | ps)
     require_root
@@ -438,6 +481,10 @@ case "$CMD" in
     # candidate across every service. Refuse until the failure is resolved
     # (zedbot rollback, or operator remediation) instead.
     assert_no_unresolved_failed_generation || exit 1
+    # See assert_no_incomplete_rollback_attempt's own comment: a failed
+    # UPDATE and a failed ROLLBACK leave two different, non-overlapping
+    # kinds of evidence behind, so both checks are required here.
+    assert_no_incomplete_rollback_attempt || exit 1
     bind_current_generation_compose_contract || exit 1
     # `compose restart` never re-reads .env; recreating the containers does.
     run_compose up -d --force-recreate --remove-orphans
@@ -466,6 +513,7 @@ case "$CMD" in
     # can still create or replace containers (e.g. none exist yet, or
     # Compose decides config changed) from that same tag.
     assert_no_unresolved_failed_generation || exit 1
+    assert_no_incomplete_rollback_attempt || exit 1
     bind_current_generation_compose_contract || exit 1
     run_compose up -d
     # Mirrors restart's own refresh: `up -d` can create or replace the bot

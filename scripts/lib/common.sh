@@ -1049,7 +1049,78 @@ recover_first_install_promotion() {
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then
     remove_canonical_state_file "$candidate" || return 1
   fi
-  advance_installation_bootstrap health-confirmed promoted
+  advance_installation_bootstrap health-confirmed promoted || return 1
+  # bootstrap.json is now promoted and current.json was already independently
+  # validated above - this installation is genuinely, durably complete. But
+  # operation-state.json (if the crash this recovers from left one behind)
+  # was never advanced past its own last confirmed stage, since the ordinary
+  # promotion-prepared -> promoted step (bootstrap-deployment.sh, right after
+  # its own call to publish_first_install_current) never got to run. Left
+  # alone it stays stuck forever: bootstrap-deployment.sh's classify_
+  # installation now reports existing-canonical and returns early
+  # ("already completed") without ever reaching its own finalize_promoted_
+  # operation_state call, and there is no newer source commit for a later
+  # `zedbot update` to advance past either - its own no-op early-return
+  # never initializes a replacement operation-state either. Finish that
+  # bookkeeping here, identity-checked against this exact generation so an
+  # unrelated marker is never touched.
+  finalize_operation_state_for_completed_generation install "$(/usr/bin/jq -r .generation "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")"
+  return 0
+}
+
+# recover_first_install_promotion's own sibling for the OTHER bootstrap kind:
+# convert_supported_legacy_installation's own tail is: write_lifecycle_role
+# (durably publishes current.json from legacy-install-v1.json) -> validate_
+# generation_metadata_core/validate_generation_owned_evidence -> THREE
+# advance_installation_bootstrap calls in a row (initialized ->
+# canonical-published -> health-confirmed -> promoted). A process death
+# anywhere in that window leaves current.json durably published while
+# bootstrap.json stays stuck at "initialized", "canonical-published", or
+# "health-confirmed" - never "promoted" - unlike the single stuck phase the
+# first-install case leaves behind, since first-install's own tail only has
+# ONE advance left to make by the time its own crash window opens.
+# classify_installation's existing-canonical branch then rejects the
+# installation on every later run exactly as it does for a stuck first-
+# install identity, and reset_abandoned_legacy_self_heal_residue can never
+# help either: it only fires when current.json is ABSENT, which is no
+# longer true here.
+#
+# Same discipline as recover_first_install_promotion, its closest sibling:
+# every check below is a precondition on the ONE specific, provably-safe,
+# identity-matched shape this can recover - a different generation, a
+# missing/invalid/unevidenced current.json or legacy-install-v1.json, or any
+# other bootstrap kind/phase makes this a documented no-op (return 0).
+# legacy-install-v1.json is never deleted, moved, or rewritten - it is a
+# permanent forensic record, same as ZEDBOT_LEGACY_INSTALLATION's own schema
+# comment requires - and neither is current.json.
+recover_legacy_upgrade_promotion() {
+  local phase
+  require_deployment_lock || return 1
+  { [ -e "$ZEDBOT_INSTALLATION_BOOTSTRAP" ] || [ -L "$ZEDBOT_INSTALLATION_BOOTSTRAP" ]; } || return 0
+  validate_installation_bootstrap || return 0
+  [ "$(/usr/bin/jq -r '.kind' "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = legacy-upgrade ] || return 0
+  phase="$(/usr/bin/jq -r '.phase' "$ZEDBOT_INSTALLATION_BOOTSTRAP")"
+  case "$phase" in initialized | canonical-published | health-confirmed) ;; *) return 0 ;; esac
+  { [ -e "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" ]; } || return 0
+  validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || return 0
+  validate_generation_owned_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" || return 0
+  [ "$(/usr/bin/jq -r .generation "$ZEDBOT_INSTALLATION_BOOTSTRAP")" = "$(/usr/bin/jq -r .generation "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")" ] || return 0
+  validate_supported_legacy_installation || return 0
+  [ "$(/usr/bin/jq -r .generation "$ZEDBOT_LEGACY_INSTALLATION")" = "$(/usr/bin/jq -r .generation "$ZEDBOT_INSTALLATION_BOOTSTRAP")" ] || return 0
+  # Falls through from whichever phase this was actually interrupted at, all
+  # the way to "promoted" - mirroring convert_supported_legacy_installation's
+  # own three-advances-in-a-row tail exactly, just resuming partway through
+  # instead of starting at "initialized".
+  [ "$phase" != initialized ] || { advance_installation_bootstrap initialized canonical-published || return 1; phase="canonical-published"; }
+  [ "$phase" != canonical-published ] || { advance_installation_bootstrap canonical-published health-confirmed || return 1; phase="health-confirmed"; }
+  [ "$phase" != health-confirmed ] || advance_installation_bootstrap health-confirmed promoted || return 1
+  # Same rationale as recover_first_install_promotion's own tail: current.json
+  # and bootstrap.json are now both independently proven complete, but
+  # operation-state.json (if the crash left one behind) was never advanced
+  # past its own last confirmed stage - finish that bookkeeping too,
+  # identity-checked against this exact generation.
+  finalize_operation_state_for_completed_generation install "$(/usr/bin/jq -r .generation "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")"
+  return 0
 }
 
 remove_canonical_state_file() {
@@ -1074,6 +1145,31 @@ finalize_promoted_operation_state() {
   validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 0
   [ "$(/usr/bin/jq -r '.stage' "$ZEDBOT_OPERATION_STATE" 2>/dev/null)" = promoted ] || return 0
   remove_canonical_state_file "$ZEDBOT_OPERATION_STATE" || log_warn "Could not clear the completed operation-state marker; rerun 'zedbot doctor' if rollback-status later reports an incomplete operation."
+  return 0
+}
+
+# A sibling of finalize_promoted_operation_state for the case where a
+# generation's own completion is proven by evidence OTHER than operation-
+# state.json's own stage - a crash-recovery path that finishes one last
+# bookkeeping write (e.g. recover_first_install_promotion above, once
+# current.json and bootstrap.json's phase already prove the generation
+# genuinely succeeded) rather than the ordinary in-process sequence that
+# advances operation-state.json through every stage itself. That external
+# proof is already stronger than anything operation-state.json's own stage
+# could add, so - once identity-matched to the exact kind and generation the
+# caller has independently proven complete - the marker is cleared
+# regardless of which stage it happens to still name; there is nothing left
+# to advance through. Identity-checked so an unrelated marker (a different
+# generation, or a genuinely concurrent-in-time different kind) is never
+# touched. Best-effort, matching finalize_promoted_operation_state's own
+# reasoning: a generation already proven complete must never be reported as
+# an incomplete operation over this bookkeeping step alone.
+finalize_operation_state_for_completed_generation() {
+  local kind="$1" generation="$2"
+  { [ -e "$ZEDBOT_OPERATION_STATE" ] || [ -L "$ZEDBOT_OPERATION_STATE" ]; } || return 0
+  validate_operation_state "$ZEDBOT_OPERATION_STATE" || return 0
+  [ "$(/usr/bin/jq -r '.kind+":"+.generation' "$ZEDBOT_OPERATION_STATE")" = "${kind}:${generation}" ] || return 0
+  remove_canonical_state_file "$ZEDBOT_OPERATION_STATE" || log_warn "Could not clear the completed operation-state marker (kind ${kind}, generation ${generation}); rerun 'zedbot doctor' if rollback-status later reports an incomplete operation."
   return 0
 }
 
@@ -2353,10 +2449,69 @@ promote_successful_rollback() {
   recover_metadata_transition
 }
 
+# Selects the generation `zedbot rollback` restores, and returns it as
+# $ZEDBOT_ROLLBACK_METADATA (previous.json's own fixed canonical path -
+# validate_deployment_path_contract requires this identity unconditionally,
+# so this function can never legitimately return anything else; the file's
+# CONTENT, not its path, is what changes below).
+#
+# Ordinarily that is simply previous.json: the generation one release behind
+# current.json. But when an update failed AFTER application recreation
+# began, publish_failed_generation recorded failed.json with
+# rollbackTargetGeneration set to current.json's OWN generation at the
+# moment of failure - current.json is never rewritten by a failed update, so
+# it still names that exact, already-known-good generation. THAT is the
+# correct rollback target while failed.json remains unresolved: not
+# previous.json's generation, which is one release further back and was
+# never touched by the failed update either. Restoring all the way past
+# current's own generation to reach previous's would skip over - and leave
+# uncleared - the failed candidate's own partially/fully recreated
+# containers, which is exactly the state a rollback run right after a failed
+# update needs to clear.
+#
+# Once failed.json's state moves to "rolled-back" (resolve_failed_generation_
+# after_rollback, called once this generation is actually promoted below) it
+# no longer counts as unresolved, and this function goes back to selecting
+# previous.json exactly as it always did - so a rollback with no unresolved
+# failed.json is completely unaffected by any of this.
 select_rollback_generation() {
+  local failed_state
   recover_metadata_transition || return 1
   if [ -e "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ]; then
     validate_generation_metadata_core "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" failed || return 1
+    failed_state="$(/usr/bin/jq -r '.state' "$ZEDBOT_FAILED_DEPLOYMENT_METADATA")" || return 1
+    if [ "$failed_state" != rolled-back ]; then
+      # current.json's own evidence was already validated by this same
+      # rollback attempt's classify_installation call (existing-canonical
+      # requires it) before select_rollback_generation is ever reached - not
+      # re-checked here, matching this file's own established convention of
+      # leaning on an already-proven precondition instead of duplicating it.
+      validate_generation_metadata_core "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" current || return 1
+      # Identity-checked against failed.json's OWN recorded rollbackTarget
+      # Generation, never inferred: a stale or unrelated failed.json (e.g.
+      # left over from an operator's manual intervention) must never
+      # silently redirect a rollback to the wrong generation. A mismatch
+      # here means the recorded diagnostics no longer describe the current
+      # installation - fail closed rather than guess.
+      [ "$(/usr/bin/jq -r '.rollbackTargetGeneration' "$ZEDBOT_FAILED_DEPLOYMENT_METADATA")" = "$(/usr/bin/jq -r '.generation' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")" ] || {
+        log_error "The recorded failed generation does not match the current generation; resolve failed.json (see 'zedbot doctor') before retrying."
+        return 1
+      }
+      # write_lifecycle_role copies current.json's own already-evidence-
+      # verified content into previous.json under the "previous" role - the
+      # exact shape every later rollback step (validate_metadata,
+      # validate_retained_image, retag_validated_previous_reference,
+      # execute_validated_rollback_transition, recover_metadata_transition's
+      # own rollback branch) already expects from $ZEDBOT_ROLLBACK_METADATA,
+      # so nothing downstream needs to know this rollback is recovering from
+      # a failed candidate rather than stepping back to a genuinely older
+      # generation. Any genuinely older previous.json this overwrites is not
+      # lost, reachable data: once an update has failed after recreation
+      # began, current's own generation is the only safe fallback target,
+      # and (like every other rollback) previous.json is deleted once this
+      # promotion completes anyway - see recover_metadata_transition.
+      write_lifecycle_role "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" previous "$ZEDBOT_ROLLBACK_METADATA" || return 1
+    fi
   fi
   validate_generation_metadata_core "$ZEDBOT_ROLLBACK_METADATA" previous || return 1
   printf '%s\n' "$ZEDBOT_ROLLBACK_METADATA"

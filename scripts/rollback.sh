@@ -155,6 +155,7 @@ show_status() {
 
 perform_rollback() {
   local assume_yes="$1" pre target state service cid image_id image_sha target_running_id="" installation_class
+  local recovering_failed_generation=0 failed_sha="" failed_image_id=""
   acquire_deployment_lock
   # A crash between a first install's own publish_first_install_current
   # current.json write and its final bootstrap.json promotion leaves a
@@ -165,10 +166,33 @@ perform_rollback() {
   # until a later update creates previous.json, so this never overlaps with
   # a genuine rollback candidate).
   recover_first_install_promotion || return 1
+  # Same recovery, for the OTHER bootstrap kind: a crash between publish_
+  # validated_legacy_self_heal's own current.json write and its final
+  # bootstrap.json promotion leaves an identical stuck-incomplete-identity
+  # situation - see recover_legacy_upgrade_promotion's own comment in
+  # lib/common.sh. Also a no-op for every other state.
+  recover_legacy_upgrade_promotion || return 1
   installation_class="$(classify_installation observe)" || { log_error "Rollback requires unambiguous canonical installation metadata."; return 1; }
   [ "$installation_class" = existing-canonical ] || { log_error "Rollback is unavailable for installation class ${installation_class}."; return 1; }
   ZEDBOT_ROLLBACK_METADATA="$(select_rollback_generation)"
-  validate_rollback_eligibility_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" "$ZEDBOT_ROLLBACK_METADATA" || { log_error "Rollback eligibility evidence is invalid or inconsistent."; return 1; }
+  # select_rollback_generation redirects the target to current.json's OWN
+  # generation (synthesizing it into previous.json under the "previous"
+  # role) whenever an unresolved failed generation exists - see its own
+  # comment in lib/common.sh. That is the one case where previous.json's
+  # generation legitimately equals current.json's; detect it here once so
+  # every later step that must behave differently for this recovery (the
+  # eligibility-chain check just below, repairing zedbot-app:latest before
+  # the compatibility probe, and the container-identity preflight loop) can
+  # branch on one clear, directly-observed signal instead of re-deriving it.
+  [ "$(metadata_field '.generation')" = "$(/usr/bin/jq -r '.generation' "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA")" ] && recovering_failed_generation=1
+  if [ "$recovering_failed_generation" -eq 0 ]; then
+    # The preDeploySha/targetDeploySha chain this proves only holds between
+    # current and a genuinely OLDER previous generation - it neither holds
+    # nor applies when previous.json was just synthesized FROM current.json
+    # itself for failed-generation recovery (see above): current's own
+    # preDeploySha describes what came before it, not itself.
+    validate_rollback_eligibility_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" "$ZEDBOT_ROLLBACK_METADATA" || { log_error "Rollback eligibility evidence is invalid or inconsistent."; return 1; }
+  fi
   initialize_operation_state rollback "$(metadata_field '.generation')"
   validate_metadata
   # The READONLY variant: validate_generation_owned_evidence (non-readonly)
@@ -222,6 +246,28 @@ perform_rollback() {
   # tolerates being called again once past its target stage, but only AFTER
   # the (here, unsafe-to-repeat) validate_compatibility call it follows.
   if [ "$(operation_stage_number rollback "$(jq -r '.stage' "$ZEDBOT_OPERATION_STATE")")" -lt "$(operation_stage_number rollback compatibility-confirmed)" ]; then
+    if [ "${recovering_failed_generation:-0}" -eq 1 ]; then
+      # A failed update leaves zedbot-app:latest pointing at the FAILED
+      # candidate's own image - update.sh only restores it to the running
+      # image when recreation was never attempted (see its own DEPLOYMENT_
+      # REFERENCE_RESTORE_ID comment), and recreation is exactly what was
+      # attempted here. validate_compatibility, just below, runs whatever
+      # image zedbot-app:latest currently resolves to; it must already be
+      # current.json's own generation before that probe runs, or it would
+      # run the failed candidate's own unrelated manifest/CLI instead of the
+      # generation this recovery is restoring, and (having no relation to
+      # current's compatibilityManifestSha256) fail every time regardless of
+      # whether the rollback itself is actually safe.
+      #
+      # This repairs the tag back to the one generation it should always
+      # have kept pointing at - it is not a new, unvalidated choice the way
+      # a normal rollback's later retag is, so no DEPLOYMENT_REFERENCE_
+      # RESTORE_ID arming is needed here: leaving zedbot-app:latest on
+      # current's own known-good image, even if this attempt is cancelled or
+      # fails right after, is strictly safer than leaving it on the failed
+      # candidate.
+      retag_validated_previous_reference "$ZEDBOT_ROLLBACK_METADATA" || return 1
+    fi
     bind_current_generation_compose_contract || return 1
     validate_compatibility
   fi
@@ -243,6 +289,20 @@ perform_rollback() {
   # fully removed) carries no image and so cannot be the unknown third image
   # this loop actually guards against; only an available container whose
   # identity is unrecognized is rejected.
+  #
+  # During failed-generation recovery (recovering_failed_generation=1, "pre"
+  # and "target" above are then the SAME sha: current.json's own), a service
+  # may still legitimately be running the FAILED candidate's own image -
+  # that is exactly the state this recovery exists to clear. failed_sha/
+  # failed_image_id, populated from failed.json's own recorded identity only
+  # in that case, make the loop recognize it as a KNOWN state rather than an
+  # unrecognized third image; ${failed_sha:-}/${failed_image_id:-} default to
+  # empty (never matching a real 40-character SHA) so the loop behaves
+  # exactly as before whenever this recovery is not in effect.
+  if [ "${recovering_failed_generation:-0}" -eq 1 ] && { [ -e "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ] || [ -L "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" ]; }; then
+    failed_sha="$(/usr/bin/jq -r '.targetDeploySha' "$ZEDBOT_FAILED_DEPLOYMENT_METADATA")"
+    failed_image_id="$(/usr/bin/jq -r '.targetImageId' "$ZEDBOT_FAILED_DEPLOYMENT_METADATA")"
+  fi
   for service in api bot worker; do
     cid="$(run_compose ps --all -q "$service" 2>/dev/null | head -n 1)"
     [ -n "$cid" ] || continue
@@ -255,6 +315,9 @@ perform_rollback() {
         ;;
       "$pre")
         [ "$image_id" = "$(metadata_field '.targetImageId')" ] || { log_error "Previous-version container image is inconsistent with metadata."; return 1; }
+        ;;
+      "${failed_sha:-}")
+        [ -n "${failed_sha:-}" ] && [ "$image_id" = "${failed_image_id:-}" ] || { log_error "${service} carries an unknown application SHA."; return 1; }
         ;;
       *) log_error "${service} carries an unknown application SHA."; return 1 ;;
     esac

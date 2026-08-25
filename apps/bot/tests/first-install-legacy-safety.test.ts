@@ -683,6 +683,195 @@ chmod 600 '${candidate}'`, true);
     expect(result.stdout).toContain("SUCCESS:First installation was already completed by a previous run");
     expect(existsSync(candidate)).toBe(false);
   });
+
+  // Regression (P2): "Finalize operation state during first-install
+  // recovery" - the crash this whole describe block recovers from also
+  // leaves operation-state.json (kind "install", this exact generation)
+  // stuck at "promotion-prepared" forever: bootstrap-deployment.sh's own
+  // advance_operation_state promotion-prepared -> promoted (right after its
+  // own call to publish_first_install_current) never got to run, and once
+  // recover_first_install_promotion finishes the bootstrap.json write,
+  // classify_installation reports existing-canonical and bootstrap-
+  // deployment.sh returns early ("already completed") without ever reaching
+  // its own finalize_promoted_operation_state call either. Nothing else
+  // ever advances or clears it - there is no newer source commit for a
+  // later `zedbot update` to promote past, so its own no-op early-return
+  // never initializes a replacement operation-state - leaving doctor/
+  // rollback-status reporting an incomplete operation forever after a
+  // genuinely successful, recovered install.
+  const promotionPreparedOperationState = (dir: string) =>
+    shell(
+      dir,
+      `initialize_operation_state install '${generation}';
+       advance_operation_state bootstrap-initialized dependency-ready;
+       advance_operation_state dependency-ready candidate-image-built;
+       advance_operation_state candidate-image-built migrations-confirmed;
+       advance_operation_state migrations-confirmed application-recreated;
+       advance_operation_state application-recreated health-confirmed;
+       advance_operation_state health-confirmed promotion-prepared`,
+      true,
+    );
+
+  it("also clears an operation-state.json stuck at promotion-prepared for this exact generation", () => {
+    const dir = fixture();
+    const candidate = path.join(dir, `candidate-${generation}.json`);
+    // begin_installation_bootstrap (inside publish()) itself requires a
+    // genuine-first-install classification, which an already-present
+    // operation-state.json would not be (installation_nonlock_entries would
+    // no longer be empty) - so the operation-state setup below must happen
+    // AFTER the bootstrap/candidate are published, exactly mirroring the
+    // real crash order this recovers from (bootstrap-deployment.sh's own
+    // initialize_operation_state runs once, long before the crash, and is
+    // never touched again by this setup).
+    const setup = publish(dir, candidate);
+    expect(setup.status, setup.stderr).toBe(0);
+    const stateSetup = promotionPreparedOperationState(dir);
+    expect(stateSetup.status, stateSetup.stderr).toBe(0);
+    write(path.join(dir, "current.json"), metadata());
+    expect(existsSync(path.join(dir, "operation-state.json"))).toBe(true);
+
+    const result = shell(dir, "recover_first_install_promotion", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("promoted");
+    expect(existsSync(path.join(dir, "operation-state.json"))).toBe(false);
+  });
+
+  it("never touches an operation-state.json for a different, unrelated generation", () => {
+    const dir = fixture();
+    const candidate = path.join(dir, `candidate-${generation}.json`);
+    const otherGeneration = "20260814T120000Z-ffffffffffff";
+    const setup = publish(dir, candidate);
+    expect(setup.status, setup.stderr).toBe(0);
+    const stateSetup = shell(dir, `initialize_operation_state install '${otherGeneration}'`, true);
+    expect(stateSetup.status, stateSetup.stderr).toBe(0);
+    write(path.join(dir, "current.json"), metadata());
+
+    const result = shell(dir, "recover_first_install_promotion", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("promoted");
+    const state = JSON.parse(readFileSync(path.join(dir, "operation-state.json"), "utf8"));
+    expect(state).toMatchObject({ kind: "install", generation: otherGeneration });
+  });
+
+  it("does not clear operation state when the recovery itself was a no-op (bootstrap not yet at health-confirmed)", () => {
+    const dir = fixture();
+    const stateSetup = shell(dir, `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; advance_installation_bootstrap initialized canonical-published; initialize_operation_state install '${generation}'; advance_operation_state bootstrap-initialized dependency-ready`, true);
+    expect(stateSetup.status, stateSetup.stderr).toBe(0);
+    const result = shell(dir, "recover_first_install_promotion", true);
+    expect(result.status, result.stderr).toBe(0);
+    const state = JSON.parse(readFileSync(path.join(dir, "operation-state.json"), "utf8"));
+    expect(state).toMatchObject({ kind: "install", generation, stage: "dependency-ready" });
+  });
+});
+
+// Regression (P2): "Make legacy current publication recoverable" -
+// recover_first_install_promotion only ever recognized a kind:"first-install"
+// bootstrap identity, so it was unconditionally a no-op for the EXACT SAME
+// crash window on the OTHER bootstrap kind: convert_supported_legacy_
+// installation's own tail is write_lifecycle_role (durably publishes
+// current.json from legacy-install-v1.json) -> validate_generation_
+// metadata_core/validate_generation_owned_evidence -> THREE advance_
+// installation_bootstrap calls in a row (initialized -> canonical-published
+// -> health-confirmed -> promoted). A crash anywhere in that window leaves a
+// fully-published current.json while bootstrap.json stays stuck at
+// whichever of those three phases it was interrupted at - classify_
+// installation then permanently rejects the installation on every later run
+// ("Canonical metadata conflicts with incomplete bootstrap identity"), and
+// reset_abandoned_legacy_self_heal_residue can never help: it only fires
+// when current.json is ABSENT, which is no longer true here.
+// recover_legacy_upgrade_promotion is the parallel recovery for this kind.
+describe("area 10 legacy-upgrade promotion recovery", () => {
+  const publishLegacyBootstrap = (dir: string) => {
+    write(path.join(dir, "legacy-install-v1.json"), metadata("current"));
+    return shell(dir, `begin_installation_bootstrap legacy-upgrade '${generation}' '${sha}' '${tree}' '${operation}'`, true);
+  };
+
+  it("is a no-op with no bootstrap.json at all", () => {
+    const dir = fixture();
+    const result = shell(dir, "recover_legacy_upgrade_promotion; echo done", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("done");
+  });
+
+  it("is a no-op for a first-install bootstrap identity (wrong kind, untouched)", () => {
+    const dir = fixture();
+    const setup = shell(
+      dir,
+      `begin_installation_bootstrap first-install '${generation}' '${sha}' '${tree}' '${operation}'; advance_installation_bootstrap initialized canonical-published; advance_installation_bootstrap canonical-published health-confirmed`,
+      true,
+    );
+    expect(setup.status, setup.stderr).toBe(0);
+    write(path.join(dir, "current.json"), metadata());
+    const result = shell(dir, "recover_legacy_upgrade_promotion", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("health-confirmed");
+  });
+
+  it.each(["initialized", "canonical-published", "health-confirmed"] as const)(
+    "finishes a legacy-upgrade promotion stuck at phase %s: promotes bootstrap.json, never touches legacy-install-v1.json or current.json, and clears matching operation state",
+    (stuckPhase) => {
+      const dir = fixture();
+      const setup = publishLegacyBootstrap(dir);
+      expect(setup.status, setup.stderr).toBe(0);
+      let advance = "";
+      if (stuckPhase !== "initialized") advance += "advance_installation_bootstrap initialized canonical-published;";
+      if (stuckPhase === "health-confirmed") advance += "advance_installation_bootstrap canonical-published health-confirmed;";
+      if (advance) {
+        const advanceResult = shell(dir, advance, true);
+        expect(advanceResult.status, advanceResult.stderr).toBe(0);
+        expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe(stuckPhase);
+      }
+      write(path.join(dir, "current.json"), metadata("current"));
+      const currentBefore = readFileSync(path.join(dir, "current.json"), "utf8");
+      const legacyBefore = readFileSync(path.join(dir, "legacy-install-v1.json"), "utf8");
+      const stateSetup = shell(dir, `initialize_operation_state install '${generation}'; advance_operation_state bootstrap-initialized dependency-ready`, true);
+      expect(stateSetup.status, stateSetup.stderr).toBe(0);
+
+      const result = shell(dir, "recover_legacy_upgrade_promotion; classify_installation observe", true);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("existing-canonical");
+      expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("promoted");
+      expect(readFileSync(path.join(dir, "current.json"), "utf8")).toBe(currentBefore);
+      expect(readFileSync(path.join(dir, "legacy-install-v1.json"), "utf8")).toBe(legacyBefore);
+      expect(existsSync(path.join(dir, "operation-state.json"))).toBe(false);
+    },
+  );
+
+  it("never touches an operation-state.json for a different, unrelated generation", () => {
+    const dir = fixture();
+    const otherGeneration = "20260814T120000Z-ffffffffffff";
+    const setup = publishLegacyBootstrap(dir);
+    expect(setup.status, setup.stderr).toBe(0);
+    const stateSetup = shell(dir, `initialize_operation_state install '${otherGeneration}'`, true);
+    expect(stateSetup.status, stateSetup.stderr).toBe(0);
+    write(path.join(dir, "current.json"), metadata("current"));
+
+    const result = shell(dir, "recover_legacy_upgrade_promotion", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("promoted");
+    const state = JSON.parse(readFileSync(path.join(dir, "operation-state.json"), "utf8"));
+    expect(state).toMatchObject({ kind: "install", generation: otherGeneration });
+  });
+
+  it("is a no-op when current.json belongs to a different generation than the stuck bootstrap identity", () => {
+    const dir = fixture();
+    const setup = publishLegacyBootstrap(dir);
+    expect(setup.status, setup.stderr).toBe(0);
+    write(path.join(dir, "current.json"), { ...metadata("current"), generation: "20260814T120000Z-ffffffffffff" });
+    const result = shell(dir, "recover_legacy_upgrade_promotion", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("initialized");
+  });
+
+  it("requires the deployment lock", () => {
+    const dir = fixture();
+    const setup = publishLegacyBootstrap(dir);
+    expect(setup.status, setup.stderr).toBe(0);
+    write(path.join(dir, "current.json"), metadata("current"));
+    const result = shell(dir, "recover_legacy_upgrade_promotion");
+    expect(result.status).not.toBe(0);
+    expect(JSON.parse(readFileSync(path.join(dir, "bootstrap.json"), "utf8")).phase).toBe("initialized");
+  });
 });
 
 // Regression: publish_validated_legacy_self_heal (the only writer of
