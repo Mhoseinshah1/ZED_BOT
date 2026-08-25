@@ -2282,9 +2282,27 @@ inspect_rollback_status() {
   if [ ! -e "$ZEDBOT_DEPLOYMENT_DIR" ]; then rollback_status_emit unavailable false FIRST_INSTALL_EMPTY "No canonical deployment history exists." genuine-first-install false false false false false false false false; return 2; fi
   [ -d "$ZEDBOT_DEPLOYMENT_DIR" ] && [ ! -L "$ZEDBOT_DEPLOYMENT_DIR" ] && [ "$(stat -c %u:%a "$ZEDBOT_DEPLOYMENT_DIR" 2>/dev/null)" = "0:700" ] || { rollback_status_emit indeterminate null UNSAFE_STATE_PATH "Canonical deployment state directory is unsafe." unsafe false false false false false false false false; return 3; }
   entries="$(installation_nonlock_entries 2>/dev/null)" || { rollback_status_emit indeterminate null INSPECTION_FAILED "Installation evidence could not be inspected safely." indeterminate false false false false false false false false; return 4; }
-  if printf '%s\n' "$entries" | /usr/bin/grep -Eq '^(candidate-|failed\.json$|transition\.json$|operation-state\.json$)'; then
+  if printf '%s\n' "$entries" | /usr/bin/grep -Eq '^(candidate-|transition\.json$|operation-state\.json$)'; then
     rollback_status_emit blocked false OPERATION_INCOMPLETE "A deployment operation or unresolved generation is present." recoverable-operation false false false false false false false false
     return 2
+  fi
+  # failed.json is a permanent diagnostic record, not itself evidence of an
+  # active or abandoned operation: resolve_failed_generation_after_rollback
+  # deliberately PRESERVES it (state "rolled-back") once a rollback has
+  # durably promoted the matching generation, and later updates explicitly
+  # permit that resolved state (assert_no_unresolved_failed_generation) and
+  # leave the file in place too - its mere presence must not block rollback-
+  # status forever after an otherwise fully successful recovery. Only an
+  # UNRESOLVED failed.json (any state other than rolled-back, or one that
+  # fails to validate at all) still blocks, exactly as before.
+  if printf '%s\n' "$entries" | /usr/bin/grep -Eq '^failed\.json$'; then
+    rollback_status_safe_file "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" && validate_generation_metadata_core "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" failed >/dev/null 2>&1 || {
+      rollback_status_emit indeterminate null INVALID_FAILED_EVIDENCE "Failed-generation diagnostic evidence is invalid or unsafe." unsafe false false false false false false false false; return 3;
+    }
+    [ "$(/usr/bin/jq -r '.state' "$ZEDBOT_FAILED_DEPLOYMENT_METADATA" 2>/dev/null)" = rolled-back ] || {
+      rollback_status_emit blocked false OPERATION_INCOMPLETE "A deployment operation or unresolved generation is present." recoverable-operation false false false false false false false false
+      return 2
+    }
   fi
   if [ -e "$ZEDBOT_LEGACY_INSTALLATION" ] || [ -L "$ZEDBOT_LEGACY_INSTALLATION" ]; then
     rollback_status_safe_file "$ZEDBOT_LEGACY_INSTALLATION" && validate_generation_metadata_core "$ZEDBOT_LEGACY_INSTALLATION" current >/dev/null 2>&1 && validate_generation_owned_evidence_readonly "$ZEDBOT_LEGACY_INSTALLATION" >/dev/null 2>&1 || { rollback_status_emit indeterminate null INVALID_LEGACY_EVIDENCE "Legacy installation evidence is invalid or unsupported." unsafe false false false false false false false false; return 3; }

@@ -158,7 +158,40 @@ describe("Area 11 strict read-only and execution consistency", () => {
   it("does not create, acquire, or release a missing operation lock", () => { const f = fixture(); expect(existsSync(f.lock)).toBe(false); expect(status(f).status).toBe(0); expect(existsSync(f.lock)).toBe(false); });
   it.each(["regular", "malformed", "symlink"])("does not modify or remove an existing %s lock", (kind) => { const f = fixture(); const target = `${f.lock}.target`; if (kind === "symlink") { write(target, "foreign"); symlinkSync(target, f.lock); } else write(f.lock, kind === "regular" ? "foreign-owner" : "{"); const before = snapshot(f.dir); status(f); expect(snapshot(f.dir)).toBe(before); });
   it("never invokes mutating, infrastructure, recovery, readiness, or trap helpers", () => { const f = fixture(); const trace = path.join(os.tmpdir(), `zedbot-area11-trace-${process.pid}-${Date.now()}`); const names = ["acquire_deployment_lock", "release_deployment_lock", "atomic_write_metadata", "install_operation_traps", "recover_metadata_transition", "convert_supported_legacy_installation", "begin_installation_bootstrap", "run_clean_docker", "run_compose", "recreate_application_services", "validate_running_application", "run_real_bot_readiness", "operation_mktemp"]; const overrides = names.map((n) => `${n}(){ echo ${n} >> '${trace}'; return 99; }`).join(";"); expect(status(f, overrides).status).toBe(0); expect(existsSync(trace)).toBe(false); });
-  it.each(["candidate-20260813T130000Z-cccccccccccc.json", "failed.json", "transition.json", "operation-state.json"])("blocks conflicting operation artifact %s", (name) => { const f = fixture(); write(path.join(f.dir, name), {}); const out = parsed(f); expect(out.result.status).toBe(2); expect(out.json.reasonCode).toBe("OPERATION_INCOMPLETE"); });
+  it.each(["candidate-20260813T130000Z-cccccccccccc.json", "transition.json", "operation-state.json"])("blocks conflicting operation artifact %s", (name) => { const f = fixture(); write(path.join(f.dir, name), {}); const out = parsed(f); expect(out.result.status).toBe(2); expect(out.json.reasonCode).toBe("OPERATION_INCOMPLETE"); });
+  // Regression: resolve_failed_generation_after_rollback deliberately
+  // PRESERVES failed.json (state "rolled-back") once a rollback has durably
+  // promoted the matching generation, and assert_no_unresolved_failed_
+  // generation explicitly permits that resolved state too - its mere
+  // presence must not block rollback-status forever after an otherwise
+  // fully successful recovery. An UNRESOLVED failed.json (any other state)
+  // still blocks exactly as before, and one that fails to validate at all
+  // still fails closed (distinctly, as invalid evidence rather than a
+  // generic incomplete-operation block).
+  it("an unresolved failed.json still blocks, a resolved one does not, and invalid failed.json fails closed distinctly", () => {
+    const failedMetadata = (state: string) => ({
+      formatVersion: 2, lifecycleRole: "failed", generation: "20260813T130000Z-cccccccccccc", sourceTree: "c".repeat(40),
+      preDeploySha: "a".repeat(40), preDeployImageId: `sha256:${"1".repeat(64)}`, targetDeploySha: "b".repeat(40), targetImageId: `sha256:${"2".repeat(64)}`,
+      retainedImageTag: "zedbot-app:rollback-20260813T130000Z-cccccccccccc", immutableImageTag: "zedbot-app:generation-20260813T130000Z-cccccccccccc",
+      failedTargetTag: "zedbot-app:failed-20260813T130000Z-cccccccccccc", capturedAt: "2026-08-13T13:00:00Z", preDeployMigrations: [],
+      declarationFormatVersion: 2, declarationSourceCategory: "generation-evidence",
+      migrationEvidencePath: "/state/evidence-20260813T130000Z-cccccccccccc", composeEvidencePath: "/state/evidence-20260813T130000Z-cccccccccccc/docker-compose.yml",
+      composeEvidenceSha256: "d".repeat(64), composeProjectName: "zedbot", composeApplicationImage: "zedbot-app:latest",
+      compatibilityManifestSha256: "e".repeat(64), compatibilityDeclarations: [], recreationAttempted: true, healthConfirmed: false, state,
+      rollbackTargetGeneration: currentGeneration, rollbackTargetImageId: `sha256:${"1".repeat(64)}`,
+    });
+    const unresolved = fixture(); write(path.join(unresolved.dir, "failed.json"), failedMetadata("failed-after-recreation"));
+    const unresolvedOut = parsed(unresolved);
+    expect(unresolvedOut.result.status).toBe(2); expect(unresolvedOut.json.reasonCode).toBe("OPERATION_INCOMPLETE");
+
+    const resolved = fixture(); write(path.join(resolved.dir, "failed.json"), failedMetadata("rolled-back"));
+    const resolvedOut = parsed(resolved);
+    expect(resolvedOut.result.status).not.toBe(2); expect(resolvedOut.json.reasonCode).not.toBe("OPERATION_INCOMPLETE");
+
+    const invalid = fixture(); write(path.join(invalid.dir, "failed.json"), {});
+    const invalidOut = parsed(invalid);
+    expect(invalidOut.result.status).toBe(3); expect(invalidOut.json.reasonCode).toBe("INVALID_FAILED_EVIDENCE");
+  });
   it.each([".temporary-status.json", "readiness-success.json", "evidence-orphan"])("fails closed for unsupported or unbound artifact %s", (name) => { const f = fixture(); const target = path.join(f.dir, name); if (name.startsWith("evidence-")) mkdirSync(target); else write(target, {}); const out = parsed(f); expect(out.result.status).toBe(3); expect(out.json.reasonCode).toBe("PARTIAL_INSTALLATION_EVIDENCE"); expect(out.json.eligible).toBeNull(); });
   it("does not consult live Compose project or runtime configuration", () => { const f = fixture(); const trace = path.join(os.tmpdir(), `zedbot-area11-live-compose-${process.pid}-${Date.now()}`); const out = status(f, `validate_compose_contract_paths(){ echo called > '${trace}'; return 99; }`); expect(out.status).toBe(0); expect(existsSync(trace)).toBe(false); });
   it("shares the pure mandatory evidence validator with actual rollback", () => { const f = fixture(); const result = spawnSync("bash", ["-c", `. '${common}'; set_deployment_state_paths '${f.dir}'; validate_rollback_eligibility_evidence '${f.current}' '${f.previous}'`], { encoding: "utf8" }); expect(result.status).toBe(0); expect(readFileSync(rollback, "utf8")).toContain('validate_rollback_eligibility_evidence "$ZEDBOT_CURRENT_DEPLOYMENT_METADATA" "$ZEDBOT_ROLLBACK_METADATA"'); });
